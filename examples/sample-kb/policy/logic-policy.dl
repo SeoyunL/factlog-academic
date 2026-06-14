@@ -1,0 +1,13 @@
+// generated from policy/logic-policy.md
+// run tools/generate_logic_policy.py to regenerate
+
+.decl requires_review(entity: symbol, reason: symbol)
+
+// bidirectional_check
+requires_review(X, "bidirectional_check") :-
+  relation(X, "develops", _),
+  relation(X, "developed_by", _).
+
+// capability_check
+requires_review(X, "capability_check") :-
+  relation(X, "performs", _).

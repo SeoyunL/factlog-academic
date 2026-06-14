@@ -1,0 +1,9 @@
+subject,relation,object,source,status,confidence,note
+Claude Code,developed_by,Anthropic,sources/example.md#what-is-claude-code,confirmed,0.99,stated directly in source
+Claude Code,is_a,command-line tool,sources/example.md#what-is-claude-code,confirmed,0.99,primary description
+Claude Code,uses,Claude model family,sources/example.md#key-capabilities,confirmed,0.95,Sonnet and Opus mentioned
+factlog,is_a,Claude Code plugin,sources/example.md#plugin-system,confirmed,0.99,distributed as a plugin
+factlog,performs,fact extraction,sources/example.md#factlog-skill,confirmed,0.95,via Claude in-session
+factlog,performs,logic checking,sources/example.md#factlog-skill,confirmed,0.95,via deterministic Python scripts
+Claude Code,supports,plugin system,sources/example.md#plugin-system,confirmed,0.95,distributes reusable skills
+Anthropic,develops,Claude Code,sources/example.md#what-is-claude-code,needs_review,0.90,inferred from developed_by relation
