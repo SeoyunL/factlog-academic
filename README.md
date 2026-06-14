@@ -3,7 +3,7 @@
 > facts + logic — a Claude Code skill that turns markdown sources into **verifiable, source-backed facts**.
 > The LLM extracts; a deterministic Datalog/wirelog engine verifies.
 
-**Status:** pre-release (`v0.1.0.dev`). Scaffolding in progress.
+**Status:** stable release (`v0.1.0`).
 
 > Not affiliated with the unrelated `tkf/factlog` Emacs file-access logger.
 
