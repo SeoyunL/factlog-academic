@@ -1,0 +1,5 @@
+# factlog runtime dependency.
+# The deterministic logic engine runs on wirelog via pyrewire.
+# 1.0.1 is the floor (earlier releases lack the EasySession API factlog uses);
+# the upper bound guards against the private-intern API drift documented in the engine module.
+pyrewire>=1.0.1,<2.0

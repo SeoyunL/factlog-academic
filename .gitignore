@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# factlog runtime artifacts (generated inside a target KB)
+runs/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
