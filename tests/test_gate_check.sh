@@ -141,7 +141,47 @@ run_case "query.dl target, report stale — deny" \
 rm -rf "$KB6"
 
 # ---------------------------------------------------------------------------
-# CASE 7: REGRESSION — single-quote in KB root path, report stale — DENY
+# CASE 7: BOOTSTRAP — fresh KB (no logic_report.txt, query.dl does not yet
+# exist) creating facts/query.dl — ALLOW.
+#
+# A `factlog init` KB seeds neither facts/logic_report.txt nor facts/query.dl,
+# so the FIRST creation of query.dl cannot be preceded by a report. Denying it
+# would deadlock the question->query-draft flow. The gate must allow it.
+# ---------------------------------------------------------------------------
+KB_BOOT="$(mktemp -d)"
+make_kb "$KB_BOOT"
+# No logic_report.txt, no query.dl on disk.
+run_case "bootstrap: fresh KB creating query.dl — allow" \
+  "$KB_BOOT" "$KB_BOOT/facts/query.dl" 0
+rm -rf "$KB_BOOT"
+
+# ---------------------------------------------------------------------------
+# CASE 8: BOOTSTRAP companion — fresh KB creating facts/accepted.dl — ALLOW.
+# ---------------------------------------------------------------------------
+KB_BOOT2="$(mktemp -d)"
+make_kb "$KB_BOOT2"
+run_case "bootstrap: fresh KB creating accepted.dl — allow" \
+  "$KB_BOOT2" "$KB_BOOT2/facts/accepted.dl" 0
+rm -rf "$KB_BOOT2"
+
+# ---------------------------------------------------------------------------
+# CASE 9: STALE-GUARD vs bootstrap — query.dl already exists but no report
+# (e.g. report was deleted) — DENY.
+#
+# This proves the bootstrap relaxation does NOT swallow the stale-guard: once
+# an engine input exists on disk without a superseding report, the edit is
+# denied. Only the genuine first-write (target absent) is allowed.
+# ---------------------------------------------------------------------------
+KB_STALE="$(mktemp -d)"
+make_kb "$KB_STALE"
+touch_file "$KB_STALE/facts/query.dl"
+# query.dl now exists; no logic_report.txt → must DENY (not bootstrap).
+run_case "existing query.dl, report absent — deny (stale-guard, not bootstrap)" \
+  "$KB_STALE" "$KB_STALE/facts/query.dl" 2
+rm -rf "$KB_STALE"
+
+# ---------------------------------------------------------------------------
+# CASE 10: REGRESSION — single-quote in KB root path, report stale — DENY
 #
 # This is the apostrophe-path regression added after the critic identified
 # that the original mtime computation used Python source string interpolation

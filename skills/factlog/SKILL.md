@@ -62,11 +62,12 @@ For each file `sources/<name>` in the KB root:
 1. Read the file contents.
 2. Apply the extraction criteria in
    `${CLAUDE_PLUGIN_ROOT}/skills/factlog/references/text-to-fact.md` to
-   identify candidate fact triples.
-3. Apply the query-translation criteria in
-   `${CLAUDE_PLUGIN_ROOT}/skills/factlog/references/text-to-datalog.md` to
-   produce Datalog-compatible relation names and entity strings.
-4. Produce a JSON array where every element is a JSON **object** (dict) with
+   identify candidate fact triples AND to name relations and entities. This
+   reference is the authoritative source for relation/entity naming during
+   fact extraction. (Do NOT use `text-to-datalog.md` here — that document is a
+   natural-language-question→Datalog-query converter, used only by the
+   `/factlog query` step, not for naming fact relations.)
+3. Produce a JSON array where every element is a JSON **object** (dict) with
    the following named keys matching `FACT_HEADER`:
 
    ```json
@@ -97,7 +98,7 @@ For each file `sources/<name>` in the KB root:
      coerces the value via `str()` before normalisation.
    - `note` is a brief rationale string (may be empty string `""`).
 
-5. Write the array to `$FACTLOG_ROOT/runs/<iso-timestamp>-<slug>.json`.
+4. Write the array to `$FACTLOG_ROOT/runs/<iso-timestamp>-<slug>.json`.
    One file per source document keeps the audit trail clean.
 
 ### Step 2 — Deterministic merge (engine script)
@@ -116,6 +117,61 @@ with a warning. Pass `--strict` to make any dropped row a hard failure.
 **Do not edit `facts/candidates.csv` or `pages/` directly.** These are engine
 outputs; the engine owns them. Only `runs/*.json` is the LLM write surface for
 this step.
+
+---
+
+## `/factlog query` — translate questions into a Datalog query draft
+
+**Purpose:** Read the natural-language research questions in `policy/questions.md`
+and translate each one into a Datalog query draft, writing the result to
+`facts/query.dl`. This is the question→query-draft contract artifact required by
+AC3. It is performed natively by Claude in-session — do NOT spawn a `claude -p`
+subprocess.
+
+`facts/query.dl` is an engine input consumed by `/factlog check` (the wirelog
+logic check runs over `facts/accepted.dl` **and** `facts/query.dl`). Run
+`/factlog query` **before** `/factlog check` so a query draft exists to evaluate.
+
+**Execution order:**
+
+### Step 1 — Load questions and schema context
+
+1. Read `policy/questions.md` and collect each natural-language question
+   (one per bullet / list item).
+2. Read `facts/accepted.dl` and `policy/logic-policy.dl` to build the schema
+   context: the entity names and relations that actually exist as engine input,
+   plus the allowed policy/query predicates. Only these may appear in a query.
+   (On a fresh KB, `facts/accepted.dl` may be empty until `/factlog check`
+   compiles it; in that case every question that cannot be safely expressed
+   becomes a `review_required(...)` line — see below.)
+
+### Step 2 — Native question→query translation (LLM, in-session)
+
+For each question, apply the translation criteria in
+`${CLAUDE_PLUGIN_ROOT}/skills/factlog/references/text-to-datalog.md`,
+substituting:
+- `{{SCHEMA_CONTEXT}}` — the accepted entities/relations/predicates from Step 1.
+- `{{QUESTION}}` — the natural-language question text.
+
+The reference emits a single JSON object `{"query": "...", "note": "..."}`:
+- `query` is a one-line Datalog query ending with `?`, using only entities and
+  relations present in `facts/accepted.dl`; OR
+- `review_required("<verbatim question>")?` when the question asks about a
+  `needs_review`/`candidate` fact, or cannot be safely expressed. The original
+  natural-language question text MUST appear verbatim inside `review_required`
+  (never a `Q`-style placeholder).
+
+### Step 3 — Write `facts/query.dl` (single batch)
+
+Write all translated query lines to `facts/query.dl` in **one** Write call —
+one query (or `review_required(...)`) line per source question. Do not write the
+file incrementally line-by-line: a single batched write avoids a second-write
+that the PreToolUse gate would deny once a report exists.
+
+On a freshly initialised KB (no `facts/logic_report.txt` and no pre-existing
+`facts/query.dl`), the PreToolUse gate allows this first creation (bootstrap).
+After `/factlog check` produces a report, re-running `/factlog query` requires a
+fresh report first — run `/factlog check` to refresh, then re-write.
 
 ---
 
@@ -141,8 +197,15 @@ Reads `facts/candidates.csv`, filters rows with `status` in
 python3 "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"
 ```
 
-Runs the wirelog/pyrewire engine over `facts/accepted.dl` and
-`policy/logic-policy.dl`. Writes and prints `facts/logic_report.txt`.
+Runs the wirelog/pyrewire engine over `facts/accepted.dl`,
+`policy/logic-policy.dl`, and the query draft `facts/query.dl` (produced by
+`/factlog query`). Each query line in `facts/query.dl` is validated and
+evaluated; `review_required(...)` lines are surfaced for human follow-up.
+Writes and prints `facts/logic_report.txt`.
+
+**Precondition:** run `/factlog query` first so `facts/query.dl` exists. If it
+is absent, the engine simply evaluates no queries (the report still compiles
+accepted facts), but the AC3 contract artifact will be missing.
 
 ### Step 3 — Show the report verbatim
 
