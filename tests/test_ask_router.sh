@@ -178,6 +178,17 @@ dout="$(router search "widgetterm")"
 if printf '%s' "$dout" | grep -qF 'decisions (supplementary)'; then ok "decisions/ searched as labeled supplementary"; else bad "decisions/ supplementary not surfaced"; fi
 rm -f "$KB/decisions/open-questions.md"
 
+# --- #31: relevance ranking + optional embedding rerank seam ---
+printf '# hi\n\n검색 문서 근거 항목 모두 포함.\n' > "$KB/sources/rank-hi.md"
+printf '# lo\n\n검색 만 언급.\n' > "$KB/sources/rank-lo.md"
+top="$(router search "검색 문서 근거 항목" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d['results'][0]['file'] if d['results'] else '')")"
+[ "$top" = "sources/rank-hi.md" ] && ok "relevance ranking surfaces highest-coverage excerpt first" || bad "ranking did not rank most-relevant first (got $top)"
+# optional embedding backend (graceful degrade is exercised by every other search; here test the ACTIVE path)
+EMB="$(mktemp -d)"; printf 'def rank(q, texts):\n    return list(range(len(texts)))\n' > "$EMB/embed_stub.py"
+act0="$(FACTLOG_EMBED_MODULE=embed_stub PYTHONPATH="$PLUGIN_ROOT:$EMB" "$PYTHON" "$ROUTER" search "검색 문서 근거 항목" --target "$KB" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d['results'][0]['file'] if d['results'] else '')")"
+if [ -n "$act0" ] && [ "$act0" != "$top" ]; then ok "optional embedding backend reorders results (seam invoked, graceful when absent)"; else bad "embedding seam did not reorder (lex=$top act=$act0)"; fi
+rm -f "$KB/sources/rank-hi.md" "$KB/sources/rank-lo.md"
+
 # --- read-only invariant (engine inputs untouched by any subcommand) ---
 if [ -f "$KB/facts/query.dl" ]; then bad "ask_router wrote facts/query.dl (must be read-only)"; else ok "facts/query.dl never written"; fi
 if [ "$(cat "$KB/facts/accepted.dl")" = "$ACCEPTED_BEFORE" ]; then ok "facts/accepted.dl unchanged"; else bad "facts/accepted.dl was mutated"; fi
