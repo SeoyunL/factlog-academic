@@ -97,6 +97,14 @@ check_field "unknown predicate code=unknown_predicate" validate 'bogus("Acme API
 # so it can never masquerade as a verified negative regardless of its text.
 check_field "marker-collision code=relation_not_accepted (not fact_absent)" validate 'relation("Acme API", "does not match accepted facts", "X")?' code relation_not_accepted
 
+# A relation present ONLY among candidates (candidates.csv) but NOT accepted must
+# route to wiki — proving validation is against load_accepted_facts(), never
+# load_facts(). Without this, candidate vocabulary would leak into the engine.
+printf 'subject,relation,object,source,status,confidence,note\nAcme API,may_use,Datadog,sources/x.md,candidate,0.40,draft\n' > "$KB/facts/candidates.csv"
+check_field "candidate-only relation routes wiki (accepted-only, no candidate leak)" validate 'relation("Acme API", "may_use", "Datadog")?' route wiki
+check_field "candidate-only relation code=relation_not_accepted" validate 'relation("Acme API", "may_use", "Datadog")?' code relation_not_accepted
+rm -f "$KB/facts/candidates.csv"
+
 # --- Path B: wiki exploration (sources/ + runs/sources/ only; pages/ excluded) ---
 printf '# Acme\n\nAcme API uses FastAPI for routing.\n' > "$KB/sources/acme.md"
 mkdir -p "$KB/runs/sources"
