@@ -14,6 +14,9 @@ env/
 # factlog runtime artifacts (generated inside a target KB)
 runs/
 
+# oh-my-claudecode session/runtime state — local only, never committed
+.omc/
+
 # OS / editor
 .DS_Store
 *.swp
