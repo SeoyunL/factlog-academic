@@ -179,6 +179,113 @@ def render_engine_answer(draft: str, rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Path B — wiki exploration (UNVERIFIED)
+# ---------------------------------------------------------------------------
+# The wiki corpus is the user's source text ONLY: sources/ (originals) and
+# runs/sources/ (text conversions of binary originals). pages/ is DELIBERATELY
+# EXCLUDED — it is engine-derived from candidates.csv (including needs_review /
+# candidate rows), so grepping it would re-surface facts the engine never
+# accepted, leaking candidate vocabulary into an answer as if it were knowledge.
+WIKI_SOURCE_DIRS = ("sources", "runs/sources")
+_EXCERPT_WINDOW = 3
+
+
+def _keywords(question: str) -> list[str]:
+    return [w.lower() for w in re.findall(r"\w+", question, flags=re.UNICODE) if len(w) > 2]
+
+
+def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, object]]:
+    """Keyword search over the wiki corpus (sources/ + runs/sources/ only).
+
+    Returns up to *limit* cited excerpts: {file, line, excerpt, dir}. Binary
+    files (e.g. an un-converted .docx) are skipped (they do not decode as text);
+    their conversions live in runs/sources/ and are searched there.
+    """
+    keywords = _keywords(question)
+    if not keywords:
+        return []
+    results: list[dict[str, object]] = []
+    seen: set[tuple[str, int]] = set()
+    for rel in WIKI_SOURCE_DIRS:
+        base = root / rel
+        if not base.is_dir():
+            continue
+        for path in sorted(p for p in base.rglob("*") if p.is_file()):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue  # binary / unreadable — skip
+            for i, line in enumerate(lines):
+                low = line.lower()
+                if not any(kw in low for kw in keywords):
+                    continue
+                # Collapse overlapping windows in the same file into one excerpt.
+                key = (path.as_posix(), i // (_EXCERPT_WINDOW * 2 + 1))
+                if key in seen:
+                    continue
+                seen.add(key)
+                start = max(0, i - _EXCERPT_WINDOW)
+                end = min(len(lines), i + _EXCERPT_WINDOW + 1)
+                results.append(
+                    {
+                        "file": path.relative_to(root).as_posix(),
+                        "line": i + 1,
+                        "excerpt": "\n".join(lines[start:end]),
+                        "dir": rel,
+                    }
+                )
+    return results[:limit]
+
+
+def render_wiki_answer(question: str, reason: str, results: list[dict[str, object]]) -> str:
+    """Render the UNVERIFIED — wiki exploration answer block.
+
+    The literal marker 'UNVERIFIED — wiki exploration' is the greppable token.
+    Citations point only at source text (sources/ , runs/sources/); this answer
+    never cites facts/accepted.dl, so its provenance alone marks it unverified.
+    """
+    lines = [
+        "UNVERIFIED — wiki exploration",
+        f"question: {question}",
+        f"reason: {reason}",
+        f"sources searched: {', '.join(WIKI_SOURCE_DIRS)}",
+    ]
+    if results:
+        for r in results:
+            lines.append(f"[{r['file']}:{r['line']}] ({r['dir']})")
+            for excerpt_line in str(r["excerpt"]).splitlines():
+                lines.append(f"    {excerpt_line}")
+    else:
+        lines.append("(no matching source excerpts found)")
+    lines.append("WARNING: unverified candidates — do not treat as confirmed facts.")
+    return "\n".join(lines)
+
+
+def record_open_question(question: str, root: Path) -> Path:
+    """Append an unanswered question to a NON-engine-input sink for later review.
+
+    Writes to decisions/ask-open-questions.md (not guarded by the PreToolUse
+    gate, never engine input), so interactive ask never touches facts/query.dl.
+    Idempotent: a question already present is not duplicated.
+    """
+    sink = root / "decisions" / "ask-open-questions.md"
+    sink.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# Ask — open questions\n\n"
+        "Unanswered `/factlog ask` questions, kept for later review. This file is\n"
+        "NOT engine input; promote items into policy/questions.md deliberately.\n"
+    )
+    text = sink.read_text(encoding="utf-8") if sink.is_file() else header
+    bullet = f"- {question}\n"
+    if bullet not in text:
+        if not text.endswith("\n"):
+            text += "\n"
+        text += bullet
+    sink.write_text(text, encoding="utf-8")
+    return sink
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     facts = load_accepted_facts()
     print(json.dumps(classify(args.draft, facts), ensure_ascii=False))
@@ -226,6 +333,32 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    from pathlib import Path as _Path
+
+    root = _Path(os.environ["FACTLOG_ROOT"])
+    print(json.dumps({"results": search(args.text, root)}, ensure_ascii=False))
+    return 0
+
+
+def cmd_wiki(args: argparse.Namespace) -> int:
+    from pathlib import Path as _Path
+
+    root = _Path(os.environ["FACTLOG_ROOT"])
+    results = search(args.text, root)
+    print(render_wiki_answer(args.text, args.reason, results))
+    return 0
+
+
+def cmd_note(args: argparse.Namespace) -> int:
+    from pathlib import Path as _Path
+
+    root = _Path(os.environ["FACTLOG_ROOT"])
+    sink = record_open_question(args.text, root)
+    print(json.dumps({"recorded": args.text, "sink": sink.relative_to(root).as_posix()}, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ask_router", description="Deterministic /factlog ask router")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -238,6 +371,24 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("draft", help="the candidate Datalog query line")
         p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
         p.set_defaults(func=func)
+
+    # Path B (wiki) subcommands take the natural-language question, not a draft.
+    search_p = sub.add_parser("search", help="search the wiki corpus (sources/ + runs/sources/) (JSON)")
+    search_p.add_argument("text", help="the natural-language question")
+    search_p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
+    search_p.set_defaults(func=cmd_search)
+
+    wiki_p = sub.add_parser("wiki", help="render the UNVERIFIED — wiki exploration answer")
+    wiki_p.add_argument("text", help="the natural-language question")
+    wiki_p.add_argument("--reason", default="not expressible over accepted facts", help="why the engine path did not apply")
+    wiki_p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
+    wiki_p.set_defaults(func=cmd_wiki)
+
+    note_p = sub.add_parser("note", help="record an unanswered question to the non-engine-input sink")
+    note_p.add_argument("text", help="the natural-language question")
+    note_p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
+    note_p.set_defaults(func=cmd_note)
+
     return parser
 
 
