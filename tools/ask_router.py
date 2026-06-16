@@ -191,8 +191,24 @@ WIKI_SOURCE_DIRS = ("sources", "runs/sources")
 _EXCERPT_WINDOW = 3
 
 
-def _keywords(question: str) -> list[str]:
-    return [w.lower() for w in re.findall(r"\w+", question, flags=re.UNICODE) if len(w) > 2]
+def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
+    """Word-boundary matchers for the question's keywords (len>2, lowercased).
+
+    Word boundaries avoid substring false positives (e.g. 'api' in 'therapist').
+    """
+    seen: set[str] = set()
+    patterns: list[re.Pattern[str]] = []
+    for word in re.findall(r"\w+", question.lower(), flags=re.UNICODE):
+        if len(word) > 2 and word not in seen:
+            seen.add(word)
+            patterns.append(re.compile(rf"\b{re.escape(word)}\b"))
+    return patterns
+
+
+def _sanitize(line: str) -> str:
+    """Drop non-printable control characters (keep tabs) so a malformed source
+    cannot smuggle NUL/ANSI/control bytes into a rendered answer."""
+    return "".join(ch for ch in line if ch == "\t" or ch.isprintable())
 
 
 def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, object]]:
@@ -202,36 +218,42 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
     files (e.g. an un-converted .docx) are skipped (they do not decode as text);
     their conversions live in runs/sources/ and are searched there.
     """
-    keywords = _keywords(question)
-    if not keywords:
+    patterns = _keyword_patterns(question)
+    if not patterns:
         return []
     results: list[dict[str, object]] = []
-    seen: set[tuple[str, int]] = set()
     for rel in WIKI_SOURCE_DIRS:
         base = root / rel
         if not base.is_dir():
             continue
+        base_resolved = base.resolve()
         for path in sorted(p for p in base.rglob("*") if p.is_file()):
+            # Stay within the corpus root: never follow a symlink out of the KB.
+            if not path.resolve().is_relative_to(base_resolved):
+                continue
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
-                continue  # binary / unreadable — skip
+                continue  # unreadable — skip
+            if "\x00" in text:
+                continue  # binary (valid-UTF-8-with-NUL) — skip
+            lines = text.splitlines()
+            last_end = -1  # collapse overlapping windows within this file
             for i, line in enumerate(lines):
                 low = line.lower()
-                if not any(kw in low for kw in keywords):
+                if not any(pat.search(low) for pat in patterns):
                     continue
-                # Collapse overlapping windows in the same file into one excerpt.
-                key = (path.as_posix(), i // (_EXCERPT_WINDOW * 2 + 1))
-                if key in seen:
-                    continue
-                seen.add(key)
                 start = max(0, i - _EXCERPT_WINDOW)
+                if start <= last_end:
+                    continue  # window overlaps the previously emitted excerpt
                 end = min(len(lines), i + _EXCERPT_WINDOW + 1)
+                last_end = end - 1
+                excerpt = "\n".join(_sanitize(line_text) for line_text in lines[start:end])
                 results.append(
                     {
                         "file": path.relative_to(root).as_posix(),
                         "line": i + 1,
-                        "excerpt": "\n".join(lines[start:end]),
+                        "excerpt": excerpt,
                         "dir": rel,
                     }
                 )
@@ -269,7 +291,10 @@ def record_open_question(question: str, root: Path) -> Path:
     gate, never engine input), so interactive ask never touches facts/query.dl.
     Idempotent: a question already present is not duplicated.
     """
+    question = " ".join(question.split())  # collapse newlines/runs so one bullet
     sink = root / "decisions" / "ask-open-questions.md"
+    if not question:
+        return sink  # nothing to record
     sink.parent.mkdir(parents=True, exist_ok=True)
     header = (
         "# Ask — open questions\n\n"
@@ -334,26 +359,20 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
-    from pathlib import Path as _Path
-
-    root = _Path(os.environ["FACTLOG_ROOT"])
+    root = Path(os.environ["FACTLOG_ROOT"])
     print(json.dumps({"results": search(args.text, root)}, ensure_ascii=False))
     return 0
 
 
 def cmd_wiki(args: argparse.Namespace) -> int:
-    from pathlib import Path as _Path
-
-    root = _Path(os.environ["FACTLOG_ROOT"])
+    root = Path(os.environ["FACTLOG_ROOT"])
     results = search(args.text, root)
     print(render_wiki_answer(args.text, args.reason, results))
     return 0
 
 
 def cmd_note(args: argparse.Namespace) -> int:
-    from pathlib import Path as _Path
-
-    root = _Path(os.environ["FACTLOG_ROOT"])
+    root = Path(os.environ["FACTLOG_ROOT"])
     sink = record_open_question(args.text, root)
     print(json.dumps({"recorded": args.text, "sink": sink.relative_to(root).as_posix()}, ensure_ascii=False))
     return 0

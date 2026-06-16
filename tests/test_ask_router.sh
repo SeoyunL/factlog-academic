@@ -112,6 +112,24 @@ router note "an unanswered question for later" >/dev/null
 if [ -f "$KB/decisions/ask-open-questions.md" ]; then ok "note writes the open-questions sink"; else bad "note did not create the sink file"; fi
 if grep -qF "an unanswered question for later" "$KB/decisions/ask-open-questions.md"; then ok "note records the question verbatim"; else bad "note did not record the question"; fi
 
+# --- Path B robustness ---
+# valid-UTF-8-with-NUL (binary-ish / malformed conversion) must be skipped, never emitted
+printf 'FastAPI \x00\x00 control \x07 bytes here\n' > "$KB/sources/weird.txt"
+if router search "control bytes" | grep -qF "weird.txt"; then bad "binary/control-byte file leaked into search"; else ok "NUL/control file skipped by search"; fi
+rm -f "$KB/sources/weird.txt"
+# word-boundary matching: 'api' must not match 'therapist'/'rapid'
+printf 'The therapist gave rapid feedback.\n' > "$KB/sources/wb.md"
+if router search "api" | grep -qF "wb.md"; then bad "substring keyword matched (therapist/rapid)"; else ok "word-boundary keyword matching (no substring false positive)"; fi
+rm -f "$KB/sources/wb.md"
+# overlapping windows collapse: two adjacent matching lines -> a single excerpt
+printf 'pad\npad\nmatchword here\nmatchword again\npad\npad\n' > "$KB/sources/dup.md"
+ndup="$(router search "matchword" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for r in d['results'] if r['file']=='sources/dup.md'))")"
+if [ "$ndup" = "1" ]; then ok "overlapping windows collapse to one excerpt"; else bad "overlapping windows not collapsed (got $ndup excerpts)"; fi
+rm -f "$KB/sources/dup.md"
+# empty/whitespace note is not recorded as a blank bullet
+router note "   " >/dev/null
+if grep -qE '^- *$' "$KB/decisions/ask-open-questions.md" 2>/dev/null; then bad "blank note recorded"; else ok "blank note not recorded"; fi
+
 # --- read-only invariant (engine inputs untouched by any subcommand) ---
 if [ -f "$KB/facts/query.dl" ]; then bad "ask_router wrote facts/query.dl (must be read-only)"; else ok "facts/query.dl never written"; fi
 if [ "$(cat "$KB/facts/accepted.dl")" = "$ACCEPTED_BEFORE" ]; then ok "facts/accepted.dl unchanged"; else bad "facts/accepted.dl was mutated"; fi
