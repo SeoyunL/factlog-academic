@@ -286,17 +286,52 @@ def _sanitize(line: str) -> str:
     return "".join(ch for ch in line if ch == "\t" or ch.isprintable())
 
 
-def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, object]]:
-    """Keyword search over the wiki corpus (sources/ + runs/sources/ only).
+def _excerpt_score(excerpt: str, patterns: list[re.Pattern[str]]) -> tuple[int, int]:
+    """Relevance of an excerpt to the query: (distinct keyword coverage, total
+    match frequency). An excerpt covering more of the query's keywords ranks
+    above one that merely repeats a single keyword — so the most relevant excerpt
+    surfaces even under a small result cap."""
+    low = excerpt.lower()
+    coverage = sum(1 for pat in patterns if pat.search(low))
+    frequency = sum(len(pat.findall(low)) for pat in patterns)
+    return (coverage, frequency)
 
-    Returns up to *limit* cited excerpts: {file, line, excerpt, dir}. Binary
-    files (e.g. an un-converted .docx) are skipped (they do not decode as text);
-    their conversions live in runs/sources/ and are searched there.
+
+def _semantic_rerank(question: str, results: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Optional neural re-rank. Bundled retrieval is lexical (relevance-ranked);
+    a neural backend is NOT bundled (it would need a model + network, breaking
+    deterministic/offline CI). If the env var FACTLOG_EMBED_MODULE names an
+    importable module exposing ``rank(question, texts) -> list[float]`` (higher =
+    more similar), results are reordered by it. Any absence/failure → unchanged
+    (graceful degrade)."""
+    module_name = os.environ.get("FACTLOG_EMBED_MODULE")
+    if not module_name or not results:
+        return results
+    try:
+        import importlib
+
+        backend = importlib.import_module(module_name)
+        scores = backend.rank(question, [str(r["excerpt"]) for r in results])
+        if not isinstance(scores, list) or len(scores) != len(results):
+            return results
+        order = sorted(range(len(results)), key=lambda i: float(scores[i]), reverse=True)
+        return [results[i] for i in order]
+    except Exception:
+        return results  # graceful degrade to lexical ranking
+
+
+def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, object]]:
+    """Relevance-ranked search over the wiki corpus (sources/ + runs/sources/).
+
+    Collects keyword-matched excerpts, ranks them by relevance (keyword coverage,
+    then frequency), optionally re-ranks via a neural backend (graceful degrade
+    when absent), and returns the top *limit* cited excerpts: {file, line,
+    excerpt, dir}. Binary files (e.g. an un-converted .docx) are skipped.
     """
     patterns = _keyword_patterns(question)
     if not patterns:
         return []
-    results: list[dict[str, object]] = []
+    scored: list[tuple[tuple[int, int], dict[str, object]]] = []
     for rel, label in _wiki_corpus():
         base = root / rel
         if not base.is_dir():
@@ -324,15 +359,18 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
                 end = min(len(lines), i + _EXCERPT_WINDOW + 1)
                 last_end = end - 1
                 excerpt = "\n".join(_sanitize(line_text) for line_text in lines[start:end])
-                results.append(
-                    {
-                        "file": path.relative_to(root).as_posix(),
-                        "line": i + 1,
-                        "excerpt": excerpt,
-                        "dir": label,
-                    }
-                )
-    return results[:limit]
+                result = {
+                    "file": path.relative_to(root).as_posix(),
+                    "line": i + 1,
+                    "excerpt": excerpt,
+                    "dir": label,
+                }
+                scored.append((_excerpt_score(excerpt, patterns), result))
+    # Rank by relevance (desc); ties keep corpus/line order (stable sort over the
+    # already-ordered collection). Then take the cap, then optional neural rerank.
+    scored.sort(key=lambda item: item[0], reverse=True)
+    ranked = [result for _score, result in scored][:limit]
+    return _semantic_rerank(question, ranked)
 
 
 def render_wiki_answer(question: str, reason: str, results: list[dict[str, object]]) -> str:
