@@ -260,7 +260,10 @@ def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
       (e.g. 'api' in 'therapist').
     - CJK words (len>=2): substring match — CJK content words are commonly two
       characters, and substring tolerates attached particles/조사 (e.g. '근거'
-      matches '근거는'); false-positive risk is low for CJK.
+      matches '근거는'). CJK compounding has no word delimiters, so a 2-char
+      query can substring-match inside an unrelated compound; this recall-over-
+      precision trade-off is acceptable for the UNVERIFIED exploration surface,
+      but do NOT reuse this matcher on a precision-sensitive path.
     """
     seen: set[str] = set()
     patterns: list[re.Pattern[str]] = []
