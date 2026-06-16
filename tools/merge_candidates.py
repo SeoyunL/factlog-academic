@@ -128,6 +128,45 @@ def source_file_refs(root: Path) -> set[str]:
     return {path.relative_to(root).as_posix() for path in source_files(root)}
 
 
+def is_text_source(path: Path, *, sniff: int = 8192) -> bool:
+    """Return True iff *path*'s leading bytes look like readable UTF-8 text.
+
+    The in-session fact extraction reads each sources/ file as text, so a file is
+    only ingestible if it decodes as text. A file is treated as non-text when its
+    first *sniff* bytes contain a NUL byte or do not decode as UTF-8 (tolerating a
+    multi-byte sequence truncated at the sniff boundary). Detection is
+    content-based, so binary formats (.docx, .pdf, images, ...) are flagged
+    regardless of their extension.
+    """
+    try:
+        chunk = path.read_bytes()[:sniff]
+    except OSError:
+        return False
+    if b"\x00" in chunk:
+        return False
+    try:
+        chunk.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # A multi-byte UTF-8 char may be cut at the sniff boundary; tolerate it.
+        return exc.start >= len(chunk) - 3
+    return True
+
+
+def nontext_source_files(root: Path) -> list[str]:
+    """List sources/ files (KB-relative) that extraction cannot read as text.
+
+    Hidden/system files (names starting with '.', e.g. .DS_Store) are skipped to
+    avoid noise — they are not intended source documents.
+    """
+    found: list[str] = []
+    for path in source_files(root):
+        if path.name.startswith("."):
+            continue
+        if not is_text_source(path):
+            found.append(path.relative_to(root).as_posix())
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Input: read candidate rows from runs/*.json
 # ---------------------------------------------------------------------------
@@ -501,6 +540,22 @@ def main() -> int:
     print(f"merge_candidates run_id={run_id} wiki={root}")
 
     # ------------------------------------------------------------------
+    # 0. Surface non-text (binary) source files. The in-session extraction
+    # reads sources/ as text, so these yield no facts (silent non-ingestion).
+    # Warn always; under --strict treat their presence as a hard failure.
+    # ------------------------------------------------------------------
+    nontext_sources = nontext_source_files(root)
+    if nontext_sources:
+        print(
+            f"  WARNING: {len(nontext_sources)} non-text source file(s) in sources/ "
+            "cannot be read by fact extraction and will yield no facts "
+            "(convert to .md/.txt first, e.g. via pandoc/textutil):",
+            file=sys.stderr,
+        )
+        for name in nontext_sources:
+            print(f"    - {name}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
     # 1. Read candidate rows from runs/*.json
     # ------------------------------------------------------------------
     raw_rows = load_candidate_files(root, input_pattern)
@@ -556,6 +611,13 @@ def main() -> int:
     validation_code = validate_outputs(root)
     if validation_code != 0:
         print(f"  validation warnings (exit {validation_code}) — run validate.py for details", file=sys.stderr)
+
+    if args.strict and nontext_sources:
+        print(
+            f"--strict: {len(nontext_sources)} non-text source file(s) present in sources/",
+            file=sys.stderr,
+        )
+        return 1
 
     return 0
 

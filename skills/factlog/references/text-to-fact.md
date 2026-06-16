@@ -12,6 +12,14 @@
 - `pages/`, `facts/`, `decisions/`의 기존 내용은 중복 확인과 갱신 판단에만 사용합니다.
 - `sources/` 밖의 임시 파일, 로그, 개인 메모는 fact 추출 입력으로 사용하지 않습니다.
 
+## 지원 파일 포맷
+
+fact 추출은 `sources/` 아래 파일을 **텍스트로 읽어** 수행합니다. 엔진(`merge_candidates.py`)은 `sources/`의 모든 파일을 source 경로로 추적하지만 내용을 파싱하지는 않으므로, 텍스트로 읽히는 파일만 실제로 추출됩니다. 비텍스트 파일이 있으면 `merge_candidates.py`가 경고를 출력합니다.
+
+- **직접 지원**: `.md`, `.markdown`, `.txt` 등 UTF-8 텍스트. 원문 그대로 읽습니다.
+- **plain text로 지원**: `.rst`, `.org`, `.csv`, 소스 코드 등 그 밖의 UTF-8 텍스트. 별도 파싱 없이 raw text로 취급합니다.
+- **직접 미지원(변환 필요)**: `.docx`, `.pptx`, `.xlsx`, `.hwp`, 바이너리 `.pdf`, 이미지. `sources/`에 그대로 두면 source 경로로만 등록되고 fact는 생성되지 않습니다(조용한 미인제스트). pandoc·textutil 등으로 Markdown/텍스트로 변환한 뒤 변환본을 `sources/`에 넣으십시오.
+
 ## 출력 위치
 
 - candidate fact는 `facts/candidates.csv`에 씁니다.

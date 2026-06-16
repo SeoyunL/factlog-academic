@@ -29,6 +29,29 @@ accepted + query →  wirelog logic check     →  facts/logic_report.txt   ← 
 review_required  →  Claude repairs (gated)  →  decisions/correction_trace.md
 ```
 
+## Source file formats
+
+`/factlog sync` extracts facts by reading each file under `sources/` **as text,
+in-session**. The bundled engine (`merge_candidates.py`) tracks every file in
+`sources/` as a source *path*, but it never parses file contents — so a file is
+only ingested if its text can be read during extraction. When a non-text file is
+found, `merge_candidates.py` prints a warning so the silent non-ingestion is
+visible.
+
+| Format | Status | Notes |
+|--------|--------|-------|
+| `.md`, `.markdown`, `.txt` | **Directly supported** | UTF-8 text, read verbatim. This is what every extraction reference assumes. |
+| Other UTF-8 text (`.rst`, `.org`, `.csv`, source code) | Supported as plain text | No special parsing; treated as raw text. |
+| `.docx`, `.pptx`, `.xlsx`, `.hwp`, binary `.pdf`, images | **Not directly ingested** | Convert to Markdown/text first, then place the converted file in `sources/`. |
+
+A binary file left in `sources/` is registered as a source path but yields **no
+facts** (silent non-ingestion). Convert it first, e.g.:
+
+```bash
+pandoc report.docx -t gfm -o sources/report.md      # Office → Markdown
+textutil -convert txt report.docx -output report.txt # macOS built-in
+```
+
 ## Requirements
 
 - Python **3.10+**
