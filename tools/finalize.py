@@ -101,7 +101,14 @@ def main(argv: list[str] | None = None) -> int:
         print("finalize: compile_facts failed.", file=sys.stderr)
         return 1
 
-    # 4. run the deterministic logic check (needs pyrewire) — graceful skip if absent
+    # 4. detect single-valued contradictions (deterministic; no pyrewire needed)
+    conflicts = _run("check_conflicts.py", "--wiki", str(root), env=env)
+    sys.stdout.write(conflicts.stdout)
+    conflict_found = conflicts.returncode != 0
+    if conflict_found:
+        sys.stderr.write(conflicts.stderr)
+
+    # 5. run the deterministic logic check (needs pyrewire) — graceful skip if absent
     if _pyrewire_ok():
         check = _run("run_logic_check.py", env=env)
         sys.stdout.write(check.stdout)
@@ -109,12 +116,23 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(check.stderr)
             print("finalize: run_logic_check failed.", file=sys.stderr)
             return 1
-        print("\nfinalize: done — merged, compiled, and logic-checked.")
+        checked = "logic-checked"
     else:
         print(
-            "\nfinalize: facts merged and compiled. Logic check SKIPPED — pyrewire>=1.0.1 "
-            "not installed. Install it and run /factlog check to verify."
+            "\nfinalize: Logic check SKIPPED — pyrewire>=1.0.1 not installed. "
+            "Install it and run /factlog check to verify."
         )
+        checked = "compiled (logic check skipped)"
+
+    if conflict_found:
+        print(
+            f"\nfinalize: merged and {checked}, but CONTRADICTIONS were found "
+            "(see CONFLICT lines above). Resolve them (mark outdated rows "
+            "status='superseded') before trusting the KB.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"\nfinalize: done — merged, {checked}, no contradictions.")
     return 0
 
 
