@@ -42,7 +42,8 @@ no facts on its own.
 | `.md`, `.markdown`, `.txt` | **Directly supported** | UTF-8 text, read verbatim. This is what every extraction reference assumes. |
 | Other UTF-8 text (`.rst`, `.org`, `.csv`, source code) | Supported as plain text | No special parsing; treated as raw text. |
 | `.docx`, binary `.pdf`, `.odt`, `.epub`, `.html`, `.rtf` | **Auto-converted** | `factlog ingest` converts these to text via pandoc / textutil / pdftotext. |
-| `.pptx`, `.xlsx`, `.hwp`, images | **Not converted** | No bundled converter — reported with a hint; convert by hand. |
+| `.hwpx` (Hancom OWPML) | **Auto-converted** | Built-in extractor (no external tool) — reads the zip's `Contents/section*.xml` text. |
+| `.pptx`, `.xlsx`, `.hwp`, images | **Not converted** | No bundled converter — reported with a hint; convert by hand (e.g. export `.hwp` to `.hwpx`/`.docx`/`.pdf`). |
 
 `factlog ingest` writes the converted text into the KB's **`runs/sources/`**
 directory (alongside the other generated run artifacts) — **never into

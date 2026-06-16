@@ -418,8 +418,55 @@ def _conv_pdftotext(src, dst) -> list[str]:
     return ["pdftotext", "-layout", str(src), str(dst)]
 
 
-# Per-extension converter chains, tried in order until one's tool is on PATH.
-# Each entry: (tool_name, output_suffix, argv_builder).
+def _conv_hwpx(src, dst) -> bool:
+    """In-process converter for Hancom HWPX (OWPML: a zip of XML).
+
+    pandoc/textutil/pdftotext cannot read hwpx, but the format is a zip whose
+    Contents/section*.xml hold the body text as <hp:t> runs inside <hp:p>
+    paragraphs. Extract per paragraph (inline tags stripped, entities
+    unescaped), one line per non-empty paragraph, across all sections. Writes
+    *dst* and returns True on success; a corrupt zip or empty extraction returns
+    False (the caller reports a failure). Standard library only.
+    """
+    import html
+    import re
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(src) as z:
+            sections = sorted(
+                n for n in z.namelist() if re.fullmatch(r"Contents/section\d+\.xml", n)
+            )
+            if not sections:
+                return False
+            lines: list[str] = []
+            for name in sections:
+                xml = z.read(name).decode("utf-8", "ignore")
+                for para in re.split(r"<hp:p\b", xml):
+                    # tolerate attributes on the run element (<hp:t charPrIDRef="..">);
+                    # OWPML permits them, so a bare-tag-only match would silently drop text.
+                    runs = re.findall(r"<hp:t\b[^>]*>(.*?)</hp:t>", para, flags=re.S)
+                    if not runs:
+                        continue
+                    line = html.unescape("".join(re.sub(r"<[^>]+>", "", r) for r in runs)).strip()
+                    if line:
+                        lines.append(line)
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return False
+    if not lines:
+        return False
+    dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
+# Converters that run in-process (a Python callable writing dst) rather than by
+# shelling out to a PATH tool; they skip the shutil.which availability check.
+_BUILTIN_CONVERTERS: frozenset[str] = frozenset({"factlog-hwpx"})
+
+# Per-extension converter chains, tried in order until one's tool is available
+# (on PATH, or always for a built-in). Each entry: (tool_name, output_suffix,
+# builder) where builder is an argv-list builder for PATH tools, or a
+# (src, dst) -> bool callable for built-ins.
 _INGEST_CONVERTERS: dict[str, list[tuple]] = {
     ".docx": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".odt": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
@@ -428,6 +475,7 @@ _INGEST_CONVERTERS: dict[str, list[tuple]] = {
     ".htm": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".rtf": [("textutil", ".txt", _conv_textutil)],
     ".pdf": [("pdftotext", ".txt", _conv_pdftotext)],
+    ".hwpx": [("factlog-hwpx", ".md", _conv_hwpx)],
 }
 
 # Formats recognised as needing conversion but with no bundled converter.
@@ -538,7 +586,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             failures += 0 if args.scan else 1
             continue
 
-        chosen = next(((t, out, build) for (t, out, build) in chain if shutil.which(t)), None)
+        chosen = next(
+            ((t, out, build) for (t, out, build) in chain if t in _BUILTIN_CONVERTERS or shutil.which(t)),
+            None,
+        )
         if chosen is None:
             tools = ", ".join(t for (t, _, _) in chain)
             hints = "; ".join(_INSTALL_HINTS.get(t, t) for (t, _, _) in chain)
@@ -557,12 +608,24 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             skipped += 1
             continue
 
-        proc = subprocess.run(build(src, dst), capture_output=True, text=True)
-        if proc.returncode != 0 or not dst.is_file():
-            detail = (proc.stderr or proc.stdout or "").strip()
-            print(f"factlog ingest: {tool} failed on {src.name}: {detail}", file=sys.stderr)
-            failures += 1
-            continue
+        if tool in _BUILTIN_CONVERTERS:
+            try:
+                ok = bool(build(src, dst))
+                detail = "could not extract text (empty, corrupt, or unsupported hwpx)"
+            except Exception as exc:  # defensive: a built-in must never crash the run
+                ok = False
+                detail = str(exc)
+            if not ok or not dst.is_file():
+                print(f"factlog ingest: {tool} failed on {src.name}: {detail}", file=sys.stderr)
+                failures += 1
+                continue
+        else:
+            proc = subprocess.run(build(src, dst), capture_output=True, text=True)
+            if proc.returncode != 0 or not dst.is_file():
+                detail = (proc.stderr or proc.stdout or "").strip()
+                print(f"factlog ingest: {tool} failed on {src.name}: {detail}", file=sys.stderr)
+                failures += 1
+                continue
 
         when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         body = dst.read_text(encoding="utf-8", errors="replace")
