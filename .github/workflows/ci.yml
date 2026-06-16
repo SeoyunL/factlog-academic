@@ -48,5 +48,6 @@ jobs:
           bash tests/test_conflicts.sh
           bash tests/test_corroboration.sh
           bash tests/test_coverage.sh
+          bash tests/test_page_template.sh
       - name: clean-env plugin smoke (pipeline end-to-end)
         run: bash tests/smoke.sh

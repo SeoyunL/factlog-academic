@@ -159,6 +159,27 @@ This file describes the Datalog rules used to reason over the knowledge base.
 Add your policy rules here. Each rule should be documented with a brief
 explanation of its purpose.
 """,
+    # Concept-page layout used by `/factlog sync` (tools/merge_candidates.py).
+    # Edit this file to change how pages/<entity>.md is generated. Placeholders:
+    #   {{ENTITY}} {{SOURCES}} {{RELATIONS}} {{REVIEW}}
+    # IMPORTANT: keep byte-identical to merge_candidates.DEFAULT_PAGE_TEMPLATE;
+    # tests/test_page_template.sh pins the two together.
+    "templates/pages.md": """\
+<!-- generated-by-factlog -->
+# {{ENTITY}}
+
+## 요약
+- `sources/`에서 추출된 candidate fact를 기준으로 정리한 개념입니다.
+
+## 출처
+{{SOURCES}}
+
+## 관련 페이지
+{{RELATIONS}}
+
+## 확인 필요
+{{REVIEW}}
+""",
 }
 
 
@@ -171,7 +192,7 @@ def _init_kb(target) -> bool:
     created-vs-existing signal is surfaced for callers (e.g. ``cmd_setup``).
     """
     created_dirs: list[str] = []
-    dirs = ["sources", "pages", "facts", "decisions", "policy", "policy/prompts", "runs", "runs/sources"]
+    dirs = ["sources", "pages", "facts", "decisions", "policy", "policy/prompts", "templates", "runs", "runs/sources"]
     for dirname in dirs:
         d = target / dirname
         if not d.exists():

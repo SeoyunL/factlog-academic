@@ -113,6 +113,37 @@ VALID_STATUSES: frozenset[str] = frozenset(ENGINE_STATUSES | REVIEW_STATUSES | S
 # and this script only manages pages it has itself created.
 GENERATED_PAGE_MARKER = "<!-- generated-by-factlog -->"
 
+# Concept-page layout. A KB may override this by placing a template at
+# <kb>/templates/pages.md (see load_page_template); absent that file, this
+# built-in default is used so existing KBs keep their current page layout.
+# Placeholders ({{ENTITY}}, {{SOURCES}}, {{RELATIONS}}, {{REVIEW}}) follow the
+# same {{...}} convention as the policy/prompts templates.
+#
+# IMPORTANT: keep this byte-identical to factlog/cli.py _TEMPLATES["templates/
+# pages.md"]; tests/test_page_template.sh pins the two to prevent divergence.
+PAGE_TEMPLATE_REL = "templates/pages.md"
+DEFAULT_PAGE_TEMPLATE = """\
+<!-- generated-by-factlog -->
+# {{ENTITY}}
+
+## 요약
+- `sources/`에서 추출된 candidate fact를 기준으로 정리한 개념입니다.
+
+## 출처
+{{SOURCES}}
+
+## 관련 페이지
+{{RELATIONS}}
+
+## 확인 필요
+{{REVIEW}}
+"""
+
+# Matches exactly the four supported page placeholders. Substitution is a single
+# regex pass (see render_page) so a value injected into one slot can never be
+# re-scanned and re-substituted as another slot's placeholder.
+_PAGE_PLACEHOLDER_RE = re.compile(r"\{\{(ENTITY|SOURCES|RELATIONS|REVIEW)\}\}")
+
 
 # ---------------------------------------------------------------------------
 # Source-file helpers
@@ -284,6 +315,45 @@ def page_filename(title: str) -> str:
     return f"{slugify(title)}.md"
 
 
+def load_page_template(root: Path) -> str:
+    """Return the concept-page template: <kb>/templates/pages.md if present,
+    else the built-in DEFAULT_PAGE_TEMPLATE (backward-compatible).
+
+    CRLF is normalised to LF. An empty/whitespace-only custom template falls back
+    to the default (with a warning); a non-empty one with no recognised
+    placeholder is honoured but warned about (pages would be static text)."""
+    custom = root / PAGE_TEMPLATE_REL
+    if not custom.is_file():
+        return DEFAULT_PAGE_TEMPLATE
+    text = custom.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if not text.strip():
+        print(f"  {PAGE_TEMPLATE_REL} is empty; using built-in default page template", file=sys.stderr)
+        return DEFAULT_PAGE_TEMPLATE
+    if not _PAGE_PLACEHOLDER_RE.search(text):
+        print(
+            f"  {PAGE_TEMPLATE_REL} has no {{{{ENTITY}}}}/{{{{SOURCES}}}}/{{{{RELATIONS}}}}/{{{{REVIEW}}}}"
+            " placeholders; generated pages will be static text",
+            file=sys.stderr,
+        )
+    return text
+
+
+def render_page(template: str, entity: str, sources: str, relations: str, review: str) -> str:
+    """Substitute the page placeholders and guarantee the generated marker.
+
+    Substitution is a SINGLE regex pass: each {{...}} is replaced exactly once,
+    so a value placed in one slot (e.g. a source string that literally contains
+    '{{REVIEW}}') is never re-scanned and re-substituted. The marker is what
+    makes regeneration non-destructive (hand-authored pages are never
+    overwritten); if a custom template doesn't start with it, prepend it so a
+    user's edit cannot silently break regeneration detection."""
+    mapping = {"ENTITY": entity, "SOURCES": sources, "RELATIONS": relations, "REVIEW": review}
+    text = _PAGE_PLACEHOLDER_RE.sub(lambda m: mapping[m.group(1)], template)
+    if not text.startswith(GENERATED_PAGE_MARKER):
+        text = f"{GENERATED_PAGE_MARKER}\n{text}"
+    return text
+
+
 def write_pages(root: Path, rows: list[dict[str, str]]) -> list[str]:
     """Generate per-entity concept pages from confirmed/accepted candidate rows.
 
@@ -294,6 +364,7 @@ def write_pages(root: Path, rows: list[dict[str, str]]) -> list[str]:
     """
     pages_dir = root / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
+    template = load_page_template(root)
 
     # Remove previously generated pages (ours only).
     for page in pages_dir.glob("*.md"):
@@ -340,24 +411,12 @@ def write_pages(root: Path, rows: list[dict[str, str]]) -> list[str]:
                     f" (confidence={row['confidence']}): {row['note']}"
                 )
 
-        text = "\n".join(
-            [
-                GENERATED_PAGE_MARKER,
-                f"# {entity}",
-                "",
-                "## 요약",
-                "- `sources/`에서 추출된 candidate fact를 기준으로 정리한 개념입니다.",
-                "",
-                "## 출처",
-                *(source_lines or ["- 확인된 source가 없습니다."]),
-                "",
-                "## 관련 페이지",
-                *(relation_lines or ["- 확인된 관계가 없습니다."]),
-                "",
-                "## 확인 필요",
-                *(review_lines or ["- 현재 추출 결과에서 별도 검토 항목이 없습니다."]),
-                "",
-            ]
+        text = render_page(
+            template,
+            entity,
+            "\n".join(source_lines or ["- 확인된 source가 없습니다."]),
+            "\n".join(relation_lines or ["- 확인된 관계가 없습니다."]),
+            "\n".join(review_lines or ["- 현재 추출 결과에서 별도 검토 항목이 없습니다."]),
         )
         path.write_text(text, encoding="utf-8")
         written.append(path.relative_to(root).as_posix())

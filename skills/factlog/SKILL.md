@@ -233,6 +233,16 @@ with a warning. Pass `--strict` to make any dropped row a hard failure.
 outputs; the engine owns them. Only `runs/*.json` is the LLM write surface for
 this step.
 
+**Concept-page layout (`templates/pages.md`).** The markdown layout of each
+regenerated `pages/<entity>.md` comes from `<kb>/templates/pages.md` (scaffolded
+by `factlog init`). Edit that file to change the page layout per KB — no plugin
+code change needed. Placeholders: `{{ENTITY}}`, `{{SOURCES}}`, `{{RELATIONS}}`,
+`{{REVIEW}}` (each block falls back to a "없습니다" line when empty). If the file
+is absent, a built-in default identical to the scaffolded seed is used. The
+`<!-- generated-by-factlog -->` marker is always guaranteed in the output (auto-
+prepended if a custom template omits it) — this is what keeps regeneration
+non-destructive, so hand-authored pages without the marker are never touched.
+
 ---
 
 ## `/factlog query` — translate questions into a Datalog query draft
