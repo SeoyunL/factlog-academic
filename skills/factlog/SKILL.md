@@ -94,6 +94,47 @@ After `setup` succeeds, use the four operating commands — `/factlog sync`,
 
 ---
 
+## `/factlog add` — one-shot capture (low friction)
+
+**Purpose:** Add one piece of knowledge (a file or free text) and finalise the
+KB in a single pass — so capturing is as light as a plain notes wiki, but you
+still get the verification tier. It composes the existing steps; the only LLM
+step is extraction.
+
+**Execution order:**
+
+### Step 1 — Place the source
+
+- A binary/office file (`.docx`, `.pdf`, ...): run
+  `python3 -m factlog ingest <path> --target "$FACTLOG_ROOT"` (or `--scan`)
+  → it writes a text conversion into `runs/sources/`.
+- Free text or a text file: place it under `sources/<name>` (text is read
+  verbatim by extraction).
+
+### Step 2 — Extract candidates (LLM, in-session)
+
+Apply `${CLAUDE_PLUGIN_ROOT}/skills/factlog/references/text-to-fact.md` to the
+new source and write candidate rows to `runs/<iso>-<slug>.json` — identical to
+`/factlog sync` Step 1 (source is `sources/<name>` or `runs/sources/<name>`).
+
+### Step 3 — Finalise deterministically (one command)
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/tools/finalize.py" --target "$FACTLOG_ROOT"
+```
+
+`finalize.py` chains the deterministic engine steps — `merge_candidates` →
+ensure `policy/logic-policy.dl` → `compile_facts` → `run_logic_check` — and
+prints a summary (candidates merged, engine facts, the logic report). It is
+idempotent and read-only with respect to hand-edited inputs (only the engine
+scripts touch their outputs). If `pyrewire` is unavailable the logic check is
+skipped with a note; facts are still merged and compiled.
+
+Use `/factlog add` for quick capture; use the explicit `sync → query → check →
+repair` sequence when you need the full question→query workflow.
+
+---
+
 ## `/factlog sync` — extract candidates and merge into KB
 
 **Purpose:** Read every file under `sources/`, extract candidate facts in
