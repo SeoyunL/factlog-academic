@@ -213,7 +213,16 @@ def load_candidate_files(root: Path, pattern: str = "runs/*.json") -> list[dict[
         except (json.JSONDecodeError, OSError) as exc:
             raise SystemExit(f"failed to parse {path.relative_to(root)}: {exc}") from exc
         if not isinstance(data, list):
-            raise SystemExit(f"{path.relative_to(root)} must contain a JSON array")
+            # Not a candidate-rows file (a fact run is a JSON array). Other tools
+            # also write JSON under runs/ — e.g. generate_logic_policy.py writes
+            # runs/natural-language-to-policy-response.json (an object). Skip such
+            # non-array files with a warning instead of failing, so the pipeline
+            # stays idempotent when those artifacts are present.
+            print(
+                f"  skip non-candidate JSON in {path.parent.name}/: {path.name} (not a JSON array)",
+                file=sys.stderr,
+            )
+            continue
         for item in data:
             if not isinstance(item, dict):
                 continue

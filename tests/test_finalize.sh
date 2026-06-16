@@ -47,6 +47,19 @@ fi
 n="$(grep -c 'relation("Acme API", "uses", "FastAPI")' "$KB/facts/accepted.dl")"
 [ "$n" = "1" ] && ok "idempotent re-run (fact not duplicated)" || bad "re-run duplicated the fact ($n)"
 
+# idempotency with a REAL compilable policy: generate_logic_policy writes
+# runs/natural-language-to-policy-response.json (a JSON object); the SECOND
+# finalize must not choke on it at the merge step.
+KB2="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB2" >/dev/null
+printf '# src\n\nAcme API deployed on AWS.\n' > "$KB2/sources/d.md"
+printf '[{"subject":"Acme API","relation":"deployed_on","object":"AWS","source":"sources/d.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB2/runs/r1.json"
+printf '# Logic policy\n\n## Rules\n\n- [hosting_check] 어떤 항목이 `deployed_on` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB2/policy/logic-policy.md"
+"$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1; r1=$?
+"$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1; r2=$?
+if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ]; then ok "idempotent with a real policy (2nd finalize survives policy-response JSON in runs/)"; else bad "policy-rule KB: finalize not idempotent (rc1=$r1 rc2=$r2)"; fi
+[ -f "$KB2/policy/logic-policy.dl" ] && grep -q "requires_review" "$KB2/policy/logic-policy.dl" && ok "real policy compiled (not stubbed over)" || bad "real policy not compiled"
+
 echo ""
 echo "========================================"
 echo "test_finalize: $pass passed, $fail failed"

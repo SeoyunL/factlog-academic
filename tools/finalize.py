@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -41,8 +42,10 @@ def _pyrewire_ok() -> bool:
     try:
         import pyrewire  # type: ignore
 
-        version = tuple(int(part) for part in str(pyrewire.__version__).split(".")[:3])
-        return version >= (1, 0, 1)
+        # Robust parse (matches common.version_tuple): tolerate pre-release tags
+        # like '1.0.1rc1' rather than treating them as absent.
+        parts = re.findall(r"\d+", str(pyrewire.__version__))[:3]
+        return tuple(int(part) for part in parts) >= (1, 0, 1)
     except Exception:
         return False
 
@@ -71,8 +74,22 @@ def main(argv: list[str] | None = None) -> int:
     #    write a no-op stub so the check can run with an empty policy.
     policy_dl = root / "policy" / "logic-policy.dl"
     if not policy_dl.is_file():
-        _run("generate_logic_policy.py", env=env)
+        gen = _run("generate_logic_policy.py", env=env)
         if not policy_dl.is_file():
+            # generate produced nothing. Distinguish "no compilable rules" (the
+            # benign fresh-KB case → stub) from a genuine generation failure when
+            # the .md DOES define rules (do not silently drop the user's policy).
+            policy_md = root / "policy" / "logic-policy.md"
+            md_text = policy_md.read_text(encoding="utf-8") if policy_md.is_file() else ""
+            has_rules = bool(re.search(r"(?m)^\s*[-*]\s*\[[a-z0-9_]+\].*`", md_text))
+            if has_rules:
+                sys.stderr.write(gen.stderr)
+                print(
+                    "finalize: WARNING — policy/logic-policy.md appears to define rules but "
+                    "generate_logic_policy did not produce logic-policy.dl. Proceeding with an "
+                    "empty policy; fix the policy and re-run to apply it.",
+                    file=sys.stderr,
+                )
             policy_dl.parent.mkdir(parents=True, exist_ok=True)
             policy_dl.write_text("// no policy rules\n", encoding="utf-8")
 
