@@ -37,10 +37,11 @@ jobs:
       # pandoc gives tests/test_ingest.sh a real docx converter; without it that
       # test self-skips its conversion assertions rather than failing.
       - run: sudo apt-get update && sudo apt-get install -y pandoc
-      - name: gate / nontext / ingest harnesses
+      - name: gate / nontext / ingest / ask-router harnesses
         run: |
           bash tests/test_gate_check.sh
           bash tests/test_nontext_sources.sh
           bash tests/test_ingest.sh
+          bash tests/test_ask_router.sh
       - name: clean-env plugin smoke (pipeline end-to-end)
         run: bash tests/smoke.sh
