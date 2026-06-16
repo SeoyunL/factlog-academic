@@ -139,6 +139,30 @@ rm -f "$KB/sources/dup.md"
 router note "   " >/dev/null
 if grep -qE '^- *$' "$KB/decisions/ask-open-questions.md" 2>/dev/null; then bad "blank note recorded"; else ok "blank note not recorded"; fi
 
+# --- Phase 2: path (positive render / variable) + policy + decisions ---
+ppos="$(router render 'path("Acme API", "FastAPI")?')"
+if printf '%s' "$ppos" | grep -qF "VERIFIED — engine" && printf '%s' "$ppos" | grep -qF "Acme API, FastAPI"; then ok "path positive renders the dependency path as an engine answer"; else bad "path positive not rendered"; fi
+check_field "path with a variable enumerates reachable pairs" evaluate 'path("Acme API", T)?' count 2
+
+# policy-predicate evaluation needs pyrewire (run_wirelog); guard so CI without
+# pyrewire skips rather than fails. Compile a tiny policy first.
+if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in pyrewire.__version__.split('.')[:3]) >= (1,0,1) else 1)" >/dev/null 2>&1; then
+  printf '# policy\n## Rules\n- [usage_chain] 어떤 항목이 `uses` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB/policy/logic-policy.md"
+  ( cd "$PLUGIN_ROOT" && FACTLOG_ROOT="$KB" "$PYTHON" tools/generate_logic_policy.py >/dev/null 2>&1 )
+  check_field "policy predicate routes engine" validate 'requires_review(E, R)?' route engine
+  pc="$(router evaluate 'requires_review(E, R)?' | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin)['count'])")"
+  if [ "$pc" -ge 1 ]; then ok "policy predicate evaluates to engine rows ($pc)"; else bad "policy predicate returned no rows"; fi
+  rm -f "$KB/policy/logic-policy.dl" "$KB/policy/logic-policy.md"
+else
+  echo "SKIP: pyrewire unavailable — skipping policy-predicate evaluation assertions"
+fi
+
+# decisions/ is searched as clearly-labeled SUPPLEMENTARY context
+printf '# Open Questions\n\n## review\n- needs_review widgetterm pending\n' > "$KB/decisions/open-questions.md"
+dout="$(router search "widgetterm")"
+if printf '%s' "$dout" | grep -qF 'decisions (supplementary)'; then ok "decisions/ searched as labeled supplementary"; else bad "decisions/ supplementary not surfaced"; fi
+rm -f "$KB/decisions/open-questions.md"
+
 # --- read-only invariant (engine inputs untouched by any subcommand) ---
 if [ -f "$KB/facts/query.dl" ]; then bad "ask_router wrote facts/query.dl (must be read-only)"; else ok "facts/query.dl never written"; fi
 if [ "$(cat "$KB/facts/accepted.dl")" = "$ACCEPTED_BEFORE" ]; then ok "facts/accepted.dl unchanged"; else bad "facts/accepted.dl was mutated"; fi
