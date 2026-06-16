@@ -425,13 +425,24 @@ def _relation_match_count(query: str, facts: list[dict[str, str]]) -> int:
     return 0
 
 
-def validate_candidate_query(line: str, facts: list[dict[str, str]]) -> tuple[bool, str]:
+def validate_candidate_query(
+    line: str,
+    facts: list[dict[str, str]],
+    policy_program: str | None = None,
+) -> tuple[bool, str]:
     """Validate a single candidate Datalog query line against the current KB state.
 
     Returns (True, "passed") on success or (False, reason) on failure.
     This is the deterministic re-validation anchor used by the self-correction
     loop (AC4): after each LLM repair attempt the corrected query is run
     through this function before being accepted.
+
+    ``policy_program`` lets callers supply the policy program text directly. When
+    None (default) the compiled ``policy/logic-policy.dl`` is loaded, which
+    requires that file to exist. Callers that must tolerate a KB without a
+    compiled policy (e.g. interactive ask before ``/factlog check``) can pass the
+    file's text if present or ``""`` if absent, so a missing policy yields an
+    empty policy-predicate set instead of a hard exit.
     """
     query = line.strip()
     if "\n" in query or not query:
@@ -442,7 +453,9 @@ def validate_candidate_query(line: str, facts: list[dict[str, str]]) -> tuple[bo
     if not match:
         return False, "candidate query must call a predicate"
     predicate = match.group(1)
-    policy_query_predicates = policy_predicates(load_logic_policy())
+    policy_query_predicates = policy_predicates(
+        load_logic_policy() if policy_program is None else policy_program
+    )
     allowed_predicates = {"relation", "path", "review_required"} | policy_query_predicates
     if predicate not in allowed_predicates:
         return False, f"unknown predicate: {predicate}"
