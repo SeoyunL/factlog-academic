@@ -80,6 +80,7 @@ import csv  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
 import subprocess  # noqa: E402
+import unicodedata  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 
 from common import (  # noqa: E402
@@ -258,7 +259,11 @@ def normalize_rows(
     dropped = 0
 
     for row in rows:
-        source = row["source"]
+        # NFC-normalise the source: macOS stores filenames as NFD, but extracted
+        # sources are typically NFC; comparing/storing NFC keeps both sides equal
+        # so a Korean-named source's facts are not silently dropped (and the
+        # canonical value written to candidates.csv is consistently NFC).
+        source = unicodedata.normalize("NFC", row["source"])
         # Compare the pre-anchor portion against known sources/-prefixed refs.
         # The canonical source value is already sources/-prefixed; bare filenames
         # will not match and are dropped with a warning.
@@ -276,6 +281,7 @@ def normalize_rows(
                 )
             continue
         clean = {field: row.get(field, "").strip() for field in FACT_HEADER}
+        clean["source"] = source  # NFC-normalised canonical source
         clean["status"] = clean["status"] if clean["status"] in VALID_STATUSES else "needs_review"
         clean["confidence"] = normalize_confidence(clean["confidence"])
         key = (clean["subject"], clean["relation"], clean["object"], clean["source"])
@@ -496,7 +502,7 @@ def record_stale_page_refs(root: Path) -> list[str]:
     added: list[str] = []
     for page in sorted((root / "pages").glob("*.md")):
         for ref in existing_source_refs(page):
-            source_file = ref.partition("#")[0]
+            source_file = unicodedata.normalize("NFC", ref.partition("#")[0])
             if source_file in known_sources:
                 continue
             bullet = f"- stale_source: {page.relative_to(root).as_posix()} references removed source {ref}"

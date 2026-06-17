@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -98,8 +99,15 @@ def source_file_refs(root: Path) -> set[str]:
     Example: <root>/sources/my-doc.md -> 'sources/my-doc.md';
              <root>/runs/sources/report.md -> 'runs/sources/report.md'.
     These match the canonical source value that candidate rows must use.
+
+    Paths are NFC-normalised: macOS stores filenames as NFD (decomposed), but
+    extracted candidate sources are typically NFC, so an un-normalised compare
+    would silently drop facts for Korean (or any decomposable) filenames.
     """
-    return {path.relative_to(root).as_posix() for path in source_files(root)}
+    return {
+        unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+        for path in source_files(root)
+    }
 
 
 def is_text_source(path: Path, *, sniff: int = 8192) -> bool:

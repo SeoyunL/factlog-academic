@@ -41,6 +41,7 @@ jobs:
         run: |
           bash tests/test_gate_check.sh
           bash tests/test_nontext_sources.sh
+          bash tests/test_nfc_sources.sh
           bash tests/test_ingest.sh
           bash tests/test_hwpx_ingest.sh
           bash tests/test_ask_router.sh
