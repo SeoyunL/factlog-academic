@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import unicodedata
 from pathlib import Path
 
 _TOOLS_DIR = Path(__file__).parent
@@ -67,9 +68,12 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
     cite it (source path before any '#'). Orphans are cited paths with no file
     on disk.
     """
+    # NFC-normalise both sides: macOS stores filenames as NFD but candidate
+    # sources are NFC, so an un-normalised compare would mis-report a Korean-named
+    # source as 0-facts + orphan (see merge_candidates' matching).
     cited: dict[str, int] = {}
     for row in engine_facts(facts):
-        ref = row.get("source", "").partition("#")[0]
+        ref = unicodedata.normalize("NFC", row.get("source", "").partition("#")[0])
         if ref:
             cited[ref] = cited.get(ref, 0) + 1
 
@@ -78,7 +82,7 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
     for path in source_files(root):
         if _hidden(path, root):
             continue
-        ref = path.relative_to(root).as_posix()
+        ref = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
         on_disk.add(ref)
         rows.append({
             "file": ref,
