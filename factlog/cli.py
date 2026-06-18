@@ -652,6 +652,53 @@ def _conv_hwpx(src, dst) -> bool:
     return True
 
 
+def _conv_pptx(src, dst) -> bool:
+    """In-process converter for PowerPoint .pptx (OOXML: a zip of XML).
+
+    pandoc can *write* pptx but cannot *read* it, so there is no PATH tool for
+    this; the format is a zip whose ppt/slides/slideN.xml hold the slide text as
+    <a:t> runs inside <a:p> paragraphs. Extract per paragraph (inline tags
+    stripped, entities unescaped), one line per non-empty paragraph, slides in
+    numeric order (slide10 after slide9, not lexicographic), each slide block
+    separated by a blank line. Writes *dst* and returns True on success; a
+    corrupt zip or empty extraction returns False (the caller reports a
+    failure). Standard library only.
+    """
+    import html
+    import re
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(src) as z:
+            slides = [n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+            # slideN.xml: order by the embedded number so slide10 follows slide9
+            # (plain sort would place slide10 before slide2).
+            slides.sort(key=lambda n: int(re.search(r"(\d+)", n).group(1)))
+            if not slides:
+                return False
+            blocks: list[str] = []
+            for name in slides:
+                xml = z.read(name).decode("utf-8", "ignore")
+                lines: list[str] = []
+                for para in re.split(r"<a:p\b", xml):
+                    # tolerate attributes on the run element (<a:t ...>); strip
+                    # inline tags inside the run, then unescape XML entities.
+                    runs = re.findall(r"<a:t\b[^>]*>(.*?)</a:t>", para, flags=re.S)
+                    if not runs:
+                        continue
+                    line = html.unescape("".join(re.sub(r"<[^>]+>", "", r) for r in runs)).strip()
+                    if line:
+                        lines.append(line)
+                if lines:
+                    blocks.append("\n".join(lines))
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return False
+    if not blocks:
+        return False
+    dst.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    return True
+
+
 class _MissingTool(Exception):
     """Raised by a built-in converter when a required external tool is absent.
 
@@ -696,7 +743,7 @@ def _conv_hwp(src, dst) -> bool:
 # Converters that run in-process (a Python callable writing dst) rather than by
 # shelling out to a single PATH tool; they skip the shutil.which availability
 # check (a built-in may itself orchestrate external tools and report _MissingTool).
-_BUILTIN_CONVERTERS: frozenset[str] = frozenset({"factlog-hwpx", "factlog-hwp"})
+_BUILTIN_CONVERTERS: frozenset[str] = frozenset({"factlog-hwpx", "factlog-hwp", "factlog-pptx"})
 
 # Per-extension converter chains, tried in order until one's tool is available
 # (on PATH, or always for a built-in). Each entry: (tool_name, output_suffix,
@@ -712,11 +759,11 @@ _INGEST_CONVERTERS: dict[str, list[tuple]] = {
     ".pdf": [("pdftotext", ".txt", _conv_pdftotext)],
     ".hwpx": [("factlog-hwpx", ".md", _conv_hwpx)],
     ".hwp": [("factlog-hwp", ".md", _conv_hwp)],
+    ".pptx": [("factlog-pptx", ".md", _conv_pptx)],
 }
 
 # Formats recognised as needing conversion but with no bundled converter.
 _INGEST_HINTS: dict[str, str] = {
-    ".pptx": "no built-in converter; export slides to text/markdown manually",
     ".xlsx": "no built-in converter; export sheets to .csv and place those in sources/",
     ".png": "images need OCR (out of scope); transcribe to text manually",
     ".jpg": "images need OCR (out of scope); transcribe to text manually",

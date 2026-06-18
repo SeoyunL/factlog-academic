@@ -45,6 +45,7 @@ jobs:
           bash tests/test_ingest.sh
           bash tests/test_hwpx_ingest.sh
           bash tests/test_hwp_ingest.sh
+          bash tests/test_pptx_ingest.sh
           bash tests/test_ask_router.sh
           bash tests/test_validate_sources.sh
           bash tests/test_finalize.sh
