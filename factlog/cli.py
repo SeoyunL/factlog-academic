@@ -966,9 +966,12 @@ def cmd_eject(args: argparse.Namespace) -> int:
     import csv
     import json
     import os
+    import re
     import subprocess
     import unicodedata
     from pathlib import Path
+
+    from common import FACT_HEADER
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1006,16 +1009,40 @@ def cmd_eject(args: argparse.Namespace) -> int:
 
     all_refs = set(disk_refs) | cited_refs
 
+    # Tie each runs/sources/ conversion to the original it was made from, read
+    # from the ingest provenance header ("... | source: <name> | ..."). Two
+    # originals can share a stem (report.pptx + report.docx both -> report.md),
+    # so a stem guess would let `eject report.docx` wrongly pull report.pptx's
+    # conversion; the recorded origin name disambiguates. Falls back to a stem
+    # match only when no header is present (a hand-made conversion).
+    conv_origin: dict[str, str] = {}
+    for ref, p in disk_refs.items():
+        if not ref.startswith("runs/sources/"):
+            continue
+        try:
+            head = p.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+        except OSError:
+            head = ""
+        m = re.search(r"source:\s*(.+?)\s*(?:\||-->|$)", head)
+        if m:
+            conv_origin[ref] = nfc(m.group(1).strip())
+
     def matches(ref: str, name: str) -> bool:
         name = nfc(name)
         rp, np_ = Path(ref), Path(name)
-        if ref == name:
+        if ref == name:  # exact KB-relative ref
             return True
-        if np_.suffix:  # an extension was given: match precisely
-            if rp.name == np_.name:  # the named original itself
-                return True
-            # ...and that original's runs/sources/<stem> conversion
-            return ref.startswith("runs/sources/") and rp.stem == np_.stem
+        is_conv = ref.startswith("runs/sources/")
+        if "/" in name:
+            # A path was given: the exact original is handled above; for a binary
+            # original also match the conversion it produced (by recorded origin).
+            # Same-basename files in other directories are NOT matched.
+            return is_conv and conv_origin.get(ref) == np_.name
+        if np_.suffix:  # a bare filename with an extension
+            if not is_conv:
+                return rp.name == np_.name  # an original with that filename
+            origin = conv_origin.get(ref)  # the conversion made from this original
+            return origin == np_.name if origin else rp.stem == np_.stem
         return rp.stem == np_.stem  # bare stem: every source with that stem
 
     matched: set[str] = set()
@@ -1067,10 +1094,13 @@ def cmd_eject(args: argparse.Namespace) -> int:
         for jp in sorted(runs_dir.glob("*.json")):
             try:
                 data = json.loads(jp.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as exc:
+                # surface it: a corrupt run file left behind could still hold the
+                # ejected source's rows and resurrect them on a later merge.
+                print(f"factlog eject: skipping unreadable {jp.name}: {exc}", file=sys.stderr)
                 continue
             if not isinstance(data, list):
-                continue
+                continue  # non-candidate run JSON (e.g. a policy-gen object): leave it
             kept = [
                 item for item in data
                 if not (isinstance(item, dict)
@@ -1087,6 +1117,13 @@ def cmd_eject(args: argparse.Namespace) -> int:
     # 3. retire candidate rows: supersede (default) or purge
     changed = 0
     if rows:
+        # Guard the supersede path against a malformed/legacy header missing the
+        # status column — without this, DictWriter would raise mid-write on a
+        # truncated ("w") file and lose every row. Fall back to the canonical
+        # FACT_HEADER, and ensure 'status' exists when we set it.
+        out_fields = fieldnames or list(FACT_HEADER)
+        if not args.purge and "status" not in out_fields:
+            out_fields = [*out_fields, "status"]
         new_rows: list[dict[str, str]] = []
         for r in rows:
             if nfc((r.get("source") or "").partition("#")[0]) in matched:
@@ -1095,10 +1132,14 @@ def cmd_eject(args: argparse.Namespace) -> int:
                     continue  # drop the row entirely
                 r["status"] = "superseded"
             new_rows.append(r)
-        with csv_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+        # Write atomically (temp + replace) so an interrupted run can't leave a
+        # half-written candidates.csv.
+        tmp = csv_path.with_name(csv_path.name + ".tmp")
+        with tmp.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=out_fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(new_rows)
+        os.replace(tmp, csv_path)
 
     # 4. optionally delete the user's original(s)
     deleted_orig = 0
@@ -1111,6 +1152,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
                 print(f"factlog eject: could not delete {ref}: {exc}", file=sys.stderr)
 
     # 5. recompile accepted.dl so the engine input drops the retired facts
+    recompile_failed = False
     if csv_path.is_file():
         proc = subprocess.run(
             [sys.executable, str(_TOOLS_DIR / "compile_facts.py")],
@@ -1118,23 +1160,30 @@ def cmd_eject(args: argparse.Namespace) -> int:
             capture_output=True, text=True,
         )
         if proc.returncode != 0:
+            recompile_failed = True
             print(
                 f"factlog eject: compile_facts failed: {(proc.stderr or proc.stdout).strip()}",
                 file=sys.stderr,
             )
 
     verb = "purged" if args.purge else "superseded"
+    recompiled = "accepted.dl NOT recompiled" if recompile_failed else "accepted.dl recompiled"
     print(
         f"factlog eject: {deleted_conv} conversion(s) deleted, {stripped_rows} run row(s) "
         f"stripped ({removed_files} run file(s) removed), {changed} candidate row(s) {verb}, "
-        f"{deleted_orig} original(s) deleted; accepted.dl recompiled"
+        f"{deleted_orig} original(s) deleted; {recompiled}"
     )
+    if changed:
+        print(
+            "factlog eject: note — pages/ may still reference the removed facts; "
+            "run /factlog sync to regenerate them."
+        )
     if orig_on_disk and not args.delete_original:
         print(
             "factlog eject: note — kept original(s) will be re-converted on the next "
             "`factlog ingest --scan` / `/factlog sync`; pass --delete-original to remove them."
         )
-    return 0
+    return 1 if recompile_failed else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

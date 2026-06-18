@@ -36,7 +36,8 @@ seed() {  # $1 = KB path
   local kb="$1"
   "$PYTHON" -m factlog init --target "$kb" >/dev/null
   printf 'PK\003\004 fake pptx\000' > "$kb/sources/deck.pptx"
-  printf '<!-- ingested -->\nslide text\n' > "$kb/runs/sources/deck.md"
+  printf '<!-- ingested-by-factlog | source: deck.pptx | converter: factlog-pptx | date: 2026-01-01T00:00:00Z -->\nslide text\n' \
+    > "$kb/runs/sources/deck.md"
   printf 'plain text\n' > "$kb/sources/notes.md"
   printf '%s\n%s\n%s\n%s\n' "$H" \
     'A,rel,B,runs/sources/deck.md,confirmed,0.9,' \
@@ -83,6 +84,41 @@ KB="$(mktemp -d)/wiki"; seed "$KB"
   && [ ! -f "$KB/runs/sources/deck.md" ] && ok "bare stem 'deck' matches the source" || bad "bare stem did not match"
 set +e; "$PYTHON" -m factlog eject nope --target "$KB" >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -ne 0 ] && ok "unknown source name errors (rc != 0)" || bad "unknown name should error"
+
+# --- a sibling sharing the stem is NOT pulled in by the conversion's provenance -
+# report.pptx was ingested (provenance source: report.pptx); report.docx was not.
+# Ejecting report.docx must not delete report.pptx's conversion or retire its fact.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf 'PK\003\004\000' > "$KB/sources/report.pptx"
+printf 'PK\003\004\000' > "$KB/sources/report.docx"
+printf '<!-- ingested-by-factlog | source: report.pptx | converter: factlog-pptx | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/report.md"
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/report.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog eject report.docx --target "$KB" >/dev/null 2>&1 || true
+[ -f "$KB/runs/sources/report.md" ] && ok "ejecting report.docx keeps report.pptx's conversion (provenance-tied)" || bad "wrong conversion deleted"
+grep -q "runs/sources/report.md,confirmed," "$KB/facts/candidates.csv" && ok "report.pptx's fact not retired by ejecting report.docx" || bad "wrong fact retired"
+
+# --- a full KB-relative path does NOT match a same-name file in another dir ----
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/a" "$KB/sources/b"
+printf 'a\n' > "$KB/sources/a/dup.md"; printf 'b\n' > "$KB/sources/b/dup.md"
+printf '%s\n%s\n%s\n' "$H" \
+  'A,rel,B,sources/a/dup.md,confirmed,0.9,' \
+  'C,rel,D,sources/b/dup.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog eject sources/a/dup.md --target "$KB" --delete-original >/dev/null 2>&1 || true
+[ ! -f "$KB/sources/a/dup.md" ] && [ -f "$KB/sources/b/dup.md" ] && ok "full path ejects only that file, not the same-name sibling" || bad "full path matched across directories"
+grep -q "sources/b/dup.md,confirmed," "$KB/facts/candidates.csv" && ok "sibling's fact preserved" || bad "sibling fact wrongly retired"
+
+# --- a candidates.csv whose header lacks 'status' is not truncated -------------
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf 'plain\n' > "$KB/sources/x.md"; printf 'plain\n' > "$KB/sources/y.md"
+printf 'subject,relation,object,source\n%s\n%s\n' \
+  'A,rel,B,sources/x.md' 'C,rel,D,sources/y.md' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog eject x.md --target "$KB" >/dev/null 2>&1 || true
+grep -q "sources/y.md" "$KB/facts/candidates.csv" && ok "rows preserved when header lacks a status column (no truncation)" || bad "candidates.csv truncated on missing status column"
 
 # --- non-KB path errors -------------------------------------------------------
 set +e; "$PYTHON" -m factlog eject anything --target "$(mktemp -d)" >/dev/null 2>&1; rc=$?; set -e
