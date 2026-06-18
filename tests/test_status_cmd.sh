@@ -78,6 +78,23 @@ for inp in "facts/accepted.dl" "facts/query.dl" "policy/logic-policy.dl"; do
   printf '%s' "$out" | grep -qF "report STALE" && ok "STALE when $inp newer than report" || bad "stale not detected for $inp"
 done
 
+# --- binary original counted as covered via its conversion (like coverage) -----
+PKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$PKB" >/dev/null
+printf '\x00\x01bin\x00' > "$PKB/sources/report.pdf"           # binary original (0 direct facts)
+printf 'converted text\n' > "$PKB/runs/sources/report.md"      # its conversion carries the fact
+printf '%s\n%s\n' "$H" \
+  'A,rel,B,runs/sources/report.md,confirmed,0.9,' > "$PKB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog status --target "$PKB" 2>&1)"
+printf '%s' "$out" | grep -qE "sources: +2 file\(s\), 2 with facts \(1 via conversion\), 0 with none" \
+  && ok "binary original counted covered via its conversion" || bad "status pairing wrong: $(printf '%s' "$out" | grep sources:)"
+
+# an UNCONVERTED binary (no conversion) stays 'with none'
+printf '\x00\x01bin\x00' > "$PKB/sources/lonely.pdf"
+out="$("$PYTHON" -m factlog status --target "$PKB" 2>&1)"
+printf '%s' "$out" | grep -qE "sources: +3 file\(s\), 2 with facts \(1 via conversion\), 1 with none" \
+  && ok "unconverted binary still counted 'with none'" || bad "unconverted binary miscounted: $(printf '%s' "$out" | grep sources:)"
+
 # --- not a KB -----------------------------------------------------------------
 set +e; "$PYTHON" -m factlog status --target "$(mktemp -d)" >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -ne 0 ] && ok "status on a non-KB path errors" || bad "non-KB path should error"

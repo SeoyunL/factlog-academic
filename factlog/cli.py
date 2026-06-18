@@ -608,11 +608,29 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"({len(attr)} attribute, {len(sv)} single-valued declared)"
     )
 
-    # Sources (NFC-matched, like coverage)
+    # Sources (NFC-matched, like coverage): a binary original is "covered via
+    # conversion" when its runs/sources/<rel> text conversion carries facts
+    # (facts attach to the conversion, not the binary original).
     cited = {unicodedata.normalize('NFC', r['source'].partition('#')[0]) for r in engine_rows if r.get('source')}
-    on_disk = c.source_file_refs(target)  # NFC
-    covered = len(on_disk & cited)
-    print(f"  sources:    {len(on_disk)} file(s), {covered} with facts, {len(on_disk) - covered} with none")
+    paths = c.source_files(target)
+    refs = {p: unicodedata.normalize('NFC', p.relative_to(target).as_posix()) for p in paths}
+    covered_keys = {
+        c.source_rel_key(ref)
+        for p, ref in refs.items()
+        if ref.startswith("runs/sources/") and ref in cited
+    }
+    direct = sum(1 for ref in refs.values() if ref in cited)
+    via = sum(
+        1
+        for p, ref in refs.items()
+        if ref not in cited
+        and ref.startswith("sources/")
+        and not c.is_text_source(p)
+        and c.source_rel_key(ref) in covered_keys
+    )
+    covered = direct + via
+    via_note = f" ({via} via conversion)" if via else ""
+    print(f"  sources:    {len(paths)} file(s), {covered} with facts{via_note}, {len(paths) - covered} with none")
 
     # Conflicts (single-valued relations with >1 distinct object)
     if sv:
