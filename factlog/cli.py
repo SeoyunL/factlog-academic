@@ -373,6 +373,86 @@ def cmd_sources(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provenance(args: argparse.Namespace) -> int:
+    """Trace a fact to its source(s).
+
+    For a matching (subject, relation, object), list every candidate row that
+    backs it: the source path, status, confidence, the note (the extracted
+    excerpt/rationale), and a [stale] marker when the source file is missing on
+    disk. Positional terms are a (subject, relation, object) prefix; a literal
+    '-' wildcards that position and omitted trailing positions are wildcards too
+    (at least one non-wildcard term is required). All statuses are shown —
+    including superseded/needs_review — so retired backing stays visible.
+    """
+    import csv
+    import unicodedata
+    from pathlib import Path
+
+    from common import source_file_refs
+
+    def nfc(s: str) -> str:
+        return unicodedata.normalize("NFC", s)
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not (target / "sources").is_dir():
+        print(f"factlog provenance: {target} is not a factlog KB (no sources/).", file=sys.stderr)
+        return 1
+
+    fields = ("subject", "relation", "object")
+    filt = {fields[i]: nfc(t) for i, t in enumerate(args.terms[:3]) if t != "-"}
+    if not filt:
+        print(
+            "factlog provenance: give at least one of SUBJECT RELATION OBJECT "
+            "(use '-' to wildcard a position)",
+            file=sys.stderr,
+        )
+        return 2
+
+    csv_path = target / "facts" / "candidates.csv"
+    rows: list[dict[str, str]] = []
+    if csv_path.is_file():
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+    def field(r: dict, k: str) -> str:
+        return nfc((r.get(k) or "").strip())
+
+    matched = [r for r in rows if all(field(r, k) == v for k, v in filt.items())]
+    if not matched:
+        shown = ", ".join(f"{k}={v}" for k, v in filt.items())
+        print(f"factlog provenance: no fact matches ({shown})", file=sys.stderr)
+        return 1
+
+    on_disk = source_file_refs(target)  # NFC-normalised refs of files that exist
+
+    groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for r in matched:
+        groups.setdefault((field(r, "subject"), field(r, "relation"), field(r, "object")), []).append(r)
+
+    distinct_sources: set[str] = set()
+    stale_rows = 0
+    print(f"factlog provenance (KB: {target}): {len(groups)} fact(s), {len(matched)} source row(s)")
+    for (s, rel, o), grp in groups.items():
+        print(f"  {s} / {rel} / {o}")
+        for r in sorted(grp, key=lambda r: field(r, "source")):
+            src = field(r, "source")
+            src_file = src.partition("#")[0]
+            stale = bool(src_file) and src_file not in on_disk
+            stale_rows += 1 if stale else 0
+            if src_file:
+                distinct_sources.add(src_file)
+            status = (r.get("status") or "").strip()
+            conf = (r.get("confidence") or "").strip()
+            note = (r.get("note") or "").strip()
+            staletag = "  [stale: source missing]" if stale else ""
+            print(f"    ← {src or '(no source)'}  [{status}, conf {conf}]{staletag}")
+            if note:
+                print(f"        note: {note}")
+    print(f"  {len(distinct_sources)} distinct source(s); {stale_rows} stale row(s)")
+    return 0
+
+
 def cmd_ignore(args: argparse.Namespace) -> int:
     """Manage policy/sync-ignore.md — glob patterns of sources excluded from sync.
 
@@ -1500,6 +1580,20 @@ def build_parser() -> argparse.ArgumentParser:
     sources = sub.add_parser("sources", help="list registered sources (original, conversion, fact count)")
     sources.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     sources.set_defaults(func=cmd_sources)
+
+    provenance = sub.add_parser(
+        "provenance",
+        aliases=["trace"],
+        help="trace a fact to its source(s): paths, status, confidence, note, staleness",
+    )
+    provenance.add_argument(
+        "terms",
+        nargs="+",
+        metavar="TERM",
+        help="SUBJECT [RELATION [OBJECT]] prefix; use '-' to wildcard a position",
+    )
+    provenance.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
+    provenance.set_defaults(func=cmd_provenance)
 
     ignore = sub.add_parser(
         "ignore",

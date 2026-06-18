@@ -427,6 +427,7 @@ def fact_signals(
     return {
         key: {
             "sources": len(entry["sources"]),
+            "source_paths": sorted(entry["sources"]),
             "confidence": f"{float(entry['confidence']):.2f}",
             "stale": entry["stale"],
         }

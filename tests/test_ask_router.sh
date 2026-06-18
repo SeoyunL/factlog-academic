@@ -245,6 +245,26 @@ assert a._entity_mentioned('갑봇', '갑봇 질문'), 'multi-char CJK entity ma
 if [ -f "$KB/facts/query.dl" ]; then bad "ask_router wrote facts/query.dl (must be read-only)"; else ok "facts/query.dl never written"; fi
 if [ "$(cat "$KB/facts/accepted.dl")" = "$ACCEPTED_BEFORE" ]; then ok "facts/accepted.dl unchanged"; else bad "facts/accepted.dl was mutated"; fi
 
+# --- engine answer lists the backing source path(s) (#81) --------------------
+# a candidates-backed KB: one relation fact with TWO sources, both on disk.
+SKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$SKB" >/dev/null
+printf 'a\n' > "$SKB/sources/a.md"; printf 'b\n' > "$SKB/sources/b.md"
+printf '// test\nrelation("Acme API", "uses", "FastAPI").\n' > "$SKB/facts/accepted.dl"
+printf 'subject,relation,object,source,status,confidence,note\n%s\n%s\n' \
+  'Acme API,uses,FastAPI,sources/a.md,confirmed,0.90,' \
+  'Acme API,uses,FastAPI,sources/b.md,confirmed,0.95,' > "$SKB/facts/candidates.csv"
+sout="$("$PYTHON" "$ROUTER" render 'relation("Acme API", "uses", V)?' --target "$SKB")"
+printf '%s' "$sout" | grep -qF "(sources: 2, confidence: 0.95)" && ok "engine answer keeps the sources/confidence signal" || bad "signal line wrong: $sout"
+printf '%s' "$sout" | grep -qF "← sources/a.md" && printf '%s' "$sout" | grep -qF "← sources/b.md" \
+  && ok "engine answer lists both backing source paths" || bad "source paths not listed: $sout"
+# a missing backing source is flagged stale on the main line
+printf 'subject,relation,object,source,status,confidence,note\n%s\n' \
+  'Acme API,uses,FastAPI,sources/gone.md,confirmed,0.90,' > "$SKB/facts/candidates.csv"
+gout="$("$PYTHON" "$ROUTER" render 'relation("Acme API", "uses", V)?' --target "$SKB")"
+printf '%s' "$gout" | grep -qF "[stale: source missing]" && printf '%s' "$gout" | grep -qF "← sources/gone.md" \
+  && ok "engine answer lists a stale source and flags it" || bad "stale source path handling wrong: $gout"
+
 echo ""
 echo "========================================"
 echo "test_ask_router: $pass passed, $fail failed"

@@ -549,7 +549,10 @@ Show the `VERIFIED — engine` block verbatim (positive rows, or `rows: 0` /
 rows are annotated `(sources: N, confidence: C)` — distinct-source count (a
 multi-source trust signal; `tools/corroboration.py` reports the full view) and
 max confidence — plus `[stale: source missing]` when a backing source has
-vanished and the fact should be re-verified.
+vanished and the fact should be re-verified. Each backing source path is listed
+beneath the row (`    ← <source>`), so a verified fact can be traced to its
+origin. For an out-of-band trace (any fact, full or partial triple, all
+statuses), use `factlog provenance <subject> [relation] [object]`.
 
 ### Step 3b — Wiki exploration (UNVERIFIED)
 

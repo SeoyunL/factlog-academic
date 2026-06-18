@@ -82,7 +82,31 @@ factlog status            # KB state: facts by status, vocabulary, conflicts, lo
 cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 factlog eject report.pdf  # inverse of ingest: remove the conversion + retire its facts
 factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
+factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 ```
+
+### Tracing a fact to its source (`factlog provenance`)
+
+Every fact records the source it was extracted from. `factlog provenance` (alias
+`trace`) lists, for a matching fact, every backing row — **source path, status,
+confidence, the note (extracted excerpt), and a `[stale]` marker** when the
+source file is missing on disk. All statuses are shown (including
+`superseded`/`needs_review`), so retired backing stays visible.
+
+```bash
+factlog provenance Acme uses FastAPI   # exact triple
+factlog provenance Acme uses           # all objects for (subject, relation)
+factlog provenance Acme                # all facts about a subject
+factlog provenance - uses              # relation only ('-' wildcards a position)
+factlog provenance - - FastAPI         # object only
+```
+
+Positional terms are a `(subject, relation, object)` prefix; a literal `-`
+wildcards that position and omitted trailing positions are wildcards too (at
+least one non-wildcard term is required). Quote a term that contains spaces.
+
+`/factlog ask` also lists each backing source path (`← <source>`) beneath a
+verified engine answer, so a fact found via a query can be traced inline.
 
 ### Excluding sources from sync (`factlog ignore`)
 

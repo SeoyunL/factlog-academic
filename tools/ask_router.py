@@ -235,19 +235,23 @@ def render_engine_answer(
     The literal marker 'VERIFIED — engine' is the greppable verification token.
     When *signals* is given, a relation row is annotated with answer-quality
     signals — '(sources: N, confidence: C)' and '[stale: source missing]' when a
-    backing source has vanished.
+    backing source has vanished — and the backing source path(s) are listed
+    beneath the row ('    ← <source>') so a verified fact can be traced to its
+    origin.
     """
     lines = ["VERIFIED — engine", f"query: {draft}", f"rows: {len(rows)}"]
     if rows:
         for row in rows:
             line = f"  - {', '.join(row)}"
-            if signals and len(row) == 3:
-                sig = signals.get((row[0], row[1], row[2]))
-                if sig:
-                    line += f" (sources: {sig['sources']}, confidence: {sig['confidence']})"
-                    if sig.get("stale"):
-                        line += " [stale: source missing]"
+            sig = signals.get((row[0], row[1], row[2])) if signals and len(row) == 3 else None
+            if sig:
+                line += f" (sources: {sig['sources']}, confidence: {sig['confidence']})"
+                if sig.get("stale"):
+                    line += " [stale: source missing]"
             lines.append(line)
+            if sig:
+                for path in sig.get("source_paths", []):
+                    lines.append(f"    ← {path}")
     else:
         lines.append("no such fact (verified negative)")
     return "\n".join(lines)
