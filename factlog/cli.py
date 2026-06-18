@@ -568,6 +568,157 @@ def cmd_reject(args: argparse.Namespace) -> int:
     return _apply_review_status(args, "superseded", "reject")
 
 
+def cmd_amend(args: argparse.Namespace) -> int:
+    """Correct a fact's subject / relation / object / note (durable).
+
+    The positional triple identifies the fact (exact NFC match, any status); the
+    --set-* flags give the new values (at least one required, or --accept). A
+    fact's values live in runs/*.json (merge rebuilds candidates.csv from it), so
+    amend updates BOTH the matching candidates.csv rows AND their backing
+    runs/*.json rows — otherwise the edit would vanish on the next sync.
+    --accept also promotes to accepted (durable via the merge engine-preservation
+    pass). confidence is intentionally not editable. --dry-run previews.
+    """
+    import csv
+    import json
+    import os
+    import subprocess
+    import unicodedata
+    from pathlib import Path
+
+    from common import FACT_HEADER
+
+    def nfc(s: str) -> str:
+        return unicodedata.normalize("NFC", s)
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not (target / "sources").is_dir():
+        print(f"factlog amend: {target} is not a factlog KB (no sources/).", file=sys.stderr)
+        return 1
+
+    old = (nfc(args.subject), nfc(args.relation), nfc(args.object))
+    sets: dict[str, str] = {}
+    for field, val in (
+        ("subject", args.set_subject),
+        ("relation", args.set_relation),
+        ("object", args.set_object),
+        ("note", args.set_note),
+    ):
+        if val is None:
+            continue
+        v = nfc(val)
+        if field in ("subject", "relation", "object") and not v.strip():
+            print(f"factlog amend: --set-{field} must not be empty", file=sys.stderr)
+            return 2
+        sets[field] = v
+    if not sets and not args.accept:
+        print("factlog amend: give at least one --set-subject/--set-relation/--set-object/--set-note (or --accept)", file=sys.stderr)
+        return 2
+
+    csv_path = target / "facts" / "candidates.csv"
+    rows: list[dict[str, str]] = []
+    fieldnames: list[str] = []
+    if csv_path.is_file():
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+
+    def fld(r: dict, k: str) -> str:
+        return nfc((r.get(k) or "").strip())
+
+    def is_old(d: dict) -> bool:
+        return (fld(d, "subject"), fld(d, "relation"), fld(d, "object")) == old
+
+    matched = [r for r in rows if is_old(r)]
+    if not matched:
+        print(f"factlog amend: no fact matches ({old[0]} / {old[1]} / {old[2]})", file=sys.stderr)
+        return 1
+
+    print(f"factlog amend (KB: {target}): {len(matched)} row(s) for {old[0]} / {old[1]} / {old[2]}")
+    for field in ("subject", "relation", "object", "note"):
+        if field in sets:
+            print(f"  set {field}: → {sets[field] or '(empty)'}")
+    if args.accept:
+        print("  status → accepted")
+    for r in matched:
+        print(f"    ← {fld(r, 'source') or '(no source)'}  [{(r.get('status') or '').strip()}]")
+    if args.dry_run:
+        print("factlog amend: --dry-run, no changes made")
+        return 0
+
+    # 1. candidates.csv (immediate) — atomic write, status-column guard
+    out_fields = fieldnames or list(FACT_HEADER)
+    if args.accept and "status" not in out_fields:
+        out_fields = [*out_fields, "status"]
+    changed = 0
+    for r in rows:
+        if is_old(r):
+            for k, v in sets.items():
+                r[k] = v
+            if args.accept:
+                r["status"] = "accepted"
+            changed += 1
+    tmp = csv_path.with_name(csv_path.name + ".tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=out_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(tmp, csv_path)
+
+    # 2. runs/*.json (durability) — a value lives here; merge rebuilds from it
+    runs_changed = 0
+    runs_dir = target / "runs"
+    if runs_dir.is_dir():
+        for jp in sorted(runs_dir.glob("*.json")):
+            try:
+                data = json.loads(jp.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(data, list):
+                continue
+            dirty = False
+            for item in data:
+                if isinstance(item, dict) and (
+                    nfc(str(item.get("subject", "")).strip()),
+                    nfc(str(item.get("relation", "")).strip()),
+                    nfc(str(item.get("object", "")).strip()),
+                ) == old:
+                    for k, v in sets.items():
+                        item[k] = v
+                    dirty = True
+                    runs_changed += 1
+            if dirty:
+                jp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    # 3. recompile accepted.dl
+    recompile_failed = False
+    if csv_path.is_file():
+        proc = subprocess.run(
+            [sys.executable, str(_TOOLS_DIR / "compile_facts.py")],
+            env=dict(os.environ, FACTLOG_ROOT=str(target)),
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            recompile_failed = True
+            print(f"factlog amend: compile_facts failed: {(proc.stderr or proc.stdout).strip()}", file=sys.stderr)
+
+    recompiled = "accepted.dl NOT recompiled" if recompile_failed else "accepted.dl recompiled"
+    print(
+        f"factlog amend: {changed} candidate row(s) updated, {runs_changed} runs/*.json row(s) updated; "
+        f"{recompiled}"
+    )
+    if changed and not runs_changed:
+        print(
+            "factlog amend: note — no runs/*.json backing was found; the edit will NOT survive a "
+            "re-merge (/factlog sync rebuilds candidates.csv from runs/*.json).",
+            file=sys.stderr,
+        )
+    print("factlog amend: note — pages/ may be stale; run /factlog sync to regenerate them.")
+    return 1 if recompile_failed else 0
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     """Find facts by a case-insensitive substring across subject/relation/object.
 
@@ -1996,6 +2147,22 @@ def build_parser() -> argparse.ArgumentParser:
         _p.add_argument("--dry-run", action="store_true", help="print the planned changes without modifying anything")
         _p.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
         _p.set_defaults(func=_func)
+
+    amend = sub.add_parser(
+        "amend",
+        help="correct a fact's subject/relation/object/note (durable: updates runs/*.json too)",
+    )
+    amend.add_argument("subject", help="the fact's current subject")
+    amend.add_argument("relation", help="the fact's current relation")
+    amend.add_argument("object", help="the fact's current object")
+    amend.add_argument("--set-subject", default=None, metavar="X", help="new subject")
+    amend.add_argument("--set-relation", default=None, metavar="Y", help="new relation")
+    amend.add_argument("--set-object", default=None, metavar="Z", help="new object")
+    amend.add_argument("--set-note", default=None, metavar="TEXT", help="new note (may be empty to clear)")
+    amend.add_argument("--accept", action="store_true", help="also promote the amended fact to accepted")
+    amend.add_argument("--dry-run", action="store_true", help="print the planned changes without modifying anything")
+    amend.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
+    amend.set_defaults(func=cmd_amend)
 
     ignore = sub.add_parser(
         "ignore",

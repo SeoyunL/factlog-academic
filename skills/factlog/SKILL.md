@@ -341,7 +341,11 @@ To promote `candidate`/`needs_review` rows into engine input (or retire them)
 without hand-editing `candidates.csv`, use the review CLI: `factlog review`
 lists the pending queue, `factlog accept <subject> <relation> <object>` sets
 matching pending rows to `accepted`, and `factlog reject ...` sets them to
-`superseded` (both recompile `accepted.dl`; `-` wildcards a position).
+`superseded` (both recompile `accepted.dl`; `-` wildcards a position). To
+correct a fact's value, `factlog amend <subject> <relation> <object>
+--set-object ... [--set-subject/--set-relation/--set-note] [--accept]` rewrites
+it durably (updates both `candidates.csv` and the backing `runs/*.json`). These
+human decisions are preserved across re-merge.
 
 ### Step 2 — Run the logic check
 
