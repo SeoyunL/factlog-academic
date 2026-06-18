@@ -742,6 +742,69 @@ def cmd_ignore(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_vocab(args: argparse.Namespace) -> int:
+    """List the KB vocabulary: entity and relation names with usage counts.
+
+    Names come from the *engine* facts (what `ask`/`provenance` can query); pass
+    --all to include candidate-only names. Objects of declared attribute
+    relations are literals, not entities, so they are excluded from the entity
+    list (consistent with `status`). --entities / --relations show one section;
+    default shows both. Relations are tagged [attribute]/[single-valued].
+    """
+    import os
+    from collections import Counter
+    from pathlib import Path
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not (target / "sources").is_dir():
+        print(f"factlog vocab: {target} is not a factlog KB (no sources/).", file=sys.stderr)
+        return 1
+    os.environ["FACTLOG_ROOT"] = target_str
+    import importlib
+
+    import common as c  # binds ROOT/FACTS_DIR/... from FACTLOG_ROOT at import
+    if str(c.ROOT) != target_str:
+        importlib.reload(c)
+
+    facts = c.load_facts() if c.CANDIDATES_CSV.is_file() else []
+    scope = facts if args.all else c.engine_facts(facts)
+    scope_label = "all candidate" if args.all else "engine"
+    attr = c.attribute_relations()
+    sv = c.single_valued_relations()
+
+    show_e = args.entities or not args.relations
+    show_r = args.relations or not args.entities
+
+    ent_counts: Counter = Counter()
+    rel_counts: Counter = Counter()
+    for row in scope:
+        s, rel, o = row["subject"], row["relation"], row["object"]
+        if rel:
+            rel_counts[rel] += 1
+        if s:
+            ent_counts[s] += 1
+        if o and rel not in attr:  # objects of attribute relations are literals, not entities
+            ent_counts[o] += 1
+
+    print(f"factlog vocab (KB: {target}) — {scope_label} facts")
+    if show_e:
+        print(f"  entities ({len(ent_counts)}):")
+        for name, n in sorted(ent_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"    [{n:>3}] {name}")
+        if not ent_counts:
+            print("    (none)")
+    if show_r:
+        print(f"  relations ({len(rel_counts)}):")
+        for name, n in sorted(rel_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            tags = [t for t, on in (("attribute", name in attr), ("single-valued", name in sv)) if on]
+            tagstr = f"  [{', '.join(tags)}]" if tags else ""
+            print(f"    [{n:>3}] {name}{tagstr}")
+        if not rel_counts:
+            print("    (none)")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Summarise the active KB's state: sources, facts by status, vocabulary,
     conflicts, logic-report freshness, and engine availability."""
@@ -1827,6 +1890,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provenance.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     provenance.set_defaults(func=cmd_provenance)
+
+    vocab = sub.add_parser(
+        "vocab",
+        help="list the KB vocabulary: entity and relation names with counts",
+    )
+    vocab.add_argument("--entities", action="store_true", help="show only entities")
+    vocab.add_argument("--relations", action="store_true", help="show only relations")
+    vocab.add_argument("--all", action="store_true", help="include candidate-only names (default: engine facts)")
+    vocab.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
+    vocab.set_defaults(func=cmd_vocab)
 
     review = sub.add_parser(
         "review",

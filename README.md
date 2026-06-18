@@ -85,6 +85,22 @@ factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 ```
 
+### Discovering the vocabulary (`factlog vocab`)
+
+`ask` and `provenance` need exact entity/relation names. `factlog vocab` lists
+them — the entity and relation names with usage counts — so you know what is
+queryable:
+
+```bash
+factlog vocab              # entities + relations (engine facts)
+factlog vocab --entities   # just entities
+factlog vocab --relations  # just relations (tagged [attribute] / [single-valued])
+factlog vocab --all        # include candidate-only names (default: engine facts)
+```
+
+Objects of declared attribute relations are literals, not entities, so they are
+excluded from the entity list (same typing as `status`).
+
 ### Tracing a fact to its source (`factlog provenance`)
 
 Every fact records the source it was extracted from. `factlog provenance` (alias

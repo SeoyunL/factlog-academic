@@ -63,5 +63,6 @@ jobs:
           bash tests/test_sync_ignore.sh
           bash tests/test_provenance.sh
           bash tests/test_review.sh
+          bash tests/test_vocab.sh
       - name: clean-env plugin smoke (pipeline end-to-end)
         run: bash tests/smoke.sh
