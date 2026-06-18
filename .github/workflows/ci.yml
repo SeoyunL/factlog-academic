@@ -60,5 +60,6 @@ jobs:
           bash tests/test_sources_cmd.sh
           bash tests/test_status_cmd.sh
           bash tests/test_eject_cmd.sh
+          bash tests/test_sync_ignore.sh
       - name: clean-env plugin smoke (pipeline end-to-end)
         run: bash tests/smoke.sh

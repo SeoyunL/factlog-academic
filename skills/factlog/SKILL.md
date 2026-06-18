@@ -178,12 +178,21 @@ python3 -m factlog ingest --scan --target "$FACTLOG_ROOT"
 
 `--scan` auto-discovers every binary file under `sources/` and writes a text
 conversion (with a provenance header) into `runs/sources/` — never into
-`sources/`. It is idempotent (unchanged files are skipped). Then extract from
-**both** `sources/` (native text) and `runs/sources/` (conversions).
+`sources/`. It is idempotent (unchanged files are skipped). Sources matching
+`policy/sync-ignore.md` are skipped. Then extract from **both** `sources/`
+(native text) and `runs/sources/` (conversions).
 
 ### Step 1 — Native fact extraction (LLM, in-session)
 
-For each file under `sources/<name>` **and** `runs/sources/<name>` in the KB root:
+**Sync-ignore:** first read `policy/sync-ignore.md` (if present) and SKIP any
+source whose path matches one of its glob patterns — by full ref (`sources/...`
+or `runs/sources/...`) or by the path within the source root (so `drafts/*.md`
+matches `sources/drafts/x.md`). These sources are excluded from re-extraction on
+purpose; their already-merged facts are left as-is. (Manage the list with
+`factlog ignore`.)
+
+For each *non-ignored* file under `sources/<name>` **and** `runs/sources/<name>`
+in the KB root:
 
 1. Read the file contents.
 2. Apply the extraction criteria in

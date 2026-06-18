@@ -89,10 +89,12 @@ from common import (  # noqa: E402
     SUPERSEDED_STATUSES,
     RUNS_DIR,
     ensure_dirs,
+    is_sync_ignored,
     is_text_source,
     normalize_confidence,
     slugify,
     source_file_refs,
+    sync_ignore_patterns,
 )
 
 # ---------------------------------------------------------------------------
@@ -163,11 +165,14 @@ def unconverted_binary_sources(root: Path) -> list[str]:
     `factlog ingest` has produced a runs/sources/<stem>.{md,txt} conversion the
     text IS ingested, so such originals are NOT reported. Hidden/system files
     (names starting with '.', e.g. .DS_Store) are skipped to avoid noise.
+    Sources on the sync-ignore list (policy/sync-ignore.md) are skipped too:
+    they are excluded from sync on purpose, so a missing conversion is expected.
     """
     base = root / "sources"
     derived = root / "runs" / "sources"
     if not base.is_dir():
         return []
+    patterns = sync_ignore_patterns(root)
     found: list[str] = []
     for path in sorted(p for p in base.rglob("*") if p.is_file()):
         if path.name.startswith("."):
@@ -175,6 +180,9 @@ def unconverted_binary_sources(root: Path) -> list[str]:
         if is_text_source(path):
             continue
         if any((derived / f"{path.stem}{ext}").is_file() for ext in (".md", ".txt")):
+            continue
+        ref = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+        if is_sync_ignored(ref, patterns):
             continue
         found.append(path.relative_to(root).as_posix())
     return found

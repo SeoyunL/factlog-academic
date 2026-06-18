@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import fnmatch
 import json
 import os
 import re
@@ -257,6 +258,54 @@ def _relation_names_from_policy(filename: str) -> set[str]:
         if name:
             names.add(name)
     return names
+
+
+def sync_ignore_patterns(root: Path | None = None) -> list[str]:
+    """Glob patterns from policy/sync-ignore.md naming sources to skip on sync.
+
+    One pattern per line; '#' comments and '-' bullets are allowed; wrap a
+    pattern that contains spaces in `backticks`. (A '*' is NOT treated as a
+    bullet, so a bare `*.md` glob survives.) Order-preserving and de-duplicated.
+    *root* selects the KB (its policy/ dir); None uses the module ROOT. Absent
+    file -> no patterns (every source is synced).
+    """
+    base = (root / "policy") if root is not None else POLICY_DIR
+    path = base / "sync-ignore.md"
+    if not path.is_file():
+        return []
+    patterns: list[str] = []
+    seen: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = re.sub(r"^\s*-\s+", "", line.strip()).strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = re.fullmatch(r"`([^`]+)`", stripped)
+        pat = unicodedata.normalize("NFC", (m.group(1) if m else stripped).strip())
+        if pat and pat not in seen:
+            seen.add(pat)
+            patterns.append(pat)
+    return patterns
+
+
+def is_sync_ignored(ref: str, patterns: list[str]) -> bool:
+    """True if a source ref matches any sync-ignore glob.
+
+    *ref* is a source path relative to the KB root (sources/- or
+    runs/sources/-prefixed). A pattern matches the full ref OR the ref's path
+    within its source root, so `drafts/*.md` matches `sources/drafts/x.md` and
+    `sources/wip.md` matches itself. Matching is case-sensitive (fnmatchcase);
+    both sides are NFC-normalised. fnmatch '*' does not cross '/'.
+    """
+    if not patterns:
+        return False
+    ref = unicodedata.normalize("NFC", ref)
+    candidates = [ref]
+    for rootname in SOURCE_ROOTS:
+        prefix = rootname + "/"
+        if ref.startswith(prefix):
+            candidates.append(ref[len(prefix):])
+            break
+    return any(fnmatch.fnmatchcase(c, pat) for pat in patterns for c in candidates)
 
 
 def single_valued_relations() -> set[str]:

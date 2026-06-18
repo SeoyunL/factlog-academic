@@ -182,6 +182,23 @@ explanation of its purpose.
 # operates_since
 # ranked
 """,
+    "policy/sync-ignore.md": """\
+# Sync-ignore list
+#
+# Source files matching these glob patterns are SKIPPED by `/factlog sync`
+# (re-extraction), `factlog ingest --scan`, and coverage gap reporting — even
+# when modified. Their already-merged facts are KEPT (use `factlog eject` to
+# remove those). Manage with `factlog ignore [--remove] <pattern>`.
+#
+# One pattern per line; '#' comments and '-' bullets allowed; quote a pattern
+# with spaces in `backticks`. A pattern matches a source by its full ref
+# (sources/... or runs/sources/...) OR its path within the source root, so
+# `drafts/*.md` matches `sources/drafts/x.md`. '*' does not cross '/'.
+#
+# Example (remove the leading '# ' to activate):
+# - drafts/*.md
+# - sources/wip-notes.md
+""",
     # Concept-page layout used by `/factlog sync` (tools/merge_candidates.py).
     # Edit this file to change how pages/<entity>.md is generated. Placeholders:
     #   {{ENTITY}} {{SOURCES}} {{RELATIONS}} {{REVIEW}}
@@ -280,6 +297,8 @@ def cmd_sources(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
+    from common import is_sync_ignored, sync_ignore_patterns
+
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
 
@@ -324,13 +343,102 @@ def cmd_sources(args: argparse.Namespace) -> int:
         if ref not in listed:
             entries.append((counts.get(ref, 0), ref, ""))
 
+    patterns = sync_ignore_patterns(target)
     total = sum(n for n, _, _ in entries)
-    print(f"factlog sources (active KB: {target}): {len(entries)} source(s), {total} fact(s)")
+    n_ignored = sum(
+        1 for _, orig, conv_ref in entries
+        if is_sync_ignored(orig, patterns) or (conv_ref and is_sync_ignored(conv_ref, patterns))
+    )
+    suffix = f", {n_ignored} sync-ignored" if n_ignored else ""
+    print(f"factlog sources (active KB: {target}): {len(entries)} source(s), {total} fact(s){suffix}")
     for facts, orig, conv_ref in sorted(entries, key=lambda e: (-e[0], e[1])):
         ext = Path(orig).suffix.lstrip(".") or "?"
         arrow = f"  →  {conv_ref}" if conv_ref else ""
-        flag = "" if facts else "   [no facts — run /factlog sync or factlog ingest]"
-        print(f"  [{facts:>3}] {orig}  ({ext}){arrow}{flag}")
+        ignored = is_sync_ignored(orig, patterns) or (conv_ref and is_sync_ignored(conv_ref, patterns))
+        flags = ""
+        if ignored:
+            flags += "   [ignored — excluded from sync]"
+        elif not facts:
+            flags += "   [no facts — run /factlog sync or factlog ingest]"
+        print(f"  [{facts:>3}] {orig}  ({ext}){arrow}{flags}")
+    return 0
+
+
+def cmd_ignore(args: argparse.Namespace) -> int:
+    """Manage policy/sync-ignore.md — glob patterns of sources excluded from sync.
+
+    No patterns: list current entries and the on-disk sources each matches.
+    With pattern(s): add them, or remove them with --remove. Excluding a source
+    only stops its re-extraction (ingest --scan / sync / coverage); its already-
+    merged facts are untouched (use `factlog eject` to remove those).
+    """
+    import re
+    import unicodedata
+    from pathlib import Path
+
+    from common import is_sync_ignored, source_files, sync_ignore_patterns
+
+    def nfc(s: str) -> str:
+        return unicodedata.normalize("NFC", s)
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not (target / "sources").is_dir():
+        print(f"factlog ignore: {target} is not a factlog KB (no sources/).", file=sys.stderr)
+        return 1
+
+    policy_file = target / "policy" / "sync-ignore.md"
+    current = sync_ignore_patterns(target)
+    requested = [nfc(p.strip()) for p in (args.patterns or []) if p.strip()]
+
+    if not requested:  # list mode
+        if not current:
+            print(f"factlog ignore (KB: {target}): no sync-ignore patterns")
+            print(f"  add one with: factlog ignore <glob>   (file: {policy_file})")
+            return 0
+        refs = sorted(nfc(p.relative_to(target).as_posix()) for p in source_files(target))
+        print(f"factlog ignore (KB: {target}): {len(current)} pattern(s):")
+        for pat in current:
+            hits = [r for r in refs if is_sync_ignored(r, [pat])]
+            shown = (": " + ", ".join(hits[:5]) + (" ..." if len(hits) > 5 else "")) if hits else ""
+            print(f"  - {pat}   ({len(hits)} match{'' if len(hits) == 1 else 'es'}){shown}")
+        return 0
+
+    policy_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.remove:
+        existing_text = policy_file.read_text(encoding="utf-8") if policy_file.is_file() else ""
+        removable = set(requested)
+        kept_lines: list[str] = []
+        removed = 0
+        for line in existing_text.splitlines():
+            stripped = re.sub(r"^\s*-\s+", "", line.strip()).strip()
+            pat = None
+            if stripped and not stripped.startswith("#"):
+                m = re.fullmatch(r"`([^`]+)`", stripped)
+                pat = nfc((m.group(1) if m else stripped).strip())
+            if pat is not None and pat in removable:
+                removed += 1
+                continue
+            kept_lines.append(line)
+        policy_file.write_text("\n".join(kept_lines).rstrip("\n") + "\n", encoding="utf-8")
+        print(f"factlog ignore: removed {removed} pattern(s)")
+        for p in (p for p in requested if p not in set(current)):
+            print(f"  (not present: {p})", file=sys.stderr)
+        return 0
+
+    # add mode
+    to_add = [p for p in requested if p not in set(current)]
+    if not to_add:
+        print("factlog ignore: all given pattern(s) already present")
+        return 0
+    needs_header = not policy_file.is_file() or not policy_file.read_text(encoding="utf-8").strip()
+    with policy_file.open("a", encoding="utf-8") as f:
+        if needs_header:
+            f.write("# Sync-ignore list — sources skipped by /factlog sync (manage with `factlog ignore`)\n")
+        for p in to_add:
+            f.write(f"- `{p}`\n" if " " in p else f"- {p}\n")
+    print(f"factlog ignore: added {len(to_add)} pattern(s): {', '.join(to_add)}")
     return 0
 
 
@@ -823,8 +931,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     """
     import shutil
     import subprocess
+    import unicodedata
     from datetime import datetime, timezone
     from pathlib import Path
+
+    from common import is_sync_ignored, sync_ignore_patterns
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
@@ -845,12 +956,22 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     derived.mkdir(parents=True, exist_ok=True)
 
     # Build the work list: explicit paths, plus (with --scan) every binary file
-    # found under sources/.
+    # found under sources/. --scan honors the sync-ignore list (an explicitly
+    # named path is always converted — the user asked for it directly).
     work: list[Path] = [Path(p).expanduser() for p in args.paths]
     if args.scan:
+        patterns = sync_ignore_patterns(target)
+        ignored = 0
         for path in sorted(p for p in (target / "sources").rglob("*") if p.is_file()):
-            if not path.name.startswith(".") and _looks_binary(path):
-                work.append(path)
+            if path.name.startswith(".") or not _looks_binary(path):
+                continue
+            ref = unicodedata.normalize("NFC", path.relative_to(target).as_posix())
+            if is_sync_ignored(ref, patterns):
+                ignored += 1
+                continue
+            work.append(path)
+        if ignored:
+            print(f"factlog ingest --scan: skipped {ignored} sync-ignored source(s)")
     if not work:
         if args.scan:
             print("factlog ingest --scan: no binary source files to convert")
@@ -1350,6 +1471,15 @@ def build_parser() -> argparse.ArgumentParser:
     sources = sub.add_parser("sources", help="list registered sources (original, conversion, fact count)")
     sources.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     sources.set_defaults(func=cmd_sources)
+
+    ignore = sub.add_parser(
+        "ignore",
+        help="manage policy/sync-ignore.md: glob patterns of sources excluded from sync",
+    )
+    ignore.add_argument("patterns", nargs="*", help="glob/path pattern(s) to add (omit to list)")
+    ignore.add_argument("--remove", action="store_true", help="remove the given pattern(s) instead of adding")
+    ignore.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
+    ignore.set_defaults(func=cmd_ignore)
 
     status = sub.add_parser("status", help="summarise KB state (sources, facts, vocabulary, conflicts, engine)")
     status.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")

@@ -71,7 +71,30 @@ factlog sources           # list registered sources (original, conversion, fact 
 factlog status            # KB state: facts by status, vocabulary, conflicts, logic freshness, engine
 cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 factlog eject report.pdf  # inverse of ingest: remove the conversion + retire its facts
+factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 ```
+
+### Excluding sources from sync (`factlog ignore`)
+
+`/factlog sync` re-extracts **every** source on each run. To keep specific
+sources out of that — a draft, a work-in-progress, an external doc — add them to
+the per-KB **sync-ignore list** (`policy/sync-ignore.md`). Ignored sources are
+skipped by `/factlog sync`, `factlog ingest --scan`, and coverage gap reporting,
+**even when modified**. Their already-merged facts are kept untouched (use
+`factlog eject` to actually remove a fact).
+
+```bash
+factlog ignore drafts/*.md sources/wip-notes.md   # add pattern(s)
+factlog ignore                                     # list patterns + what they match
+factlog ignore --remove drafts/*.md               # remove a pattern
+```
+
+`policy/sync-ignore.md` is one glob per line (same lenient format as the other
+policy files — `#` comments, `-` bullets, backtick-quoted entries). A pattern
+matches a source by its full ref (`sources/...` / `runs/sources/...`) or by its
+path within the source root, so `drafts/*.md` matches `sources/drafts/x.md`
+(`*` does not cross `/`). `factlog sources` marks ignored sources `[ignored]`
+and coverage reports them as `excluded` rather than gaps.
 
 ### Removing a source (`factlog eject`) — the inverse of `ingest`
 

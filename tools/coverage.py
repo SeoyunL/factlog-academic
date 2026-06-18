@@ -50,9 +50,11 @@ from common import (  # noqa: E402
     CANDIDATES_CSV,
     ensure_dirs,
     engine_facts,
+    is_sync_ignored,
     is_text_source,
     load_facts,
     source_files,
+    sync_ignore_patterns,
 )
 
 
@@ -64,9 +66,10 @@ def _hidden(path: Path, base: Path) -> bool:
 def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[str, object]], list[str]]:
     """Return (per-source rows, orphan citations).
 
-    Each row: {file, dir, text, facts} where facts is how many engine-input rows
-    cite it (source path before any '#'). Orphans are cited paths with no file
-    on disk.
+    Each row: {file, dir, text, facts, ignored} where facts is how many
+    engine-input rows cite it (source path before any '#') and ignored marks a
+    source excluded by policy/sync-ignore.md. Orphans are cited paths with no
+    file on disk.
     """
     # NFC-normalise both sides: macOS stores filenames as NFD but candidate
     # sources are NFC, so an un-normalised compare would mis-report a Korean-named
@@ -77,6 +80,7 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
         if ref:
             cited[ref] = cited.get(ref, 0) + 1
 
+    patterns = sync_ignore_patterns()
     rows: list[dict[str, object]] = []
     on_disk: set[str] = set()
     for path in source_files(root):
@@ -89,6 +93,7 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
             "dir": "runs/sources" if ref.startswith("runs/sources/") else "sources",
             "text": is_text_source(path),
             "facts": cited.get(ref, 0),
+            "ignored": is_sync_ignored(ref, patterns),
         })
     orphans = sorted(set(cited) - on_disk)
     return rows, orphans
@@ -112,15 +117,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     covered = [r for r in rows if r["facts"]]
-    text_gaps = [r for r in rows if not r["facts"] and r["text"]]
-    binary_gaps = [r for r in rows if not r["facts"] and not r["text"]]
+    excluded = [r for r in rows if r["ignored"]]
+    # Sources on the sync-ignore list are never gaps: they're excluded on purpose.
+    text_gaps = [r for r in rows if not r["facts"] and r["text"] and not r["ignored"]]
+    binary_gaps = [r for r in rows if not r["facts"] and not r["text"] and not r["ignored"]]
+    excluded_note = f", {len(excluded)} excluded (sync-ignored)" if excluded else ""
     print(
         f"coverage: {len(rows)} source(s); {len(covered)} covered, "
         f"{len(text_gaps)} text gap(s), {len(binary_gaps)} binary needing conversion, "
-        f"{len(orphans)} orphan citation(s)"
+        f"{len(orphans)} orphan citation(s){excluded_note}"
     )
     for r in rows:
-        print(f"  {r['facts']} fact(s): {r['file']}")
+        tag = "  [excluded]" if r["ignored"] else ""
+        print(f"  {r['facts']} fact(s): {r['file']}{tag}")
     for r in text_gaps:
         print(f"  GAP (text, run /factlog sync): {r['file']}", file=sys.stderr)
     for r in binary_gaps:
