@@ -7,7 +7,7 @@
       "name": "factlog",
       "source": ".",
       "description": "Keep a markdown knowledge base honest: the LLM extracts source-backed facts, a deterministic Datalog/wirelog engine verifies them.",
-      "version": "0.1.2"
+      "version": "0.1.3"
     }
   ]
 }

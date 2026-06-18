@@ -1,7 +1,7 @@
 {
   "name": "factlog",
   "displayName": "factlog",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Keep a markdown knowledge base honest: the LLM extracts source-backed facts, a deterministic Datalog/wirelog engine verifies them.",
   "author": { "name": "Justin Kim" },
   "homepage": "https://github.com/semantic-reasoning/factlog",
