@@ -303,7 +303,7 @@ def cmd_sources(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import is_sync_ignored, sync_ignore_patterns
+    from common import is_sync_ignored, source_rel_key, sync_ignore_patterns
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -324,13 +324,16 @@ def cmd_sources(args: argparse.Namespace) -> int:
                 if ref:
                     counts[ref] = counts.get(ref, 0) + 1
 
-    # conversions in runs/sources/, keyed by filename stem
+    # conversions in runs/sources/, keyed by their subdir-aware rel key so a
+    # nested original pairs with runs/sources/<same-subdir>/<stem> (ingest mirrors
+    # the original's subtree), not just any same-stem file.
     conv: dict[str, str] = {}
     runs_dir = target / "runs" / "sources"
     if runs_dir.is_dir():
         for p in sorted(runs_dir.rglob("*")):
             if p.is_file() and not p.name.startswith("."):
-                conv.setdefault(nfc(p.stem), nfc(p.relative_to(target).as_posix()))
+                ref = nfc(p.relative_to(target).as_posix())
+                conv.setdefault(source_rel_key(ref), ref)
 
     entries: list[tuple[int, str, str]] = []  # (facts, original-ref, conversion-ref or "")
     listed: set[str] = set()
@@ -338,7 +341,7 @@ def cmd_sources(args: argparse.Namespace) -> int:
         if not p.is_file() or p.name.startswith("."):
             continue
         orig_ref = nfc(p.relative_to(target).as_posix())
-        conv_ref = conv.get(nfc(p.stem), "")
+        conv_ref = conv.get(source_rel_key(orig_ref), "")
         fact_ref = conv_ref or orig_ref  # facts attach to the conversion when present
         entries.append((counts.get(fact_ref, 0), orig_ref, conv_ref))
         listed.add(orig_ref)
@@ -969,6 +972,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     # the user's originals. sync reads both sources/ and runs/sources/.
     derived = target / "runs" / "sources"
     derived.mkdir(parents=True, exist_ok=True)
+    sources_dir = (target / "sources").resolve()
 
     # Build the work list: explicit paths, plus (with --scan) every binary file
     # found under sources/. --scan honors the sync-ignore list (an explicitly
@@ -1033,7 +1037,17 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             continue
 
         tool, out_suffix, build = chosen
-        dst = derived / (src.stem + out_suffix)
+        # Mirror the original's subdirectory under runs/sources/ so a nested
+        # source (sources/sub/x.pdf) converts to runs/sources/sub/x.md — never a
+        # flat name that would collide with a same-stem file in another subdir.
+        # An explicitly-named path outside sources/ has no subtree to mirror, so
+        # it falls back to a flat output name.
+        try:
+            rel_parent = src.resolve().relative_to(sources_dir).parent
+        except (ValueError, OSError):
+            rel_parent = Path()
+        dst = derived / rel_parent / (src.stem + out_suffix)
+        dst.parent.mkdir(parents=True, exist_ok=True)
         if dst.exists() and not args.force and dst.stat().st_mtime >= src.stat().st_mtime:
             print(f"factlog ingest: {dst.relative_to(target).as_posix()} up to date; skipping {src.name}")
             skipped += 1

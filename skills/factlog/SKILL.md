@@ -178,9 +178,10 @@ python3 -m factlog ingest --scan --target "$FACTLOG_ROOT"
 
 `--scan` auto-discovers every binary file under `sources/` and writes a text
 conversion (with a provenance header) into `runs/sources/` — never into
-`sources/`. It is idempotent (unchanged files are skipped). Sources matching
-`policy/sync-ignore.md` are skipped. Then extract from **both** `sources/`
-(native text) and `runs/sources/` (conversions).
+`sources/`, mirroring the original's subdirectory (`sources/sub/x.pdf` →
+`runs/sources/sub/x.md`). It is idempotent (unchanged files are skipped).
+Sources matching `policy/sync-ignore.md` are skipped. Then extract from **both**
+`sources/` (native text) and `runs/sources/` (conversions).
 
 ### Step 1 — Native fact extraction (LLM, in-session)
 

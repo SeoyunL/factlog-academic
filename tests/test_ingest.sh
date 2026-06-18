@@ -128,6 +128,42 @@ fi
 grep -qiE "hwp|no common converter|no converter" "$err" && ok ".hwp prints an actionable hint" || bad ".hwp hint missing"
 
 # ---------------------------------------------------------------------------
+# 5. subdirectory structure is preserved (stdlib .pptx converter; no external dep)
+# ---------------------------------------------------------------------------
+make_pptx() {  # make_pptx <path> <text>
+  "$PYTHON" - "$1" "$2" <<'PY'
+import sys, zipfile
+path, text = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(path, "w") as z:
+    z.writestr("[Content_Types].xml", "<Types/>")
+    z.writestr("ppt/slides/slide1.xml",
+               f'<?xml version="1.0"?><p:sld><a:p><a:t>{text}</a:t></a:p></p:sld>')
+PY
+}
+
+SUBKB="$(mktemp -d)/wiki"
+"${FACTLOG[@]}" init --target "$SUBKB" >/dev/null
+mkdir -p "$SUBKB/sources/a" "$SUBKB/sources/b"
+make_pptx "$SUBKB/sources/a/report.pptx" "alpha slide"
+make_pptx "$SUBKB/sources/b/report.pptx" "beta slide"   # same stem, different subdir
+"${FACTLOG[@]}" ingest --scan --target "$SUBKB" >/dev/null 2>&1
+[ -f "$SUBKB/runs/sources/a/report.md" ] && [ -f "$SUBKB/runs/sources/b/report.md" ] \
+  && ok "ingest mirrors the source subdirectory under runs/sources/" \
+  || bad "subdirectory not mirrored in conversion path"
+[ -f "$SUBKB/runs/sources/report.md" ] \
+  && bad "a flat conversion leaked (subdir not preserved)" \
+  || ok "no flat collision: same-stem files in different subdirs stay separate"
+grep -qx "alpha slide" "$SUBKB/runs/sources/a/report.md" && grep -qx "beta slide" "$SUBKB/runs/sources/b/report.md" \
+  && ok "each nested conversion holds its own source's text" || bad "nested conversion content wrong"
+
+# an explicitly-named path OUTSIDE sources/ has no subtree to mirror → flat name
+make_pptx "$SRC_DIR/external.pptx" "external slide"
+"${FACTLOG[@]}" ingest "$SRC_DIR/external.pptx" --target "$SUBKB" >/dev/null 2>&1
+[ -f "$SUBKB/runs/sources/external.md" ] \
+  && ok "explicit path outside sources/ converts to a flat runs/sources/ name" \
+  || bad "external explicit path not converted flat"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

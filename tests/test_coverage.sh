@@ -126,6 +126,23 @@ aout="$("$PYTHON" "$COV" --wiki "$PAIRKB" 2>&1)"
 printf '%s' "$aout" | grep -qF "GAP (binary, run factlog ingest): sources/doc.pdf" && ok "binary original not masked by a same-stem binary in runs/sources" || bad "anomalous binary masked a real gap"
 printf '%s' "$aout" | grep -qF "GAP (binary under runs/sources — ingest output should be text): runs/sources/doc.bin" && ok "stray binary under runs/sources still flagged as anomaly" || bad "runs/sources binary anomaly missing"
 
+# --- same stem in different subdirs each pair to THEIR OWN conversion ----------
+# (ingest now mirrors subdirs; coverage pairs by subdir-aware rel key)
+SUBKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$SUBKB" >/dev/null
+mkdir -p "$SUBKB/sources/a" "$SUBKB/sources/b" "$SUBKB/runs/sources/a" "$SUBKB/runs/sources/b"
+printf '\x00\x01bin\x00' > "$SUBKB/sources/a/report.pdf"
+printf '\x00\x01bin\x00' > "$SUBKB/sources/b/report.pdf"
+printf 'a text\n' > "$SUBKB/runs/sources/a/report.md"
+printf 'b text\n' > "$SUBKB/runs/sources/b/report.md"
+printf '%s\n%s\n%s\n' "$HEADER" \
+  '갑봇,통합,을서비스,runs/sources/a/report.md,accepted,0.9,' \
+  '값가,대체,값나,runs/sources/b/report.md,accepted,0.9,' > "$SUBKB/facts/candidates.csv"
+sout="$("$PYTHON" "$COV" --wiki "$SUBKB" 2>&1)"
+printf '%s' "$sout" | grep -qF "covered via runs/sources/a/report.md" && ok "subdir a binary pairs to a/ conversion" || bad "subdir a mispaired: $sout"
+printf '%s' "$sout" | grep -qF "covered via runs/sources/b/report.md" && ok "subdir b binary pairs to b/ conversion (no stem collision)" || bad "subdir b mispaired"
+printf '%s' "$sout" | grep -qE 'GAP .*report\.pdf' && bad "nested binary wrongly flagged as gap" || ok "nested binaries not flagged as gaps"
+
 # --- NFC/NFD: an NFD-named source cited NFC is covered, not orphan (#64) ------
 NFCKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$NFCKB" >/dev/null

@@ -8,7 +8,7 @@ import re
 import sys
 import unicodedata
 from collections import defaultdict, deque
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:
     import pyrewire
@@ -109,6 +109,26 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 # --- Source file discovery (shared by merge_candidates / coverage) -----------
 SOURCE_ROOTS = ("sources", "runs/sources")
+
+
+def source_rel_key(ref: str) -> str:
+    """A source ref minus its source-root prefix and file suffix.
+
+    This is the key that pairs a binary original with its runs/sources/<rel>
+    conversion now that `factlog ingest` mirrors the original's subdirectory:
+        'sources/a/report.pdf'      -> 'a/report'
+        'runs/sources/a/report.md'  -> 'a/report'   (pairs with the line above)
+        'sources/report.pdf'        -> 'report'      (top-level: unchanged)
+    Subdirectory-aware, so same-stem files in different subtrees no longer
+    collide. NFC-normalised. (Uses PurePosixPath since refs are posix-style.)
+    """
+    ref = unicodedata.normalize("NFC", ref)
+    for rootname in SOURCE_ROOTS:
+        prefix = rootname + "/"
+        if ref.startswith(prefix):
+            ref = ref[len(prefix):]
+            break
+    return PurePosixPath(ref).with_suffix("").as_posix()
 
 
 def source_files(root: Path) -> list[Path]:

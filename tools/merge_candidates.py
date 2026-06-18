@@ -179,7 +179,10 @@ def unconverted_binary_sources(root: Path) -> list[str]:
             continue
         if is_text_source(path):
             continue
-        if any((derived / f"{path.stem}{ext}").is_file() for ext in (".md", ".txt")):
+        # ingest mirrors the original's subdirectory, so look for the conversion
+        # at runs/sources/<same-subdir>/<stem>.{md,txt}, not a flat name.
+        rel_parent = path.relative_to(base).parent
+        if any((derived / rel_parent / f"{path.stem}{ext}").is_file() for ext in (".md", ".txt")):
             continue
         ref = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
         if is_sync_ignored(ref, patterns):

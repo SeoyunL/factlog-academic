@@ -49,9 +49,12 @@ no facts on its own.
 
 `factlog ingest` writes the converted text into the KB's **`runs/sources/`**
 directory (alongside the other generated run artifacts) — **never into
-`sources/`**, which stays the user's originals. The original is left untouched
-and the conversion carries a provenance header (source, converter, date). Both
-`sources/` and `runs/sources/` are valid source roots that extraction reads.
+`sources/`**, which stays the user's originals. A nested original mirrors its
+subdirectory (`sources/sub/report.pdf` → `runs/sources/sub/report.md`), so
+same-stem files in different folders never collide. The original is left
+untouched and the conversion carries a provenance header (source, converter,
+date). Both `sources/` and `runs/sources/` are valid source roots that
+extraction reads.
 
 ```bash
 factlog ingest report.docx --target ~/wiki   # → ~/wiki/runs/sources/report.md (pandoc)

@@ -58,6 +58,7 @@ from common import (  # noqa: E402
     is_text_source,
     load_facts,
     source_files,
+    source_rel_key,
     sync_ignore_patterns,
 )
 
@@ -106,20 +107,19 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
             "conv_facts": 0,
         })
 
-    # Pair a binary original under sources/ with its runs/sources/<stem>
-    # conversion (ingest names conversions by stem; matches `factlog sources`).
-    # Only *text* conversions count — a stray binary under runs/sources/ is an
-    # anomaly, not a usable conversion, so it must not mask a real "needs
-    # conversion" gap on the original. Matching is stem-only (subdirectory-
-    # agnostic, like `factlog sources`): a same-stem conversion in another
-    # subtree will pair, which is acceptable for this informational report.
-    conv_by_stem: dict[str, dict[str, object]] = {}
+    # Pair a binary original under sources/ with its runs/sources/<rel>
+    # conversion using the subdir-aware rel key (ingest mirrors the original's
+    # subtree), so sources/a/x.pdf pairs with runs/sources/a/x.md and a same-stem
+    # file in another subtree does NOT mispair. Only *text* conversions count —
+    # a stray binary under runs/sources/ is an anomaly, not a usable conversion,
+    # so it must not mask a real "needs conversion" gap on the original.
+    conv_by_key: dict[str, dict[str, object]] = {}
     for r in rows:
         if r["dir"] == "runs/sources" and r["text"]:
-            conv_by_stem.setdefault(Path(str(r["file"])).stem, r)
+            conv_by_key.setdefault(source_rel_key(str(r["file"])), r)
     for r in rows:
         if r["dir"] == "sources" and not r["text"]:
-            conv = conv_by_stem.get(Path(str(r["file"])).stem)
+            conv = conv_by_key.get(source_rel_key(str(r["file"])))
             if conv is not None:
                 r["conversion"] = conv["file"]
                 r["conv_facts"] = conv["facts"]
