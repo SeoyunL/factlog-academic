@@ -56,5 +56,6 @@ jobs:
           bash tests/test_entity_audit.sh
           bash tests/test_count_check.sh
           bash tests/test_active_kb_config.sh
+          bash tests/test_sources_cmd.sh
       - name: clean-env plugin smoke (pipeline end-to-end)
         run: bash tests/smoke.sh

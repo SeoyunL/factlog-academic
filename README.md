@@ -66,6 +66,7 @@ working directory — no `--target`/`--wiki` needed:
 ```bash
 factlog use ~/wiki        # make ~/wiki the active KB (recorded in config)
 factlog where             # show the active KB and how it was resolved
+factlog sources           # list registered sources (original, conversion, fact count)
 cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 ```
 

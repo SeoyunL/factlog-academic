@@ -274,6 +274,66 @@ def cmd_where(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sources(args: argparse.Namespace) -> int:
+    """List registered sources: original file, its conversion, and fact count."""
+    import csv
+    import unicodedata
+    from pathlib import Path
+
+    def nfc(s: str) -> str:
+        return unicodedata.normalize("NFC", s)
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not (target / "sources").is_dir():
+        print(f"factlog sources: {target} is not a factlog KB (no sources/).", file=sys.stderr)
+        return 1
+
+    # fact count per cited source (NFC-normalised, anchor stripped)
+    counts: dict[str, int] = {}
+    csv_path = target / "facts" / "candidates.csv"
+    if csv_path.is_file():
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                ref = nfc((row.get("source") or "").partition("#")[0])
+                if ref:
+                    counts[ref] = counts.get(ref, 0) + 1
+
+    # conversions in runs/sources/, keyed by filename stem
+    conv: dict[str, str] = {}
+    runs_dir = target / "runs" / "sources"
+    if runs_dir.is_dir():
+        for p in sorted(runs_dir.rglob("*")):
+            if p.is_file() and not p.name.startswith("."):
+                conv.setdefault(nfc(p.stem), nfc(p.relative_to(target).as_posix()))
+
+    entries: list[tuple[int, str, str]] = []  # (facts, original-ref, conversion-ref or "")
+    listed: set[str] = set()
+    for p in sorted((target / "sources").rglob("*")):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        orig_ref = nfc(p.relative_to(target).as_posix())
+        conv_ref = conv.get(nfc(p.stem), "")
+        fact_ref = conv_ref or orig_ref  # facts attach to the conversion when present
+        entries.append((counts.get(fact_ref, 0), orig_ref, conv_ref))
+        listed.add(orig_ref)
+        if conv_ref:
+            listed.add(conv_ref)
+    # conversions / text files under runs/sources/ with no original in sources/
+    for ref in sorted(set(conv.values())):
+        if ref not in listed:
+            entries.append((counts.get(ref, 0), ref, ""))
+
+    total = sum(n for n, _, _ in entries)
+    print(f"factlog sources (active KB: {target}): {len(entries)} source(s), {total} fact(s)")
+    for facts, orig, conv_ref in sorted(entries, key=lambda e: (-e[0], e[1])):
+        ext = Path(orig).suffix.lstrip(".") or "?"
+        arrow = f"  →  {conv_ref}" if conv_ref else ""
+        flag = "" if facts else "   [no facts — run /factlog sync or factlog ingest]"
+        print(f"  [{facts:>3}] {orig}  ({ext}){arrow}{flag}")
+    return 0
+
+
 def _find_requirements():
     """Locate requirements.txt.
 
@@ -781,6 +841,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     where = sub.add_parser("where", help="print the active KB and where it was resolved from")
     where.set_defaults(func=cmd_where)
+
+    sources = sub.add_parser("sources", help="list registered sources (original, conversion, fact count)")
+    sources.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
+    sources.set_defaults(func=cmd_sources)
 
     return parser
 
