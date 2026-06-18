@@ -101,6 +101,18 @@ factlog vocab --all        # include non-engine names (candidate/needs_review/su
 Objects of declared attribute relations are literals, not entities, so they are
 excluded from the entity list (same typing as `status`).
 
+### Finding facts (`factlog search`)
+
+When you don't know the exact name, `factlog search <term>` does a
+case-insensitive substring match across subject / relation / object and lists
+the matching facts (with status and source count). `vocab` lists names,
+`search` finds facts by a fragment, `provenance` traces an exact triple.
+
+```bash
+factlog search chatgpt   # case-insensitive; matches 'ChatGPT'
+factlog search acme       # partial — every fact mentioning the fragment
+```
+
 ### Tracing a fact to its source (`factlog provenance`)
 
 Every fact records the source it was extracted from. `factlog provenance` (alias

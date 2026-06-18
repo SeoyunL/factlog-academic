@@ -568,6 +568,64 @@ def cmd_reject(args: argparse.Namespace) -> int:
     return _apply_review_status(args, "superseded", "reject")
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    """Find facts by a case-insensitive substring across subject/relation/object.
+
+    The "I don't know the exact name" discovery tool — complements `vocab`
+    (which lists names) and `provenance` (precise field-targeted exact trace).
+    Reads candidates.csv across all statuses; groups distinct matching facts with
+    their statuses and distinct-source count.
+    """
+    import csv
+    import unicodedata
+    from pathlib import Path
+
+    def nfc(s: str) -> str:
+        return unicodedata.normalize("NFC", s)
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not (target / "sources").is_dir():
+        print(f"factlog search: {target} is not a factlog KB (no sources/).", file=sys.stderr)
+        return 1
+
+    term = nfc(args.term).strip().casefold()
+    if not term:
+        print("factlog search: give a non-empty search term", file=sys.stderr)
+        return 2
+
+    csv_path = target / "facts" / "candidates.csv"
+    rows: list[dict[str, str]] = []
+    if csv_path.is_file():
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+    def fld(r: dict, k: str) -> str:
+        return nfc((r.get(k) or "").strip())
+
+    matched = [r for r in rows if any(term in fld(r, k).casefold() for k in ("subject", "relation", "object"))]
+    if not matched:
+        print(f"factlog search: no fact matches '{args.term}'", file=sys.stderr)
+        return 1
+
+    groups: dict[tuple[str, str, str], dict[str, set]] = {}
+    for r in matched:
+        key = (fld(r, "subject"), fld(r, "relation"), fld(r, "object"))
+        g = groups.setdefault(key, {"statuses": set(), "sources": set()})
+        g["statuses"].add((r.get("status") or "").strip() or "?")
+        src_file = fld(r, "source").partition("#")[0]
+        if src_file:
+            g["sources"].add(src_file)
+
+    print(f"factlog search (KB: {target}): {len(groups)} fact(s) matching '{args.term}'")
+    for (s, rel, o), g in sorted(groups.items()):
+        statuses = ", ".join(sorted(g["statuses"]))
+        n = len(g["sources"])
+        print(f"  {s} / {rel} / {o}   [{statuses}]  ({n} source{'' if n == 1 else 's'})")
+    print("  full detail: factlog provenance <subject> <relation> <object>")
+    return 0
+
+
 def cmd_provenance(args: argparse.Namespace) -> int:
     """Trace a fact to its source(s).
 
@@ -1902,6 +1960,14 @@ def build_parser() -> argparse.ArgumentParser:
     vocab.add_argument("--all", action="store_true", help="include non-engine names (candidate/needs_review/superseded); default: engine facts")
     vocab.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     vocab.set_defaults(func=cmd_vocab)
+
+    search = sub.add_parser(
+        "search",
+        help="find facts by a case-insensitive substring across subject/relation/object",
+    )
+    search.add_argument("term", help="substring to match (quote if it contains spaces)")
+    search.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
+    search.set_defaults(func=cmd_search)
 
     review = sub.add_parser(
         "review",
