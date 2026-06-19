@@ -278,10 +278,20 @@ rows = [['Acme API', 'uses', 'FastAPI'], ['Acme API', 'reaches', 'Datadog']]
 signals = {('Acme API', 'uses', 'FastAPI'): {'sources': 1, 'source_paths': ['sources/a.md'], 'confidence': '0.90', 'stale': False}}
 out = render_engine_answer('relation(\"Acme API\", R, O)?', rows, signals)
 assert 'uses, FastAPI (sources: 1, extraction conf: 0.90)' in out, out
-assert 'reaches, Datadog [derived — no extraction confidence]' in out, out
-# the derived row must NOT carry any extraction-conf annotation
+assert 'reaches, Datadog [no extraction backing]' in out, out
+# the unbacked row must NOT carry any extraction-conf annotation
 assert 'reaches, Datadog (' not in out, out
-" 2>/dev/null; then ok "derived relation row marked '[derived — no extraction confidence]', backed row keeps extraction conf"; else bad "derived/base relation row distinction wrong in render_engine_answer"; fi
+" 2>/dev/null; then ok "unbacked relation row marked '[no extraction backing]', backed row keeps extraction conf"; else bad "backed/unbacked relation row distinction wrong in render_engine_answer"; fi
+
+# integration: a relation in accepted.dl with NO candidates.csv backing (a desync)
+# renders the '[no extraction backing]' marker through the full render command.
+DKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$DKB" >/dev/null
+printf '// test\nrelation(\"Acme API\", \"uses\", \"FastAPI\").\n' > "$DKB/facts/accepted.dl"
+printf 'subject,relation,object,source,status,confidence,note\n' > "$DKB/facts/candidates.csv"  # empty: backs nothing
+dout="$("$PYTHON" "$ROUTER" render 'relation("Acme API", "uses", V)?' --target "$DKB")"
+printf '%s' "$dout" | grep -qF "[no extraction backing]" && ok "desynced relation (accepted.dl without candidates backing) marked via full render" || bad "desync marker missing via render: $dout"
+printf '%s' "$dout" | grep -qF "extraction conf:" && bad "unbacked row must not show an extraction conf" || ok "desynced relation carries no extraction conf"
 
 # non-relation predicates (signals=None) never get a derived marker (computed rows)
 if "$PYTHON" -c "

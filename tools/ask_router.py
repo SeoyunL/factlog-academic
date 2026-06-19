@@ -243,9 +243,12 @@ def render_engine_answer(
       NOT a confidence in the engine verification) — plus '[stale: source
       missing]' when a backing source has vanished, with backing source path(s)
       listed beneath ('    ← <source>').
-    - A relation row with NO such backing is engine-DERIVED (rule-inferred, not
-      extracted), so no extraction confidence applies; it is marked
-      '[derived — no extraction confidence]' rather than left ambiguous.
+    - A relation row with NO backing extraction (no signal entry) carries no
+      extraction confidence, so it is marked '[no extraction backing]' rather
+      than left ambiguous. Today accepted.dl is a 1:1 projection of the
+      candidates table and no rule derives relation atoms, so this only arises
+      when the two are out of sync (recompile via /factlog check); it would also
+      cover a future rule-derived relation. Either way the verdict stays binary.
 
     Non-relation predicates (path/count/policy) pass signals=None: their rows are
     computed by the engine, carry no extraction confidence by construction, and
@@ -261,11 +264,14 @@ def render_engine_answer(
                 if sig.get("stale"):
                     line += " [stale: source missing]"
             elif signals is not None and len(row) == 3:
-                # In a relation answer (signals supplied) a row with no extraction
-                # provenance is engine-derived, not extracted — so it carries no
-                # extraction confidence. The verdict stays binary (the row IS
-                # verified); we only mark the absence of an extraction basis.
-                line += " [derived — no extraction confidence]"
+                # A relation answer is expected to have an extraction-backed signal
+                # per row. A row without one carries no extraction confidence:
+                # today that means candidates.csv/accepted.dl are out of sync
+                # (accepted.dl is a 1:1 projection of the candidates table — no
+                # rule derives relation atoms yet); it would also cover a future
+                # rule-derived relation. Mark the absence; the verdict stays
+                # binary (the row IS verified).
+                line += " [no extraction backing]"
             lines.append(line)
             if sig:
                 for path in sig.get("source_paths", []):
@@ -561,7 +567,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             return 0
         # Positive engine answer: relation, path, and policy predicates are all
         # evaluated by the engine and rendered (0 rows -> a verified-empty result,
-        # never a wiki fallback). Answer-quality signals (sources/confidence/
+        # never a wiki fallback). Answer-quality signals (sources/extraction-conf/
         # staleness) annotate relation rows only (the (s,r,o) key is a relation
         # triple); gate on the predicate so path/policy rows are never annotated
         # by a coincidental 3-element shape.

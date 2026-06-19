@@ -564,12 +564,14 @@ reports the full view) and the LLM's source→fact **extraction** confidence (a
 candidate-stage trust signal, NOT a probability on the verification) — plus
 `[stale: source missing]` when a backing source has vanished and the fact should
 be re-verified. Each backing source path is listed beneath the row (`    ←
-<source>`). A relation row with **no** extraction backing is engine-DERIVED
-(rule-inferred, not extracted) and is marked `[derived — no extraction
-confidence]`; non-relation predicates (path/count/policy) are computed and carry
-no extraction confidence by construction. For an out-of-band trace (any fact,
-full or partial triple, all statuses), use `factlog provenance <subject>
-[relation] [object]`.
+<source>`). A relation row with **no** extraction backing is marked `[no
+extraction backing]` — today `accepted.dl` is a 1:1 projection of the candidate
+table and no rule derives relation atoms, so this only arises when the two are
+out of sync (recompile via `/factlog check`); it would also cover a future
+rule-derived relation. Non-relation predicates (path/count/policy) are computed
+and carry no extraction confidence by construction. The verdict stays binary in
+every case. For an out-of-band trace (any fact, full or partial triple, all
+statuses), use `factlog provenance <subject> [relation] [object]`.
 
 ### Step 3b — Wiki exploration (UNVERIFIED)
 
