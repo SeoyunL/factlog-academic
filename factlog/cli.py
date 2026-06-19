@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path as _Path
+from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
 
@@ -1533,6 +1534,182 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+class _EjectSelection(NamedTuple):
+    """What an eject mode selected: the predicate that decides which candidate
+    rows / runs/*.json items are retired, plus the source-mode-only file actions
+    (empty in fact mode, which never touches source files)."""
+
+    match_row: Callable[[dict], bool]
+    conv_to_delete: list[str]
+    orig_on_disk: list[str]
+    strip_runs: bool
+
+
+def _select_eject_facts(args, rows, fact_specs, target, nfc):
+    """Fact mode: select candidate rows matching the given (subject, relation,
+    object) triple(s). Returns an _EjectSelection, or an int exit code when there
+    is nothing to do. Prints the plan exactly as cmd_eject used to inline."""
+    targets = {(nfc(s), nfc(rel), nfc(o)) for s, rel, o in fact_specs}
+
+    def match_row(d: dict) -> bool:
+        return (
+            nfc(str(d.get("subject", ""))),
+            nfc(str(d.get("relation", ""))),
+            nfc(str(d.get("object", ""))),
+        ) in targets
+
+    affected = [r for r in rows if match_row(r)]
+    if not affected:
+        print("factlog eject: no candidate fact matches the given triple(s):", file=sys.stderr)
+        for s, rel, o in sorted(targets):
+            print(f"  - ({s}, {rel}, {o})", file=sys.stderr)
+        return 1
+    print(
+        f"factlog eject (KB: {target}): fact mode — {len(affected)} candidate row(s) to "
+        f"{'purge' if args.purge else 'supersede'}:"
+    )
+    for r in affected:
+        print(
+            f"  - ({nfc(r.get('subject', ''))}, {nfc(r.get('relation', ''))}, "
+            f"{nfc(r.get('object', ''))})  [source: {r.get('source', '')}]"
+        )
+    # Keep runs/*.json on a supersede: the source stays, so the run keeps
+    # re-asserting the fact and merge_candidates' superseded-preservation holds the
+    # retirement durably across the next sync. Only --purge strips the run row too.
+    return _EjectSelection(match_row, [], [], args.purge)
+
+
+def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
+    """Source / --orphans mode: select source refs to retire (and their on-disk
+    conversions/originals). Returns an _EjectSelection, or an int exit code when
+    nothing matches. Prints the plan exactly as cmd_eject used to inline."""
+    import re
+    from pathlib import Path
+
+    from common import source_rel_key
+
+    # Tie each runs/sources/ conversion to the original it was made from, read
+    # from the ingest provenance header ("... | source: <name> | ..."). Two
+    # originals can share a stem (report.pptx + report.docx both -> report.md),
+    # so a stem guess would let `eject report.docx` wrongly pull report.pptx's
+    # conversion; the recorded origin name disambiguates. Falls back to a stem
+    # match only when no header is present (a hand-made conversion).
+    conv_origin: dict[str, str] = {}
+    for ref, p in disk_refs.items():
+        if not ref.startswith("runs/sources/"):
+            continue
+        try:
+            head = p.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+        except OSError:
+            head = ""
+        # Exclude the field delimiters from the capture so an empty/malformed
+        # `source:` value (e.g. `... | source:  | converter: ...`) can't let
+        # the lazy group swallow the `|`/`-->` and capture a garbage origin.
+        # Also drop a whitespace-only capture (strips to "") — an empty origin
+        # is "no reliable origin", not "an original named ''"; in --orphans
+        # mode either misread would become an autonomous false deletion.
+        m = re.search(r"source:\s*([^|>]+?)\s*(?:\||-->|$)", head)
+        if m:
+            origin = nfc(m.group(1).strip())
+            if origin:
+                conv_origin[ref] = origin
+
+    def matches(ref: str, name: str) -> bool:
+        name = nfc(name)
+        rp, np_ = Path(ref), Path(name)
+        if ref == name:  # exact KB-relative ref
+            return True
+        is_conv = ref.startswith("runs/sources/")
+        if "/" in name:
+            # A path was given: the exact original is handled above; for a
+            # binary original also match the conversion it produced (by
+            # recorded origin). Same-basename files elsewhere are NOT matched.
+            return is_conv and conv_origin.get(ref) == np_.name
+        if np_.suffix:  # a bare filename with an extension
+            if not is_conv:
+                return rp.name == np_.name  # an original with that filename
+            origin = conv_origin.get(ref)  # the conversion made from this original
+            return origin == np_.name if origin else rp.stem == np_.stem
+        return rp.stem == np_.stem  # bare stem: every source with that stem
+
+    matched: set[str] = set()
+    if args.orphans:
+        # Auto-detect orphaned sources — a source whose backing original is
+        # gone. For a runs/sources/ conversion the origin is the file named
+        # in its provenance header (conv_origin); it is an orphan when no
+        # source under sources/ still bears that basename. A hand-placed
+        # conversion (no header → no conv_origin entry) is kept. A cited ref
+        # whose file is simply missing on disk is also an orphan. Only refs
+        # under the two source roots are considered, so a malformed citation
+        # is never auto-ejected.
+        # Pairing a conversion with its backing original:
+        #  - a *mirrored* conversion (runs/sources/<sub>/x.md) carries the
+        #    original's subdir, so we pair by subdir-aware rel key. A flat
+        #    basename set used to mask an orphan when same-name originals lived
+        #    in different subtrees (sources/a/report.pdf vs sources/b/report.pdf):
+        #    deleting only a/report.pdf left report.pdf in the set (from b), so
+        #    a/report's conversion was never flagged.
+        #  - a *flat* conversion (runs/sources/x.md — legacy layout, or an
+        #    original ingested without a subtree to mirror) has no subdir, so
+        #    the provenance basename is the only origin signal; fall back to it
+        #    and keep erring toward retention.
+        src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
+        src_relkeys = {source_rel_key(r) for r in disk_refs if not r.startswith("runs/sources/")}
+        for ref in all_refs:
+            if ref.startswith("runs/sources/"):
+                if ref in disk_refs:
+                    origin = conv_origin.get(ref)
+                    # origin is not None == has a factlog provenance header
+                    # (hand-placed conversions are kept).
+                    if origin is not None:
+                        ck = source_rel_key(ref)
+                        paired = ck in src_relkeys if "/" in ck else origin in src_basenames
+                        if not paired:
+                            matched.add(ref)  # the original it was made from is gone
+                else:
+                    matched.add(ref)  # cited conversion whose file is already gone
+            elif ref.startswith("sources/") and ref not in disk_refs:
+                matched.add(ref)  # a directly-cited source whose file is gone
+        if not matched:
+            print(
+                "factlog eject: no orphaned sources found "
+                "(every cited source's original is present)."
+            )
+            return 0
+        print(f"factlog eject (KB: {target}): orphan scan — {len(matched)} orphaned source(s)")
+    else:
+        for name in args.sources:
+            hits = {ref for ref in all_refs if matches(ref, name)}
+            if hits:
+                matched |= hits
+            else:
+                print(f"factlog eject: no source matches '{name}'", file=sys.stderr)
+        if not matched:
+            print("factlog eject: nothing to eject", file=sys.stderr)
+            return 1
+
+    def match_row(d: dict) -> bool:
+        return nfc(str(d.get("source", "")).partition("#")[0]) in matched
+
+    matched_sorted = sorted(matched)
+    print(f"factlog eject (KB: {target}): {len(matched_sorted)} matched source ref(s):")
+    for ref in matched_sorted:
+        print(f"  - {ref}  [{'on disk' if ref in disk_refs else 'cited only (no file)'}]")
+
+    conv_to_delete = [r for r in matched_sorted if r.startswith("runs/sources/") and r in disk_refs]
+    orig_on_disk = [r for r in matched_sorted if not r.startswith("runs/sources/") and r in disk_refs]
+    affected = [r for r in rows if match_row(r)]
+
+    action = "purge" if args.purge else "supersede"
+    print(f"  candidates.csv: {len(affected)} row(s) to {action}")
+    print(f"  runs/sources conversion(s) to delete: {len(conv_to_delete)}")
+    if args.delete_original:
+        print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
+    elif orig_on_disk:
+        print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
+    return _EjectSelection(match_row, conv_to_delete, orig_on_disk, True)
+
+
 def cmd_eject(args: argparse.Namespace) -> int:
     """Inverse of `ingest`: remove a source — or a single fact — from the KB.
 
@@ -1577,11 +1754,10 @@ def cmd_eject(args: argparse.Namespace) -> int:
     """
     import csv
     import json
-    import re
     import unicodedata
     from pathlib import Path
 
-    from common import FACT_HEADER, source_rel_key
+    from common import FACT_HEADER
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1636,162 +1812,14 @@ def cmd_eject(args: argparse.Namespace) -> int:
         print("factlog eject: --delete-original is only valid when ejecting a source", file=sys.stderr)
         return 2
 
-    # `match_row` decides which candidate rows AND runs/*.json items are retired;
-    # `conv_to_delete` / `orig_on_disk` / `strip_runs` carry the source-mode-only
-    # file actions (empty/false in fact mode, which never touches source files).
+    # Selection differs by mode; the retirement tail below is shared.
     if fact_mode:
-        targets = {(nfc(s), nfc(rel), nfc(o)) for s, rel, o in fact_specs}
-
-        def match_row(d: dict) -> bool:
-            return (
-                nfc(str(d.get("subject", ""))),
-                nfc(str(d.get("relation", ""))),
-                nfc(str(d.get("object", ""))),
-            ) in targets
-
-        affected = [r for r in rows if match_row(r)]
-        if not affected:
-            print("factlog eject: no candidate fact matches the given triple(s):", file=sys.stderr)
-            for s, rel, o in sorted(targets):
-                print(f"  - ({s}, {rel}, {o})", file=sys.stderr)
-            return 1
-        print(
-            f"factlog eject (KB: {target}): fact mode — {len(affected)} candidate row(s) to "
-            f"{'purge' if args.purge else 'supersede'}:"
-        )
-        for r in affected:
-            print(
-                f"  - ({nfc(r.get('subject', ''))}, {nfc(r.get('relation', ''))}, "
-                f"{nfc(r.get('object', ''))})  [source: {r.get('source', '')}]"
-            )
-        conv_to_delete: list[str] = []
-        orig_on_disk: list[str] = []
-        # Keep runs/*.json on a supersede: the source stays, so the run keeps
-        # re-asserting the fact and merge_candidates' superseded-preservation
-        # holds the retirement durably across the next sync. Only --purge, which
-        # means "remove it", strips the run row too.
-        strip_runs = args.purge
+        sel = _select_eject_facts(args, rows, fact_specs, target, nfc)
     else:
-        # Tie each runs/sources/ conversion to the original it was made from, read
-        # from the ingest provenance header ("... | source: <name> | ..."). Two
-        # originals can share a stem (report.pptx + report.docx both -> report.md),
-        # so a stem guess would let `eject report.docx` wrongly pull report.pptx's
-        # conversion; the recorded origin name disambiguates. Falls back to a stem
-        # match only when no header is present (a hand-made conversion).
-        conv_origin: dict[str, str] = {}
-        for ref, p in disk_refs.items():
-            if not ref.startswith("runs/sources/"):
-                continue
-            try:
-                head = p.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
-            except OSError:
-                head = ""
-            # Exclude the field delimiters from the capture so an empty/malformed
-            # `source:` value (e.g. `... | source:  | converter: ...`) can't let
-            # the lazy group swallow the `|`/`-->` and capture a garbage origin.
-            # Also drop a whitespace-only capture (strips to "") — an empty origin
-            # is "no reliable origin", not "an original named ''"; in --orphans
-            # mode either misread would become an autonomous false deletion.
-            m = re.search(r"source:\s*([^|>]+?)\s*(?:\||-->|$)", head)
-            if m:
-                origin = nfc(m.group(1).strip())
-                if origin:
-                    conv_origin[ref] = origin
-
-        def matches(ref: str, name: str) -> bool:
-            name = nfc(name)
-            rp, np_ = Path(ref), Path(name)
-            if ref == name:  # exact KB-relative ref
-                return True
-            is_conv = ref.startswith("runs/sources/")
-            if "/" in name:
-                # A path was given: the exact original is handled above; for a
-                # binary original also match the conversion it produced (by
-                # recorded origin). Same-basename files elsewhere are NOT matched.
-                return is_conv and conv_origin.get(ref) == np_.name
-            if np_.suffix:  # a bare filename with an extension
-                if not is_conv:
-                    return rp.name == np_.name  # an original with that filename
-                origin = conv_origin.get(ref)  # the conversion made from this original
-                return origin == np_.name if origin else rp.stem == np_.stem
-            return rp.stem == np_.stem  # bare stem: every source with that stem
-
-        matched: set[str] = set()
-        if orphan_mode:
-            # Auto-detect orphaned sources — a source whose backing original is
-            # gone. For a runs/sources/ conversion the origin is the file named
-            # in its provenance header (conv_origin); it is an orphan when no
-            # source under sources/ still bears that basename. A hand-placed
-            # conversion (no header → no conv_origin entry) is kept. A cited ref
-            # whose file is simply missing on disk is also an orphan. Only refs
-            # under the two source roots are considered, so a malformed citation
-            # is never auto-ejected.
-            # Pairing a conversion with its backing original:
-            #  - a *mirrored* conversion (runs/sources/<sub>/x.md) carries the
-            #    original's subdir, so we pair by subdir-aware rel key. A flat
-            #    basename set used to mask an orphan when same-name originals lived
-            #    in different subtrees (sources/a/report.pdf vs sources/b/report.pdf):
-            #    deleting only a/report.pdf left report.pdf in the set (from b), so
-            #    a/report's conversion was never flagged.
-            #  - a *flat* conversion (runs/sources/x.md — legacy layout, or an
-            #    original ingested without a subtree to mirror) has no subdir, so
-            #    the provenance basename is the only origin signal; fall back to it
-            #    and keep erring toward retention.
-            src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
-            src_relkeys = {source_rel_key(r) for r in disk_refs if not r.startswith("runs/sources/")}
-            for ref in all_refs:
-                if ref.startswith("runs/sources/"):
-                    if ref in disk_refs:
-                        origin = conv_origin.get(ref)
-                        # origin is not None == has a factlog provenance header
-                        # (hand-placed conversions are kept).
-                        if origin is not None:
-                            ck = source_rel_key(ref)
-                            paired = ck in src_relkeys if "/" in ck else origin in src_basenames
-                            if not paired:
-                                matched.add(ref)  # the original it was made from is gone
-                    else:
-                        matched.add(ref)  # cited conversion whose file is already gone
-                elif ref.startswith("sources/") and ref not in disk_refs:
-                    matched.add(ref)  # a directly-cited source whose file is gone
-            if not matched:
-                print(
-                    "factlog eject: no orphaned sources found "
-                    "(every cited source's original is present)."
-                )
-                return 0
-            print(f"factlog eject (KB: {target}): orphan scan — {len(matched)} orphaned source(s)")
-        else:
-            for name in args.sources:
-                hits = {ref for ref in all_refs if matches(ref, name)}
-                if hits:
-                    matched |= hits
-                else:
-                    print(f"factlog eject: no source matches '{name}'", file=sys.stderr)
-            if not matched:
-                print("factlog eject: nothing to eject", file=sys.stderr)
-                return 1
-
-        def match_row(d: dict) -> bool:
-            return nfc(str(d.get("source", "")).partition("#")[0]) in matched
-
-        matched_sorted = sorted(matched)
-        print(f"factlog eject (KB: {target}): {len(matched_sorted)} matched source ref(s):")
-        for ref in matched_sorted:
-            print(f"  - {ref}  [{'on disk' if ref in disk_refs else 'cited only (no file)'}]")
-
-        conv_to_delete = [r for r in matched_sorted if r.startswith("runs/sources/") and r in disk_refs]
-        orig_on_disk = [r for r in matched_sorted if not r.startswith("runs/sources/") and r in disk_refs]
-        affected = [r for r in rows if match_row(r)]
-        strip_runs = True
-
-        action = "purge" if args.purge else "supersede"
-        print(f"  candidates.csv: {len(affected)} row(s) to {action}")
-        print(f"  runs/sources conversion(s) to delete: {len(conv_to_delete)}")
-        if args.delete_original:
-            print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
-        elif orig_on_disk:
-            print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
+        sel = _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc)
+    if isinstance(sel, int):
+        return sel  # nothing matched / orphan scan empty — code already printed
+    match_row, conv_to_delete, orig_on_disk, strip_runs = sel
 
     if args.dry_run:
         print("factlog eject: --dry-run, no changes made")
