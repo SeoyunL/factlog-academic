@@ -998,26 +998,24 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     list (consistent with `status`). --entities / --relations show one section;
     default shows both. Relations are tagged [attribute]/[single-valued].
     """
-    import os
     from collections import Counter
     from pathlib import Path
+
+    import common
 
     target_str, _ = factlog_config.resolve_root(args.target)
     target = Path(target_str)
     if not _require_kb(target, "vocab"):
         return 1
-    os.environ["FACTLOG_ROOT"] = target_str
-    import importlib
+    # A KbContext bound to the requested KB — no need to mutate FACTLOG_ROOT and
+    # importlib.reload(common) just to read a non-default root in-process.
+    ctx = common.KbContext.for_root(target_str)
 
-    import common as c  # binds ROOT/FACTS_DIR/... from FACTLOG_ROOT at import
-    if str(c.ROOT) != target_str:
-        importlib.reload(c)
-
-    facts = c.load_facts() if c.CANDIDATES_CSV.is_file() else []
-    scope = facts if args.all else c.engine_facts(facts)
+    facts = ctx.load_facts() if ctx.candidates_csv.is_file() else []
+    scope = facts if args.all else common.engine_facts(facts)
     scope_label = "all candidate" if args.all else "engine"
-    attr = c.attribute_relations()
-    sv = c.single_valued_relations()
+    attr = ctx.attribute_relations()
+    sv = ctx.single_valued_relations()
 
     show_e = args.entities or not args.relations
     show_r = args.relations or not args.entities
@@ -1054,23 +1052,18 @@ def cmd_vocab(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Summarise the active KB's state: sources, facts by status, vocabulary,
     conflicts, logic-report freshness, and engine availability."""
-    import os
     import unicodedata
     from collections import Counter
     from pathlib import Path
+
+    import common
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
     if not _require_kb(target, "status", suffix="Run 'factlog init'/'use'."):
         return 1
-    os.environ["FACTLOG_ROOT"] = target_str
-    import importlib
-
-    import common as c  # binds ROOT/FACTS_DIR/... from FACTLOG_ROOT at import
-    if str(c.ROOT) != target_str:
-        # common was already imported in this process bound to a different KB
-        # (latent for any future in-process caller / --target iteration); rebind.
-        importlib.reload(c)
+    # KbContext bound to the requested KB — no FACTLOG_ROOT mutation / reload(common).
+    ctx = common.KbContext.for_root(target_str)
 
     src_label = {"flag": "--target", "env": "$FACTLOG_ROOT", "config": "config", "cwd": "cwd"}.get(source, source)
     print(f"factlog status — active KB: {target}  (from {src_label})")
@@ -1086,9 +1079,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  engine:     {engine}")
 
     # Facts
-    facts = c.load_facts() if c.CANDIDATES_CSV.is_file() else []
+    facts = ctx.load_facts() if ctx.candidates_csv.is_file() else []
     by_status = Counter(r["status"] for r in facts)
-    engine_rows = c.engine_facts(facts)
+    engine_rows = common.engine_facts(facts)
     if facts:
         order = ["confirmed", "accepted", "needs_review", "candidate", "superseded"]
         seen = [f"{s}={by_status[s]}" for s in order if by_status.get(s)]
@@ -1098,9 +1091,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("  facts:      none (no facts/candidates.csv — run /factlog sync)")
 
     # Vocabulary
-    attr = c.attribute_relations()
-    sv = c.single_valued_relations()
-    ent, val = c.entity_set(facts), c.value_set(facts)
+    attr = ctx.attribute_relations()
+    sv = ctx.single_valued_relations()
+    # Pass attr so entity_set reads THIS KB's attribute relations, not the module
+    # default (cmd_status may target a KB other than the ambient FACTLOG_ROOT).
+    ent, val = common.entity_set(facts, attr), common.value_set(facts)
     # Literals are values appearing only as attribute-relation objects; with no
     # attribute-relations.md declared, entity_set == value_set so there are none.
     literals = f"{len(val) - len(ent)} literal(s)" if attr else "0 literal(s) — none declared"
@@ -1108,7 +1103,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"  vocabulary: {len(ent)} entit(y/ies), {literals}, "
         # engine-scoped, like entity_set/value_set above — so the counts agree
         # with `factlog vocab` (which lists the same engine vocabulary).
-        f"{len(c.allowed_relations(engine_rows))} relation(s) "
+        f"{len(common.allowed_relations(engine_rows))} relation(s) "
         f"({len(attr)} attribute, {len(sv)} single-valued declared)"
     )
 
@@ -1116,23 +1111,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     # conversion" when its runs/sources/<rel> text conversion carries facts
     # (facts attach to the conversion, not the binary original).
     cited = {unicodedata.normalize('NFC', r['source'].partition('#')[0]) for r in engine_rows if r.get('source')}
-    patterns = c.sync_ignore_patterns(target)
+    patterns = common.sync_ignore_patterns(target)
     refs: dict = {}
     n_ignored = 0
-    for p in c.source_files(target):
+    for p in common.source_files(target):
         if any(part.startswith(".") for part in p.relative_to(target).parts):
             continue  # hidden (.DS_Store, .git, ...)
         ref = unicodedata.normalize('NFC', p.relative_to(target).as_posix())
-        if c.is_sync_ignored(ref, patterns):
+        if common.is_sync_ignored(ref, patterns):
             n_ignored += 1  # excluded from sync on purpose — not a gap
             continue
         refs[p] = ref
     # only a *text* conversion under runs/sources/ backs an original (a stray
     # binary there is an anomaly, not a usable conversion — matches coverage).
     covered_keys = {
-        c.source_rel_key(ref)
+        common.source_rel_key(ref)
         for p, ref in refs.items()
-        if ref.startswith("runs/sources/") and ref in cited and c.is_text_source(p)
+        if ref.startswith("runs/sources/") and ref in cited and common.is_text_source(p)
     }
     direct = sum(1 for ref in refs.values() if ref in cited)
     via = sum(
@@ -1140,8 +1135,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         for p, ref in refs.items()
         if ref not in cited
         and ref.startswith("sources/")
-        and not c.is_text_source(p)
-        and c.source_rel_key(ref) in covered_keys
+        and not common.is_text_source(p)
+        and common.source_rel_key(ref) in covered_keys
     )
     covered = direct + via
     total = len(refs)
@@ -1164,7 +1159,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("  conflicts:  n/a (no single-valued relations declared in policy/single-valued.md)")
 
     # Logic report freshness
-    report = c.FACTS_DIR / "logic_report.txt"
+    report = ctx.facts_dir / "logic_report.txt"
     if report.is_file():
         text = report.read_text(encoding="utf-8", errors="ignore")
         # Lower-case `errors:`/`warnings:` are the summary lines in
@@ -1173,7 +1168,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         warnings = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("warnings:")), "?")
         rep_mtime = report.stat().st_mtime
         # The report is a function of all three run_logic_check inputs.
-        inputs = [p for p in (c.ACCEPTED_DL, c.FACTS_DIR / "query.dl", c.LOGIC_POLICY_DL) if p.is_file()]
+        inputs = [p for p in (ctx.accepted_dl, ctx.facts_dir / "query.dl", ctx.logic_policy_dl) if p.is_file()]
         stale = any(p.stat().st_mtime > rep_mtime for p in inputs)
         fresh = "STALE (inputs changed since last check — run /factlog check)" if stale else "fresh"
         print(f"  logic:      report {fresh}; errors={errors}, warnings={warnings}")

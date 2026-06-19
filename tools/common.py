@@ -8,6 +8,7 @@ import re
 import sys
 import unicodedata
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 try:
@@ -91,6 +92,63 @@ RELATION_FACT_RE = re.compile(r"^relation\((.*)\)\.$")
 MIN_PYREWIRE_VERSION = (1, 0, 1)
 
 
+@dataclass(frozen=True)
+class KbContext:
+    """Resolved KB paths for one explicit root, with loaders bound to them.
+
+    The module-level path globals (ROOT/FACTS_DIR/CANDIDATES_CSV/...) stay the
+    default surface for the ambient ``FACTLOG_ROOT`` and every existing caller.
+    KbContext lets an in-process caller (notably ``factlog.cli``) read a *different*
+    KB without mutating ``FACTLOG_ROOT`` and ``importlib.reload``-ing this module.
+    Its loader methods share the exact parsing of the module-level functions via
+    the ``_*_from(path)`` helpers, so the two can never drift.
+    """
+
+    root: Path
+    facts_dir: Path
+    decisions_dir: Path
+    runs_dir: Path
+    policy_dir: Path
+    prompts_dir: Path
+    candidates_csv: Path
+    accepted_dl: Path
+    logic_policy_dl: Path
+    questions_md: Path
+
+    @classmethod
+    def for_root(cls, root) -> KbContext:
+        root = Path(root).expanduser().resolve()
+        facts = root / "facts"
+        policy = root / "policy"
+        return cls(
+            root=root,
+            facts_dir=facts,
+            decisions_dir=root / "decisions",
+            runs_dir=root / "runs",
+            policy_dir=policy,
+            prompts_dir=policy / "prompts",
+            candidates_csv=facts / "candidates.csv",
+            accepted_dl=facts / "accepted.dl",
+            logic_policy_dl=policy / "logic-policy.dl",
+            questions_md=policy / "questions.md",
+        )
+
+    def load_facts(self) -> list[dict[str, str]]:
+        return _load_facts_from(self.candidates_csv)
+
+    def load_accepted_facts(self) -> list[dict[str, str]]:
+        return _load_accepted_facts_from(self.accepted_dl)
+
+    def load_logic_policy(self) -> str:
+        return _load_logic_policy_from(self.logic_policy_dl)
+
+    def single_valued_relations(self) -> set[str]:
+        return _relation_names_from(self.policy_dir / "single-valued.md")
+
+    def attribute_relations(self) -> set[str]:
+        return _relation_names_from(self.policy_dir / "attribute-relations.md")
+
+
 def version_tuple(value: str) -> tuple[int, ...]:
     parts = re.findall(r"\d+", value)
     return tuple(int(part) for part in parts[:3])
@@ -124,7 +182,14 @@ def ensure_dirs() -> None:
 
 def read_csv(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
-        raise FactlogError(f"missing {path.relative_to(ROOT)}")
+        # Show the path relative to the ambient ROOT when it lives under it;
+        # a KbContext may point read_csv at a different root, so fall back to the
+        # full path rather than letting relative_to raise.
+        try:
+            shown: Path = path.relative_to(ROOT)
+        except ValueError:
+            shown = path
+        raise FactlogError(f"missing {shown}")
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
@@ -204,8 +269,11 @@ def is_text_source(path: Path, *, sniff: int = 8192) -> bool:
     return True
 
 
-def load_facts() -> list[dict[str, str]]:
-    rows = read_csv(CANDIDATES_CSV)
+# load_facts / load_accepted_facts / load_logic_policy delegate to path-taking
+# _*_from helpers so the module-level (ambient-root) functions and KbContext's
+# methods parse identically. The module functions are unchanged for callers.
+def _load_facts_from(candidates_csv: Path) -> list[dict[str, str]]:
+    rows = read_csv(candidates_csv)
     normalized: list[dict[str, str]] = []
     for row in rows:
         clean = {field: str(row.get(field, "")).strip() for field in FACT_HEADER}
@@ -214,11 +282,15 @@ def load_facts() -> list[dict[str, str]]:
     return normalized
 
 
-def load_accepted_facts() -> list[dict[str, str]]:
-    if not ACCEPTED_DL.is_file():
+def load_facts() -> list[dict[str, str]]:
+    return _load_facts_from(CANDIDATES_CSV)
+
+
+def _load_accepted_facts_from(accepted_dl: Path) -> list[dict[str, str]]:
+    if not accepted_dl.is_file():
         raise FactlogError("missing facts/accepted.dl; run tools/compile_facts.py first")
     rows: list[dict[str, str]] = []
-    for line in ACCEPTED_DL.read_text(encoding="utf-8").splitlines():
+    for line in accepted_dl.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("//"):
             continue
@@ -230,10 +302,18 @@ def load_accepted_facts() -> list[dict[str, str]]:
     return rows
 
 
-def load_logic_policy() -> str:
-    if not LOGIC_POLICY_DL.is_file():
+def load_accepted_facts() -> list[dict[str, str]]:
+    return _load_accepted_facts_from(ACCEPTED_DL)
+
+
+def _load_logic_policy_from(logic_policy_dl: Path) -> str:
+    if not logic_policy_dl.is_file():
         raise FactlogError("missing policy/logic-policy.dl; run factlog init --target <kb> --force")
-    return LOGIC_POLICY_DL.read_text(encoding="utf-8").strip()
+    return logic_policy_dl.read_text(encoding="utf-8").strip()
+
+
+def load_logic_policy() -> str:
+    return _load_logic_policy_from(LOGIC_POLICY_DL)
 
 
 def policy_predicates(policy_program: str | None = None) -> set[str]:
@@ -280,13 +360,12 @@ def load_questions() -> list[dict[str, str]]:
     return rows
 
 
-def _relation_names_from_policy(filename: str) -> set[str]:
+def _relation_names_from(path: Path) -> set[str]:
     """Parse a policy file that lists relation names, one per line.
 
     Bullets and '#' comments are allowed; the relation name is the first
     `backtick`-quoted token if present, else the first whitespace token (quote a
     name that contains spaces). Absent file → empty set."""
-    path = POLICY_DIR / filename
     if not path.is_file():
         return set()
     names: set[str] = set()
@@ -397,7 +476,7 @@ def single_valued_relations() -> set[str]:
     are a contradiction (see tools/check_conflicts.py). Absent file → no
     single-valued relations → no conflicts.
     """
-    return _relation_names_from_policy("single-valued.md")
+    return _relation_names_from(POLICY_DIR / "single-valued.md")
 
 
 def attribute_relations() -> set[str]:
@@ -411,7 +490,7 @@ def attribute_relations() -> set[str]:
     Same file format as single-valued.md; absent file → no attribute relations
     → entity_set == value_set (fully backward compatible).
     """
-    return _relation_names_from_policy("attribute-relations.md")
+    return _relation_names_from(POLICY_DIR / "attribute-relations.md")
 
 
 def corroboration_counts(facts: list[dict[str, str]]) -> dict[tuple[str, str, str], int]:
@@ -479,14 +558,21 @@ def value_set(facts: list[dict[str, str]] | None = None) -> set[str]:
     return {value for row in selected for value in [row["subject"], row["object"]] if value}
 
 
-def entity_set(facts: list[dict[str, str]] | None = None) -> set[str]:
+def entity_set(
+    facts: list[dict[str, str]] | None = None,
+    attribute_rels: set[str] | None = None,
+) -> set[str]:
     """First-class entities only: every subject, plus objects whose relation is
     NOT declared an attribute relation. Objects of attribute relations are
     literal values (see attribute_relations) and are excluded so they don't show
     up as entities (entity listings, path nodes, count subjects). With no
-    policy/attribute-relations.md this equals value_set (backward compatible)."""
+    policy/attribute-relations.md this equals value_set (backward compatible).
+
+    *attribute_rels* overrides which relations count as attribute (literal-valued)
+    relations; pass a KbContext's attribute_relations() to read a non-default KB.
+    None falls back to the module-level (ambient-root) attribute_relations()."""
     selected = engine_input_rows(facts if facts is not None else load_accepted_facts())
-    literal_rels = attribute_relations()
+    literal_rels = attribute_relations() if attribute_rels is None else attribute_rels
     entities: set[str] = set()
     for row in selected:
         if row["subject"]:
