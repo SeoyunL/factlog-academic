@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import re
-
 from common import (
     FACTS_DIR,
     QUERY_PREDICATES,
@@ -20,6 +18,9 @@ from common import (
     review_facts,
     LOGIC_POLICY_DL,
     run_wirelog,
+    _arg_value as arg_value,
+    _query_args as query_args,
+    _quoted_constants as quoted_constants,
 )
 
 
@@ -34,21 +35,11 @@ def query_lines() -> list[str]:
     ]
 
 
-def quoted_constants(line: str) -> list[str]:
-    return re.findall(r'"([^"]+)"', line)
-
-
-def query_args(line: str) -> list[str]:
-    match = re.match(r"^\w+\((.*)\)\?$", line)
-    if not match:
-        return []
-    return [part.strip() for part in match.group(1).split(",")]
-
-
-def arg_value(arg: str) -> str:
-    if len(arg) >= 2 and arg[0] == '"' and arg[-1] == '"':
-        return arg[1:-1]
-    return arg
+# Query parsing is delegated to common's string-aware parsers
+# (_query_args / _arg_value / _quoted_constants, imported above) so this engine
+# and the ask router agree on every query — notably commas inside quoted literals
+# like relation("A", "born_in", "Paris, France")?, which a naive split(",") would
+# mis-count as 4 args and report as "0 rows".
 
 
 def relation_results(line: str, facts: list[dict[str, str]]) -> list[tuple[str, str, str]]:
