@@ -30,14 +30,14 @@ bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 verdict="$(FACTLOG_ROOT="/tmp" "$PYTHON" - <<'PY'
 import os, sys
 sys.path.insert(0, os.path.join(os.environ.get("PYTHONPATH", "").split(":")[0], "factlog"))
-from factlog import cli
+from factlog import ingest
 problems = []
-chain = cli._INGEST_CONVERTERS.get(".hwp")
+chain = ingest.INGEST_CONVERTERS.get(".hwp")
 if not chain or chain[0][0] != "factlog-hwp":
     problems.append(".hwp not registered to factlog-hwp")
-if "factlog-hwp" not in cli._BUILTIN_CONVERTERS:
+if "factlog-hwp" not in ingest.BUILTIN_CONVERTERS:
     problems.append("factlog-hwp not a built-in converter")
-if ".hwp" in cli._INGEST_HINTS:
+if ".hwp" in ingest.INGEST_HINTS:
     problems.append(".hwp still in unsupported hints")
 if chain and chain[0][1] != ".md":
     problems.append(".hwp output suffix is not .md")

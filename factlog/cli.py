@@ -18,7 +18,7 @@ import argparse
 import sys
 from pathlib import Path as _Path
 
-from factlog import __version__
+from factlog import __version__, ingest
 
 # Share the active-KB config resolver with the tools/ scripts (same module).
 _TOOLS_DIR = _Path(__file__).resolve().parent.parent / "tools"
@@ -1347,191 +1347,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
 # provenance header, into <target>/sources/ so /factlog sync can read it.
 
 
-def _conv_pandoc(src, dst) -> list[str]:
-    return ["pandoc", str(src), "-t", "gfm", "--wrap=none", "-o", str(dst)]
-
-
-def _conv_textutil(src, dst) -> list[str]:
-    return ["textutil", "-convert", "txt", str(src), "-output", str(dst)]
-
-
-def _conv_pdftotext(src, dst) -> list[str]:
-    return ["pdftotext", "-layout", str(src), str(dst)]
-
-
-def _conv_hwpx(src, dst) -> bool:
-    """In-process converter for Hancom HWPX (OWPML: a zip of XML).
-
-    pandoc/textutil/pdftotext cannot read hwpx, but the format is a zip whose
-    Contents/section*.xml hold the body text as <hp:t> runs inside <hp:p>
-    paragraphs. Extract per paragraph (inline tags stripped, entities
-    unescaped), one line per non-empty paragraph, across all sections. Writes
-    *dst* and returns True on success; a corrupt zip or empty extraction returns
-    False (the caller reports a failure). Standard library only.
-    """
-    import html
-    import re
-    import zipfile
-
-    try:
-        with zipfile.ZipFile(src) as z:
-            sections = sorted(
-                n for n in z.namelist() if re.fullmatch(r"Contents/section\d+\.xml", n)
-            )
-            if not sections:
-                return False
-            lines: list[str] = []
-            for name in sections:
-                xml = z.read(name).decode("utf-8", "ignore")
-                for para in re.split(r"<hp:p\b", xml):
-                    # tolerate attributes on the run element (<hp:t charPrIDRef="..">);
-                    # OWPML permits them, so a bare-tag-only match would silently drop text.
-                    runs = re.findall(r"<hp:t\b[^>]*>(.*?)</hp:t>", para, flags=re.S)
-                    if not runs:
-                        continue
-                    line = html.unescape("".join(re.sub(r"<[^>]+>", "", r) for r in runs)).strip()
-                    if line:
-                        lines.append(line)
-    except (zipfile.BadZipFile, OSError, KeyError):
-        return False
-    if not lines:
-        return False
-    dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return True
-
-
-def _conv_pptx(src, dst) -> bool:
-    """In-process converter for PowerPoint .pptx (OOXML: a zip of XML).
-
-    pandoc can *write* pptx but cannot *read* it, so there is no PATH tool for
-    this; the format is a zip whose ppt/slides/slideN.xml hold the slide text as
-    <a:t> runs inside <a:p> paragraphs. Extract per paragraph (inline tags
-    stripped, entities unescaped), one line per non-empty paragraph, slides in
-    numeric order (slide10 after slide9, not lexicographic), each slide block
-    separated by a blank line. Writes *dst* and returns True on success; a
-    corrupt zip or empty extraction returns False (the caller reports a
-    failure). Standard library only.
-
-    Scope (deliberate, like the hwpx built-in): only *on-slide* text body is
-    read — speaker notes (ppt/notesSlides/) are excluded. Table cells are each
-    their own <a:p>, so a table flattens to one line per cell (row/column
-    grouping is not preserved). The DrawingML element prefix is matched
-    prefix-agnostically (<*:p>/<*:t>) so non-PowerPoint exporters that alias the
-    namespace differently still extract.
-    """
-    import html
-    import re
-    import zipfile
-
-    try:
-        with zipfile.ZipFile(src) as z:
-            slides = [n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
-            # slideN.xml: order by the embedded number so slide10 follows slide9
-            # (plain sort would place slide10 before slide2).
-            slides.sort(key=lambda n: int(re.search(r"slide(\d+)", n).group(1)))
-            if not slides:
-                return False
-            blocks: list[str] = []
-            for name in slides:
-                xml = z.read(name).decode("utf-8", "ignore")
-                lines: list[str] = []
-                # Split on the paragraph tag with any namespace prefix; \b after
-                # ":p" keeps <*:pPr>/<*:prstGeom> from being treated as paragraphs.
-                for para in re.split(r"<\w+:p\b", xml):
-                    # tolerate attributes on the run element (<*:t ...>); strip
-                    # inline tags inside the run, then unescape XML entities.
-                    runs = re.findall(r"<\w+:t\b[^>]*>(.*?)</\w+:t>", para, flags=re.S)
-                    if not runs:
-                        continue
-                    line = html.unescape("".join(re.sub(r"<[^>]+>", "", r) for r in runs)).strip()
-                    if line:
-                        lines.append(line)
-                if lines:
-                    blocks.append("\n".join(lines))
-    except (zipfile.BadZipFile, OSError, KeyError):
-        return False
-    if not blocks:
-        return False
-    dst.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
-    return True
-
-
-class _MissingTool(Exception):
-    """Raised by a built-in converter when a required external tool is absent.
-
-    Treated like a missing PATH converter: a soft skip under --scan, a failure
-    when the file was named explicitly. Carries an install hint as its message.
-    """
-
-
-def _conv_hwp(src, dst) -> bool:
-    """Convert a legacy Hancom .hwp (HWP 5.x, an OLE binary) to markdown.
-
-    LibreOffice's HWP import filter only handles old HWP (<=3.x), so the
-    soffice->PDF route fails on modern HWP 5.x files. Instead use pyhwp's
-    `hwp5html` to extract structure-preserving HTML, then pandoc to markdown
-    (tables survive). Raises _MissingTool if hwp5html or pandoc is unavailable.
-    """
-    import shutil
-    import subprocess
-    import tempfile
-    from pathlib import Path
-
-    if not shutil.which("hwp5html"):
-        raise _MissingTool("install pyhwp for .hwp support (`pip install pyhwp`); provides hwp5html")
-    if not shutil.which("pandoc"):
-        raise _MissingTool("install pandoc for the HTML->markdown step (e.g. `brew install pandoc`)")
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "html"
-        h = subprocess.run(
-            ["hwp5html", "--output", str(out), str(src)],
-            capture_output=True, text=True, timeout=180,
-        )
-        index = out / "index.xhtml"
-        if h.returncode != 0 or not index.is_file():
-            return False
-        p = subprocess.run(
-            ["pandoc", str(index), "-t", "gfm", "--wrap=none", "-o", str(dst)],
-            capture_output=True, text=True, timeout=180,
-        )
-    return p.returncode == 0 and dst.is_file() and dst.stat().st_size > 0
-
-
-# Converters that run in-process (a Python callable writing dst) rather than by
-# shelling out to a single PATH tool; they skip the shutil.which availability
-# check (a built-in may itself orchestrate external tools and report _MissingTool).
-_BUILTIN_CONVERTERS: frozenset[str] = frozenset({"factlog-hwpx", "factlog-hwp", "factlog-pptx"})
-
-# Per-extension converter chains, tried in order until one's tool is available
-# (on PATH, or always for a built-in). Each entry: (tool_name, output_suffix,
-# builder) where builder is an argv-list builder for PATH tools, or a
-# (src, dst) -> bool callable for built-ins.
-_INGEST_CONVERTERS: dict[str, list[tuple]] = {
-    ".docx": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
-    ".odt": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
-    ".epub": [("pandoc", ".md", _conv_pandoc)],
-    ".html": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
-    ".htm": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
-    ".rtf": [("textutil", ".txt", _conv_textutil)],
-    ".pdf": [("pdftotext", ".txt", _conv_pdftotext)],
-    ".hwpx": [("factlog-hwpx", ".md", _conv_hwpx)],
-    ".hwp": [("factlog-hwp", ".md", _conv_hwp)],
-    ".pptx": [("factlog-pptx", ".md", _conv_pptx)],
-}
-
-# Formats recognised as needing conversion but with no bundled converter.
-_INGEST_HINTS: dict[str, str] = {
-    ".xlsx": "no built-in converter; export sheets to .csv and place those in sources/",
-    ".png": "images need OCR (out of scope); transcribe to text manually",
-    ".jpg": "images need OCR (out of scope); transcribe to text manually",
-    ".jpeg": "images need OCR (out of scope); transcribe to text manually",
-}
-
-_INSTALL_HINTS: dict[str, str] = {
-    "pandoc": "install pandoc (e.g. `brew install pandoc`, https://pandoc.org)",
-    "pdftotext": "install poppler (e.g. `brew install poppler`)",
-    "textutil": "textutil ships with macOS",
-}
+# The source-file converters (per-extension chains, built-in hwpx/pptx/hwp
+# converters, install hints) live in factlog/ingest.py; cmd_ingest drives them
+# via the ingest.* public surface.
 
 
 def _looks_binary(path, sniff: int = 8192) -> bool:
@@ -1629,9 +1447,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             continue
 
         suffix = src.suffix.lower()
-        chain = _INGEST_CONVERTERS.get(suffix)
+        chain = ingest.INGEST_CONVERTERS.get(suffix)
         if not chain:
-            hint = _INGEST_HINTS.get(suffix, "no converter available for this format")
+            hint = ingest.INGEST_HINTS.get(suffix, "no converter available for this format")
             print(
                 f"factlog ingest: skip {src.name} ({suffix or 'no extension'}): {hint}",
                 file=sys.stderr,
@@ -1643,12 +1461,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             continue
 
         chosen = next(
-            ((t, out, build) for (t, out, build) in chain if t in _BUILTIN_CONVERTERS or shutil.which(t)),
+            ((t, out, build) for (t, out, build) in chain if t in ingest.BUILTIN_CONVERTERS or shutil.which(t)),
             None,
         )
         if chosen is None:
             tools = ", ".join(t for (t, _, _) in chain)
-            hints = "; ".join(_INSTALL_HINTS.get(t, t) for (t, _, _) in chain)
+            hints = "; ".join(ingest.INSTALL_HINTS.get(t, t) for (t, _, _) in chain)
             print(
                 f"factlog ingest: no converter on PATH for {suffix} (tried: {tools}). {hints}",
                 file=sys.stderr,
@@ -1674,11 +1492,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             skipped += 1
             continue
 
-        if tool in _BUILTIN_CONVERTERS:
+        if tool in ingest.BUILTIN_CONVERTERS:
             try:
                 ok = bool(build(src, dst))
                 detail = "could not extract text (empty, corrupt, or unsupported file)"
-            except _MissingTool as exc:
+            except ingest.MissingTool as exc:
                 # required external tool absent: like a missing PATH converter —
                 # soft-skip under --scan, count as failure when named explicitly.
                 print(f"factlog ingest: skip {src.name} ({suffix}): {exc}", file=sys.stderr)
