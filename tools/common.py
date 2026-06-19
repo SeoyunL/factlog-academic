@@ -715,6 +715,23 @@ def _quoted_constants(line: str) -> list[str]:
     return re.findall(r'"([^"]+)"', line)
 
 
+# Public query-parsing API -----------------------------------------------------
+# These are the stable, documented names external callers should use to parse a
+# Datalog query atom (ask_router and run_logic_check both depend on them, so they
+# are de-facto public). The underscore-prefixed originals above remain as internal
+# aliases used within this module; prefer the public names from other modules.
+#   query_args(line)       -> positional args, string-aware (commas inside quotes)
+#   arg_value(arg)         -> a quoted literal's value (JSON-decoded) or the bare arg
+#   is_quoted_string(arg)  -> True if arg is a quoted string literal
+#   is_variable(arg)       -> True if arg is a Datalog variable (capitalised)
+#   quoted_constants(line) -> every "..." literal in a line
+query_args = _query_args
+arg_value = _arg_value
+is_quoted_string = _is_quoted_string
+is_variable = _is_variable
+quoted_constants = _quoted_constants
+
+
 def _relation_match_count(query: str, facts: list[dict[str, str]]) -> int:
     if query.startswith("relation"):
         args = _query_args(query)

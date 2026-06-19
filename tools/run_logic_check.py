@@ -18,9 +18,9 @@ from common import (
     review_facts,
     LOGIC_POLICY_DL,
     run_wirelog,
-    _arg_value as arg_value,
-    _query_args as query_args,
-    _quoted_constants as quoted_constants,
+    arg_value,
+    query_args,
+    quoted_constants,
 )
 
 

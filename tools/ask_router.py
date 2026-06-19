@@ -70,10 +70,10 @@ from common import (  # noqa: E402
     LOGIC_POLICY_DL,
     QUERY_FACT_ABSENT,
     QUERY_OK,
-    _arg_value,
-    _is_quoted_string,
-    _is_variable,
-    _query_args,
+    arg_value,
+    is_quoted_string,
+    is_variable,
+    query_args,
     classify_query,
     dependency_graph,
     dependency_path,
@@ -140,13 +140,13 @@ def evaluate_relation(draft: str, facts: list[dict[str, str]]) -> list[list[str]
     Returns the matching [subject, relation, object] rows. Does not touch
     facts/query.dl.
     """
-    args = _query_args(draft)
+    args = query_args(draft)
     if len(args) != 3:
         return []
     rows: list[list[str]] = []
     for row in facts:
         values = [row["subject"], row["relation"], row["object"]]
-        if all(_is_variable(arg) or _arg_value(arg) == value for arg, value in zip(args, values)):
+        if all(is_variable(arg) or arg_value(arg) == value for arg, value in zip(args, values)):
             rows.append([row["subject"], row["relation"], row["object"]])
     return rows
 
@@ -186,39 +186,39 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     negative.
     """
     predicate = _predicate_of(draft)
-    args = _query_args(draft)
+    args = query_args(draft)
     if predicate == "relation":
         rows = evaluate_relation(draft, facts)
         return {"rows": rows, "count": len(rows)}
     if predicate == "count":
         # count(subject, relation)? -> number of distinct objects (a verified
         # aggregate; 0 is a real answer). Rendered as a single value row.
-        subject, relation = _arg_value(args[0]), _arg_value(args[1])
+        subject, relation = arg_value(args[0]), arg_value(args[1])
         objects = {
             row["object"]
             for row in facts
-            if (_is_variable(args[0]) or row["subject"] == subject)
-            and (_is_variable(args[1]) or row["relation"] == relation)
+            if (is_variable(args[0]) or row["subject"] == subject)
+            and (is_variable(args[1]) or row["relation"] == relation)
         }
         return {"rows": [[str(len(objects))]], "count": len(objects)}
     if predicate == "path":
-        if len(args) == 2 and all(_is_quoted_string(a) for a in args):
-            path = dependency_path(facts, _arg_value(args[0]), _arg_value(args[1]))
+        if len(args) == 2 and all(is_quoted_string(a) for a in args):
+            path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
             rows = [path] if path else []
         else:
             rows = [
                 [start, target]
                 for (start, target) in sorted(_reachable_pairs(facts))
                 if (len(args) == 2
-                    and (_is_variable(args[0]) or _arg_value(args[0]) == start)
-                    and (_is_variable(args[1]) or _arg_value(args[1]) == target))
+                    and (is_variable(args[0]) or arg_value(args[0]) == start)
+                    and (is_variable(args[1]) or arg_value(args[1]) == target))
             ]
         return {"rows": rows, "count": len(rows)}
     if predicate in policy_predicates(_policy_program_optional()):
         inferred = run_wirelog()
         rows = []
         for row in sorted(inferred.get(predicate, set())):
-            if args and _is_quoted_string(args[0]) and (not row or _arg_value(args[0]) != row[0]):
+            if args and is_quoted_string(args[0]) and (not row or arg_value(args[0]) != row[0]):
                 continue
             rows.append(list(row))
         return {"rows": rows, "count": len(rows)}
