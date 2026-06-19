@@ -502,7 +502,11 @@ def write_decisions(root: Path, rows: list[dict[str, str]]) -> list[str]:
 
 def existing_source_refs(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8", errors="ignore")
-    return re.findall(r"sources/[^\s`)>,]+?\.md(?:#[^\s`)>,]+)?", text)
+    # Match the ingestible text extensions a page can cite (md/txt/csv — pdftotext
+    # and textutil emit .txt, direct text sources may be .txt/.csv), with the
+    # optional runs/ prefix, for parity with validate.py. An .md-only pattern
+    # silently never recorded stale refs to deleted .txt/.csv sources.
+    return re.findall(r"(?:runs/)?sources/[^\s`)>,]+?\.(?:md|txt|csv)(?:#[^\s`)>,]+)?", text)
 
 
 def record_stale_page_refs(root: Path) -> list[str]:

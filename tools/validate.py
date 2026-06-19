@@ -212,7 +212,9 @@ def validate(root: Path) -> list[str]:
 
     for page in pages:
         text = read(page)
-        for source_ref in re.findall(r"(?:runs/)?sources/[^\s`)>,]+?\.md(?:#[^\s`)>,]+)?", text):
+        # md/txt/csv: pages may cite text sources or pdftotext/textutil .txt
+        # conversions, not only .md — keep in sync with merge_candidates.existing_source_refs.
+        for source_ref in re.findall(r"(?:runs/)?sources/[^\s`)>,]+?\.(?:md|txt|csv)(?:#[^\s`)>,]+)?", text):
             source_error = validate_source_ref(root, source_ref)
             stale_record = f"stale_source: {page.relative_to(root).as_posix()} references removed source {source_ref}"
             if source_error and stale_record not in decision_text:

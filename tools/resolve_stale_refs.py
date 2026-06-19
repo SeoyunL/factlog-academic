@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-STALE_RE = re.compile(r"^- stale_source: (?P<page>pages/\S+) references removed source (?P<source>sources/\S+)$")
+# The source group accepts the optional runs/ prefix because validate.py records
+# refs as (?:runs/)?sources/...; without it, a removed runs/sources/ conversion's
+# stale record could never be matched and would linger forever.
+STALE_RE = re.compile(r"^- stale_source: (?P<page>pages/\S+) references removed source (?P<source>(?:runs/)?sources/\S+)$")
 
 
 @dataclass(frozen=True)
