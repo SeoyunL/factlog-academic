@@ -50,6 +50,28 @@ printf '%s' "$out" | grep -qF "1 runs/*.json row(s) updated" && ok "reports runs
 grep -q "Widget,codename,Falcon,sources/a.md,accepted,0.50,name finalized" "$KB/facts/candidates.csv" \
   && ok "amended value + accepted status survive a re-merge" || bad "amend reverted after re-merge: $(grep codename "$KB/facts/candidates.csv")"
 
+# --- #106: a human re-review (accepted -> needs_review in candidates.csv) is ---
+# --- NOT silently re-promoted by a stale 'accepted' left in runs/*.json --------
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf 'a\n' > "$KB/sources/a.md"
+printf '[{"subject":"Gizmo","relation":"codename","object":"Nova","source":"sources/a.md","status":"accepted","confidence":0.9,"note":""}]\n' \
+  > "$KB/runs/r.json"  # runs/*.json carries the fact as accepted (e.g. an earlier accept)
+"$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
+grep -q "Gizmo,codename,Nova,sources/a.md,accepted," "$KB/facts/candidates.csv" && ok "seed: fact merges as accepted" || bad "seed merge failed"
+# human pulls it back for re-review in candidates.csv ONLY (runs/*.json untouched)
+"$PYTHON" - "$KB/facts/candidates.csv" <<'PY'
+import sys
+p = sys.argv[1]
+t = open(p, encoding="utf-8").read().replace(
+    "Gizmo,codename,Nova,sources/a.md,accepted,", "Gizmo,codename,Nova,sources/a.md,needs_review,")
+open(p, "w", encoding="utf-8").write(t)
+PY
+"$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
+grep -q "Gizmo,codename,Nova,sources/a.md,needs_review," "$KB/facts/candidates.csv" \
+  && ok "human re-review held at needs_review across re-merge (#106)" \
+  || bad "re-review silently re-promoted: $(grep codename "$KB/facts/candidates.csv")"
+
 # --- --set-subject / --set-relation ------------------------------------------
 KB="$(mktemp -d)/wiki"; seed "$KB"
 "$PYTHON" -m factlog amend Widget codename Draft --set-subject "Widget v2" --set-relation alias --target "$KB" >/dev/null 2>&1

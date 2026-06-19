@@ -616,6 +616,31 @@ def existing_engine_keys(root: Path) -> dict[tuple[str, str, str, str], str]:
     return keys
 
 
+def existing_review_keys(root: Path) -> set[tuple[str, str, str, str]]:
+    """Keys (subject, relation, object, source-without-#anchor) a human pulled back
+    to `needs_review` in the live candidates.csv.
+
+    Preserved across re-merge so a deliberate re-review survives: a stale
+    runs/*.json value left from an earlier accept (status 'accepted') must not
+    silently re-promote a fact the human downgraded. Only `needs_review` is held
+    (not the default `candidate`), and superseded is stronger and still wins.
+    Anchor-insensitive key, like existing_engine_keys / existing_superseded_keys."""
+    csv_path = root / "facts" / "candidates.csv"
+    if not csv_path.is_file():
+        return set()
+    keys: set[tuple[str, str, str, str]] = set()
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if (row.get("status") or "").strip() == "needs_review":
+                keys.add((
+                    (row.get("subject") or "").strip(),
+                    (row.get("relation") or "").strip(),
+                    (row.get("object") or "").strip(),
+                    (row.get("source") or "").strip().partition("#")[0],
+                ))
+    return keys
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -731,6 +756,22 @@ def main() -> int:
                 restored += 1
         if restored:
             print(f"  preserved {restored} human-accepted row(s) from candidates.csv")
+
+    # Respect a deliberate human re-review: a row the human pulled back to
+    # needs_review in candidates.csv must not be silently re-promoted by a stale
+    # engine status carried in runs/*.json (e.g. left from an earlier accept).
+    # Only engine statuses are overridden — a re-asserted 'candidate' is untouched
+    # — and superseded (handled above) still wins.
+    review_keys = existing_review_keys(root)
+    if review_keys:
+        held = 0
+        for row in rows:
+            key = (row["subject"], row["relation"], row["object"], row["source"].partition("#")[0])
+            if key in review_keys and row["status"] in ENGINE_STATUSES:
+                row["status"] = "needs_review"
+                held += 1
+        if held:
+            print(f"  held {held} human-reviewed row(s) at needs_review (re-review respected)")
 
     # Warn prominently when rows were loaded but all were dropped — this
     # distinguishes a silent contract violation from a genuinely empty run.
