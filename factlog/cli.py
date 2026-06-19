@@ -1727,10 +1727,12 @@ def cmd_eject(args: argparse.Namespace) -> int:
     in sources/ in one pass. A hand-placed runs/sources/ file (no provenance
     header) has no original to track and is never treated as an orphan. Honours
     --purge / --delete-original / --dry-run like an explicit source list.
-    Detection compares originals by basename (the header records only the
-    original's name), so it errs toward keeping: a deletion is missed only when a
-    same-basename original survives elsewhere, and renaming an original on disk
-    without re-ingesting counts as orphaning its old conversion.
+    Detection pairs a conversion in a subdir (runs/sources/a/report.md, which
+    ingest mirrors from sources/a/report.*) with its original by subdir-aware rel
+    key, so same-name originals in different subtrees no longer mask each other; a
+    flat conversion (runs/sources/report.md) keeps the legacy basename match since
+    its path records no subdir. Either way it errs toward keeping. Renaming an
+    original on disk without re-ingesting counts as orphaning its old conversion.
 
     Fact mode (`eject --fact SUBJECT RELATION OBJECT`, repeatable) — retires
     candidate rows matching the given (subject, relation, object) triple(s)
@@ -1750,7 +1752,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import FACT_HEADER
+    from common import FACT_HEADER, source_rel_key
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1896,13 +1898,30 @@ def cmd_eject(args: argparse.Namespace) -> int:
             # whose file is simply missing on disk is also an orphan. Only refs
             # under the two source roots are considered, so a malformed citation
             # is never auto-ejected.
+            # Pairing a conversion with its backing original:
+            #  - a *mirrored* conversion (runs/sources/<sub>/x.md) carries the
+            #    original's subdir, so we pair by subdir-aware rel key. A flat
+            #    basename set used to mask an orphan when same-name originals lived
+            #    in different subtrees (sources/a/report.pdf vs sources/b/report.pdf):
+            #    deleting only a/report.pdf left report.pdf in the set (from b), so
+            #    a/report's conversion was never flagged.
+            #  - a *flat* conversion (runs/sources/x.md — legacy layout, or an
+            #    original ingested without a subtree to mirror) has no subdir, so
+            #    the provenance basename is the only origin signal; fall back to it
+            #    and keep erring toward retention.
             src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
+            src_relkeys = {source_rel_key(r) for r in disk_refs if not r.startswith("runs/sources/")}
             for ref in all_refs:
                 if ref.startswith("runs/sources/"):
                     if ref in disk_refs:
                         origin = conv_origin.get(ref)
-                        if origin is not None and origin not in src_basenames:
-                            matched.add(ref)  # the original it was made from is gone
+                        # origin is not None == has a factlog provenance header
+                        # (hand-placed conversions are kept).
+                        if origin is not None:
+                            ck = source_rel_key(ref)
+                            paired = ck in src_relkeys if "/" in ck else origin in src_basenames
+                            if not paired:
+                                matched.add(ref)  # the original it was made from is gone
                     else:
                         matched.add(ref)  # cited conversion whose file is already gone
                 elif ref.startswith("sources/") and ref not in disk_refs:

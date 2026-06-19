@@ -300,6 +300,23 @@ printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/frag.md#sec2,confirmed,0.9,' > "$KB
 "$PYTHON" -m factlog eject --orphans --target "$KB" >/dev/null 2>&1
 grep -q ",superseded," "$KB/facts/candidates.csv" && ok "orphan fact cited with a #fragment is still retired" || bad "fragment-cited orphan not retired"
 
+# --- same-basename originals in different subtrees: only the deleted one's -----
+# --- mirrored conversion is orphaned, not the surviving sibling (#103) ---------
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/a" "$KB/sources/b" "$KB/runs/sources/a" "$KB/runs/sources/b"
+printf 'PK\003\004\000' > "$KB/sources/b/report.pdf"   # b survives; a/report.pdf is "deleted" (never created)
+printf '<!-- ingested-by-factlog | source: report.pdf | converter: pdftotext | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/a/report.md"
+printf '<!-- ingested-by-factlog | source: report.pdf | converter: pdftotext | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/b/report.md"
+printf '%s\n%s\n%s\n' "$H" \
+  'P,rel,Q,runs/sources/a/report.md,confirmed,0.9,' \
+  'R,rel,S,runs/sources/b/report.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog eject --orphans --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/a/report.md" ] && ok "orphaned subdir conversion (deleted original) is ejected" || bad "same-basename collision masked the orphan"
+[ -f "$KB/runs/sources/b/report.md" ] && ok "surviving subdir sibling's conversion is kept" || bad "surviving sibling wrongly orphaned"
+
 # --- non-KB path errors -------------------------------------------------------
 set +e; "$PYTHON" -m factlog eject anything --target "$(mktemp -d)" >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -ne 0 ] && ok "eject on a non-KB path errors" || bad "non-KB path should error"
