@@ -923,6 +923,30 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
         session.intern(row["relation"])
         session.intern(row["object"])
 
+    # Project typed rows into their side-relations, deterministically ordered so
+    # the run is reproducible (#116 invariant 3). A non-parsing object warns and
+    # skips ONLY that row — the fact still loads untyped via relation/3 (#116
+    # invariant 4). Scalars are bare ints and must NEVER be interned.
+    #
+    # NB: derived comparison-predicate heads must stay subject-only. A small
+    # scalar appearing in a head is mis-decoded as an interned symbol by
+    # decode_wirelog_value (it round-trips ints through the intern table); that
+    # is a #120/#121 concern, not handled here.
+    if specs:
+        for row in sorted(accepted, key=lambda r: (r["relation"], r["subject"], r["object"])):
+            spec = specs.get(row["relation"])
+            if spec is None or spec.type not in _TYPED_COL:
+                continue
+            scalar = literal_types.normalize(spec.type, row["object"])
+            if scalar is None:
+                print(
+                    f"typed-relations: {row['object']!r} for {row['relation']!r} "
+                    f"({row['subject']!r}) does not parse as {spec.type}; loading untyped",
+                    file=sys.stderr,
+                )
+                continue
+            session.insert(spec.alias, (session.intern(row["subject"]), scalar))
+
     inferred: dict[str, set[tuple[str, ...]]] = defaultdict(set)
     for relation_name, row, diff in session.step():
         if diff > 0:
