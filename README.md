@@ -139,8 +139,10 @@ factlog vocab --all        # include non-engine names (candidate/needs_review/su
 - `amount` — `100억` / `1,000원` → 정수 기본 단위. **엔진 투영 지원**. 단위 표가
   필요하며, 줄 끝에 인라인으로 줄 수 있습니다: `: amount as <alias> (억=1e8, 만=1e4, 원=1)`
   (값은 양의 정수). 절을 생략하면 기본 단위 표를 씁니다.
-- `number` — `1,000` / `3.5` → 수치 크기. 현재는 **선언만** 되며 아직 엔진으로
-  투영되지 않습니다(#125).
+- `number` — `1,000` / `3.5` → 수치 크기. **엔진 투영 지원**: 정렬 가능한
+  int64 로 ×1000 스케일됩니다(소수점 3자리). ⚠️ 비교 술어의 임계값은 반드시
+  **스케일된 단위**로 적어야 합니다: `version >= 2.0` → `version_num(S, V), V >= 2000`.
+  소수 3자리를 넘는 정밀도는 반올림됩니다(ROUND_HALF_UP).
 
 `factlog vocab` 은 선언된 타입 지정 관계에 `[typed:<type>]` 태그를 붙여 보여
 줍니다(예: `[attribute, typed:date]`).

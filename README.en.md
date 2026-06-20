@@ -134,8 +134,11 @@ The four types:
   Needs a unit table; supply one inline at the end of the line:
   `: amount as <alias> (억=1e8, 만=1e4, 원=1)` (values must be positive ints).
   Omit the clause to use the built-in default unit table.
-- `number` — `1,000` / `3.5` → numeric magnitude. Currently **declared only**,
-  not yet engine-projectable (#125).
+- `number` — `1,000` / `3.5` → numeric magnitude. **Engine-projectable**: scaled
+  ×1000 (3 decimal places) to a sortable int64. ⚠️ Thresholds in comparison
+  predicates MUST be written in **scaled units**: `version >= 2.0` →
+  `version_num(S, V), V >= 2000`. Precision beyond 3 decimals rounds
+  (ROUND_HALF_UP).
 
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).
