@@ -250,6 +250,39 @@ explanation of its purpose.
 # operates_since
 # ranked
 """,
+    "policy/typed-relations.md": """\
+# Typed (comparable-literal) relations
+#
+# Declare relations whose literal object should be COMPARED, not just matched —
+# so the deterministic engine can order them, threshold them, or range over them
+# (e.g. "launched after 2030", "rank <= 3"). A relation listed here should ALSO
+# be declared in attribute-relations.md (its object is a literal, not an entity).
+#
+# One declaration per line:
+#   - `relation name` : <type> as <ascii_alias>
+# where <type> is one of: date | number | ordinal | amount, and <ascii_alias>
+# names the engine side-relation that holds the comparable value. The alias must
+# be an ASCII identifier ([A-Za-z_][A-Za-z0-9_]*); it is author-chosen so it
+# stays a legal engine name even when the relation name is non-ASCII. Quote a
+# relation name containing spaces in `backticks`.
+#
+# Type meanings:
+#   date     2030.1 / 2030-01-15  -> sortable yyyymmdd
+#   number   1,000 / 3.5          -> numeric magnitude (declared only; not yet
+#                                    engine-projectable — see issue #125)
+#   ordinal  rank 3 / 3rd         -> int rank
+#   amount   100억 / 1,000원       -> integer base unit (needs a unit table)
+#
+# An `amount` line MAY carry an inline unit table; values must be positive ints:
+#   - `relation name` : amount as <ascii_alias> (억=1e8, 만=1e4, 원=1)
+# Omit the clause to use the built-in default unit table.
+#
+# Examples (remove the leading '# ' to activate — all-synthetic):
+# - `released_on` : date as release_date
+# - `headcount` : number as headcount_value
+# - `league_rank` : ordinal as rank_value
+# - `valuation` : amount as valuation_won (억=1e8, 만=1e4, 원=1)
+""",
     "policy/sync-ignore.md": """\
 # Sync-ignore list
 #

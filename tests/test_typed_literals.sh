@@ -47,6 +47,29 @@ printf '%s\n%s\n%s\n' "$H" \
 printf 'x\n' > "$KB/sources/a.md"
 printf -- '- `정식_운영` : date as launch_date\n' > "$KB/policy/typed-relations.md"
 
+# --- section 0: scaffold + empty typed_relations() (no pyrewire) --------------
+# A freshly init-ed KB ships an all-commented policy/typed-relations.md whose
+# typed_relations() parses to {} with NO stderr warning (BOM/parse cleanliness),
+# so a fresh KB stays byte-identical (#116 invariant 1).
+SKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$SKB" >/dev/null
+if [ -f "$SKB/policy/typed-relations.md" ]; then
+  ok "init scaffolds policy/typed-relations.md"
+else
+  bad "policy/typed-relations.md not scaffolded"
+fi
+scaffold_err="$(mktemp)"
+verdict="$(FACTLOG_ROOT="$SKB" "$PYTHON" - <<'PY' 2>"$scaffold_err"
+import sys; sys.path.insert(0, "tools")
+import common as c
+print("OK" if c.typed_relations() == {} else f"FAIL: {c.typed_relations()!r}")
+PY
+)"
+[ "$verdict" = "OK" ] && ok "scaffolded stub -> typed_relations() == {}" || bad "$verdict"
+[ -s "$scaffold_err" ] && bad "stderr warning loading scaffolded stub: $(cat "$scaffold_err")" \
+  || ok "no stderr warning loading scaffolded stub (BOM/parse clean)"
+rm -f "$scaffold_err"
+
 # --- section 1: compile layer (ALWAYS runs, no pyrewire) ----------------------
 # logic-policy.dl needs at least one valid .decl; compile_facts does not read it
 # but keeping the KB engine-shaped lets section 3 reuse it.
