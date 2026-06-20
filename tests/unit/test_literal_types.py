@@ -37,6 +37,29 @@ class TestParseNumber:
         assert lt.parse_number(raw) is None
 
 
+class TestParseNumberScaled:
+    @pytest.mark.parametrize("raw,expected", [
+        ("2.5", 2500),
+        ("2026", 2026000),
+        ("1,000", 1000000),
+        ("0", 0),
+        # IEEE-754 divergence proofs: a float path mis-rounds these; Decimal is
+        # exact. 1.0005 * 1000 == 1000.4999999... as a float -> 1000, but the
+        # exact scaled value is 1000.5 -> ROUND_HALF_UP -> 1001.
+        ("1.0005", 1001),
+        ("0.0005", 1),
+    ])
+    def test_accepts(self, raw, expected):
+        assert lt.parse_number_scaled(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["abc", "", "3호", "1.2.3"])
+    def test_rejects(self, raw):
+        assert lt.parse_number_scaled(raw) is None
+
+    def test_returns_int_never_float(self):
+        assert type(lt.parse_number_scaled("2.5")) is int
+
+
 class TestParseOrdinal:
     @pytest.mark.parametrize("raw,expected", [
         ("제3호", 3), ("3위", 3), ("3rd", 3), ("1st", 1), ("12th", 12), ("제5번", 5),
@@ -78,7 +101,8 @@ class TestParseAmount:
 class TestNormalizeDispatcher:
     def test_dispatches_by_tag(self):
         assert lt.normalize("date", "2030.1") == 20300101
-        assert lt.normalize("number", "3.14") == 3.14
+        # number now projects as a scaled int64 (×1000), not a float (#125).
+        assert lt.normalize("number", "3.14") == 3140
         assert lt.normalize("ordinal", "3위") == 3
 
     def test_amount_uses_default_table(self):
@@ -119,9 +143,9 @@ class TestLiteralReConsistency:
     CANONICAL = [
         ("2030.1", "date", 20300101),
         ("2024-07-01", "date", 20240701),
-        ("2026", "number", 2026.0),
-        ("1,000", "number", 1000.0),
-        ("3.14", "number", 3.14),
+        ("2026", "number", 2026000),
+        ("1,000", "number", 1000000),
+        ("3.14", "number", 3140),
         ("제3호", "ordinal", 3),
         ("3위", "ordinal", 3),
         ("100억", "amount", 10000000000),

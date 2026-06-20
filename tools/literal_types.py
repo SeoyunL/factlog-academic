@@ -78,6 +78,25 @@ def parse_number(raw: str) -> float | None:
         return None
 
 
+NUMBER_SCALE = 1000  # fixed-point factor for `number` -> int64 (3 decimal places)
+
+
+def parse_number_scaled(raw: str) -> int | None:
+    """A number -> exact int scaled by NUMBER_SCALE (2.5 -> 2500), or None.
+    _NUMBER_RE validates; Decimal scales exactly (a float path mis-rounds:
+    1.0005 -> 1000 vs 1001). Sub-factor fraction rounds ROUND_HALF_UP."""
+    s = raw.strip()
+    if not _NUMBER_RE.match(s):
+        return None
+    try:
+        product = Decimal(s.replace(",", "")) * NUMBER_SCALE
+    except decimal.InvalidOperation:  # pragma: no cover - guarded by the regex
+        return None
+    if product == product.to_integral_value():
+        return int(product)
+    return int(product.to_integral_value(rounding=decimal.ROUND_HALF_UP))
+
+
 def parse_ordinal(raw: str) -> int | None:
     """An ordinal -> its int rank (``제3호``/``3위``/``3rd`` -> ``3``).
 
@@ -120,7 +139,11 @@ def parse_amount(raw: str, units: dict[str, int]) -> int | None:
     return int(product.to_integral_value(rounding=decimal.ROUND_HALF_UP))
 
 
-_PARSERS = {"date": parse_date, "number": parse_number, "ordinal": parse_ordinal}
+# `number` dispatches to parse_number_scaled (exact int64 fixed-point, ×1000):
+# the engine .dl text parser has no float column, so a number projects as a
+# sortable scaled int (see #125). parse_number (float) stays exported as the
+# public parser / validity gate (AC3).
+_PARSERS = {"date": parse_date, "number": parse_number_scaled, "ordinal": parse_ordinal}
 
 
 def normalize(type_tag: str, raw: str, units: dict[str, int] | None = None) -> int | float | None:
