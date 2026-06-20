@@ -338,6 +338,40 @@ def test_amount_threshold_with_default_table(tmp_path: Path):
 
 
 @pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")
+def test_amount_out_of_int64_range_is_skipped(tmp_path: Path):
+    # An amount that resolves above 2**63 must be skipped + warned rather than
+    # silently truncated/misinserted into the int64 column. 큰예산 = 1e11 * 1e8 =
+    # 1e19 (> 9.22e18 = 2**63); 갑서비스 100억 = 1e10 still clears the threshold.
+    (tmp_path / "facts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "policy").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "facts" / "accepted.dl").write_text(
+        'relation("갑서비스","예산","100억").\n'
+        'relation("큰예산서비스","예산","100000000000억").\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "policy" / "typed-relations.md").write_text(
+        "- `예산` : amount as budget_krw (억=1e8, 만=1e4, 원=1)\n", encoding="utf-8"
+    )
+    (tmp_path / "policy" / "logic-policy.dl").write_text(
+        ".decl over10b(s: symbol, reason: symbol)\n"
+        'over10b(S, "ge_10b") :- budget_krw(S, V), V >= 10000000000.\n',
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["FACTLOG_ROOT"] = str(tmp_path)
+    env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
+    proc = subprocess.run(
+        [sys.executable, "-c", _AMOUNT_RUNNER], env=env, capture_output=True, text=True
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    subjects = json.loads(proc.stdout.strip().splitlines()[-1])
+    # The out-of-range row is dropped from projection; the in-range one survives.
+    assert subjects == ["갑서비스"]
+    assert "out of int64 range" in proc.stderr
+    assert "큰예산서비스" in proc.stderr
+
+
+@pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")
 def test_no_typed_file_no_extra_is_byte_identical(tmp_path: Path):
     # A KB with neither typed-relations.md nor logic-policy.extra.dl must produce
     # a report byte-identical to the same KB run again — the feature is inert when

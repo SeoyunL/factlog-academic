@@ -46,8 +46,9 @@ _ORDINAL_KO_RE = re.compile(r"^제?(\d+)\s*(?:호|위|번|차|등|째)$")
 _ORDINAL_EN_RE = re.compile(r"^(\d+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
 # <number><unit>, contiguous OR a single space between them. The number part is a
 # plain/comma/decimal magnitude; the unit is validated against the table by the
-# caller. A leading `제` (ordinal marker) is rejected via the `(?<!제)` guard so
-# `제3호`-style ordinals never match.
+# caller. A leading `제` (ordinal marker) can't match because the `num` group is
+# anchored to a leading digit (`^\d…`), so `제3호`-style ordinals never match (the
+# first char `제` is a non-digit → no match).
 _AMOUNT_RE = re.compile(r"^(?P<num>\d[\d,]*(?:\.\d+)?) ?(?P<unit>\D+)$")
 
 

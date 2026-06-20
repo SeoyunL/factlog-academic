@@ -99,6 +99,10 @@ class TestAmountUnits:
         plain = common._parse_typed_relations("- `예산` : amount as a (억=100000000)\n")
         assert sci["예산"].units == plain["예산"].units == {"억": 10**8}
 
+    def test_duplicate_unit_errors(self):
+        with pytest.raises(common.FactlogError, match="duplicate unit"):
+            common._parse_typed_relations("- `예산` : amount as a (억=1e8, 억=1e4)\n")
+
 
 class TestKbContext:
     def _kb(self, tmp_path, *, typed=None, attrs=None):

@@ -595,6 +595,8 @@ def _parse_amount_units(body: str) -> dict[str, int]:
             raise FactlogError(f"typed-relations: non-numeric unit value {value!r} for {unit!r}") from exc
         if num != num.to_integral_value() or num <= 0:
             raise FactlogError(f"typed-relations: unit value for {unit!r} must be a positive integer, got {value!r}")
+        if unit in units:
+            raise FactlogError(f"typed-relations: duplicate unit {unit!r} in units clause")
         units[unit] = int(num)
     return units
 
@@ -1019,6 +1021,13 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
                 print(
                     f"typed-relations: {row['object']!r} for {row['relation']!r} "
                     f"({row['subject']!r}) normalized to non-int {scalar!r}; skipping",
+                    file=sys.stderr,
+                )
+                continue
+            if not (-(2**63) <= scalar < 2**63):
+                print(
+                    f"typed-relations: {row['object']!r} for {row['relation']!r} "
+                    f"({row['subject']!r}) = {scalar} out of int64 range; skipping",
                     file=sys.stderr,
                 )
                 continue
