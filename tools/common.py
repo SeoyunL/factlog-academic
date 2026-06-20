@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import decimal
 import json
 import os
 import re
@@ -538,12 +539,20 @@ def attribute_relations() -> set[str]:
 class TypedRelSpec:
     type: str   # one of literal_types.TYPES
     alias: str  # ASCII identifier naming the engine side-relation
+    # Inline unit table for an `amount` relation, e.g. {"억": 10**8, "원": 1}.
+    # None for non-amount types, and for an amount line with no inline clause
+    # (the projection then resolves to literal_types.DEFAULT_AMOUNT_UNITS).
+    units: dict[str, int] | None = None
 
 
 _ASCII_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# `name` : type  as  alias   — name optionally backtick-quoted (may contain spaces).
+# `name` : type  as  alias  (units)?  — name optionally backtick-quoted (may
+# contain spaces); an optional trailing `(...)` unit clause is valid ONLY on an
+# `amount` line (enforced in _parse_typed_relations). Lines with no clause parse
+# byte-identically to before and yield units=None.
 _TYPED_REL_RE = re.compile(
-    r"^(?:`(?P<qname>[^`]+)`|(?P<name>\S+))\s*:\s*(?P<type>\w+)\s+as\s+(?P<alias>\S+)\s*$"
+    r"^(?:`(?P<qname>[^`]+)`|(?P<name>\S+))\s*:\s*(?P<type>\w+)\s+as\s+(?P<alias>\S+)"
+    r"(?:\s*\((?P<units>[^)]*)\))?\s*$"
 )
 _TYPED_RESERVED = {"relation", "edge", "path"}  # built-in engine predicates
 
@@ -559,6 +568,35 @@ def _try(fn):
 
 def _typed_reserved_names(relations: set[str], predicates: set[str]) -> set[str]:
     return _TYPED_RESERVED | set(relations) | set(predicates)
+
+
+def _parse_amount_units(body: str) -> dict[str, int]:
+    """Parse an inline `amount` unit clause body, e.g. ``억=1e8, 만=1e4, 원=1``.
+
+    Comma-separated ``unit=number`` pairs; the value may be written ``1e8`` or
+    ``100000000`` but MUST resolve to a **positive integer** (the engine projects
+    amounts into an int64 column). A non-positive / non-integer / non-numeric
+    value, or a malformed pair, → FactlogError (fail loudly)."""
+    units: dict[str, int] = {}
+    for pair in body.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise FactlogError(f"typed-relations: malformed unit pair {pair!r} (expected unit=number)")
+        unit, _, value = pair.partition("=")
+        unit = unit.strip()
+        value = value.strip()
+        if not unit:
+            raise FactlogError(f"typed-relations: empty unit name in {pair!r}")
+        try:
+            num = decimal.Decimal(value)
+        except decimal.InvalidOperation as exc:
+            raise FactlogError(f"typed-relations: non-numeric unit value {value!r} for {unit!r}") from exc
+        if num != num.to_integral_value() or num <= 0:
+            raise FactlogError(f"typed-relations: unit value for {unit!r} must be a positive integer, got {value!r}")
+        units[unit] = int(num)
+    return units
 
 
 def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = frozenset()) -> dict[str, TypedRelSpec]:
@@ -587,9 +625,14 @@ def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = froz
         name = unicodedata.normalize("NFC", (m.group("qname") or m.group("name")).strip())
         type_tag = m.group("type")
         alias = m.group("alias")
+        units_body = m.group("units")  # None if no clause, "" if empty `()`
         if type_tag not in literal_types.TYPES:
             print(f"typed-relations: unknown type {type_tag!r} for {name!r}; skipping", file=sys.stderr)
             continue
+        # A units clause is valid ONLY on an amount line (fail loudly otherwise).
+        if units_body is not None and type_tag != "amount":
+            raise FactlogError(f"typed-relations: a units clause is only valid on an amount line, not {type_tag!r} ({name!r})")
+        units = _parse_amount_units(units_body) if (type_tag == "amount" and units_body is not None) else None
         if not _ASCII_IDENT_RE.match(alias):
             raise FactlogError(f"typed-relations: alias must be an ASCII identifier: {alias!r}")
         if alias in _TYPED_RESERVED or alias in reserved:
@@ -597,7 +640,7 @@ def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = froz
         if alias in seen_alias:
             raise FactlogError(f"typed-relations: duplicate alias {alias!r} ({seen_alias[alias]} and {name})")
         seen_alias[alias] = name
-        specs[name] = TypedRelSpec(type=type_tag, alias=alias)
+        specs[name] = TypedRelSpec(type=type_tag, alias=alias, units=units)
     return specs
 
 

@@ -65,6 +65,41 @@ class TestValidation:
             common._parse_typed_relations("- `x` : date as a\n- `y` : number as a\n")
 
 
+class TestAmountUnits:
+    def test_amount_with_units_table(self):
+        specs = common._parse_typed_relations(
+            "- `예산` : amount as budget_krw (억=1e8, 만=1e4, 원=1)\n"
+        )
+        assert specs["예산"] == common.TypedRelSpec(
+            "amount", "budget_krw", {"억": 10**8, "만": 10**4, "원": 1}
+        )
+
+    def test_amount_without_units_is_none(self):
+        specs = common._parse_typed_relations("- `예산` : amount as budget_krw\n")
+        assert specs["예산"].units is None
+
+    def test_units_on_date_line_errors(self):
+        with pytest.raises(common.FactlogError, match="only valid on an amount"):
+            common._parse_typed_relations("- `정식_운영` : date as launch_date (억=1e8)\n")
+
+    def test_non_positive_unit_errors(self):
+        with pytest.raises(common.FactlogError, match="positive integer"):
+            common._parse_typed_relations("- `예산` : amount as budget_krw (억=0)\n")
+
+    def test_non_integer_unit_errors(self):
+        with pytest.raises(common.FactlogError, match="positive integer"):
+            common._parse_typed_relations("- `예산` : amount as budget_krw (억=3.5)\n")
+
+    def test_non_numeric_unit_errors(self):
+        with pytest.raises(common.FactlogError, match="non-numeric"):
+            common._parse_typed_relations("- `예산` : amount as budget_krw (억=lots)\n")
+
+    def test_scientific_and_plain_notation_equivalent(self):
+        sci = common._parse_typed_relations("- `예산` : amount as a (억=1e8)\n")
+        plain = common._parse_typed_relations("- `예산` : amount as a (억=100000000)\n")
+        assert sci["예산"].units == plain["예산"].units == {"억": 10**8}
+
+
 class TestKbContext:
     def _kb(self, tmp_path, *, typed=None, attrs=None):
         (tmp_path / "policy").mkdir(parents=True, exist_ok=True)
