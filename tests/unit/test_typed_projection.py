@@ -26,23 +26,24 @@ class TestTypedDecls:
         specs = {"우선순위": common.TypedRelSpec("ordinal", "priority_rank")}
         assert common._typed_decls(specs) == "\n.decl priority_rank(subject: symbol, v: int64)\n"
 
-    def test_number_is_skipped(self):
-        # No float text column in this pyrewire build (#125 follow-up).
+    def test_number_emits_int64_line(self):
+        # number now projects as a scaled int64 (×1000) side-relation (#125).
         specs = {"버전": common.TypedRelSpec("number", "version_num")}
-        assert common._typed_decls(specs) == ""
+        assert common._typed_decls(specs) == "\n.decl version_num(subject: symbol, v: int64)\n"
 
     def test_sorted_by_alias(self):
         specs = {
             "b": common.TypedRelSpec("date", "zzz"),
             "a": common.TypedRelSpec("ordinal", "aaa"),
-            "n": common.TypedRelSpec("number", "skipme"),
+            "n": common.TypedRelSpec("number", "mmm"),
         }
         out = common._typed_decls(specs)
+        # number now projects too, sorted alongside date/ordinal by alias.
         assert out == (
             "\n.decl aaa(subject: symbol, v: int64)"
+            "\n.decl mmm(subject: symbol, v: int64)"
             "\n.decl zzz(subject: symbol, v: int64)\n"
         )
-        assert "skipme" not in out
 
 
 class TestAliasCollision:
@@ -57,12 +58,13 @@ class TestAliasCollision:
         program = ".decl relation(subject: symbol, rel: symbol, object: symbol)\n"
         common._assert_no_alias_collision(specs, program)  # does not raise
 
-    def test_non_projectable_alias_ignored(self):
-        # A `number` alias that happens to match an existing decl is not a
-        # collision because number is never projected.
+    def test_number_alias_is_collision_checked(self):
+        # number now projects (#125), so a number alias that duplicates an
+        # existing .decl IS a collision (it would emit a duplicate decl).
         specs = {"버전": common.TypedRelSpec("number", "version_num")}
         program = ".decl version_num(s: symbol, v: int64)\n"
-        common._assert_no_alias_collision(specs, program)  # does not raise
+        with pytest.raises(common.FactlogError):
+            common._assert_no_alias_collision(specs, program)
 
 
 _RUNNER = textwrap.dedent(
@@ -369,6 +371,88 @@ def test_amount_out_of_int64_range_is_skipped(tmp_path: Path):
     assert subjects == ["갑서비스"]
     assert "out of int64 range" in proc.stderr
     assert "큰예산서비스" in proc.stderr
+
+
+# --- #125: number projects into a scaled int64 (×1000) side-relation ----------
+
+_NUMBER_RUNNER = textwrap.dedent(
+    """
+    import os, sys, json
+    sys.path.insert(0, os.path.join(os.environ["KB_TOOLS"]))
+    import common
+    a = common.run_wirelog()
+    b = common.run_wirelog()
+    assert a == b, "non-deterministic engine output"
+    print(json.dumps(sorted(row[0] for row in a.get("ge_v2", set()))))
+    """
+)
+
+
+@pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")
+def test_number_threshold_scaled(tmp_path: Path):
+    # appA 버전 2.5 (-> 2500) clears `>= 2000` (i.e. version 2.0 in SCALED units);
+    # appB 버전 1.999 (-> 1999) is one scaled unit below -> the determinism proof.
+    (tmp_path / "facts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "policy").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "facts" / "accepted.dl").write_text(
+        'relation("appA","버전","2.5").\n'
+        'relation("appB","버전","1.999").\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "policy" / "typed-relations.md").write_text(
+        "- `버전` : number as version_num\n", encoding="utf-8"
+    )
+    (tmp_path / "policy" / "logic-policy.dl").write_text(
+        # Arity-2 head (run_wirelog-direct test); the threshold is in SCALED
+        # units: version 2.0 -> 2000 (×1000). See the date e2e note above.
+        ".decl ge_v2(s: symbol, reason: symbol)\n"
+        'ge_v2(S, "ge_2_0") :- version_num(S, V), V >= 2000.\n',
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["FACTLOG_ROOT"] = str(tmp_path)
+    env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
+    proc = subprocess.run(
+        [sys.executable, "-c", _NUMBER_RUNNER], env=env, capture_output=True, text=True
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    subjects = json.loads(proc.stdout.strip().splitlines()[-1])
+    # 2500 >= 2000; 1999 < 2000 — the 1.999 boundary proves exact scaled ordering.
+    assert subjects == ["appA"]
+
+
+@pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")
+def test_number_out_of_int64_range_is_skipped(tmp_path: Path):
+    # A number whose scaled value (×1000) exceeds 2**63 must be skipped + warned
+    # rather than misinserted. 1e16 * 1000 = 1e19 (> 9.22e18 = 2**63); appA's
+    # 2.5 (-> 2500) still clears the threshold.
+    (tmp_path / "facts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "policy").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "facts" / "accepted.dl").write_text(
+        'relation("appA","버전","2.5").\n'
+        'relation("bigApp","버전","10000000000000000").\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "policy" / "typed-relations.md").write_text(
+        "- `버전` : number as version_num\n", encoding="utf-8"
+    )
+    (tmp_path / "policy" / "logic-policy.dl").write_text(
+        ".decl ge_v2(s: symbol, reason: symbol)\n"
+        'ge_v2(S, "ge_2_0") :- version_num(S, V), V >= 2000.\n',
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["FACTLOG_ROOT"] = str(tmp_path)
+    env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
+    proc = subprocess.run(
+        [sys.executable, "-c", _NUMBER_RUNNER], env=env, capture_output=True, text=True
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    subjects = json.loads(proc.stdout.strip().splitlines()[-1])
+    # The out-of-range row is dropped from projection; the in-range one survives.
+    assert subjects == ["appA"]
+    assert "out of int64 range" in proc.stderr
+    assert "bigApp" in proc.stderr
 
 
 @pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")

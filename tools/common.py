@@ -676,14 +676,15 @@ def typed_relations() -> dict[str, TypedRelSpec]:
     return specs
 
 
-# Per-type engine column for a projectable typed side-relation. `number` is
-# intentionally absent: this pyrewire build's .dl TEXT parser accepts only
-# int32|int64|string|symbol scalar columns — there is NO float text column, and
-# one unparseable .decl rejects the whole program. So `number` cannot be
-# projected yet (it is warned declared-but-not-supported and skipped); follow-up
-# #125 handles it. `date`/`ordinal` normalize to sortable ints -> int64.
-# `amount` normalizes to an exact integer base unit (see literal_types) -> int64.
-_TYPED_COL = {"date": "int64", "ordinal": "int64", "amount": "int64"}
+# Per-type engine column for a projectable typed side-relation. This pyrewire
+# build's .dl TEXT parser accepts only int32|int64|string|symbol scalar columns
+# — there is NO float text column. `date`/`ordinal` normalize to sortable ints
+# -> int64. `amount` normalizes to an exact integer base unit -> int64. `number`
+# (#125) has no native float column, so it projects as a fixed-point int64
+# scaled ×1000 (3 decimal places, see literal_types.parse_number_scaled);
+# comparison thresholds in hand-authored predicates MUST be written in the same
+# SCALED units (`version >= 2.0` -> `version_num(S, V), V >= 2000`).
+_TYPED_COL = {"date": "int64", "ordinal": "int64", "number": "int64", "amount": "int64"}
 
 
 def _typed_decls(specs: dict[str, TypedRelSpec]) -> str:
