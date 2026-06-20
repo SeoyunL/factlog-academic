@@ -680,7 +680,8 @@ def typed_relations() -> dict[str, TypedRelSpec]:
 # one unparseable .decl rejects the whole program. So `number` cannot be
 # projected yet (it is warned declared-but-not-supported and skipped); follow-up
 # #125 handles it. `date`/`ordinal` normalize to sortable ints -> int64.
-_TYPED_COL = {"date": "int64", "ordinal": "int64"}
+# `amount` normalizes to an exact integer base unit (see literal_types) -> int64.
+_TYPED_COL = {"date": "int64", "ordinal": "int64", "amount": "int64"}
 
 
 def _typed_decls(specs: dict[str, TypedRelSpec]) -> str:
@@ -1002,11 +1003,22 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
             spec = specs.get(row["relation"])
             if spec is None or spec.type not in _TYPED_COL:
                 continue
-            scalar = literal_types.normalize(spec.type, row["object"])
+            scalar = literal_types.normalize(spec.type, row["object"], spec.units)
             if scalar is None:
                 print(
                     f"typed-relations: {row['object']!r} for {row['relation']!r} "
                     f"({row['subject']!r}) does not parse as {spec.type}; loading untyped",
+                    file=sys.stderr,
+                )
+                continue
+            # Defensive: every _TYPED_COL is an int64 column. pyrewire silently
+            # accepts a float into an int64 column (wrong comparison), so if a
+            # future normalizer ever leaks a non-int, skip + warn loudly rather
+            # than insert a silently-wrong value.
+            if not isinstance(scalar, int):
+                print(
+                    f"typed-relations: {row['object']!r} for {row['relation']!r} "
+                    f"({row['subject']!r}) normalized to non-int {scalar!r}; skipping",
                     file=sys.stderr,
                 )
                 continue

@@ -2,6 +2,7 @@
 """Unit + end-to-end tests for the typed side-relation projection (#119)."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -274,6 +275,66 @@ def test_superseded_typed_row_excluded_from_comparison(tmp_path: Path):
     report = _run_logic_check(tmp_path)
     assert "after2030: 을서비스 (launch_after_2030)" in report
     assert "구서비스" not in report.split("Policy Findings:", 1)[-1]
+
+
+# --- #122: amount projects into an int64 base-unit side-relation ---------------
+
+_AMOUNT_RUNNER = textwrap.dedent(
+    """
+    import os, sys, json
+    sys.path.insert(0, os.path.join(os.environ["KB_TOOLS"]))
+    import common
+    a = common.run_wirelog()
+    b = common.run_wirelog()
+    assert a == b, "non-deterministic engine output"
+    print(json.dumps(sorted(row[0] for row in a.get("over10b", set()))))
+    """
+)
+
+
+def _run_amount_kb(tmp_path: Path, units_clause: str) -> tuple[list[str], str]:
+    """Build an amount KB (옵셔널 inline unit clause) and return (subjects, stderr).
+
+    갑서비스 예산 100억 (=1e10) clears `>= 1e10`; 을서비스 50억 (=5e9) does not.
+    """
+    (tmp_path / "facts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "policy").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "facts" / "accepted.dl").write_text(
+        'relation("갑서비스","예산","100억").\n'
+        'relation("을서비스","예산","50억").\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "policy" / "typed-relations.md").write_text(
+        f"- `예산` : amount as budget_krw{units_clause}\n", encoding="utf-8"
+    )
+    (tmp_path / "policy" / "logic-policy.dl").write_text(
+        # Arity-2 head (run_wirelog-direct test; see the date e2e note above).
+        ".decl over10b(s: symbol, reason: symbol)\n"
+        'over10b(S, "ge_10b") :- budget_krw(S, V), V >= 10000000000.\n',
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["FACTLOG_ROOT"] = str(tmp_path)
+    env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
+    proc = subprocess.run(
+        [sys.executable, "-c", _AMOUNT_RUNNER], env=env, capture_output=True, text=True
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    return json.loads(proc.stdout.strip().splitlines()[-1]), proc.stderr
+
+
+@pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")
+def test_amount_threshold_with_inline_units(tmp_path: Path):
+    # 100억 = 1e10 clears `>= 1e10`; 50억 = 5e9 does not. Exact int base unit.
+    subjects, _ = _run_amount_kb(tmp_path, " (억=1e8, 만=1e4, 원=1)")
+    assert subjects == ["갑서비스"]
+
+
+@pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")
+def test_amount_threshold_with_default_table(tmp_path: Path):
+    # No inline clause -> projection resolves to DEFAULT_AMOUNT_UNITS (억=1e8).
+    subjects, _ = _run_amount_kb(tmp_path, "")
+    assert subjects == ["갑서비스"]
 
 
 @pytest.mark.skipif(common.EasySession is None, reason="pyrewire not installed")
