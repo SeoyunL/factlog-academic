@@ -11,6 +11,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+import literal_types
+
 try:
     import pyrewire
     from pyrewire import EasySession
@@ -147,6 +149,18 @@ class KbContext:
 
     def attribute_relations(self) -> set[str]:
         return _relation_names_from(self.policy_dir / "attribute-relations.md")
+
+    def typed_relations(self) -> dict[str, TypedRelSpec]:
+        path = self.policy_dir / "typed-relations.md"
+        if not path.is_file():
+            return {}
+        reserved = _typed_reserved_names(
+            relations=_try(lambda: allowed_relations(self.load_facts())),
+            predicates=_try(lambda: policy_predicates(self.load_logic_policy())),
+        )
+        specs = _parse_typed_relations(path.read_text(encoding="utf-8"), reserved)
+        _warn_typed_not_attribute(specs, self.attribute_relations())
+        return specs
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -491,6 +505,110 @@ def attribute_relations() -> set[str]:
     → entity_set == value_set (fully backward compatible).
     """
     return _relation_names_from(POLICY_DIR / "attribute-relations.md")
+
+
+# --- typed relations (policy/typed-relations.md) -----------------------------
+# Declares which relations carry a typed literal object (date/number/ordinal),
+# and the ASCII alias of the engine side-relation that holds the comparable
+# value. The alias is author-chosen (not derived from the relation name) so it is
+# guaranteed to be a legal, stable engine identifier even when the relation name
+# is non-ASCII. The flat triple stays canonical; this only declares typing.
+
+@dataclass(frozen=True)
+class TypedRelSpec:
+    type: str   # one of literal_types.TYPES
+    alias: str  # ASCII identifier naming the engine side-relation
+
+
+_ASCII_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# `name` : type  as  alias   — name optionally backtick-quoted (may contain spaces).
+_TYPED_REL_RE = re.compile(
+    r"^(?:`(?P<qname>[^`]+)`|(?P<name>\S+))\s*:\s*(?P<type>\w+)\s+as\s+(?P<alias>\S+)\s*$"
+)
+_TYPED_RESERVED = {"relation", "edge", "path"}  # built-in engine predicates
+
+
+def _try(fn):
+    """Best-effort: return fn()'s result, or an empty set if it raises a
+    FactlogError (e.g. a fresh KB with no candidates.csv / logic-policy.dl)."""
+    try:
+        return fn()
+    except FactlogError:
+        return set()
+
+
+def _typed_reserved_names(relations: set[str], predicates: set[str]) -> set[str]:
+    return _TYPED_RESERVED | set(relations) | set(predicates)
+
+
+def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = frozenset()) -> dict[str, TypedRelSpec]:
+    """Pure parser for typed-relations.md. *reserved* is the set of names the
+    alias must not collide with (built-ins + existing relations/predicates).
+
+    - relation names are NFC-normalised;
+    - an unknown type tag → warning + the line is skipped (loaded untyped);
+    - a malformed line → warning + skipped;
+    - a non-ASCII-identifier alias, an alias colliding with a reserved/existing
+      name, or a duplicate alias within the file → FactlogError (fail loudly).
+    """
+    specs: dict[str, TypedRelSpec] = {}
+    seen_alias: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = re.sub(r"^\s*[-*]\s+", "", line.strip()).strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        stripped = re.sub(r"\s*#.*$", "", stripped).strip()  # drop a trailing inline comment
+        if not stripped:
+            continue
+        m = _TYPED_REL_RE.match(stripped)
+        if not m:
+            print(f"typed-relations: skipping malformed line: {stripped!r}", file=sys.stderr)
+            continue
+        name = unicodedata.normalize("NFC", (m.group("qname") or m.group("name")).strip())
+        type_tag = m.group("type")
+        alias = m.group("alias")
+        if type_tag not in literal_types.TYPES:
+            print(f"typed-relations: unknown type {type_tag!r} for {name!r}; skipping", file=sys.stderr)
+            continue
+        if not _ASCII_IDENT_RE.match(alias):
+            raise FactlogError(f"typed-relations: alias must be an ASCII identifier: {alias!r}")
+        if alias in _TYPED_RESERVED or alias in reserved:
+            raise FactlogError(f"typed-relations: alias {alias!r} collides with a reserved or existing name")
+        if alias in seen_alias:
+            raise FactlogError(f"typed-relations: duplicate alias {alias!r} ({seen_alias[alias]} and {name})")
+        seen_alias[alias] = name
+        specs[name] = TypedRelSpec(type=type_tag, alias=alias)
+    return specs
+
+
+def _warn_typed_not_attribute(specs: dict[str, TypedRelSpec], attrs: set[str]) -> None:
+    attrs_nfc = {unicodedata.normalize("NFC", a) for a in attrs}
+    for name in specs:
+        if name not in attrs_nfc:
+            print(
+                f"typed-relations: {name!r} is typed but not declared in attribute-relations.md "
+                "(its object should be a literal, not an entity)",
+                file=sys.stderr,
+            )
+
+
+def typed_relations() -> dict[str, TypedRelSpec]:
+    """Relations declared typed in policy/typed-relations.md → {name: TypedRelSpec}.
+
+    Absent (or all-comment) file → empty mapping (no typed relations; behaviour
+    is byte-identical to a KB without the feature). See KbContext.typed_relations
+    for the per-KB variant.
+    """
+    path = POLICY_DIR / "typed-relations.md"
+    if not path.is_file():
+        return {}
+    reserved = _typed_reserved_names(
+        relations=_try(allowed_relations),
+        predicates=_try(policy_predicates),
+    )
+    specs = _parse_typed_relations(path.read_text(encoding="utf-8"), reserved)
+    _warn_typed_not_attribute(specs, attribute_relations())
+    return specs
 
 
 def corroboration_counts(facts: list[dict[str, str]]) -> dict[tuple[str, str, str], int]:
