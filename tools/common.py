@@ -611,6 +611,44 @@ def typed_relations() -> dict[str, TypedRelSpec]:
     return specs
 
 
+# Per-type engine column for a projectable typed side-relation. `number` is
+# intentionally absent: this pyrewire build's .dl TEXT parser accepts only
+# int32|int64|string|symbol scalar columns — there is NO float text column, and
+# one unparseable .decl rejects the whole program. So `number` cannot be
+# projected yet (it is warned declared-but-not-supported and skipped); follow-up
+# #125 handles it. `date`/`ordinal` normalize to sortable ints -> int64.
+_TYPED_COL = {"date": "int64", "ordinal": "int64"}
+
+
+def _typed_decls(specs: dict[str, TypedRelSpec]) -> str:
+    """`.decl <alias>(subject: symbol, v: <col>)` lines for every projectable
+    typed relation (type in _TYPED_COL), sorted by alias for determinism.
+
+    Returns "" when none, so appending to the program text is byte-identical to
+    today whenever there are no projectable typed relations (#116 invariant 1)."""
+    lines = sorted(
+        f".decl {spec.alias}(subject: symbol, v: {_TYPED_COL[spec.type]})"
+        for spec in specs.values()
+        if spec.type in _TYPED_COL
+    )
+    return ("\n" + "\n".join(lines) + "\n") if lines else ""
+
+
+def _assert_no_alias_collision(specs: dict[str, TypedRelSpec], program_text: str) -> None:
+    """Raise FactlogError if a projectable alias duplicates a `.decl <name>(`
+    already present in the assembled program.
+
+    The engine silently accepts a duplicate .decl, and #118's parse-time check
+    uses a best-effort reserved set, so re-check here against the real, fully
+    assembled program (WIRELOG_PROGRAM + policy + accepted)."""
+    declared = set(re.findall(r"^\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\(", program_text, flags=re.MULTILINE))
+    for spec in specs.values():
+        if spec.type in _TYPED_COL and spec.alias in declared:
+            raise FactlogError(
+                f"typed-relations: alias {spec.alias!r} collides with a .decl already in the program"
+            )
+
+
 def corroboration_counts(facts: list[dict[str, str]]) -> dict[tuple[str, str, str], int]:
     """Map each engine-input fact (subject, relation, object) to the number of
     DISTINCT sources backing it. A fact corroborated by several independent
@@ -863,10 +901,24 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
 
     accepted_program = ACCEPTED_DL.read_text(encoding="utf-8")
     policy_program = load_logic_policy()
-    session = EasySession(WIRELOG_PROGRAM + "\n" + policy_program + "\n" + accepted_program)
+    specs = typed_relations()
+    base_program = WIRELOG_PROGRAM + "\n" + policy_program + "\n" + accepted_program
+    if specs:
+        _assert_no_alias_collision(specs, base_program)
+        for name, spec in specs.items():
+            if spec.type not in _TYPED_COL:
+                print(
+                    f"typed-relations: {name!r} declared {spec.type!r}, which is not yet "
+                    "projectable into the engine; skipping (see #125)",
+                    file=sys.stderr,
+                )
+    # _typed_decls(specs) is "" when there is nothing projectable, so the program
+    # text is byte-identical to today for a KB with no typed-relations (#116 inv.1).
+    session = EasySession(base_program + _typed_decls(specs))
     for value in re.findall(r'"([^"]+)"', policy_program):
         session.intern(value)
-    for row in load_accepted_facts():
+    accepted = load_accepted_facts()
+    for row in accepted:
         session.intern(row["subject"])
         session.intern(row["relation"])
         session.intern(row["object"])
