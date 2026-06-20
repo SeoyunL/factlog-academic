@@ -943,10 +943,12 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     # skips ONLY that row — the fact still loads untyped via relation/3 (#116
     # invariant 4). Scalars are bare ints and must NEVER be interned.
     #
-    # NB: derived comparison-predicate heads must stay subject-only. A small
-    # scalar appearing in a head is mis-decoded as an interned symbol by
-    # decode_wirelog_value (it round-trips ints through the intern table); that
-    # is a #120/#121 concern, not handled here.
+    # NB: hand-authored comparison-predicate rules (#120) use arity-2
+    # (subject, reason) heads with a quoted reason string; the scalar stays in
+    # the body. A bare scalar in a head would be mis-decoded as an interned
+    # symbol by decode_wirelog_value (it round-trips ints through the intern
+    # table), so it must never appear there. Those rules live in the optional
+    # policy/logic-policy.extra.dl, not here.
     if specs:
         for row in sorted(accepted, key=lambda r: (r["relation"], r["subject"], r["object"])):
             spec = specs.get(row["relation"])

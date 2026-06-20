@@ -153,6 +153,39 @@ optional; with no declarations the entity set is unchanged (every object is an
 entity). Run `tools/entity_audit.py` to find candidates (objects that look like
 literals under a relation you haven't declared).
 
+**Typed comparison predicates (hand-authored).** A relation declared in
+`policy/typed-relations.md` with a type tag and an ASCII alias —
+e.g. `- `정식_운영` : date as launch_date` — is projected each run into a typed
+side-relation `launch_date(subject: symbol, v: int64)` keyed on the subject. To
+*ask a comparison over it* ("which subjects launched on/after 2030?"), write the
+rule yourself in the optional file **`policy/logic-policy.extra.dl`** (NOT
+`logic-policy.dl`, which is regenerated from `logic-policy.md` and byte-checked
+by `generate_logic_policy.py --check`; a hand-authored rule there is flagged
+stale). `load_logic_policy()` concatenates `logic-policy.extra.dl` onto the
+generated program when it exists and `--check` never touches it. The
+comparison-predicate head **must be arity-2 `(entity: symbol, reason: symbol)`
+with a quoted reason string** — the same shape as a `requires_review` finding —
+and the scalar value stays in the **body**, never the head:
+
+```
+.decl after2030(entity: symbol, reason: symbol)
+after2030(S, "launch_after_2030") :- launch_date(S, D), D >= 20300101.
+```
+
+(A subject-only arity-1 head like `after2030(S)` crashes the report's
+findings path and is rejected by query classification; a bare scalar in the
+head is also mis-decoded as an interned symbol. The quoted reason is pre-interned
+and safe.) The threshold is the *question*, not a property of the relation, so
+you supply it: `D >= 20300101` is inclusive of the boundary day (2030-01-01 is
+included). For `date`, the value is a sortable `yyyymmdd` int64 — a source object
+`2030.1` normalises to `20300101` (missing parts default to `01`), so a comparison
+threshold is also written `yyyymmdd`. The source object must be in a parseable
+form (`2030.1`, not a bare `2030`). The predicate's rows surface in
+`logic_report.txt` under `Policy Findings:` (`after2030: 을서비스 (launch_after_2030)`)
+via the existing policy-findings path, because its `.decl` name is auto-discovered
+by `policy_predicates()`. With no `typed-relations.md` and no
+`logic-policy.extra.dl`, behaviour is byte-identical to a KB without the feature.
+
 Use `/factlog add` for quick capture; use the explicit `sync → query → check →
 repair` sequence when you need the full question→query workflow.
 
