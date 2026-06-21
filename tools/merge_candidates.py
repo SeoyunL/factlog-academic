@@ -251,14 +251,25 @@ def normalize_rows(
 
     - status is normalised to 'needs_review' if not in VALID_STATUSES
     - confidence is clamped to [0.00, 1.00]
-    - exact duplicate (subject, relation, object, source) tuples are dropped
+    - duplicate (subject, relation, object, source-file) tuples collapse to one
+      row.  The dedup key strips any '#anchor' (so 'sources/a.md' and
+      'sources/a.md#sec1' are one fact), consistent with the anchor-insensitive
+      status-preservation keys (existing_superseded_keys / existing_engine_keys
+      / existing_review_keys).  The surviving row is chosen deterministically:
+      the one whose full 'source' sorts lexicographically first — a bare
+      'sources/a.md' (a prefix of, thus less than, any 'sources/a.md#anchor')
+      wins over every anchored variant, otherwise the lexicographically-first
+      anchor wins.  This is independent of input row order.
     - result is sorted by (source, subject, relation, object)
 
     If *strict* is True, any dropped row causes a non-zero exit.
     """
     known_sources = source_file_refs(root)
-    seen: set[tuple[str, str, str, str]] = set()
-    normalized: list[dict[str, str]] = []
+    # Anchor-insensitive dedup: key on (subject, relation, object, source-file),
+    # mapping to the surviving row.  On collision the row whose full 'source'
+    # sorts lexicographically first wins (bare path < anchored variant), so the
+    # winner is fixed by value, not input order.
+    dedup: dict[tuple[str, str, str, str], dict[str, str]] = {}
     dropped = 0
 
     for row in rows:
@@ -287,18 +298,23 @@ def normalize_rows(
         clean["source"] = source  # NFC-normalised canonical source
         clean["status"] = clean["status"] if clean["status"] in VALID_STATUSES else "needs_review"
         clean["confidence"] = normalize_confidence(clean["confidence"])
-        key = (clean["subject"], clean["relation"], clean["object"], clean["source"])
-        if key in seen:
+        # Anchor-insensitive key: source_file is the pre-'#anchor' portion
+        # (already computed above for the source-existence check).
+        key = (clean["subject"], clean["relation"], clean["object"], source_file)
+        existing = dedup.get(key)
+        if existing is None:
+            dedup[key] = clean
+        else:
             dropped += 1
-            continue
-        seen.add(key)
-        normalized.append(clean)
+            # Keep the row whose full source sorts first (bare < anchored).
+            if clean["source"] < existing["source"]:
+                dedup[key] = clean
 
     if dropped:
         print(f"  warning: {dropped} row(s) dropped during normalise/dedup", file=sys.stderr)
 
     return sorted(
-        normalized,
+        dedup.values(),
         key=lambda item: (item["source"], item["subject"], item["relation"], item["object"]),
     )
 
