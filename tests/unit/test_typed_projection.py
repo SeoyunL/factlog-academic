@@ -13,6 +13,16 @@ import common
 import pytest
 
 
+def _run_child(command: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+
 class TestTypedDecls:
     def test_empty_specs_is_empty_string(self):
         # Byte-identity gate (#116 invariant 1): nothing projectable -> "".
@@ -173,12 +183,7 @@ def test_end_to_end_threshold_inference(tmp_path: Path):
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(tmp_path)
     env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
-    proc = subprocess.run(
-        [sys.executable, "-c", _RUNNER],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    proc = _run_child([sys.executable, "-c", _RUNNER], env=env)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     import json
 
@@ -236,12 +241,7 @@ def _run_logic_check(root: Path) -> str:
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(root)
     tools_dir = Path(common.__file__).resolve().parent
-    proc = subprocess.run(
-        [sys.executable, str(tools_dir / "run_logic_check.py")],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    proc = _run_child([sys.executable, str(tools_dir / "run_logic_check.py")], env=env)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     return (root / "facts" / "logic_report.txt").read_text(encoding="utf-8")
 
@@ -282,12 +282,7 @@ def _compile_facts(root: Path) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(root)
     tools_dir = Path(common.__file__).resolve().parent
-    return subprocess.run(
-        [sys.executable, str(tools_dir / "compile_facts.py")],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    return _run_child([sys.executable, str(tools_dir / "compile_facts.py")], env=env)
 
 
 def _build_superseded_kb(root: Path) -> None:
@@ -376,9 +371,7 @@ def _run_amount_kb(tmp_path: Path, units_clause: str) -> tuple[list[str], str]:
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(tmp_path)
     env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
-    proc = subprocess.run(
-        [sys.executable, "-c", _AMOUNT_RUNNER], env=env, capture_output=True, text=True
-    )
+    proc = _run_child([sys.executable, "-c", _AMOUNT_RUNNER], env=env)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     return json.loads(proc.stdout.strip().splitlines()[-1]), proc.stderr
 
@@ -420,9 +413,7 @@ def test_amount_out_of_int64_range_is_skipped(tmp_path: Path):
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(tmp_path)
     env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
-    proc = subprocess.run(
-        [sys.executable, "-c", _AMOUNT_RUNNER], env=env, capture_output=True, text=True
-    )
+    proc = _run_child([sys.executable, "-c", _AMOUNT_RUNNER], env=env)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     subjects = json.loads(proc.stdout.strip().splitlines()[-1])
     # The out-of-range row is dropped from projection; the in-range one survives.
@@ -470,9 +461,7 @@ def test_number_threshold_scaled(tmp_path: Path):
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(tmp_path)
     env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
-    proc = subprocess.run(
-        [sys.executable, "-c", _NUMBER_RUNNER], env=env, capture_output=True, text=True
-    )
+    proc = _run_child([sys.executable, "-c", _NUMBER_RUNNER], env=env)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     subjects = json.loads(proc.stdout.strip().splitlines()[-1])
     # 2500 >= 2000; 1999 < 2000 — the 1.999 boundary proves exact scaled ordering.
@@ -502,9 +491,7 @@ def test_number_out_of_int64_range_is_skipped(tmp_path: Path):
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(tmp_path)
     env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
-    proc = subprocess.run(
-        [sys.executable, "-c", _NUMBER_RUNNER], env=env, capture_output=True, text=True
-    )
+    proc = _run_child([sys.executable, "-c", _NUMBER_RUNNER], env=env)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     subjects = json.loads(proc.stdout.strip().splitlines()[-1])
     # The out-of-range row is dropped from projection; the in-range one survives.
@@ -550,9 +537,7 @@ def test_unscaled_number_threshold_extra_dl_fails_loud(tmp_path: Path):
     env = dict(os.environ)
     env["FACTLOG_ROOT"] = str(tmp_path)
     env["KB_TOOLS"] = str(Path(common.__file__).resolve().parent)
-    proc = subprocess.run(
-        [sys.executable, "-c", _NUMBER_RAISE_RUNNER], env=env, capture_output=True, text=True
-    )
+    proc = _run_child([sys.executable, "-c", _NUMBER_RAISE_RUNNER], env=env)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     assert "FACTLOGERROR:" in proc.stdout
     assert "version_num" in proc.stdout
