@@ -37,6 +37,11 @@ subject,relation,object,source,status,confidence,note
 
 각 행은 검증 가능한 관계 명제 하나만 담습니다.
 
+타입 지정 리터럴 객체는 구조가 더 분명하면 compact compound term으로 적을 수
+있습니다. 지원 형식은 `date(2030,1)`, `date(2030,1,15)`, `number(2.5)`,
+`ordinal(3)`, `amount(100,"억")`입니다. 엔티티 객체는 compound term으로 감싸지
+말고 평범한 이름으로 둡니다.
+
 `confidence`는 source 문서가 해당 subject-relation-object 관계를 얼마나 직접 뒷받침하는지 나타내는 0.00부터 1.00 사이의 점수입니다.
 명시적으로 쓰여 있으면 높게, 관계명 선택이나 동일 개념 판단이 필요하면 낮게 둡니다.
 

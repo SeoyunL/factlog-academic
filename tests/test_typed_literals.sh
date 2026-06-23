@@ -38,11 +38,11 @@ bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 KB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$KB" >/dev/null
 H="subject,relation,object,source,status,confidence,note"
-# 을서비스 (accepted, 2030.1 -> 20300101) clears the threshold.
+# 을서비스 (accepted, date(2030,1) -> 20300101) clears the threshold.
 # 구서비스 (superseded, 2032.1 -> 20320101) WOULD clear but is retired, so it
 # must never reach accepted.dl and must never appear in a comparison finding.
 printf '%s\n%s\n%s\n' "$H" \
-  '을서비스,정식_운영,2030.1,sources/a.md,accepted,0.9,' \
+  '을서비스,정식_운영,"date(2030,1)",sources/a.md,accepted,0.9,' \
   '구서비스,정식_운영,2032.1,sources/a.md,superseded,0.9,retired' > "$KB/facts/candidates.csv"
 printf 'x\n' > "$KB/sources/a.md"
 printf -- '- `정식_운영` : date as launch_date\n' > "$KB/policy/typed-relations.md"

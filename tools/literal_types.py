@@ -41,22 +41,37 @@ DEFAULT_AMOUNT_UNITS: dict[str, int] = {
 }
 
 _DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
+_DATE_COMPOUND_RE = re.compile(
+    r"^date\(\s*(\d{4})\s*,\s*(\d{1,2})(?:\s*,\s*(\d{1,2}))?\s*\)$",
+    re.IGNORECASE,
+)
 _NUMBER_RE = re.compile(r"^\d[\d,]*(?:\.\d+)?$")
+_NUMBER_COMPOUND_RE = re.compile(
+    r"^number\(\s*\"?(\d[\d,]*(?:\.\d+)?)\"?\s*\)$",
+    re.IGNORECASE,
+)
 _ORDINAL_KO_RE = re.compile(r"^제?(\d+)\s*(?:호|위|번|차|등|째)$")
 _ORDINAL_EN_RE = re.compile(r"^(\d+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
+_ORDINAL_COMPOUND_RE = re.compile(r"^ordinal\(\s*(\d+)\s*\)$", re.IGNORECASE)
 # <number><unit>, contiguous OR a single space between them. The number part is a
 # plain/comma/decimal magnitude; the unit is validated against the table by the
 # caller. A leading `제` (ordinal marker) can't match because the `num` group is
 # anchored to a leading digit (`^\d…`), so `제3호`-style ordinals never match (the
 # first char `제` is a non-digit → no match).
 _AMOUNT_RE = re.compile(r"^(?P<num>\d[\d,]*(?:\.\d+)?) ?(?P<unit>\D+)$")
+_AMOUNT_COMPOUND_RE = re.compile(
+    r"^amount\(\s*\"?(?P<num>\d[\d,]*(?:\.\d+)?)\"?\s*,\s*\"?(?P<unit>[^\",)]+)\"?\s*\)$",
+    re.IGNORECASE,
+)
 
 
 def parse_date(raw: str) -> int | None:
     """A date string -> a sortable ``yyyymmdd`` int. Missing month/day default to
     ``01`` (e.g. ``2030.1`` -> ``20300101``, ``2030.01.15`` -> ``20300115``).
-    Accepts ``.``/``-``/``/`` separators. Returns ``None`` if out of range."""
-    m = _DATE_RE.match(raw.strip())
+    Accepts ``.``/``-``/``/`` separators and the compound form
+    ``date(year, month[, day])``. Returns ``None`` if out of range."""
+    text = raw.strip()
+    m = _DATE_COMPOUND_RE.match(text) or _DATE_RE.match(text)
     if not m:
         return None
     year = int(m.group(1))
@@ -68,8 +83,12 @@ def parse_date(raw: str) -> int | None:
 
 
 def parse_number(raw: str) -> float | None:
-    """A plain/comma/decimal number -> ``float`` (``1,000`` -> ``1000.0``)."""
+    """A plain/comma/decimal number -> ``float`` (``1,000`` -> ``1000.0``).
+    Also accepts ``number(value)``."""
     s = raw.strip()
+    compound = _NUMBER_COMPOUND_RE.match(s)
+    if compound:
+        s = compound.group(1)
     if not _NUMBER_RE.match(s):
         return None
     try:
@@ -84,8 +103,12 @@ NUMBER_SCALE = 1000  # fixed-point factor for `number` -> int64 (3 decimal place
 def parse_number_scaled(raw: str) -> int | None:
     """A number -> exact int scaled by NUMBER_SCALE (2.5 -> 2500), or None.
     _NUMBER_RE validates; Decimal scales exactly (a float path mis-rounds:
-    1.0005 -> 1000 vs 1001). Sub-factor fraction rounds ROUND_HALF_UP."""
+    1.0005 -> 1000 vs 1001). Also accepts ``number(value)``. Sub-factor
+    fraction rounds ROUND_HALF_UP."""
     s = raw.strip()
+    compound = _NUMBER_COMPOUND_RE.match(s)
+    if compound:
+        s = compound.group(1)
     if not _NUMBER_RE.match(s):
         return None
     try:
@@ -102,9 +125,10 @@ def parse_ordinal(raw: str) -> int | None:
 
     Only ordinal-class units (호/위/번/차/등/째 and English st/nd/rd/th) qualify;
     amount units (억/만/원) and date units (년/월/일) are NOT ordinals -> ``None``.
+    Also accepts ``ordinal(n)``.
     """
     s = raw.strip()
-    m = _ORDINAL_KO_RE.match(s) or _ORDINAL_EN_RE.match(s)
+    m = _ORDINAL_COMPOUND_RE.match(s) or _ORDINAL_KO_RE.match(s) or _ORDINAL_EN_RE.match(s)
     return int(m.group(1)) if m else None
 
 
@@ -122,7 +146,7 @@ def parse_amount(raw: str, units: dict[str, int]) -> int | None:
     ``제`` (ordinal marker), a ``%``, or any unit not in *units* -> ``None``.
     ``3 GB`` / ASCII-space units are out of scope.
     """
-    m = _AMOUNT_RE.match(raw.strip())
+    m = _AMOUNT_COMPOUND_RE.match(raw.strip()) or _AMOUNT_RE.match(raw.strip())
     if not m:
         return None
     unit = m.group("unit").strip()

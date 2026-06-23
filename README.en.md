@@ -140,6 +140,11 @@ The four types:
   `version_num(S, V), V >= 2000`. Precision beyond 3 decimals rounds
   (ROUND_HALF_UP).
 
+Extractors may emit typed literal objects as compact compound terms when that
+preserves structure better: `date(2030,1)`, `date(2030,1,15)`, `number(2.5)`,
+`ordinal(3)`, `amount(100,"억")`. The `relation/3` object stores that term as a
+string, and the typed side-relation projects the comparable scalar.
+
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).
 

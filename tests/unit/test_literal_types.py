@@ -13,11 +13,13 @@ class TestParseDate:
         ("2030.01.15", 20300115),
         ("2024/07/01", 20240701),
         ("2030.12.31", 20301231),
+        ("date(2030, 1)", 20300101),
+        ("date(2030, 1, 15)", 20300115),
     ])
     def test_accepts(self, raw, expected):
         assert lt.parse_date(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["2026", "not a date", "2030.13.01", "2030.1.32", ""])
+    @pytest.mark.parametrize("raw", ["2026", "not a date", "2030.13.01", "2030.1.32", "date(2030)", ""])
     def test_rejects(self, raw):
         assert lt.parse_date(raw) is None
 
@@ -28,11 +30,13 @@ class TestParseNumber:
         ("3.14", 3.14),
         ("1,000", 1000.0),
         ("1,000,000", 1000000.0),
+        ("number(3.14)", 3.14),
+        ('number("1,000")', 1000.0),
     ])
     def test_accepts(self, raw, expected):
         assert lt.parse_number(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["abc", "", "3호", "1.2.3"])
+    @pytest.mark.parametrize("raw", ["abc", "", "3호", "1.2.3", "number(abc)"])
     def test_rejects(self, raw):
         assert lt.parse_number(raw) is None
 
@@ -48,11 +52,13 @@ class TestParseNumberScaled:
         # exact scaled value is 1000.5 -> ROUND_HALF_UP -> 1001.
         ("1.0005", 1001),
         ("0.0005", 1),
+        ("number(2.5)", 2500),
+        ('number("1,000")', 1000000),
     ])
     def test_accepts(self, raw, expected):
         assert lt.parse_number_scaled(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["abc", "", "3호", "1.2.3"])
+    @pytest.mark.parametrize("raw", ["abc", "", "3호", "1.2.3", "number(abc)"])
     def test_rejects(self, raw):
         assert lt.parse_number_scaled(raw) is None
 
@@ -63,6 +69,7 @@ class TestParseNumberScaled:
 class TestParseOrdinal:
     @pytest.mark.parametrize("raw,expected", [
         ("제3호", 3), ("3위", 3), ("3rd", 3), ("1st", 1), ("12th", 12), ("제5번", 5),
+        ("ordinal(3)", 3),
     ])
     def test_accepts(self, raw, expected):
         assert lt.parse_ordinal(raw) == expected
@@ -80,6 +87,8 @@ class TestParseAmount:
         ("50억", 5000000000),
         ("1조", 1000000000000),
         ("100 억", 10000000000),  # single space allowed
+        ("amount(100, 억)", 10000000000),
+        ('amount("2.675", "억")', 267500000),
     ])
     def test_accepts(self, raw, expected):
         assert lt.parse_amount(raw, lt.DEFAULT_AMOUNT_UNITS) == expected

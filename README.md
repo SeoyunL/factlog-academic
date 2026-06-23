@@ -144,6 +144,11 @@ factlog vocab --all        # include non-engine names (candidate/needs_review/su
   **스케일된 단위**로 적어야 합니다: `version >= 2.0` → `version_num(S, V), V >= 2000`.
   소수 3자리를 넘는 정밀도는 반올림됩니다(ROUND_HALF_UP).
 
+추출기는 타입 지정 리터럴 객체를 구조가 보존되는 compact compound term으로 써도
+됩니다: `date(2030,1)`, `date(2030,1,15)`, `number(2.5)`, `ordinal(3)`,
+`amount(100,"억")`. `relation/3` 의 객체는 이 term 문자열을 그대로 보관하고,
+타입 지정 사이드 관계가 비교 가능한 스칼라로 투영합니다.
+
 `factlog vocab` 은 선언된 타입 지정 관계에 `[typed:<type>]` 태그를 붙여 보여
 줍니다(예: `[attribute, typed:date]`).
 

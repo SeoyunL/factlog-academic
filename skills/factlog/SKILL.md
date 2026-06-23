@@ -180,7 +180,12 @@ you supply it: `D >= 20300101` is inclusive of the boundary day (2030-01-01 is
 included). For `date`, the value is a sortable `yyyymmdd` int64 — a source object
 `2030.1` normalises to `20300101` (missing parts default to `01`), so a comparison
 threshold is also written `yyyymmdd`. The source object must be in a parseable
-form (`2030.1`, not a bare `2030`). The predicate's rows surface in
+form (`2030.1`, not a bare `2030`). Typed source objects may also be emitted as
+compact compound terms when that preserves structure better than prose strings:
+`date(2030,1)`, `date(2030,1,15)`, `number(2.5)`, `ordinal(3)`, or
+`amount(100,"억")`. The flat `relation/3` fact still stores that term as the
+object string, while the typed side-relation projects its comparable scalar.
+The predicate's rows surface in
 `logic_report.txt` under `Policy Findings:` (`after2030: 을서비스 (launch_after_2030)`)
 via the existing policy-findings path, because its `.decl` name is auto-discovered
 by `policy_predicates()`. With no `typed-relations.md` and no
