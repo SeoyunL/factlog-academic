@@ -321,10 +321,19 @@ warns so the silent non-ingestion is visible.
 factlog is a **Claude Code plugin**. Install it from this repo's marketplace in a Claude Code session:
 
 ```
-/plugin marketplace add semantic-reasoning/factlog
+/plugin marketplace add https://github.com/semantic-reasoning/factlog
 /plugin install factlog@semantic-reasoning
+/reload-plugins
 /factlog setup                     # one-shot: deps + doctor + init, in-session
 ```
+
+Run these commands **one line at a time**. If you paste multiple plugin commands
+at once, Claude Code may try to process the marketplace registration and install
+out of order.
+
+After a successful install, the new `/factlog ...` commands may not be loaded in
+the current session yet. Run `/reload-plugins` after `/plugin install`, then run
+`/factlog setup`.
 
 `setup` runs `doctor`, installs the engine dependency (`pyrewire`), scaffolds the KB, and re-checks the environment — in one command.
 
@@ -335,6 +344,8 @@ To develop against a local clone, register the working tree as the marketplace i
 ```
 /plugin marketplace add ~/git/semantic-reasoning/factlog
 /plugin install factlog@semantic-reasoning
+/reload-plugins
+/factlog setup
 ```
 
 ### What `/factlog setup` does
