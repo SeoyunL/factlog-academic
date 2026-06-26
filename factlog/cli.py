@@ -20,12 +20,7 @@ from pathlib import Path as _Path
 from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
-
-# Share the active-KB config resolver with the tools/ scripts (same module).
-_TOOLS_DIR = _Path(__file__).resolve().parent.parent / "tools"
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
-import factlog_config  # noqa: E402
+from factlog import config as factlog_config
 
 MIN_PYTHON = (3, 11)
 MIN_PYREWIRE = (1, 0, 1)
@@ -88,7 +83,7 @@ def _recompile_accepted(target, command: str) -> bool:
     import subprocess
 
     proc = subprocess.run(
-        [sys.executable, str(_TOOLS_DIR / "compile_facts.py")],
+        [sys.executable, "-m", "factlog.compile_facts"],
         env=dict(os.environ, FACTLOG_ROOT=str(target)),
         capture_output=True, text=True,
     )
@@ -408,7 +403,7 @@ def cmd_sources(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import is_sync_ignored, source_rel_key, sync_ignore_patterns
+    from factlog.common import is_sync_ignored, source_rel_key, sync_ignore_patterns
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -503,7 +498,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import REVIEW_STATUSES, normalize_confidence
+    from factlog.common import REVIEW_STATUSES, normalize_confidence
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -558,7 +553,7 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     import unicodedata
     from pathlib import Path
 
-    from common import FACT_HEADER, REVIEW_STATUSES
+    from factlog.common import FACT_HEADER, REVIEW_STATUSES
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -671,7 +666,7 @@ def cmd_amend(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import FACT_HEADER
+    from factlog.common import FACT_HEADER
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -869,7 +864,7 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import normalize_confidence, source_file_refs
+    from factlog.common import normalize_confidence, source_file_refs
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -952,7 +947,7 @@ def cmd_ignore(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import is_sync_ignored, source_files, sync_ignore_patterns
+    from factlog.common import is_sync_ignored, source_files, sync_ignore_patterns
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1039,7 +1034,7 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     from collections import Counter
     from pathlib import Path
 
-    import common
+    import factlog.common as common
 
     target_str, _ = factlog_config.resolve_root(args.target)
     target = Path(target_str)
@@ -1099,7 +1094,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     from collections import Counter
     from pathlib import Path
 
-    import common
+    import factlog.common as common
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
@@ -1432,7 +1427,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
     from pathlib import Path
 
-    from common import is_sync_ignored, sync_ignore_patterns
+    from factlog.common import is_sync_ignored, sync_ignore_patterns
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
@@ -1624,7 +1619,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     import re
     from pathlib import Path
 
-    from common import source_rel_key
+    from factlog.common import source_rel_key
 
     # Tie each runs/sources/ conversion to the original it was made from, read
     # from the ingest provenance header ("... | source: <name> | ..."). Two
@@ -1795,7 +1790,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from common import FACT_HEADER
+    from factlog.common import FACT_HEADER
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -2178,7 +2173,7 @@ def main(argv: list[str] | None = None) -> int:
         # legacy "message to stderr, exit 1". Resolve the class lazily so it still
         # matches after a command reloads the common module. Anything else
         # propagates unchanged.
-        from common import FactlogError
+        from factlog.common import FactlogError
 
         if isinstance(exc, FactlogError):
             print(str(exc), file=sys.stderr)
