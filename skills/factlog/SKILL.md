@@ -6,7 +6,7 @@ description: >-
   logic check, and attempt gated self-correction. Use when the user asks to
   "sync facts", "check the wiki", "run factlog", "verify facts", or update a
   knowledge base from its source documents.
-allowed-tools: Bash(python3 *) Read Edit Write Grep Glob
+allowed-tools: Bash(*factlog_python.sh *) Bash(python3 *) Bash(python *) Bash(py *) Read Edit Write Grep Glob
 ---
 
 # factlog — Agent Bridge
@@ -23,7 +23,7 @@ gate is also backed by a plugin hook (`hooks/hooks.json`).
 
 1. Treat every fact/query you generate as `candidate`/draft — never promote it
    to engine input yourself.
-2. Always run `python3 ${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py` and show
+2. Always run `"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"` and show
    the resulting `facts/logic_report.txt` **verbatim** before stating any
    conclusion.
 3. If the report shows `errors > 0`, return to the human instead of concluding.
@@ -61,14 +61,14 @@ the four operating commands below — it is the first thing to do after
 separate terminal:
 
 ```bash
-python3 -m factlog setup --target <kb>
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog setup --target <kb>
 ```
 
 In order, `setup`:
 
 1. Runs the `doctor` checks and reports Python / pyrewire status.
 2. If pyrewire is missing or `< 1.0.1`, installs it via
-   `python3 -m pip install -r <requirements.txt>` (located via
+   `"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m pip install -r <requirements.txt>` (located via
    `$CLAUDE_PLUGIN_ROOT` if set, else the package root). If pyrewire already
    satisfies the floor, the install is skipped.
 3. Runs the KB `init` for `--target` (scaffolds `sources/`, `facts/`,
@@ -84,9 +84,9 @@ will refuse to install into it. `setup` does **not** override this with
 Create and activate a virtual environment, then re-run:
 
 ```bash
-python3 -m venv ~/.factlog-venv
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m venv ~/.factlog-venv
 source ~/.factlog-venv/bin/activate
-python3 -m factlog setup --target <kb>
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog setup --target <kb>
 ```
 
 After `setup` succeeds, use the four operating commands — `/factlog sync`,
@@ -106,7 +106,7 @@ step is extraction.
 ### Step 1 — Place the source
 
 - A binary/office file (`.docx`, `.pdf`, ...): run
-  `python3 -m factlog ingest <path> --target "$FACTLOG_ROOT"` (or `--scan`)
+  `"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog ingest <path> --target "$FACTLOG_ROOT"` (or `--scan`)
   → it writes a text conversion into `runs/sources/`.
 - Free text or a text file: place it under `sources/<name>` (text is read
   verbatim by extraction).
@@ -120,7 +120,7 @@ new source and write candidate rows to `runs/<iso>-<slug>.json` — identical to
 ### Step 3 — Finalise deterministically (one command)
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/finalize.py" --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/finalize.py" --target "$FACTLOG_ROOT"
 ```
 
 `finalize.py` chains the deterministic engine steps — `merge_candidates` →
@@ -211,7 +211,7 @@ Extraction reads `sources/` files as text, so binary/office originals
 first:
 
 ```bash
-python3 -m factlog ingest --scan --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog ingest --scan --target "$FACTLOG_ROOT"
 ```
 
 `--scan` auto-discovers every binary file under `sources/` and writes a text
@@ -281,7 +281,7 @@ Run merge_candidates.py to normalise, deduplicate, write `facts/candidates.csv`,
 regenerate `pages/`, and update `decisions/open-questions.md`:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/merge_candidates.py" --wiki "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/merge_candidates.py" --wiki "$FACTLOG_ROOT"
 ```
 
 The script reads all `runs/*.json` files (see `--input` for a custom glob).
@@ -369,7 +369,7 @@ check, and display the full report verbatim.
 ### Step 1 — Compile accepted facts
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/compile_facts.py"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/compile_facts.py"
 ```
 
 Reads `facts/candidates.csv`, filters rows with `status` in
@@ -388,7 +388,7 @@ human decisions are preserved across re-merge.
 ### Step 2 — Run the logic check
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"
 ```
 
 Runs the wirelog/pyrewire engine over `facts/accepted.dl`,
@@ -426,7 +426,7 @@ A free-text wiki cannot tell you what it *failed* to capture. Run the coverage
 critic to surface sources the KB has not extracted any facts from:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/coverage.py" --wiki "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/coverage.py" --wiki "$FACTLOG_ROOT"
 ```
 
 It reports, per source file under `sources/` and `runs/sources/`, how many
@@ -536,7 +536,7 @@ ok, reason = validate_candidate_query(proposed_query_line, facts)
 After any write to `facts/query.dl`, immediately run:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"
 ```
 
 Show the new `facts/logic_report.txt` verbatim. This is the final evidence for
@@ -565,7 +565,7 @@ including the `review_required("<verbatim question>")?` fallback.
 ### Step 2 — Classify deterministically
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" validate "<draft>" --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" validate "<draft>" --target "$FACTLOG_ROOT"
 ```
 
 This prints JSON `{ok, code, reason, route, negative, predicate}`. **Branch on
@@ -589,7 +589,7 @@ correct, so retrying is pointless.
 ### Step 3a — Engine answer (VERIFIED)
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" render "<draft>" --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" render "<draft>" --target "$FACTLOG_ROOT"
 ```
 
 Show the `VERIFIED — engine` block verbatim (positive rows, or `rows: 0` /
@@ -614,7 +614,7 @@ statuses), use `factlog provenance <subject> [relation] [object]`.
 ### Step 3b — Wiki exploration (UNVERIFIED)
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" wiki "<question>" --reason "<why>" --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" wiki "<question>" --reason "<why>" --target "$FACTLOG_ROOT"
 ```
 
 Show the `UNVERIFIED — wiki exploration` block verbatim (cited `sources/` /
@@ -627,7 +627,7 @@ present wiki excerpts as confirmed facts. Optionally record the unanswered
 question for later review (a non-engine-input sink, never `facts/query.dl`):
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
 ```
 
 ---

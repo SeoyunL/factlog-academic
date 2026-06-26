@@ -34,27 +34,33 @@
 # KB root: set FACTLOG_ROOT to the knowledge-base root for sound path matching;
 # falls back to the current working directory when unset.
 #
-# Fail-closed: if python3 is unavailable or target-path extraction fails for an
-# engine-input-shaped payload, the gate denies rather than silently allowing.
+# Fail-closed: if a usable Python 3.11+ is unavailable or target-path extraction
+# fails for an engine-input-shaped payload, the gate denies rather than silently
+# allowing.
 
 set -euo pipefail
 
-payload="$(cat)"
+payload="$(</dev/stdin)"
 
 # Determine the KB root: prefer FACTLOG_ROOT, fall back to cwd.
 KB_ROOT="${FACTLOG_ROOT:-.}"
 
-# python3 is required for JSON parsing and portable path/mtime handling.
+HOOK_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
+PYTHON_RUNNER_SCRIPT="${FACTLOG_PYTHON_RUNNER:-"$HOOK_DIR/../tools/factlog_python.sh"}"
+PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
+
+# Python 3.11+ is required for JSON parsing and portable path/mtime handling.
 # Fail closed: without it we cannot evaluate the predicate safely.
-if ! command -v python3 &>/dev/null; then
-  echo "[factlog GATE] DENIED: python3 is required to evaluate the gate predicate." >&2
+if ! "${PYTHON_RUNNER[@]}" -c 'import sys' >/dev/null 2>&1; then
+  echo "[factlog GATE] DENIED: usable Python 3.11+ is required to evaluate the gate predicate." >&2
+  echo "  Set FACTLOG_PYTHON to a venv/system python if python3 is unavailable or is a Windows Store stub." >&2
   exit 2
 fi
 
 # Extract the tool target from the hook payload.
 # Claude Code sends the tool input as JSON on stdin.
 # The relevant field is "file_path" for Write and "file_path" for Edit.
-target_path="$(printf '%s' "$payload" | python3 -c \
+target_path="$(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c \
   "import json,sys; d=json.load(sys.stdin); print(d.get('file_path','') or d.get('path',''))" \
   2>/dev/null || true)"
 
@@ -68,12 +74,12 @@ fi
 # Normalise: check whether the target is facts/accepted.dl or facts/query.dl
 # under the KB root. Match both absolute and relative paths.
 #
-# Use python3 for portable path canonicalisation — realpath -m is GNU-only and
-# is not available on macOS/BSD. python3 os.path.realpath resolves symlinks and
+# Use Python for portable path canonicalisation — realpath -m is GNU-only and
+# is not available on macOS/BSD. os.path.realpath resolves symlinks and
 # normalises . / .. segments on all platforms without requiring the path to
 # exist (matching realpath -m semantics).
 _canon() {
-  python3 -c "import os,sys; print(os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1]))))" "$1" 2>/dev/null || printf '%s' "$1"
+  "${PYTHON_RUNNER[@]}" -c "import os,sys; print(os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1]))))" "$1" 2>/dev/null || printf '%s' "$1"
 }
 
 abs_target="$(_canon "$target_path")"
@@ -111,30 +117,38 @@ fi
 if [ ! -f "$report" ]; then
   echo "[factlog GATE] DENIED: facts/logic_report.txt does not exist." >&2
   echo "  An engine input already exists but no report supersedes it." >&2
-  echo "  Run /factlog check (python3 \"\${CLAUDE_PLUGIN_ROOT}\"/tools/run_logic_check.py)" >&2
+  echo "  Run /factlog check (\"\${CLAUDE_PLUGIN_ROOT}\"/tools/factlog_python.sh \"\${CLAUDE_PLUGIN_ROOT}\"/tools/run_logic_check.py)" >&2
   echo "  to produce a fresh report before editing engine inputs." >&2
   exit 2
 fi
 
+_mtime() {
+  local value
+  if value="$(stat -c %Y "$1" 2>/dev/null)" || value="$(stat -f %m "$1" 2>/dev/null)"; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  echo "[factlog GATE] DENIED: could not read mtime for $1" >&2
+  exit 2
+}
+
 # Find the most recently modified engine input file that exists.
-# python3 availability is already guaranteed by the fail-closed check at the
-# top of this script, so the mtime probes below call it unconditionally.
 newest_input_mtime=0
 for f in "$accepted" "$query"; do
   if [ -f "$f" ]; then
-    mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$f" 2>/dev/null || echo 0)"
+    mtime="$(_mtime "$f")"
     if [ "$mtime" -gt "$newest_input_mtime" ]; then
       newest_input_mtime="$mtime"
     fi
   fi
 done
 
-report_mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$report" 2>/dev/null || echo 0)"
+report_mtime="$(_mtime "$report")"
 
 if [ "$report_mtime" -lt "$newest_input_mtime" ]; then
   echo "[factlog GATE] DENIED: facts/logic_report.txt is stale." >&2
   echo "  The report predates the last modification to facts/accepted.dl or facts/query.dl." >&2
-  echo "  Run /factlog check (python3 \"\${CLAUDE_PLUGIN_ROOT}\"/tools/run_logic_check.py)" >&2
+  echo "  Run /factlog check (\"\${CLAUDE_PLUGIN_ROOT}\"/tools/factlog_python.sh \"\${CLAUDE_PLUGIN_ROOT}\"/tools/run_logic_check.py)" >&2
   echo "  to refresh the report before editing engine inputs." >&2
   exit 2
 fi

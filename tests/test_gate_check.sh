@@ -13,6 +13,7 @@ set -euo pipefail
 export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
 
 GATE="$(cd "$(dirname "$0")/.." && pwd)/hooks/gate_check.sh"
+PYTHON_RUNNER="$(cd "$(dirname "$0")/.." && pwd)/tools/factlog_python.sh"
 
 pass=0
 fail=0
@@ -60,7 +61,7 @@ set_mtime_past() {
   # Uses touch -t on macOS/BSD (YYYYMMDDHHMMSS).
   local path="$1"
   local past
-  past="$(python3 -c 'import time,datetime; t=time.time()-2; print(datetime.datetime.fromtimestamp(t).strftime("%Y%m%d%H%M.%S"))')"
+  past="$(bash "$PYTHON_RUNNER" -c 'import time,datetime; t=time.time()-2; print(datetime.datetime.fromtimestamp(t).strftime("%Y%m%d%H%M.%S"))')"
   touch -t "$past" "$path"
 }
 
@@ -68,7 +69,7 @@ set_mtime_future() {
   # Set file mtime to 2 seconds in the future.
   local path="$1"
   local future
-  future="$(python3 -c 'import time,datetime; t=time.time()+2; print(datetime.datetime.fromtimestamp(t).strftime("%Y%m%d%H%M.%S"))')"
+  future="$(bash "$PYTHON_RUNNER" -c 'import time,datetime; t=time.time()+2; print(datetime.datetime.fromtimestamp(t).strftime("%Y%m%d%H%M.%S"))')"
   touch -t "$future" "$path"
 }
 
@@ -203,36 +204,29 @@ run_case "single-quote in KB root, report stale — deny (apostrophe regression)
 rm -rf "$TMPBASE"
 
 # ---------------------------------------------------------------------------
-# CASE 11: FAIL-CLOSED INVARIANT — python3 unavailable on a Write to an engine
+# CASE 11: FAIL-CLOSED INVARIANT — Python unavailable on a Write to an engine
 # input — DENY (exit 2), not allow.
 #
 # u16 removed the dead `command -v python3` guards that sat *below* the mtime
 # probes, justified by the assertion that a fail-closed `exit 2` near the TOP of
-# gate_check.sh guarantees python3 is present before any probe runs. This case
-# pins that invariant behaviorally: if python3 cannot be found, the gate must
+# gate_check.sh guarantees a usable Python is present before any probe runs. This
+# case pins that invariant behaviorally: if Python cannot be found, the gate must
 # DENY before it ever reaches a probe — so a future edit that reorders the
 # top-of-file fail-closed check below the probes is caught here.
 #
-# Hermetic simulation: we build a throwaway PATH directory containing symlinks
-# to ONLY the shell utilities gate_check.sh needs before its fail-closed check
-# (`cat`), deliberately omitting python3/python. `command -v python3` then fails
-# regardless of where the host python3 lives, so the test does not depend on the
-# host python3 location beyond resolving the few utilities we explicitly shim.
+# Hermetic simulation: run with an empty throwaway PATH, deliberately omitting
+# python3/python/py. The test does not depend on the host Python location.
 # ---------------------------------------------------------------------------
 KB_NOPY="$(mktemp -d)"
 make_kb "$KB_NOPY"
 touch_file "$KB_NOPY/facts/accepted.dl"  # existing engine input (not bootstrap)
 
-# Build a minimal PATH dir with the non-python utilities the gate needs.
 SHIM_PATH="$(mktemp -d)"
-for util in cat bash; do
-  src="$(command -v "$util")"
-  ln -s "$src" "$SHIM_PATH/$util"
-done
+BASH_BIN="${BASH:-$(command -v bash)}"
 
 nopy_exit=0
 PATH="$SHIM_PATH" FACTLOG_ROOT="$KB_NOPY" \
-  "$SHIM_PATH/bash" "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_NOPY/facts/accepted.dl")" \
+  "$BASH_BIN" "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_NOPY/facts/accepted.dl")" \
   >/dev/null 2>&1 || nopy_exit=$?
 if [ "$nopy_exit" -eq 2 ]; then
   echo "PASS: python3 unavailable on engine-input write — fail-closed deny (exit $nopy_exit)"
@@ -242,6 +236,40 @@ else
   fail=$((fail + 1))
 fi
 rm -rf "$KB_NOPY" "$SHIM_PATH"
+
+# ---------------------------------------------------------------------------
+# CASE 12: WINDOWS STORE STUB REGRESSION — python3 exists but cannot execute.
+#
+# Windows can put a Microsoft Store python3.exe stub on PATH. The command exists,
+# but `python3 -c ...` fails. The gate must skip that stub and use python/py or
+# FACTLOG_PYTHON instead of failing open during JSON/path parsing.
+# ---------------------------------------------------------------------------
+KB_STUB="$(mktemp -d)"
+make_kb "$KB_STUB"
+touch_file "$KB_STUB/facts/accepted.dl"
+set_mtime_past "$KB_STUB/facts/accepted.dl"
+touch_file "$KB_STUB/facts/logic_report.txt"
+
+STUB_PATH="$(mktemp -d)"
+cat > "$STUB_PATH/python3" <<'SH'
+#!/usr/bin/env sh
+echo Python
+exit 1
+SH
+chmod +x "$STUB_PATH/python3"
+
+stub_exit=0
+PATH="$STUB_PATH:$PATH" FACTLOG_ROOT="$KB_STUB" \
+  bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_STUB/facts/accepted.dl")" \
+  >/dev/null 2>&1 || stub_exit=$?
+if [ "$stub_exit" -eq 0 ]; then
+  echo "PASS: broken python3 stub skipped when another Python is usable (exit $stub_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: broken python3 stub — expected exit 0 via fallback Python, got $stub_exit"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_STUB" "$STUB_PATH"
 
 # ---------------------------------------------------------------------------
 # Summary

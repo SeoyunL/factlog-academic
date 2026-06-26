@@ -1243,7 +1243,7 @@ def _find_requirements():
 
 
 def _install_requirements(requirements) -> int:
-    """Attempt ``python3 -m pip install -r <requirements>``.
+    """Attempt ``sys.executable -m pip install -r <requirements>``.
 
     PEP 668 handling: if pip refuses because the environment is
     externally-managed, DO NOT pass --break-system-packages. Print actionable
@@ -1278,9 +1278,9 @@ def _install_requirements(requirements) -> int:
             "--break-system-packages. Create and activate a virtual environment,\n"
             "then re-run setup:\n"
             "\n"
-            "    python3 -m venv ~/.factlog-venv\n"
+            "    python -m venv ~/.factlog-venv\n"
             "    source ~/.factlog-venv/bin/activate\n"
-            "    python3 -m factlog setup --target <kb>\n",
+            "    python -m factlog setup --target <kb>\n",
             file=sys.stderr,
         )
     else:

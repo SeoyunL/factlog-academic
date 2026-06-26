@@ -12,11 +12,11 @@
 # delivery plan (T3) using a PreToolUse deny on the relevant action. A Stop hook
 # cannot block, so enforcement must sit on a tool action, not on completion.
 
-payload="$(cat)"
+payload="$(</dev/stdin)"
 
 if printf '%s' "$payload" | grep -Eq 'facts/(query\.dl|candidates\.csv|accepted\.dl)|policy/logic-policy\.dl'; then
   echo "[factlog] An engine input was edited. Run the logic check before concluding:" >&2
-  echo "          python3 \"\${CLAUDE_PLUGIN_ROOT}\"/tools/run_logic_check.py" >&2
+  echo "          \"\${CLAUDE_PLUGIN_ROOT}\"/tools/factlog_python.sh \"\${CLAUDE_PLUGIN_ROOT}\"/tools/run_logic_check.py" >&2
   echo "          then show facts/logic_report.txt verbatim. Candidates are not engine input until confirmed." >&2
 fi
 
