@@ -267,8 +267,9 @@ explanation of its purpose.
 #
 # Type meanings:
 #   date     2030.1 / 2030-01-15  -> sortable yyyymmdd
-#   number   1,000 / 3.5          -> numeric magnitude (declared only; not yet
-#                                    engine-projectable — see issue #125)
+#   number   1,000 / 3.5          -> fixed-point int64, scaled ×1000 (3 decimals,
+#                                    positive only); thresholds in scaled units
+#                                    (e.g. `V >= 2.0` -> `V >= 2000`)
 #   ordinal  rank 3 / 3rd         -> int rank
 #   amount   100억 / 1,000원       -> integer base unit (needs a unit table)
 #
