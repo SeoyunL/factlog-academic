@@ -169,6 +169,16 @@ if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in py
   check_field "policy predicate routes engine" validate 'requires_review(E, R)?' route engine
   pc="$(router evaluate 'requires_review(E, R)?' | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin)['count'])")"
   if [ "$pc" -ge 1 ]; then ok "policy predicate evaluates to engine rows ($pc)"; else bad "policy predicate returned no rows"; fi
+
+  # #152 regression: a user-authored predicate in logic-policy.extra.dl must be
+  # askable. ask_router previously read only the generated logic-policy.dl and
+  # ignored extra.dl, so such predicates wrongly classified unknown_predicate->wiki.
+  printf '.decl uses_fastapi(entity: symbol, reason: symbol)\nuses_fastapi(S, "uses_fastapi") :- relation(S, "uses", "FastAPI").\n' > "$KB/policy/logic-policy.extra.dl"
+  check_field "extra.dl predicate routes engine (#152)" validate 'uses_fastapi(E, R)?' route engine
+  ec="$(router evaluate 'uses_fastapi(E, R)?' | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin)['count'])")"
+  if [ "$ec" -ge 1 ]; then ok "extra.dl predicate evaluates to engine rows ($ec)"; else bad "extra.dl predicate returned no rows"; fi
+  rm -f "$KB/policy/logic-policy.extra.dl"
+
   rm -f "$KB/policy/logic-policy.dl" "$KB/policy/logic-policy.md"
 else
   echo "SKIP: pyrewire unavailable — skipping policy-predicate evaluation assertions"

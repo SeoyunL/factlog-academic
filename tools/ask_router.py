@@ -76,18 +76,30 @@ from common import (  # noqa: E402
     fact_signals,
     load_accepted_facts,
     load_facts,
+    load_logic_policy,
     policy_predicates,
     run_wirelog,
 )
 
 
 def _policy_program_optional() -> str:
-    """Return the compiled policy text, or '' if it has not been generated yet.
+    """Return the fully assembled policy text — the generated `logic-policy.dl`
+    PLUS the optional hand-authored `logic-policy.extra.dl` — or '' if the policy
+    has not been generated yet.
 
     `/factlog ask` is interactive and must work before `/factlog check` compiles
     `policy/logic-policy.dl`; a missing policy simply means no policy predicates.
+
+    Reading the *assembled* program (via `load_logic_policy()`, which concatenates
+    `logic-policy.extra.dl`) — not just the generated file — lets ask see and
+    evaluate user-authored comparison predicates declared in
+    `logic-policy.extra.dl` (#152), matching exactly what `/factlog check`
+    evaluates. Both the classify/route path and the evaluate/render path read
+    this, so one source of truth fixes both.
     """
-    return LOGIC_POLICY_DL.read_text(encoding="utf-8") if LOGIC_POLICY_DL.is_file() else ""
+    if not LOGIC_POLICY_DL.is_file():
+        return ""
+    return load_logic_policy()
 
 def _predicate_of(draft: str) -> str:
     """Parse the predicate name the way the validator does (regex), so the router
