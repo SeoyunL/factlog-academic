@@ -67,7 +67,7 @@ separate terminal:
 In order, `setup`:
 
 1. Runs the `doctor` checks and reports Python / pyrewire status.
-2. If pyrewire is missing or `< 1.0.1`, installs it via
+2. If pyrewire is missing or `< 1.0.3`, installs it via
    `"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m pip install -r <requirements.txt>` (located via
    `$CLAUDE_PLUGIN_ROOT` if set, else the package root). If pyrewire already
    satisfies the floor, the install is skipped.

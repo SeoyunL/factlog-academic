@@ -5,7 +5,7 @@
 # policy -> compile -> (logic check). This pins:
 #   - candidates.csv and accepted.dl are produced (pyrewire-independent)
 #   - policy/logic-policy.dl is ensured so the check can load (stub if no rules)
-#   - with pyrewire>=1.0.1: logic_report.txt is produced; without it the check
+#   - with pyrewire>=1.0.3: logic_report.txt is produced; without it the check
 #     is skipped gracefully (no hard failure) and facts are still compiled
 #   - idempotent: re-running does not duplicate the fact
 #

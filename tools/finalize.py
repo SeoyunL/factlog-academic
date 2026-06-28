@@ -9,7 +9,7 @@ low-friction:
     merge_candidates  ->  ensure policy/logic-policy.dl  ->  compile_facts  ->  run_logic_check
 
 It is read-through to the bundled scripts (no logic duplicated here) and prints a
-concise summary. The logic check needs pyrewire>=1.0.1; when that is absent the
+concise summary. The logic check needs pyrewire>=1.0.3; when that is absent the
 check is skipped with a clear note (facts are still merged and compiled) so the
 command degrades gracefully rather than hard-failing.
 
@@ -45,7 +45,7 @@ def _pyrewire_ok() -> bool:
         # Robust parse (matches common.version_tuple): tolerate pre-release tags
         # like '1.0.1rc1' rather than treating them as absent.
         parts = re.findall(r"\d+", str(pyrewire.__version__))[:3]
-        return tuple(int(part) for part in parts) >= (1, 0, 1)
+        return tuple(int(part) for part in parts) >= (1, 0, 3)
     except Exception:
         return False
 
@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         checked = "logic-checked"
     else:
         print(
-            "\nfinalize: Logic check SKIPPED — pyrewire>=1.0.1 not installed. "
+            "\nfinalize: Logic check SKIPPED — pyrewire>=1.0.3 not installed. "
             "Install it and run /factlog check to verify."
         )
         checked = "compiled (logic check skipped)"

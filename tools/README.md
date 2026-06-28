@@ -31,6 +31,6 @@ core of `04_self_correct.py` (`validate_candidate_query`) was promoted into
 ## Private API note
 
 `common.decode_wirelog_value` uses `session._intern` (a private pyrewire
-EasySession attribute).  The dependency is pinned `pyrewire>=1.0.1,<2.0` in
+EasySession attribute).  The dependency is pinned `pyrewire>=1.0.3,<2.0` in
 `pyproject.toml` to guard against silent breakage if the internal API changes in
 a future major release.

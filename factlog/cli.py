@@ -23,7 +23,7 @@ from factlog import __version__, ingest
 from factlog import config as factlog_config
 
 MIN_PYTHON = (3, 11)
-MIN_PYREWIRE = (1, 0, 1)
+MIN_PYREWIRE = (1, 0, 3)  # bundles wirelog v0.52.0 with \" escape support (wirelog#924)
 
 
 def _atomic_write_text(path: _Path, text: str) -> None:
@@ -131,7 +131,8 @@ def _run_doctor_checks() -> bool:
         else:
             ok = False
             print(
-                f"FAIL pyrewire {getattr(pyrewire, '__version__', '?')} < 1.0.1 "
+                f"FAIL pyrewire {getattr(pyrewire, '__version__', '?')} "
+                f"< {'.'.join(map(str, MIN_PYREWIRE))} "
                 "(pip install -r requirements.txt)",
                 file=sys.stderr,
             )

@@ -4,7 +4,7 @@
 # Verifies the `setup` subcommand performs doctor + init and exits 0 on an
 # environment where pyrewire is ALREADY present, WITHOUT depending on the
 # network or a real pip install. The venv at /tmp/factlog-venv already has
-# pyrewire 1.0.1, so setup takes the "already satisfied, skip install" path —
+# pyrewire >=1.0.3, so setup takes the "already satisfied, skip install" path —
 # the pip branch is exercised by code review (PEP 668 guidance), not here.
 #
 # Asserts:

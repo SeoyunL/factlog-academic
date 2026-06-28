@@ -92,7 +92,10 @@ REVIEW_STATUSES = {"needs_review", "candidate"}
 SUPERSEDED_STATUSES = {"superseded"}
 QUERY_PREDICATES = {"relation", "path", "count", "conflict", "review_required"}
 RELATION_FACT_RE = re.compile(r"^relation\((.*)\)\.$")
-MIN_PYREWIRE_VERSION = (1, 0, 1)
+# 1.0.3 is the floor: it bundles/validates wirelog v0.52.0, the first release
+# whose .dl parser supports \" escapes (wirelog#924) — required so an always-quoted
+# amount unit (amount(N,"unit")) loads instead of aborting the whole program.
+MIN_PYREWIRE_VERSION = (1, 0, 3)
 
 
 @dataclass(frozen=True)
@@ -171,11 +174,11 @@ def version_tuple(value: str) -> tuple[int, ...]:
 
 def require_pyrewire_version() -> None:
     if EasySession is None or pyrewire is None:
-        raise FactlogError("pyrewire가 필요합니다. 예: pip install 'pyrewire>=1.0.1'")
+        raise FactlogError("pyrewire가 필요합니다. 예: pip install 'pyrewire>=1.0.3'")
     current = version_tuple(str(getattr(pyrewire, "__version__", "0")))
     if current < MIN_PYREWIRE_VERSION:
         raise FactlogError(
-            "pyrewire 1.0.1 이상이 필요합니다. "
+            "pyrewire 1.0.3 이상이 필요합니다. "
             f"현재 버전: {getattr(pyrewire, '__version__', 'unknown')}"
         )
 
@@ -992,7 +995,7 @@ def decode_wirelog_value(session: EasySession, value: object) -> object:
 
     Uses the private ``session._intern`` table exposed by pyrewire's EasySession.
     This is a private API (underscore-prefixed), intentionally pinned to
-    ``pyrewire>=1.0.1,<2.0`` in pyproject.toml to guard against breakage if the
+    ``pyrewire>=1.0.3,<2.0`` in pyproject.toml to guard against breakage if the
     internals change in a future major release.  The <2.0 upper bound in
     requirements.txt mirrors this constraint.
 
