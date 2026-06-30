@@ -6,8 +6,9 @@
 > 바꿔 주는 도구입니다. LLM이 추출하고, 결정론적 Datalog/wirelog 엔진이 검증합니다.
 >
 > factlog는 [Claude Code](https://code.claude.com) **플러그인**입니다. 세션 안에서는
-> `/factlog ...` slash command로 쓰고, 그 뒤에서는 Python CLI(`python3 -m factlog ...`)와
-> 결정론 엔진이 동작합니다 — slash command · Python CLI · 검증 엔진, 이 셋이 한 도구입니다.
+> `/factlog ...` slash command로 쓰고, 검토·승인 같은 사람의 게이트는 터미널에서
+> Python CLI(`python3 -m factlog ...`)로 직접 실행합니다. 두 입구 모두 같은 결정론
+> 엔진을 호출합니다 — slash command · Python CLI · 검증 엔진, 이 셋이 한 도구입니다.
 
 ## 개요
 
@@ -61,7 +62,7 @@ factlog에는 두 종류의 사실이 있습니다.
 
 | 구분 | 실행 위치 | 예시 | 역할 |
 |------|-----------|------|------|
-| **Claude Code slash command** | Claude Code 세션 안 | `/factlog setup`, `/factlog sync`, `/factlog query`, `/factlog check`, `/factlog ask` | 에이전트가 소스를 읽어 후보 사실을 추출하고, 자연어 질문에서 쿼리 초안을 잡고, 엔진 검증 흐름(컴파일·로직 체크·답변)을 돌립니다. |
+| **Claude Code slash command** | Claude Code 세션 안 | `/factlog setup`, `/factlog sync`, `/factlog query`, `/factlog check`, `/factlog ask` | 에이전트가 소스를 읽어 후보 사실을 추출하고, 자연어 질문에서 쿼리 초안을 잡고, 엔진 검증 흐름(컴파일·로직 체크·답변)을 호출합니다(검증 자체는 결정론 엔진이 수행). |
 | **Python CLI command** | 터미널(shell) | `factlog status`, `factlog review`, `factlog accept`, `factlog reject`, `factlog amend` | KB 상태를 확인하고, 후보 사실을 **사람이** 검토·승인·폐기·수정합니다. `accept`/`reject` 는 후보를 accepted로 확정하거나 폐기하는 **사람의 게이트**입니다(자동 단계가 아님). |
 | **KB 파일**(명령 아님 — 산출물/위치) | 프로젝트 KB 폴더 | `sources/`, `facts/candidates.csv`, `facts/accepted.dl`, `facts/logic_report.txt` | 원본(`sources/`), 후보(`candidates.csv`), 엔진 입력(`accepted.dl`)이 놓이는 자리입니다. `facts/logic_report.txt` 는 **엔진이 생성하는 검증 결과가 남는 위치**로, 사람이 편집하지 않습니다. |
 
