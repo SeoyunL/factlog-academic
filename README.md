@@ -115,7 +115,7 @@ factlog에는 두 종류의 사실이 있습니다.
 
 **특정 사실의 출처 추적하기**
 
-- (터미널에서 실행) `factlog search` 로 확인하려는 accepted 사실을 찾는다
+- (터미널에서 실행) `factlog search` 로 확인하려는 사실을 찾는다
 - (터미널에서 실행) `factlog provenance` 로 그 사실이 어느 소스에서 왔는지 추적한다
 - 자세한 사용법은 아래 [사실의 출처 추적](#사실의-출처-추적-factlog-provenance) 참고
 
@@ -123,7 +123,7 @@ factlog에는 두 종류의 사실이 있습니다.
 
 - (Claude Code에서 실행) `/factlog sync` 로 후보 사실을 만든다
 - (터미널에서 실행) `factlog review` 로 후보를 검토한다
-- (터미널에서 실행) 잘못 추출된 후보는 `factlog reject` 로 폐기하고, 표현만 다듬을 후보는 `factlog amend` 로 고쳐 승인한다
+- (터미널에서 실행) 잘못 추출된 후보는 `factlog reject` 로 폐기하고, 표현만 다듬을 후보는 `factlog amend` 로 값을 고친 뒤 `factlog accept`(또는 `factlog amend --accept`)로 승인한다
 - 자세한 사용법은 아래 [사실 검토](#사실-검토-factlog-review--accept--reject) 참고
 
 ### 동작 방식
