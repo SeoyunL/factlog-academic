@@ -108,43 +108,174 @@ def _pyrewire_ok() -> bool:
     return _version_tuple(str(getattr(pyrewire, "__version__", "0"))) >= MIN_PYREWIRE
 
 
-def _run_doctor_checks() -> bool:
-    """Run and print the doctor checks. Returns True iff all checks pass.
+class Check(NamedTuple):
+    """A single doctor diagnostic.
 
-    Shared by `cmd_doctor` and `cmd_setup` so setup reports the exact same
-    Python/pyrewire status the standalone doctor would.
+    * severity — one of ``OK`` / ``INFO`` / ``WARN`` / ``FAIL``. Only ``FAIL``
+      flips the doctor exit code; ``INFO``/``WARN`` are advisory and must never
+      change exit status (smoke.sh/setup.sh depend on exit 0 in a healthy env).
+    * title    — the one-line status shown after the severity tag.
+    * hints    — follow-up guidance lines. Each hint is prefixed at render time
+      with ``→`` and already carries an execution-location tag such as
+      ``[터미널]`` (a shell) or ``[Claude Code]`` (inside the assistant).
     """
-    ok = True
 
-    if sys.version_info[:2] >= MIN_PYTHON:
-        print(f"OK  Python {sys.version_info.major}.{sys.version_info.minor}")
+    severity: str
+    title: str
+    hints: tuple[str, ...] = ()
+
+
+def _shadow_factlog_dir() -> str | None:
+    """Return the path of a shadowing ``./factlog`` folder, or None.
+
+    Heuristic (all three must hold, so this is WARN-only and false-positive shy):
+    the cwd has a ``factlog`` subdirectory, the cwd has *no* ``pyproject.toml``
+    (so it is not the repo checkout), and that subdirectory is not the actually
+    imported ``factlog`` package. Such a stray folder shadows the installed
+    package on ``sys.path[0]`` and makes ``python -m factlog`` import the wrong
+    code.
+    """
+    import factlog as _pkg
+
+    cwd = _Path.cwd()
+    candidate = cwd / "factlog"
+    if not candidate.is_dir():
+        return None
+    if (cwd / "pyproject.toml").exists():
+        return None
+    try:
+        pkg_dir = _Path(_pkg.__file__).resolve().parent
+    except (AttributeError, TypeError):
+        return None
+    if candidate.resolve() == pkg_dir:
+        return None
+    return str(candidate)
+
+
+def _collect_doctor_checks() -> list[Check]:
+    """Gather doctor diagnostics as structured :class:`Check` rows.
+
+    Pure data: builds and returns the checks without printing, so unit tests can
+    assert severities directly. Rendering/exit-code logic lives in
+    :func:`_render_doctor`.
+    """
+    import os
+    import shutil
+
+    checks: list[Check] = []
+
+    # (1)+(2) Python version floor + interpreter surfacing (WindowsApps stub).
+    interp = sys.executable or "?"
+    py = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if sys.version_info[:2] < MIN_PYTHON:
+        checks.append(
+            Check("FAIL", f"Python {py} < 3.11 필요 ({interp})",
+                  ("[터미널] Python 3.11 이상을 설치한 뒤 다시 실행하세요",))
+        )
+    elif "WindowsApps" in interp:
+        # Microsoft Store Python stub: often a non-functional launcher shim.
+        checks.append(
+            Check("WARN", f"Python {py} (Store stub: {interp})",
+                  ("[터미널] python.org 정식 배포판 설치를 권장합니다",))
+        )
     else:
-        ok = False
-        print(f"FAIL Python {sys.version_info.major}.{sys.version_info.minor} < 3.11", file=sys.stderr)
+        checks.append(Check("OK", f"Python {py} ({interp})"))
 
+    # pyrewire engine floor (unchanged behaviour/message intent).
     try:
         import pyrewire  # type: ignore
 
-        current = _version_tuple(str(getattr(pyrewire, "__version__", "0")))
-        if current >= MIN_PYREWIRE:
-            print(f"OK  pyrewire {getattr(pyrewire, '__version__', '?')}")
+        version = str(getattr(pyrewire, "__version__", "?"))
+        if _version_tuple(version) >= MIN_PYREWIRE:
+            checks.append(Check("OK", f"pyrewire {version}"))
         else:
-            ok = False
-            print(
-                f"FAIL pyrewire {getattr(pyrewire, '__version__', '?')} "
-                f"< {'.'.join(map(str, MIN_PYREWIRE))} "
-                "(pip install -r requirements.txt)",
-                file=sys.stderr,
+            floor = ".".join(map(str, MIN_PYREWIRE))
+            checks.append(
+                Check("FAIL", f"pyrewire {version} < {floor}",
+                      ("[터미널] pip install -r requirements.txt",))
             )
     except ImportError:
-        ok = False
-        print("FAIL pyrewire not installed (pip install -r requirements.txt)", file=sys.stderr)
+        checks.append(
+            Check("FAIL", "pyrewire not installed",
+                  ("[터미널] pip install -r requirements.txt",))
+        )
 
-    return ok
+    # (1) git availability. macOS ships it via the Command Line Tools.
+    if shutil.which("git"):
+        checks.append(Check("OK", "git"))
+    elif sys.platform == "darwin":
+        checks.append(Check("FAIL", "git이 없습니다", ("[터미널] xcode-select --install",)))
+    else:
+        checks.append(
+            Check("FAIL", "git이 없습니다",
+                  ("[터미널] 패키지 매니저로 git을 설치하세요 (예: apt install git)",))
+        )
+
+    # (3) shadowing ./factlog folder (WARN-only, false-positive shy).
+    shadow = _shadow_factlog_dir()
+    if shadow is not None:
+        checks.append(
+            Check("WARN", f"이 폴더에 factlog/ 폴더가 있어 패키지를 가릴 수 있습니다 ({shadow})",
+                  ("[터미널] 다른 위치에서 실행하거나 이 폴더 이름을 바꾸세요",))
+        )
+
+    # (4) FACTLOG_PYTHON override.
+    fp = os.environ.get("FACTLOG_PYTHON")
+    perm_hint = "[터미널] 영구 등록: echo 'export FACTLOG_PYTHON=…' >> ~/.zshrc"
+    if not fp:
+        checks.append(
+            Check("INFO", "FACTLOG_PYTHON 미설정 (시스템 python3 사용)", (perm_hint,))
+        )
+    elif os.path.exists(fp):
+        checks.append(Check("OK", f"FACTLOG_PYTHON = {fp} (존재함)"))
+    else:
+        checks.append(
+            Check("WARN", f"FACTLOG_PYTHON = {fp} (경로 없음)",
+                  ("[터미널] 경로를 고치거나 unset FACTLOG_PYTHON 하세요", perm_hint))
+        )
+
+    return checks
+
+
+def _render_doctor(checks: list[Check], emit_summary: bool = False) -> bool:
+    """Print *checks* in the rich doctor layout. Returns True iff no FAIL rows.
+
+    When *emit_summary* is True a concluding banner is printed. `cmd_setup`
+    calls the doctor twice, so it renders with emit_summary=False to avoid a
+    duplicate banner; only the standalone `cmd_doctor` emits the summary.
+    """
+    print("factlog doctor — 설치 점검")
+    print()
+
+    fails = 0
+    for check in checks:
+        if check.severity == "FAIL":
+            fails += 1
+        print(f"{check.severity:<6}{check.title}")
+        for hint in check.hints:
+            print(f"      → {hint}")
+
+    if emit_summary:
+        print("─" * 28)
+        if fails == 0:
+            print("결과: 이상 없음")
+        else:
+            print(f"결과: FAIL {fails}개. 위 → 안내를 처리한 뒤 doctor를 다시 실행하세요.")
+
+    return fails == 0
+
+
+def _run_doctor_checks(emit_summary: bool = False) -> bool:
+    """Collect and render the doctor checks. Returns True iff all checks pass.
+
+    Shared by `cmd_doctor` and `cmd_setup` so setup reports the exact same
+    diagnostics the standalone doctor would.
+    """
+    return _render_doctor(_collect_doctor_checks(), emit_summary=emit_summary)
 
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
-    return 0 if _run_doctor_checks() else 1
+    return 0 if _run_doctor_checks(emit_summary=True) else 1
 
 
 _TEMPLATES: dict[str, str] = {
