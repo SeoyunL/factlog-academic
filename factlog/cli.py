@@ -1053,12 +1053,23 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     '-' wildcards that position and omitted trailing positions are wildcards too
     (at least one non-wildcard term is required). All statuses are shown —
     including superseded/needs_review — so retired backing stays visible.
+
+    Alias expansion (requires policy/relation-aliases.md): when the RELATION
+    term is a declared canonical, rows stored under surface variant predicates
+    are also included and labelled with ``surface: <raw>``.  When the RELATION
+    term is itself a surface predicate, a ``canonical: <name>`` context line is
+    shown.  Absent alias file → byte-identical behaviour to today.
     """
     import csv
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import normalize_confidence, source_file_refs
+    from factlog.common import (
+        normalize_confidence,
+        relation_aliases,
+        source_file_refs,
+        surface_variants,
+    )
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1094,7 +1105,35 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     def field(r: dict, k: str) -> str:
         return nfc((r.get(k) or "").strip())
 
-    matched = [r for r in rows if all(field(r, k) == v for k, v in filt.items())]
+    # --- alias expansion (no-op when relation-aliases.md is absent) ----------
+    aliases = relation_aliases(target)
+    relation_term = filt.get("relation")  # None when relation position is wildcarded
+    variants: set[str] = set()
+    canonical_for_term: str | None = None
+
+    if relation_term is not None and aliases:
+        # Is the queried relation a declared canonical?  Expand to surface variants.
+        variants = surface_variants(relation_term, aliases)
+        # Is the queried relation itself a surface predicate?  Surface its canonical.
+        canonical_for_term = aliases.get(relation_term)
+
+    # Build extended filter: rows matching the base filter OR rows where the
+    # relation is one of the surface variants (all other fields still match).
+    if variants:
+        base_filt = {k: v for k, v in filt.items() if k != "relation"}
+
+        def _matches_extended(r: dict) -> bool:
+            rel = field(r, "relation")
+            if rel == relation_term:
+                return all(field(r, k) == v for k, v in base_filt.items())
+            if rel in variants:
+                return all(field(r, k) == v for k, v in base_filt.items())
+            return False
+
+        matched = [r for r in rows if _matches_extended(r)]
+    else:
+        matched = [r for r in rows if all(field(r, k) == v for k, v in filt.items())]
+
     if not matched:
         shown = ", ".join(f"{k}={v}" for k, v in filt.items())
         print(f"factlog provenance: no fact matches ({shown})", file=sys.stderr)
@@ -1102,15 +1141,37 @@ def cmd_provenance(args: argparse.Namespace) -> int:
 
     on_disk = source_file_refs(target)  # NFC-normalised refs of files that exist
 
-    groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
-    for r in matched:
-        groups.setdefault((field(r, "subject"), field(r, "relation"), field(r, "object")), []).append(r)
+    # When a canonical was queried, bucket rows by the raw relation they were
+    # stored under so each surface variant gets its own labelled group.
+    # When no alias expansion applies, bucket_key is always relation_term (or
+    # the actual relation value for wildcard queries) — identical to today.
+    if variants:
+        # Group by (subject, raw_relation, object) so surface variants are separate.
+        groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+        for r in matched:
+            groups.setdefault(
+                (field(r, "subject"), field(r, "relation"), field(r, "object")), []
+            ).append(r)
+    else:
+        groups = {}
+        for r in matched:
+            groups.setdefault(
+                (field(r, "subject"), field(r, "relation"), field(r, "object")), []
+            ).append(r)
 
     distinct_sources: set[str] = set()
     stale_rows = 0
+
     print(f"factlog provenance (KB: {target}): {len(groups)} fact(s), {len(matched)} source row(s)")
+    # Print canonical context line when the user queried a surface predicate.
+    if canonical_for_term:
+        print(f"  canonical: {canonical_for_term}")
     for (s, rel, o), grp in groups.items():
-        print(f"  {s} / {rel} / {o}")
+        # Label surface-variant groups so the original raw predicate is explicit.
+        if variants and rel != relation_term:
+            print(f"  {s} / {rel} / {o}  [surface: {rel}]")
+        else:
+            print(f"  {s} / {rel} / {o}")
         for r in sorted(grp, key=lambda r: field(r, "source")):
             src = field(r, "source")
             src_file = src.partition("#")[0]
