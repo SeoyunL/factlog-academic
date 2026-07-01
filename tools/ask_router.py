@@ -81,6 +81,7 @@ from common import (  # noqa: E402
     policy_predicates,
     run_wirelog,
 )
+from factlog import literal_types  # noqa: E402
 
 
 def _policy_program_optional() -> str:
@@ -269,6 +270,15 @@ def render_engine_answer(
     if rows:
         for row in rows:
             line = f"  - {', '.join(row)}"
+            # Display-only: annotate a compound-term object (amount/date/number)
+            # with its human-friendly form. The stored/canonical string stays in
+            # the row verbatim (still copy-paste queryable); the pretty form is
+            # appended, never substituted. No-op for plain objects, so a KB with
+            # no compound objects renders byte-identically (#188 follow-up).
+            if len(row) == 3:
+                pretty = literal_types.humanize(row[2])
+                if pretty != row[2]:
+                    line += f"  (= {pretty})"
             sig = signals.get((row[0], row[1], row[2])) if signals is not None and len(row) == 3 else None
             if sig:
                 line += f" (sources: {sig['sources']}, extraction conf: {sig['confidence']})"
