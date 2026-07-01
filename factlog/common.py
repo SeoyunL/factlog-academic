@@ -423,8 +423,14 @@ def _load_logic_policy_from(logic_policy_dl: Path) -> str:
                 "policy/logic-policy.dl is missing but policy/logic-policy.md defines "
                 "rules; run tools/generate_logic_policy.py (or /factlog add) to compile it"
             )
-        return ""
-    text = logic_policy_dl.read_text(encoding="utf-8").strip()
+        # No compiled logic-policy.dl, but a hand-authored logic-policy.extra.dl
+        # may still exist (#120). Fall through to the extra.dl merge tail with an
+        # empty base rather than short-circuiting here — otherwise those rules
+        # would be silently dropped (justinjoy review), violating #190's own
+        # invariant that user policy is never discarded without a loud error.
+        text = ""
+    else:
+        text = logic_policy_dl.read_text(encoding="utf-8").strip()
     # Optional sibling for hand-authored rules (e.g. typed comparison predicates,
     # #120). Unlike logic-policy.dl this file is never regenerated or byte-compared
     # by generate_logic_policy.py --check, so authors may edit it directly. Absent
@@ -443,7 +449,9 @@ def _load_logic_policy_from(logic_policy_dl: Path) -> str:
             and not line.strip().startswith("#")
             for line in extra_text.splitlines()
         ):
-            text = text + "\n" + extra_text
+            # Avoid a leading newline when the base is empty (no compiled
+            # logic-policy.dl) so the engine program text stays clean.
+            text = (text + "\n" + extra_text) if text else extra_text
     return text
 
 

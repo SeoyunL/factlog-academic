@@ -122,6 +122,29 @@ class TestMissingLogicPolicyDl:
         dl = self._dl(tmp_path, md="   \n\n")
         assert common._load_logic_policy_from(dl) == ""
 
+    def test_absent_dl_with_extra_dl_preserves_hand_authored_rules(self, tmp_path):
+        # Fresh KB: no compiled logic-policy.dl, prose-only logic-policy.md (no
+        # rules) → empty base policy. But a hand-authored logic-policy.extra.dl
+        # (#120 typed-comparison rule) MUST NOT be silently dropped just because
+        # the compiled .dl is absent (justinjoy review). The extra.dl merge tail
+        # has to run even on the no-policy branch.
+        md = "# Logic policy\n\nWrite rules like `- [c1] ... ` here later.\n"
+        dl = self._dl(tmp_path, md=md)
+        extra = (
+            ".decl after2030(entity: symbol, reason: symbol)\n"
+            'after2030(S, "x") :- launch_date(S, D), D >= 20300101.\n'
+        )
+        (tmp_path / "policy" / "logic-policy.extra.dl").write_text(
+            extra, encoding="utf-8"
+        )
+        text = common._load_logic_policy_from(dl)
+        # The rule survives (not an empty string) and stays byte-clean: because
+        # the base is empty there must be NO leading newline.
+        assert text == extra.strip()
+        assert "after2030" in text
+        # And the predicate is preserved end-to-end (no silent drop).
+        assert "after2030" in common.policy_predicates(text)
+
     def _assert_raises_uncompiled(self, dl):
         try:
             common._load_logic_policy_from(dl)
