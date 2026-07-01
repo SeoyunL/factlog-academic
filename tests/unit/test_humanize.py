@@ -54,6 +54,25 @@ class TestHumanizePassthrough:
         assert result is s  # passthrough must be byte-identical object
 
 
+class TestHumanizeDateOutOfRange:
+    """Out-of-range date compounds must be returned verbatim (not fabricated ISO)."""
+
+    def test_month_too_high(self):
+        assert lt.humanize("date(2030,13)") == "date(2030,13)"
+
+    def test_month_zero(self):
+        assert lt.humanize("date(2030,0)") == "date(2030,0)"
+
+    def test_day_too_high(self):
+        assert lt.humanize("date(2030,1,45)") == "date(2030,1,45)"
+
+    def test_valid_3arg_still_humanizes(self):
+        assert lt.humanize("date(2030,12,31)") == "2030-12-31"
+
+    def test_valid_2arg_still_humanizes(self):
+        assert lt.humanize("date(2030,1)") == "2030-01"
+
+
 class TestHumanizeNeverRaises:
     @pytest.mark.parametrize("value", [
         "",

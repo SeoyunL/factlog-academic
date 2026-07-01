@@ -241,9 +241,13 @@ def humanize(value: str) -> str:
     text = value.strip()
     m = _DATE_COMPOUND_RE.match(text)
     if m:
-        iso = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
-        if m.group(3) is not None:
-            iso += f"-{int(m.group(3)):02d}"
+        month = int(m.group(2))
+        day = int(m.group(3)) if m.group(3) is not None else None
+        if not (1 <= month <= 12 and (day is None or 1 <= day <= 31)):
+            return value
+        iso = f"{int(m.group(1)):04d}-{month:02d}"
+        if day is not None:
+            iso += f"-{day:02d}"
         return iso
     m = _AMOUNT_COMPOUND_RE.match(text)
     if m:
