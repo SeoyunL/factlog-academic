@@ -26,6 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from common import logic_policy_md_has_rules
+
 _TOOLS = Path(__file__).parent
 
 
@@ -88,9 +90,9 @@ def main(argv: list[str] | None = None) -> int:
             # benign fresh-KB case → stub) from a genuine generation failure when
             # the .md DOES define rules (do not silently drop the user's policy).
             policy_md = root / "policy" / "logic-policy.md"
-            md_text = policy_md.read_text(encoding="utf-8") if policy_md.is_file() else ""
-            has_rules = bool(re.search(r"(?m)^\s*[-*]\s*\[[a-z0-9_]+\].*`", md_text))
-            if has_rules:
+            # Shared has-rules definition (factlog/common.py) so finalize and
+            # _load_logic_policy_from never drift on what "defines rules" means (#190).
+            if logic_policy_md_has_rules(policy_md):
                 sys.stderr.write(gen.stderr)
                 print(
                     "finalize: WARNING — policy/logic-policy.md appears to define rules but "

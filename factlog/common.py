@@ -327,9 +327,40 @@ def load_accepted_facts() -> list[dict[str, str]]:
     return _load_accepted_facts_from(ACCEPTED_DL)
 
 
+def logic_policy_md_has_rules(md_path: Path) -> bool:
+    """Deterministic 'does this policy .md define compilable rules?' check.
+
+    A rule bullet looks like ``- [c1] ... `rel` ...`` — a list bullet, a
+    ``[id]`` tag, and at least one backtick-quoted relation. This is the same
+    definition tools/finalize.py uses to distinguish a benign fresh-KB policy
+    (prose/empty → no rules) from one that DOES define rules; both call sites
+    must share it so the two never drift (#190). generate_logic_policy.py's
+    bullet parser (markdown_policy_items + fixture_policy_json) recognises the
+    same shape.
+    """
+    if not md_path.is_file():
+        return False
+    md_text = md_path.read_text(encoding="utf-8")
+    return bool(re.search(r"(?m)^\s*[-*]\s*\[[a-z0-9_]+\].*`", md_text))
+
+
 def _load_logic_policy_from(logic_policy_dl: Path) -> str:
     if not logic_policy_dl.is_file():
-        raise FactlogError("missing policy/logic-policy.dl; run factlog init --target <kb> --force")
+        # A fresh `init`ed KB has no compiled logic-policy.dl yet. Distinguish
+        # the benign no-policy case (empty/prose logic-policy.md → treat as an
+        # empty policy so `check` can complete with 0 findings, matching how
+        # `/factlog ask` is already graceful, #190) from a real error where the
+        # author DID write rules but never compiled them (do not silently drop
+        # the policy). The asymmetry is intentional: `ask` is exploratory and
+        # short-circuits on a missing file (ask_router._policy_program_optional),
+        # while `check` is a verification gate that must still complete.
+        md_path = logic_policy_dl.with_name("logic-policy.md")
+        if logic_policy_md_has_rules(md_path):
+            raise FactlogError(
+                "policy/logic-policy.dl is missing but policy/logic-policy.md defines "
+                "rules; run tools/generate_logic_policy.py (or /factlog add) to compile it"
+            )
+        return ""
     text = logic_policy_dl.read_text(encoding="utf-8").strip()
     # Optional sibling for hand-authored rules (e.g. typed comparison predicates,
     # #120). Unlike logic-policy.dl this file is never regenerated or byte-compared
@@ -369,7 +400,7 @@ def policy_predicates(policy_program: str | None = None) -> set[str]:
 
 def load_questions() -> list[dict[str, str]]:
     if not QUESTIONS_MD.is_file():
-        raise FactlogError("missing policy/questions.md; run factlog init --target <kb> --force")
+        raise FactlogError("missing policy/questions.md; run factlog init --target <kb>")
     rows: list[dict[str, str]] = []
     seen_ids: set[str] = set()
     for lineno, line in enumerate(QUESTIONS_MD.read_text(encoding="utf-8").splitlines(), start=1):
@@ -955,7 +986,7 @@ def schema_context() -> str:
 
 def build_text_to_datalog_prompt(question: str) -> str:
     if not TEXT_TO_DATALOG_PROMPT.is_file():
-        raise FactlogError("missing policy/prompts/text_to_datalog.md; run factlog init --target <kb> --force")
+        raise FactlogError("missing policy/prompts/text_to_datalog.md; run factlog init --target <kb>")
     template = TEXT_TO_DATALOG_PROMPT.read_text(encoding="utf-8")
     bad = [name for name in ["{{SCHEMA_CONTEXT}}", "{{QUESTION}}"] if template.count(name) != 1]
     if bad:

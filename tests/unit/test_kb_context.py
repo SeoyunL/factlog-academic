@@ -94,6 +94,56 @@ class TestExtraLogicPolicy:
         assert "after2030" in common.policy_predicates(ctx.load_logic_policy())
 
 
+class TestMissingLogicPolicyDl:
+    """A freshly `init`ed KB has no compiled logic-policy.dl yet (#190).
+
+    When logic-policy.md defines no compilable rules this is a legitimate empty
+    policy → return '' so `check` completes with 0 findings (mirroring how
+    `/factlog ask` is already graceful). When the .md DOES define rules but was
+    never compiled, keep failing loud (do not silently drop the policy)."""
+
+    def _dl(self, root, *, md=None):
+        (root / "policy").mkdir(parents=True, exist_ok=True)
+        if md is not None:
+            (root / "policy" / "logic-policy.md").write_text(md, encoding="utf-8")
+        return root / "policy" / "logic-policy.dl"
+
+    def test_absent_dl_no_md_is_empty_policy(self, tmp_path):
+        dl = self._dl(tmp_path)  # no .md, no .dl at all
+        assert common._load_logic_policy_from(dl) == ""
+
+    def test_absent_dl_prose_only_md_is_empty_policy(self, tmp_path):
+        md = "# Logic policy\n\nWrite rules like `- [c1] ... ` here later.\n"
+        # Prose text — no bullet with a [id] tag → no rules → empty policy.
+        dl = self._dl(tmp_path, md=md)
+        assert common._load_logic_policy_from(dl) == ""
+
+    def test_absent_dl_empty_md_is_empty_policy(self, tmp_path):
+        dl = self._dl(tmp_path, md="   \n\n")
+        assert common._load_logic_policy_from(dl) == ""
+
+    def test_absent_dl_with_rules_still_raises(self, tmp_path):
+        md = "# Logic policy\n\n- [c1] flag when `requires_review`\n"
+        dl = self._dl(tmp_path, md=md)
+        try:
+            common._load_logic_policy_from(dl)
+        except common.FactlogError as exc:
+            msg = str(exc)
+            assert "generate_logic_policy" in msg or "/factlog add" in msg
+            assert "--force" not in msg
+        else:
+            raise AssertionError("expected FactlogError for uncompiled rules")
+
+    def test_has_rules_helper(self, tmp_path):
+        (tmp_path / "rules.md").write_text("- [c1] flag `rel`\n", encoding="utf-8")
+        (tmp_path / "prose.md").write_text("just prose, no bullets\n", encoding="utf-8")
+        (tmp_path / "notag.md").write_text("- a bullet with `rel` but no id\n", encoding="utf-8")
+        assert common.logic_policy_md_has_rules(tmp_path / "rules.md") is True
+        assert common.logic_policy_md_has_rules(tmp_path / "prose.md") is False
+        assert common.logic_policy_md_has_rules(tmp_path / "notag.md") is False
+        assert common.logic_policy_md_has_rules(tmp_path / "missing.md") is False
+
+
 class TestTwoKbsAreIndependent:
     def test_contexts_do_not_bleed(self, tmp_path):
         # Two KBs with different attribute-relation policies, read in one process.
