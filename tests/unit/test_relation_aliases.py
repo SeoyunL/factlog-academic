@@ -2,6 +2,8 @@
 """Unit tests for relation_aliases() parser, surface_variants(), and collision guard."""
 from __future__ import annotations
 
+import unicodedata
+
 import pytest
 
 import common
@@ -77,6 +79,27 @@ class TestRelationAliasesParse:
         ))
         assert common.relation_aliases(tmp_path) == {"a": "b"}
 
+    def test_missing_arrow_not_parsed_as_mapping(self, tmp_path):
+        # Two backtick groups but NO `->` between them must NOT become a mapping
+        # (the arrow is required — two stray backticks are not a declaration).
+        _write_alias_file(tmp_path, (
+            "- `a` `b`\n"
+            "- `x` -> `y`\n"
+        ))
+        aliases = common.relation_aliases(tmp_path)
+        assert "a" not in aliases
+        assert aliases == {"x": "y"}
+
+    def test_wrong_arrow_not_parsed_as_mapping(self, tmp_path):
+        # A non-`->` separator (e.g. `<-`) must NOT become a mapping.
+        _write_alias_file(tmp_path, (
+            "- `a` <- `b`\n"
+            "- `x` -> `y`\n"
+        ))
+        aliases = common.relation_aliases(tmp_path)
+        assert "a" not in aliases
+        assert aliases == {"x": "y"}
+
 
 # ---------------------------------------------------------------------------
 # surface_variants
@@ -138,3 +161,38 @@ class TestRelationAliasesCollisions:
         ))
         aliases = common.relation_aliases(tmp_path)
         assert aliases == {"a": "b"}
+
+
+# ---------------------------------------------------------------------------
+# NFC normalization (macOS-authored NFD files must match NFC CSV relations)
+# ---------------------------------------------------------------------------
+
+class TestRelationAliasesNFC:
+    """A KB file authored on macOS is often NFD (decomposed) Hangul, but the CSV
+    relations cmd_provenance compares against are NFC-normalized. So the parsed
+    keys/values MUST be NFC or the canonical lookup and surface match silently
+    miss for exactly the Korean predicates this feature targets (#188)."""
+
+    def test_nfd_key_normalized_to_nfc(self, tmp_path):
+        nfd = unicodedata.normalize("NFD", "게재연도")
+        assert nfd != unicodedata.normalize("NFC", "게재연도")  # sanity: forms differ
+        _write_alias_file(tmp_path, f"- `{nfd}` -> `published_year`\n")
+        key = next(iter(common.relation_aliases(tmp_path)))
+        assert unicodedata.is_normalized("NFC", key)
+        assert key == unicodedata.normalize("NFC", "게재연도")
+
+    def test_nfd_canonical_normalized_to_nfc(self, tmp_path):
+        nfd = unicodedata.normalize("NFD", "게재연도")
+        _write_alias_file(tmp_path, f"- `publication_year` -> `{nfd}`\n")
+        canonical = common.relation_aliases(tmp_path)["publication_year"]
+        assert unicodedata.is_normalized("NFC", canonical)
+        assert canonical == unicodedata.normalize("NFC", "게재연도")
+
+    def test_nfc_query_matches_nfd_authored_surface(self, tmp_path):
+        # A canonical queried in NFC finds an NFD-authored surface variant.
+        nfd = unicodedata.normalize("NFD", "게재연도")
+        _write_alias_file(tmp_path, f"- `{nfd}` -> `published_year`\n")
+        aliases = common.relation_aliases(tmp_path)
+        assert unicodedata.normalize("NFC", "게재연도") in common.surface_variants(
+            "published_year", aliases
+        )

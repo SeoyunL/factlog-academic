@@ -656,11 +656,12 @@ def relation_aliases(root: Path | None = None) -> dict[str, str]:
         stripped = re.sub(r"^\s*[-*]\s+", "", line.strip()).strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # Expect exactly two backtick groups: `raw` -> `canonical`
-        groups = re.findall(r"`([^`]+)`", stripped)
-        if len(groups) != 2:
+        # Expect exactly `raw` -> `canonical` — arrow is required.
+        m = re.fullmatch(r"`([^`]+)`\s*->\s*`([^`]+)`", stripped)
+        if not m:
             continue
-        raw, canonical = groups[0].strip(), groups[1].strip()
+        raw = unicodedata.normalize("NFC", m.group(1).strip())
+        canonical = unicodedata.normalize("NFC", m.group(2).strip())
         if not raw or not canonical:
             continue
         # self-map
