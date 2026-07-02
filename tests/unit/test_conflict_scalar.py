@@ -30,6 +30,9 @@ def _fact(subject: str, relation: str, obj: str, status: str = "confirmed") -> d
 _AMOUNT_SPEC = common.TypedRelSpec("amount", "revenue")
 _TYPED_AMOUNT = {"매출": _AMOUNT_SPEC}
 
+# A typed single-valued date relation (no unit table needed).
+_TYPED_DATE = {"출시": common.TypedRelSpec("date", "launch_date")}
+
 
 class TestEquivalentNotationNotFlagged:
     def test_amount_equivalent_units_collapse_to_one_value(self):
@@ -48,6 +51,15 @@ class TestEquivalentNotationNotFlagged:
             _fact("갑사", "매출", 'amount(0.54,"조")'),
         ]
         conflicts = check_conflicts.detect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
+        assert conflicts == {}
+
+    def test_date_equivalent_precision_collapses_to_one_value(self):
+        # 2030.1 (month precision, day->01) == 2030.01.01 == 20300101 -> one value.
+        facts = [
+            _fact("기서비스", "출시", "2030.1"),
+            _fact("기서비스", "출시", "2030.01.01"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, _TYPED_DATE)
         assert conflicts == {}
 
 
@@ -126,6 +138,19 @@ class TestUnparseableDegrades:
         ]
         conflicts = check_conflicts.detect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
         assert conflicts == {}
+
+    def test_raw_integer_string_does_not_collide_with_scalar_key(self):
+        # Key-namespace safety: amount(5400,"억") -> ("scalar", 540000000000);
+        # the bare digit string "540000000000" has no unit -> unparseable as amount
+        # -> ("raw", "540000000000"). The (kind, value) tuple keeps the int scalar
+        # and the look-alike raw string distinct, so this is a real 2-value conflict,
+        # never a false merge.
+        facts = [
+            _fact("갑사", "매출", 'amount(5400,"억")'),
+            _fact("갑사", "매출", "540000000000"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
+        assert conflicts[("갑사", "매출")] == ["540000000000", 'amount(5400,"억")']
 
 
 class TestMultiValuedNotFlagged:
