@@ -36,13 +36,34 @@ _TOOLS = Path(__file__).parent
 POLICY_STUB = "// no policy rules\n"
 
 
+# Defensive upper bound so a wedged child (e.g. an engine call that never returns)
+# can't hang finalize forever. Generous — the deterministic steps finish in
+# well under a second on real KBs; this only trips on a genuine hang.
+_RUN_TIMEOUT_SEC = 300
+
+
 def _run(script: str, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(_TOOLS / script), *args],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            [sys.executable, str(_TOOLS / script), *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_RUN_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Surface a timeout as an ordinary non-zero result so every caller handles
+        # it exactly like any other failure (rc != 0), rather than raising through
+        # finalize. Preserve whatever output was captured before the timeout.
+        stdout = exc.stdout or ""
+        stderr = (exc.stderr or "") + (
+            f"\n{script}: timed out after {_RUN_TIMEOUT_SEC}s\n"
+        )
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        return subprocess.CompletedProcess(exc.cmd, returncode=124, stdout=stdout, stderr=stderr)
 
 
 def _pyrewire_ok() -> bool:
@@ -114,13 +135,35 @@ def main(argv: list[str] | None = None) -> int:
     # between the .md rules and the compiled .dl; on drift the .dl is stale and we
     # fall through to regenerate so the current rules are actually applied. In sync
     # → --check exits 0 and we leave everything untouched (deterministic, idempotent,
-    # no output). Only the generated logic-policy.dl is inspected here; a benign
-    # no-rules .md (--check is skipped, would hard-error) and hand-authored
-    # logic-policy.extra.dl are never touched.
+    # no output). When the .md has NO rules but a real compiled .dl is still on disk,
+    # --check is skipped (it would hard-error on a ruleless .md) so the symmetric
+    # rules→empty reset below handles that case instead. Only the generated
+    # logic-policy.dl is inspected here; hand-authored logic-policy.extra.dl is a
+    # separate file and is never touched.
     stale_dl = False
     if policy_dl.is_file() and logic_policy_md_has_rules(policy_md):
         check = _run("generate_logic_policy.py", "--check", env=env)
         stale_dl = check.returncode != 0
+    elif (
+        policy_dl.is_file()
+        and not logic_policy_md_has_rules(policy_md)
+        and policy_dl.read_text(encoding="utf-8") != POLICY_STUB
+    ):
+        # #217 (symmetric transition rules→empty): the .md previously had rules that
+        # compiled into a real .dl, but the user has since REMOVED all rules.
+        # has_rules is now False so the stale-check above is skipped, yet the real
+        # compiled .dl (old rules, e.g. requires_review(X,"c1") :- relation(X,"uses",_))
+        # is still on disk and the engine keeps applying the OLD policy — the same
+        # silent stale-apply this issue removes, just in the rules→empty direction.
+        # Reset the .dl to the empty-policy stub so it matches the now-ruleless .md.
+        # A benign stub is already POLICY_STUB so this never fires for it (no-op),
+        # and the #194 stub-over-rules self-heal above ran first, so a stub is never
+        # left masking real rules.
+        policy_dl.write_text(POLICY_STUB, encoding="utf-8")
+        print(
+            "finalize: policy/logic-policy.dl was stale; reset to empty policy "
+            "(logic-policy.md defines no rules)."
+        )
     if stale_dl or not policy_dl.is_file():
         gen = _run("generate_logic_policy.py", env=env)
         if stale_dl and policy_dl.is_file() and gen.returncode != 0:

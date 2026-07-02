@@ -190,6 +190,35 @@ else
   bad "#217: extra.dl was modified or logic-policy.dl not regenerated"
 fi
 
+# --- #217 (symmetric transition rules→empty): after a real policy compiled into a
+# .dl, REMOVING all rules from logic-policy.md must reset the .dl to the empty-policy
+# stub — otherwise the engine keeps applying the OLD compiled rules (silent
+# stale-apply, the same bug in the other direction). Reverting the fix (leaving the
+# old rules in the .dl) must make this fail: it's a real regression guard.
+KB10="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB10" >/dev/null
+printf '# src\n\nAcme API uses FastAPI.\n' > "$KB10/sources/a.md"
+printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB10/runs/r1.json"
+# step 1: real rule R1 -> finalize -> dl compiled with requires_review
+printf '# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 `uses` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB10/policy/logic-policy.md"
+"$PYTHON" "$FINALIZE" --target "$KB10" >/dev/null 2>&1 || true
+if grep -q "requires_review" "$KB10/policy/logic-policy.dl" 2>/dev/null; then ok "#217: R1 real policy compiled (pre-condition)"; else bad "#217: R1 real policy did not compile (pre-condition)"; fi
+# step 2: remove ALL rules from the .md (prose-only) and re-run finalize
+printf '# Logic policy\n\nNo rules yet.\n' > "$KB10/policy/logic-policy.md"
+rc10=0; out10="$("$PYTHON" "$FINALIZE" --target "$KB10" 2>&1)" || rc10=$?
+if [ "$(cat "$KB10/policy/logic-policy.dl")" = "// no policy rules" ] && ! grep -q "requires_review" "$KB10/policy/logic-policy.dl"; then
+  ok "#217: rules→empty resets dl to empty-policy stub (old rules dropped)"
+else
+  bad "#217: rules→empty left the OLD compiled rules in dl (silent stale-apply)"
+fi
+printf '%s' "$out10" | grep -qF "reset to empty policy" && ok "#217: rules→empty reset is surfaced (not silent)" || bad "#217: rules→empty reset was silent"
+
+# --- #217 (symmetric): once reset to the stub, an in-sync re-run must be a no-op
+# (benign stub + no-rules .md → no churn, no false 'stale' note).
+rc10b=0; out10b="$("$PYTHON" "$FINALIZE" --target "$KB10" 2>&1)" || rc10b=$?
+[ "$(cat "$KB10/policy/logic-policy.dl")" = "// no policy rules" ] && ok "#217: reset stub is stable on re-run (idempotent)" || bad "#217: reset stub churned on re-run"
+printf '%s' "$out10b" | grep -qF "reset to empty policy" && bad "#217: benign stub re-run wrongly reported reset" || ok "#217: benign stub re-run is silent (no reset note)"
+
 echo ""
 echo "========================================"
 echo "test_finalize: $pass passed, $fail failed"
