@@ -597,7 +597,7 @@ def cmd_sources(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import is_sync_ignored, source_rel_key, source_stem_key, sync_ignore_patterns
+    from factlog.common import is_sync_ignored, paired_conversion, source_rel_key, sync_ignore_patterns
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -634,10 +634,10 @@ def cmd_sources(args: argparse.Namespace) -> int:
         if not p.is_file() or p.name.startswith("."):
             continue
         orig_ref = nfc(p.relative_to(target).as_posix())
-        # Pair on the full-name key (#213); fall back to the legacy stem key so a
-        # conversion made before #213 (named by the bare stem) still pairs until
-        # the KB is re-ingested.
-        conv_ref = conv.get(source_rel_key(orig_ref)) or conv.get(source_stem_key(orig_ref), "")
+        # Match on the full-name key (#213), with a provenance-verified legacy
+        # stem-key fallback so a pre-#213 conversion still pairs — but never
+        # mispairs a same-stem/different-extension sibling (see paired_conversion).
+        conv_ref = paired_conversion(orig_ref, conv, lambda ref: target / ref) or ""
         fact_ref = conv_ref or orig_ref  # facts attach to the conversion when present
         entries.append((counts.get(fact_ref, 0), orig_ref, conv_ref))
         listed.add(orig_ref)
@@ -1490,11 +1490,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         refs[p] = ref
     # only a *text* conversion under runs/sources/ backs an original (a stray
     # binary there is an anomaly, not a usable conversion — matches coverage).
-    covered_keys = {
-        common.source_rel_key(ref)
-        for p, ref in refs.items()
-        if ref.startswith("runs/sources/") and ref in cited and common.is_text_source(p)
-    }
+    # Conversions that are cited AND text back a binary original "via conversion".
+    covered_conv_by_key: dict[str, str] = {}
+    path_by_ref = {ref: p for p, ref in refs.items()}
+    for p, ref in refs.items():
+        if ref.startswith("runs/sources/") and ref in cited and common.is_text_source(p):
+            covered_conv_by_key.setdefault(common.source_rel_key(ref), ref)
     direct = sum(1 for ref in refs.values() if ref in cited)
     via = sum(
         1
@@ -1502,12 +1503,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         if ref not in cited
         and ref.startswith("sources/")
         and not common.is_text_source(p)
-        # Pair on the full-name key (#213); fall back to the legacy stem key so a
-        # pre-#213 conversion (named by the bare stem) still pairs pre-re-ingest.
-        and (
-            common.source_rel_key(ref) in covered_keys
-            or common.source_stem_key(ref) in covered_keys
-        )
+        # Match on the full-name key (#213), with a provenance-verified legacy
+        # stem-key fallback so a pre-#213 conversion still pairs without
+        # mispairing a same-stem sibling (see common.paired_conversion).
+        and common.paired_conversion(ref, covered_conv_by_key, lambda r: path_by_ref[r])
+        is not None
     )
     covered = direct + via
     total = len(refs)
@@ -1960,8 +1960,6 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     import re
     from pathlib import Path
 
-    from factlog.common import source_rel_key
-
     # Tie each runs/sources/ conversion to the original it was made from, read
     # from the ingest provenance header ("... | source: <name> | ..."). Two
     # originals can share a stem (report.pptx + report.docx both -> report.md),
@@ -2027,36 +2025,20 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # under the two source roots are considered, so a malformed citation
         # is never auto-ejected.
         # Pairing a conversion with its backing original:
-        #  - a *mirrored* conversion (runs/sources/<sub>/x.md) carries the
-        #    original's subdir, so we pair by subdir-aware rel key. A flat
-        #    basename set used to mask an orphan when same-name originals lived
-        #    in different subtrees (sources/a/report.pdf vs sources/b/report.pdf):
-        #    deleting only a/report.pdf left report.pdf in the set (from b), so
-        #    a/report's conversion was never flagged.
-        #  - a *flat* conversion (runs/sources/x.md — legacy layout, or an
-        #    original ingested without a subtree to mirror) has no subdir, so
-        #    the provenance basename is the only origin signal; fall back to it
-        #    and keep erring toward retention.
+        #  - a *mirrored* conversion (runs/sources/<sub>/x.<ext>.md) carries the
+        #    original's subdir, so the original it was made from lives at
+        #    sources/<same-subdir>/<provenance-origin>. Verify that exact original
+        #    is present. This is extension-aware and works for both the new naming
+        #    (report.pptx.md) and the legacy stem naming (report.md): a same-stem
+        #    sibling of another extension can neither mask a real orphan (#213
+        #    MINOR) nor, across subtrees, hide a deleted original (#103).
+        #  - a *flat* conversion (runs/sources/x.md — an original ingested without
+        #    a subtree to mirror, so the subdir is unknown) has only the
+        #    provenance basename as an origin signal; match by basename and keep
+        #    erring toward retention.
         from pathlib import PurePosixPath
 
-        def _legacy_stem_key(r: str) -> str:
-            # An original keyed the pre-#213 way: root prefix stripped, suffix
-            # dropped (sources/a/report.pdf -> a/report). Pairs a legacy
-            # conversion (runs/sources/a/report.md, keyed 'a/report') that
-            # predates the new full-name naming with its still-present original.
-            for root in ("runs/sources/", "sources/"):
-                if r.startswith(root):
-                    r = r[len(root):]
-                    break
-            return PurePosixPath(r).with_suffix("").as_posix()
-
         src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
-        src_relkeys = {source_rel_key(r) for r in disk_refs if not r.startswith("runs/sources/")}
-        # Legacy conversions key by the original's stem, not its full name, so
-        # also pair a mirrored conversion against the legacy stem key. Same-stem
-        # originals in different subtrees stay distinct (subdir is in the key),
-        # so #103's cross-subtree orphan detection is preserved for both layouts.
-        src_stemkeys = {_legacy_stem_key(r) for r in disk_refs if not r.startswith("runs/sources/")}
         for ref in all_refs:
             if ref.startswith("runs/sources/"):
                 if ref in disk_refs:
@@ -2064,9 +2046,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                     # origin is not None == has a factlog provenance header
                     # (hand-placed conversions are kept).
                     if origin is not None:
-                        ck = source_rel_key(ref)
-                        if "/" in ck:
-                            paired = ck in src_relkeys or ck in src_stemkeys
+                        conv_rel = ref[len("runs/sources/"):]
+                        subdir = PurePosixPath(conv_rel).parent
+                        if subdir.as_posix() != ".":
+                            expected = (PurePosixPath("sources") / subdir / origin).as_posix()
+                            paired = expected in disk_refs
                         else:
                             paired = origin in src_basenames
                         if not paired:

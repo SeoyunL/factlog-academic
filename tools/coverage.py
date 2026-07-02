@@ -52,9 +52,9 @@ from common import (  # noqa: E402
     is_sync_ignored,
     is_text_source,
     load_facts,
+    paired_conversion,
     source_files,
     source_rel_key,
-    source_stem_key,
     sync_ignore_patterns,
 )
 
@@ -109,19 +109,21 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
     # file in another subtree does NOT mispair. Only *text* conversions count —
     # a stray binary under runs/sources/ is an anomaly, not a usable conversion,
     # so it must not mask a real "needs conversion" gap on the original.
-    conv_by_key: dict[str, dict[str, object]] = {}
+    conv_by_key: dict[str, str] = {}
+    conv_rows: dict[str, dict[str, object]] = {}
     for r in rows:
         if r["dir"] == "runs/sources" and r["text"]:
-            conv_by_key.setdefault(source_rel_key(str(r["file"])), r)
+            cref = str(r["file"])
+            conv_by_key.setdefault(source_rel_key(cref), cref)
+            conv_rows[cref] = r
     for r in rows:
         if r["dir"] == "sources" and not r["text"]:
-            # Pair on the full-name key (#213); fall back to the legacy stem key
-            # so a pre-#213 conversion (named by the bare stem) still pairs until
-            # the KB is re-ingested.
-            conv = conv_by_key.get(source_rel_key(str(r["file"]))) or conv_by_key.get(
-                source_stem_key(str(r["file"]))
-            )
-            if conv is not None:
+            # Match on the full-name key (#213), with a provenance-verified legacy
+            # stem-key fallback (paired_conversion) so a pre-#213 conversion still
+            # pairs — but never mispairs a same-stem/different-extension sibling.
+            cref = paired_conversion(str(r["file"]), conv_by_key, lambda ref: root / ref)
+            if cref is not None:
+                conv = conv_rows[cref]
                 r["conversion"] = conv["file"]
                 r["conv_facts"] = conv["facts"]
 

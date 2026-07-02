@@ -85,8 +85,10 @@ from common import (  # noqa: E402
     is_sync_ignored,
     is_text_source,
     normalize_confidence,
+    paired_conversion,
     slugify,
     source_file_refs,
+    source_rel_key,
     sync_ignore_patterns,
 )
 from factlog import literal_types  # noqa: E402
@@ -166,6 +168,20 @@ def unconverted_binary_sources(root: Path) -> list[str]:
     derived = root / "runs" / "sources"
     if not base.is_dir():
         return []
+    # Index every runs/sources/ conversion by its subdir-aware pairing key. ingest
+    # names a conversion by the original's full name plus the out-suffix
+    # (report.pptx -> runs/sources/report.pptx.md, #213), and mirrors its subdir;
+    # source_rel_key drops just that out-suffix so the key equals the original's
+    # full-name key. paired_conversion() then matches new naming exactly and falls
+    # back (provenance-verified) to a legacy <stem>.{md,txt} conversion.
+    conv_by_key: dict[str, str] = {}
+    conv_paths: dict[str, Path] = {}
+    if derived.is_dir():
+        for p in sorted(derived.rglob("*")):
+            if p.is_file() and not p.name.startswith("."):
+                ref = unicodedata.normalize("NFC", p.relative_to(root).as_posix())
+                conv_by_key.setdefault(source_rel_key(ref), ref)
+                conv_paths[ref] = p
     patterns = sync_ignore_patterns(root)
     found: list[str] = []
     for path in sorted(p for p in base.rglob("*") if p.is_file()):
@@ -173,13 +189,10 @@ def unconverted_binary_sources(root: Path) -> list[str]:
             continue
         if is_text_source(path):
             continue
-        # ingest mirrors the original's subdirectory, so look for the conversion
-        # at runs/sources/<same-subdir>/<stem>.{md,txt}, not a flat name.
-        rel_parent = path.relative_to(base).parent
-        if any((derived / rel_parent / f"{path.stem}{ext}").is_file() for ext in (".md", ".txt")):
-            continue
-        ref = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
-        if is_sync_ignored(ref, patterns):
+        orig_ref = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+        if paired_conversion(orig_ref, conv_by_key, lambda ref: conv_paths[ref]) is not None:
+            continue  # a conversion backs this binary — it is ingested, not a gap
+        if is_sync_ignored(orig_ref, patterns):
             continue
         found.append(path.relative_to(root).as_posix())
     return found

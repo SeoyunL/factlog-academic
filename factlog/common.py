@@ -9,6 +9,7 @@ import re
 import sys
 import unicodedata
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -273,6 +274,60 @@ def source_stem_key(ref: str) -> str:
             ref = ref[len(prefix):]
             break
     return PurePosixPath(ref).with_suffix("").as_posix()
+
+
+def conversion_origin(path: Path) -> str | None:
+    """The original filename recorded in an ingest conversion's provenance header.
+
+    ingest writes a first-line header `... | source: <original-name> | ...` (or
+    `[ingested-by-factlog] source: <name> | ...` for non-markdown output). Return
+    the NFC-normalised original basename, or None when there is no header / no
+    reliable `source:` value (a hand-placed conversion). Used to *verify* a
+    legacy stem-key pairing so a pre-#213 conversion is tied to the exact
+    original it was made from, never a same-stem sibling of a different extension.
+    """
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+    except OSError:
+        return None
+    m = re.search(r"source:\s*([^|>]+?)\s*(?:\||-->|$)", head)
+    if not m:
+        return None
+    origin = unicodedata.normalize("NFC", m.group(1).strip())
+    return origin or None
+
+
+def paired_conversion(
+    orig_ref: str,
+    conv_by_key: dict[str, str],
+    path_of: Callable[[str], Path],
+) -> str | None:
+    """The runs/sources/ conversion ref that backs the original *orig_ref*, or None.
+
+    *conv_by_key* maps source_rel_key(conv_ref) -> conv_ref for every candidate
+    conversion; *path_of* resolves a conv_ref to its on-disk Path (to read the
+    provenance header for the legacy fallback).
+
+    Matching, shared by sources/coverage/status/merge so they agree:
+      1. New scheme (#213): the conversion keeps the original's full name, so
+         source_rel_key(orig) == source_rel_key(conv) — an exact, extension-aware
+         1:1 match.
+      2. Legacy fallback: a pre-#213 conversion is named by the bare stem, so it
+         keys under source_stem_key(orig). Accept it ONLY when its provenance
+         header names this exact original (or has no header — a hand-placed
+         conversion, kept for backward compatibility). This prevents a new,
+         still-unconverted original (report.pptx) from being mispaired to a
+         legacy stem conversion made from a same-stem sibling (report.pdf).
+    """
+    conv = conv_by_key.get(source_rel_key(orig_ref))
+    if conv is not None:
+        return conv
+    conv = conv_by_key.get(source_stem_key(orig_ref))
+    if conv is not None:
+        origin = conversion_origin(path_of(conv))
+        if origin is None or origin == PurePosixPath(orig_ref).name:
+            return conv
+    return None
 
 
 def source_files(root: Path) -> list[Path]:
