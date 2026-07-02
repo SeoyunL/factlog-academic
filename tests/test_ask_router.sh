@@ -119,6 +119,9 @@ if router render 'relation("Acme API", "uses", V)?' | grep -qF "policy is uncomp
 # `if LOGIC_POLICY_DL.is_file(): return False` short-circuit in _policy_uncompiled:
 # once the policy is compiled, authored md rules no longer trigger the warning even
 # though logic-policy.md still contains them. (A compiled .dl means policy IS applied.)
+# Control pair: this reuses the SAME md rule proven detectable at the True assertion
+# above (~L105, .dl absent => uncompiled=True); the only variable here is .dl presence.
+# If that True assertion is removed, this contrast weakens — keep the pair together.
 printf '# policy\n## Rules\n- [usage_chain] 어떤 항목이 `uses` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB/policy/logic-policy.md"
 : > "$KB/policy/logic-policy.dl"   # present (empty is enough: detection keys on existence, not content)
 check_field "compiled policy (.dl present) not flagged uncompiled despite md rules" validate 'relation("Acme API", "uses", V)?' policy_uncompiled False
