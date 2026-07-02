@@ -7,7 +7,6 @@ These tests are engine-free and read-only — no accepted.dl, no pyrewire.
 from __future__ import annotations
 
 import factlog.common as fcommon
-import common  # tools shim — exposes factlog.common API
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +196,8 @@ class TestSchemaContextCanonicalSection:
         self._patch_kb(monkeypatch, tmp_path)
         ctx = fcommon.schema_context()
         lines = ctx.splitlines()
-        idx_published = next((i for i, l in enumerate(lines) if "published_year" in l and "<-" in l), -1)
-        idx_author = next((i for i, l in enumerate(lines) if "저자" in l and "<-" in l), -1)
+        idx_published = next((i for i, ln in enumerate(lines) if "published_year" in ln and "<-" in ln), -1)
+        idx_author = next((i for i, ln in enumerate(lines) if "저자" in ln and "<-" in ln), -1)
         assert idx_published != -1, "published_year canonical line not found"
         assert idx_author != -1, "저자 canonical line not found"
         # Python's default sort puts ASCII before Korean: published_year (p) < 저자.

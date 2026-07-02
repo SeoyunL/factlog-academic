@@ -80,7 +80,9 @@ from common import (  # noqa: E402
     load_logic_policy,
     logic_policy_md_has_rules,
     policy_predicates,
+    relation_aliases,
     run_wirelog,
+    surface_variants,
 )
 from factlog import literal_types  # noqa: E402
 
@@ -190,20 +192,35 @@ def evaluate_relation(draft: str, facts: list[dict[str, str]]) -> list[list[str]
     """Evaluate a single ``relation(...)`` query against accepted facts.
 
     Quoted constants must match the corresponding field; variables bind freely.
+    When the relation argument is a quoted canonical name (one whose
+    surface_variants set is non-empty), a fact row matches if its relation
+    field equals the canonical name OR is in that variant set — so a canonical
+    query returns all surface-variant rows. Subject/object matching is unchanged.
     Returns the matching [subject, relation, object] rows. Does not touch
     facts/query.dl.
     """
     args = query_args(draft)
     if len(args) != 3:
         return []
+    s_arg, r_arg, o_arg = args
+    # Pre-compute surface variants when the relation arg is a quoted canonical.
+    rel_variants: set[str] = set()
+    if is_quoted_string(r_arg):
+        import unicodedata
+        _rel_name = unicodedata.normalize("NFC", arg_value(r_arg))
+        rel_variants = surface_variants(_rel_name, relation_aliases())
     rows: list[list[str]] = []
     for row in facts:
-        values = [row["subject"], row["relation"], row["object"]]
-        if all(
-            is_variable(arg) or canonical_value(arg_value(arg)) == canonical_value(value)
-            for arg, value in zip(args, values)
-        ):
-            rows.append([row["subject"], row["relation"], row["object"]])
+        s_val, r_val, o_val = row["subject"], row["relation"], row["object"]
+        if not (is_variable(s_arg) or canonical_value(arg_value(s_arg)) == canonical_value(s_val)):
+            continue
+        if not (is_variable(r_arg) or
+                canonical_value(arg_value(r_arg)) == canonical_value(r_val) or
+                r_val in rel_variants):
+            continue
+        if not (is_variable(o_arg) or canonical_value(arg_value(o_arg)) == canonical_value(o_val)):
+            continue
+        rows.append([row["subject"], row["relation"], row["object"]])
     return rows
 
 

@@ -368,6 +368,65 @@ assert 'derived — no extraction confidence' not in out, out
 assert 'extraction conf' not in out, out
 " 2>/dev/null; then ok "non-relation (path/count/policy) rows render plain, no derived/conf annotation"; else bad "non-relation row wrongly annotated"; fi
 
+# --- #227 SLICE 1: canonical relation name query expansion ---
+# A canonical name (one that appears as a target in relation-aliases.md) must:
+#   1. validate as route=engine (not relation_not_accepted -> wiki)
+#   2. evaluate/render to ALL surface-variant rows (real stored triples, real provenance)
+#   3. Without an alias file: every behavior byte-identical to today (opt-in no-op)
+AKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$AKB" >/dev/null
+# Two facts stored under different surface variants of the same canonical.
+printf '// test\nrelation("논문A", "게재연도", "2005").\nrelation("논문B", "publication_year", "2007").\n' \
+  > "$AKB/facts/accepted.dl"
+# candidates.csv backs both facts (so no [no extraction backing] appears).
+printf 'subject,relation,object,source,status,confidence,note\n%s\n%s\n' \
+  '논문A,게재연도,2005,sources/paper-a.md,confirmed,0.90,' \
+  '논문B,publication_year,2007,sources/paper-b.md,confirmed,0.85,' \
+  > "$AKB/facts/candidates.csv"
+mkdir -p "$AKB/sources"
+printf '# paper A\n' > "$AKB/sources/paper-a.md"
+printf '# paper B\n' > "$AKB/sources/paper-b.md"
+# Alias file: both surface variants map to the canonical published_year.
+printf '# Relation aliases\n- `게재연도` -> `published_year`\n- `publication_year` -> `published_year`\n' \
+  > "$AKB/policy/relation-aliases.md"
+
+arouter() { "$PYTHON" "$ROUTER" "$@" --target "$AKB"; }
+
+# 1. validate: canonical name -> route=engine (not wiki/relation_not_accepted)
+check_field_router() {  # like check_field but uses arouter
+  local desc="$1" sub="$2" draft="$3" key="$4" expected="$5"
+  local got; got="$(arouter "$sub" "$draft" | field "$key")"
+  if [ "$got" = "$expected" ]; then ok "$desc ($key=$got)"; else bad "$desc — expected $key=$expected, got $got"; fi
+}
+check_field_router "#227: canonical name routes engine (not wiki)" validate 'relation("논문A", "published_year", X)?' route engine
+check_field_router "#227: canonical name code=ok (positive, not fact_absent)" validate 'relation(S, "published_year", O)?' code ok
+check_field_router "#227: canonical query not flagged negative" validate 'relation(S, "published_year", O)?' negative False
+
+# 2. evaluate: canonical query returns BOTH surface-variant rows
+aeval_count="$(arouter evaluate 'relation(S, "published_year", O)?' | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin)['count'])")"
+if [ "$aeval_count" = "2" ]; then ok "#227: canonical evaluate returns 2 surface-variant rows"; else bad "#227: canonical evaluate count wrong (expected 2, got $aeval_count)"; fi
+
+# 3. render: canonical query shows both real stored rows, no [no extraction backing]
+arender="$(arouter render 'relation(S, "published_year", O)?')"
+if printf '%s' "$arender" | grep -qF "VERIFIED — engine"; then ok "#227: canonical render carries VERIFIED marker"; else bad "#227: canonical render missing VERIFIED marker"; fi
+if printf '%s' "$arender" | grep -qF "논문A, 게재연도, 2005"; then ok "#227: canonical render shows 논문A/게재연도 row"; else bad "#227: canonical render missing 논문A row"; fi
+if printf '%s' "$arender" | grep -qF "논문B, publication_year, 2007"; then ok "#227: canonical render shows 논문B/publication_year row"; else bad "#227: canonical render missing 논문B row"; fi
+if printf '%s' "$arender" | grep -qF "[no extraction backing]"; then bad "#227: canonical render wrongly shows [no extraction backing]"; else ok "#227: canonical render: real stored rows carry real provenance (no [no extraction backing])"; fi
+
+# 4. Without alias file: normal query unchanged (opt-in no-op)
+NKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$NKB" >/dev/null
+printf '// test\nrelation("Acme API", "uses", "FastAPI").\n' > "$NKB/facts/accepted.dl"
+nrouter() { "$PYTHON" "$ROUTER" "$@" --target "$NKB"; }
+ncheck_field() {
+  local desc="$1" sub="$2" draft="$3" key="$4" expected="$5"
+  local got; got="$(nrouter "$sub" "$draft" | field "$key")"
+  if [ "$got" = "$expected" ]; then ok "$desc ($key=$got)"; else bad "$desc — expected $key=$expected, got $got"; fi
+}
+ncheck_field "#227: no alias file — existing relation still routes engine" validate 'relation("Acme API", "uses", V)?' route engine
+ncheck_field "#227: no alias file — unknown relation still routes wiki" validate 'relation("Acme API", "published_year", V)?' route wiki
+ncheck_field "#227: no alias file — unknown relation code=relation_not_accepted" validate 'relation("Acme API", "published_year", V)?' code relation_not_accepted
+
 echo ""
 echo "========================================"
 echo "test_ask_router: $pass passed, $fail failed"
