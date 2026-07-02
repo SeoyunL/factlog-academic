@@ -548,6 +548,11 @@ def _load_logic_policy_from(logic_policy_dl: Path) -> str:
             # Avoid a leading newline when the base is empty (no compiled
             # logic-policy.dl) so the engine program text stays clean.
             text = (text + "\n" + extra_text) if text else extra_text
+    # Guard: canonical is a reserved EDB predicate; a head occurrence in policy
+    # text silently corrupts the engine program (pyrewire treats canonical as IDB
+    # and drops all compile-emitted EDB atoms). Fail loud here, after the full
+    # policy text (base + extra.dl) is assembled, so the check covers both files.
+    _assert_no_canonical_head(text)
     return text
 
 
@@ -991,6 +996,72 @@ def _assert_no_alias_collision(specs: dict[str, TypedRelSpec], program_text: str
             raise FactlogError(
                 f"typed-relations: alias {spec.alias!r} collides with a .decl already in the program"
             )
+
+
+def _assert_no_canonical_head(policy_text: str) -> None:
+    """Raise FactlogError if the policy text contains a canonical/3 rule head or fact.
+
+    ``canonical`` is a reserved engine EDB predicate emitted by compile_facts into
+    accepted.dl and declared in WIRELOG_PROGRAM.  It may appear freely in rule
+    *bodies* (right of ``:-``) — that is the whole point of #227.  But a rule
+    that *heads* ``canonical`` (left of ``:-``, or a bare canonical fact line)
+    makes pyrewire treat canonical as IDB and silently drops every compile-emitted
+    EDB atom, producing wrong answers with rc=0.
+
+    Detection strategy: track whether we are inside a rule body (i.e. a ``:-`` has
+    been seen and the rule has not yet ended with ``.``).  On each non-comment line,
+    strip quoted strings (so ``"canonical("`` inside a reason literal is not
+    mistaken for a predicate call), then:
+
+    - If we are NOT already in a body, a ``canonical(`` token on this line is a
+      head occurrence (either a head in a single-line rule, or a bare fact).
+    - If we ARE already in a body, ``canonical(`` is a body reference → allowed.
+
+    The ``.decl canonical`` in WIRELOG_PROGRAM is never passed as *policy_text*, so
+    it is safe from this check.
+
+    Raises :class:`FactlogError` on first offending line with an actionable message.
+    """
+    _ERR = (
+        "canonical is a reserved engine EDB predicate (populated from "
+        "relation-aliases.md); it may appear only in rule bodies, not as a "
+        "rule head/fact in logic-policy(.extra).dl"
+    )
+    in_body = False  # True once we have seen a ':-' and the rule has not ended with '.'
+    for line in policy_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//") or stripped.startswith("#"):
+            continue
+        # Strip quoted string literals so tokens inside "..." are not scanned.
+        line_bare = re.sub(r'"[^"]*"', "", stripped)
+        # Detect neck (':-') and rule end ('.') on this bare line.
+        has_neck = ":-" in line_bare
+        has_end = line_bare.rstrip().endswith(".")
+        has_canonical = "canonical(" in line_bare
+        if has_canonical:
+            if in_body:
+                # canonical appearing inside a rule body → allowed.
+                pass
+            elif has_neck:
+                # canonical before the neck on the same line → head.
+                neck_pos = line_bare.find(":-")
+                canon_pos = line_bare.find("canonical(")
+                if canon_pos < neck_pos:
+                    raise FactlogError(_ERR)
+                # canonical after the neck on the same line → body → allowed.
+            else:
+                # No neck and not yet in a body → bare fact or a head continuation.
+                raise FactlogError(_ERR)
+        # Update body-tracking state.
+        if has_neck:
+            if has_end:
+                # Single-line rule: head :- body. — ends on the same line.
+                in_body = False
+            else:
+                in_body = True
+        elif in_body and has_end:
+            # Multi-line rule ended.
+            in_body = False
 
 
 _FLOAT_LITERAL_RE = re.compile(r"\d+\.\d+")
