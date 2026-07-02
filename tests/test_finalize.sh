@@ -130,7 +130,9 @@ if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in py
   printf '# src\n\nAcme API uses FastAPI.\n' > "$KB7/sources/a.md"
   printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB7/runs/r1.json"
   printf '# Logic policy\n\n## Rules\n\n- [c1] flag when `foo bar` occurs\n' > "$KB7/policy/logic-policy.md"
-  "$PYTHON" "$FINALIZE" --target "$KB7" >/dev/null 2>&1; rc7=$?
+  # capture rc under `set -e`: a bare `cmd; rc=$?` aborts the whole script the
+  # instant finalize (correctly) exits non-zero, so the assertion below never runs.
+  rc7=0; "$PYTHON" "$FINALIZE" --target "$KB7" >/dev/null 2>&1 || rc7=$?
   [ "$rc7" -ne 0 ] && ok "#194: uncompiled policy fails loud with pyrewire (rc=$rc7)" || bad "#194: uncompiled policy did not fail loud with pyrewire"
 else
   echo "SKIP: pyrewire absent — skipping the loud-fail assertion (#194 loud half)"
