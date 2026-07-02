@@ -406,6 +406,8 @@ def _load_accepted_facts_from(accepted_dl: Path) -> list[dict[str, str]]:
         line = line.strip()
         if not line or line.startswith("//"):
             continue
+        if line.startswith("canonical("):
+            continue
         try:
             subject, relation, object_ = parse_relation_fact(line)
         except ValueError:
@@ -1106,6 +1108,43 @@ def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return unique
 
 
+def canonical_atoms(
+    rows: list[dict[str, str]],
+    aliases: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """Return deduped ``(subject, canonical_rel, object)`` triples for rows that
+    participate in the alias map (alias-participating only: strategy A).
+
+    A row participates when its relation is either:
+    - an alias **key** (raw predicate) → canonical = ``aliases[R]``
+    - an alias **value** (canonical name itself stored literally) → canonical = R
+
+    Rows whose relation is in neither set are skipped.  Deduplication mirrors
+    ``dedup_engine_atoms``: first-occurrence stable, keeps the first triple seen.
+    NFC-normalization is applied to the row's relation before lookup so NFD-
+    authored CSV rows match the NFC-normalized alias keys produced by
+    ``relation_aliases``."""
+    if not aliases:
+        return []
+    canonical_values: set[str] = set(aliases.values())
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[tuple[str, str, str]] = []
+    for row in rows:
+        R = unicodedata.normalize("NFC", row["relation"])
+        if R in aliases:
+            canon = aliases[R]
+        elif R in canonical_values:
+            canon = R
+        else:
+            continue
+        triple = (row["subject"], canon, row["object"])
+        if triple in seen:
+            continue
+        seen.add(triple)
+        unique.append(triple)
+    return unique
+
+
 def review_facts(facts: list[dict[str, str]]) -> list[dict[str, str]]:
     return [row for row in facts if row["status"] in REVIEW_STATUSES]
 
@@ -1288,6 +1327,7 @@ def first_dependency_path(facts: list[dict[str, str]]) -> list[str]:
 
 WIRELOG_PROGRAM = """
 .decl relation(subject: symbol, rel: symbol, object: symbol)
+.decl canonical(subject: symbol, rel: symbol, object: symbol)
 .decl edge(start: symbol, target: symbol)
 .decl path(start: symbol, target: symbol)
 
