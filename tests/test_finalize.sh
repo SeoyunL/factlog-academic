@@ -138,6 +138,58 @@ else
   echo "SKIP: pyrewire absent — skipping the loud-fail assertion (#194 loud half)"
 fi
 
+# --- #217: a real (non-stub) logic-policy.dl that already exists must be checked
+# for staleness against logic-policy.md. The pre-#217 `if not policy_dl.is_file()`
+# guard skipped regeneration whenever a .dl was present, so editing the .md after
+# the first finalize was silently ignored and the engine kept applying the OLD
+# compiled rules. finalize must now detect the drift (via generate --check) and
+# regenerate so the current rules are applied.
+KB8="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB8" >/dev/null
+printf '# src\n\nAcme API uses FastAPI.\n' > "$KB8/sources/a.md"
+printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB8/runs/r1.json"
+# step 1: policy rule R1 (relation `uses`) -> finalize -> dl compiled with `uses`
+printf '# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 `uses` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB8/policy/logic-policy.md"
+"$PYTHON" "$FINALIZE" --target "$KB8" >/dev/null 2>&1 || true
+if grep -q '"uses"' "$KB8/policy/logic-policy.dl" 2>/dev/null; then ok "#217: R1 policy compiled (dl references \`uses\`)"; else bad "#217: R1 policy did not compile"; fi
+# step 2: change the rule to R2 (relation `deployed_on`) and re-run finalize
+printf '# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 `deployed_on` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB8/policy/logic-policy.md"
+out8="$("$PYTHON" "$FINALIZE" --target "$KB8" 2>&1)" || true
+if grep -q '"deployed_on"' "$KB8/policy/logic-policy.dl" 2>/dev/null && ! grep -q '"uses"' "$KB8/policy/logic-policy.dl" 2>/dev/null; then
+  ok "#217: stale dl regenerated to R2 (regression guard: was R1 forever)"
+else
+  bad "#217: stale dl NOT regenerated (still applying old R1)"
+fi
+printf '%s' "$out8" | grep -qF "was stale" && ok "#217: stale regeneration is surfaced (not silent)" || bad "#217: stale regeneration was silent"
+
+# --- #217: in-sync dl is left untouched — no needless regeneration/warning, and
+# the recompile note only appears on drift (idempotent, byte-identical re-run).
+before8="$($PYTHON -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())" "$KB8/policy/logic-policy.dl")"
+out8b="$("$PYTHON" "$FINALIZE" --target "$KB8" 2>&1)" || true
+after8="$($PYTHON -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())" "$KB8/policy/logic-policy.dl")"
+[ "$before8" = "$after8" ] && ok "#217: in-sync re-run leaves dl byte-identical (idempotent)" || bad "#217: in-sync re-run churned the dl"
+printf '%s' "$out8b" | grep -qF "was stale" && bad "#217: in-sync re-run wrongly reported stale" || ok "#217: in-sync re-run is silent (no stale note)"
+
+# --- #217: hand-authored logic-policy.extra.dl is never inspected or regenerated,
+# even when logic-policy.dl is stale and gets regenerated.
+KB9="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB9" >/dev/null
+printf '# src\n\nAcme API uses FastAPI.\n' > "$KB9/sources/a.md"
+printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB9/runs/r1.json"
+printf '# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 `uses` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB9/policy/logic-policy.md"
+"$PYTHON" "$FINALIZE" --target "$KB9" >/dev/null 2>&1 || true
+EXTRA_SENTINEL='// hand-authored extra policy — do not touch (#217)\n.decl custom_flag(entity: symbol)\n'
+printf "$EXTRA_SENTINEL" > "$KB9/policy/logic-policy.extra.dl"
+extra_before="$($PYTHON -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())" "$KB9/policy/logic-policy.extra.dl")"
+printf '# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 `deployed_on` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB9/policy/logic-policy.md"
+"$PYTHON" "$FINALIZE" --target "$KB9" >/dev/null 2>&1 || true
+extra_after="$($PYTHON -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())" "$KB9/policy/logic-policy.extra.dl")"
+if [ "$extra_before" = "$extra_after" ] && grep -q '"deployed_on"' "$KB9/policy/logic-policy.dl" 2>/dev/null; then
+  ok "#217: extra.dl untouched while stale logic-policy.dl is regenerated"
+else
+  bad "#217: extra.dl was modified or logic-policy.dl not regenerated"
+fi
+
 echo ""
 echo "========================================"
 echo "test_finalize: $pass passed, $fail failed"

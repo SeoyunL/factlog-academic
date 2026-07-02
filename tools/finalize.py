@@ -105,8 +105,32 @@ def main(argv: list[str] | None = None) -> int:
         and logic_policy_md_has_rules(policy_md)
     ):
         policy_dl.unlink()
-    if not policy_dl.is_file():
+    # #217: a real (non-stub) .dl that already exists must NOT be trusted blindly.
+    # The old `if not policy_dl.is_file(): generate` guard skipped regeneration
+    # whenever a .dl was present, so edits to logic-policy.md after the first
+    # finalize were silently ignored and the engine kept applying the OLD compiled
+    # rules (stale policy). When the .md defines rules, reuse the compiler's own
+    # byte-identity verification (generate_logic_policy.py --check) to detect drift
+    # between the .md rules and the compiled .dl; on drift the .dl is stale and we
+    # fall through to regenerate so the current rules are actually applied. In sync
+    # → --check exits 0 and we leave everything untouched (deterministic, idempotent,
+    # no output). Only the generated logic-policy.dl is inspected here; a benign
+    # no-rules .md (--check is skipped, would hard-error) and hand-authored
+    # logic-policy.extra.dl are never touched.
+    stale_dl = False
+    if policy_dl.is_file() and logic_policy_md_has_rules(policy_md):
+        check = _run("generate_logic_policy.py", "--check", env=env)
+        stale_dl = check.returncode != 0
+    if stale_dl or not policy_dl.is_file():
         gen = _run("generate_logic_policy.py", env=env)
+        if stale_dl and policy_dl.is_file() and gen.returncode != 0:
+            # The .dl drifted from the .md but regeneration also failed (e.g. the
+            # edited .md no longer compiles). Do NOT keep applying the stale .dl
+            # silently — remove it so this run surfaces the uncompiled state the same
+            # way the absent-.dl path does below (#194 invariant): run_logic_check
+            # fails loud with pyrewire, and /factlog check's loud detection (#190)
+            # keys on the .dl being ABSENT.
+            policy_dl.unlink(missing_ok=True)
         if not policy_dl.is_file():
             # generate produced nothing. Distinguish "no compilable rules" (the
             # benign fresh-KB case → stub) from a genuine generation failure when
@@ -135,6 +159,11 @@ def main(argv: list[str] | None = None) -> int:
                 # with an empty policy (fresh-KB case).
                 policy_dl.parent.mkdir(parents=True, exist_ok=True)
                 policy_dl.write_text(POLICY_STUB, encoding="utf-8")
+        elif stale_dl:
+            # Stale .dl was regenerated from the current .md rules. Surface this on
+            # stdout (only in the drift path — the in-sync path stays silent) so the
+            # behaviour change is visible rather than a silent recompile.
+            print("finalize: policy/logic-policy.dl was stale; regenerated from logic-policy.md.")
 
     # 3. compile confirmed/accepted facts -> facts/accepted.dl
     compile_proc = _run("compile_facts.py", env=env)
