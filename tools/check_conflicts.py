@@ -36,25 +36,69 @@ import factlog_config  # noqa: E402
 
 os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 
+import literal_types  # noqa: E402
 from common import (  # noqa: E402
+    TypedRelSpec,
     engine_facts,
     ensure_dirs,
     load_facts,
     single_valued_relations,
+    typed_relations,
 )
+
+
+def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
+    """Return the equivalence key an *object* string is grouped under.
+
+    For a relation declared typed (#116), the object's canonical scalar
+    (``literal_types.normalize``) is the key, so equivalent notations of the same
+    value (e.g. ``amount(5400,"억")`` and ``amount(0.54,"조")`` -> 5.4e11) collapse
+    to one value instead of firing a false CONFLICT. ``amount`` needs its unit
+    table, so ``spec.units`` is passed through.
+
+    Falls back to the raw object string when the relation is untyped OR the value
+    does not parse (normalize -> None): backward-compatible, lossless degrade. The
+    two key spaces are tagged (``"scalar"`` vs ``"raw"``) so a scalar never
+    collides with an unrelated raw string. Total: never raises (normalize is
+    total)."""
+    if spec is not None:
+        scalar = literal_types.normalize(spec.type, obj, spec.units)
+        if scalar is not None:
+            return ("scalar", scalar)
+    return ("raw", obj)
 
 
 def detect_conflicts(
     facts: list[dict[str, str]],
     single_valued: set[str],
+    typed: dict[str, TypedRelSpec] | None = None,
 ) -> dict[tuple[str, str], list[str]]:
-    """Map (subject, relation) -> sorted distinct objects, for single-valued
-    relations that have more than one object (a contradiction)."""
-    by_key: dict[tuple[str, str], set[str]] = {}
+    """Map (subject, relation) -> sorted distinct *display* objects, for
+    single-valued relations that hold more than one *distinct value* (a
+    contradiction).
+
+    Distinctness is judged on the canonical grouping key (typed scalar when
+    available, else the raw string — see ``_group_key``), so equivalent typed
+    notations do not false-positive. The reported values, however, preserve the
+    original object strings (provenance): each distinct key contributes one
+    deterministic representative (the lexicographically smallest raw object seen
+    for it). Deterministic; never raises."""
+    typed = typed or {}
+    # (subject, relation) -> group key -> set of raw object strings under it.
+    by_key: dict[tuple[str, str], dict[tuple, set[str]]] = {}
     for row in engine_facts(facts):
-        if row["relation"] in single_valued:
-            by_key.setdefault((row["subject"], row["relation"]), set()).add(row["object"])
-    return {key: sorted(objs) for key, objs in by_key.items() if len(objs) > 1}
+        relation = row["relation"]
+        if relation not in single_valued:
+            continue
+        obj = row["object"]
+        key = _group_key(obj, typed.get(relation))
+        groups = by_key.setdefault((row["subject"], relation), {})
+        groups.setdefault(key, set()).add(obj)
+    return {
+        key: sorted(min(raws) for raws in groups.values())
+        for key, groups in by_key.items()
+        if len(groups) > 1
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         print("check_conflicts: no single-valued relations declared (policy/single-valued.md); nothing to check")
         return 0
 
-    conflicts = detect_conflicts(load_facts(), single_valued)
+    conflicts = detect_conflicts(load_facts(), single_valued, typed_relations())
     if not conflicts:
         print(f"check_conflicts: 0 conflicts across {len(single_valued)} single-valued relation(s)")
         return 0

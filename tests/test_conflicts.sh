@@ -78,6 +78,30 @@ printf '# single-valued\n\n- 주_속성\n' > "$KB/policy/single-valued.md"
 # validate.py accepts the superseded status (no invalid-status error)
 if "$PYTHON" "$PLUGIN_ROOT/tools/validate.py" "$KB" 2>&1 | grep -q "invalid status"; then bad "validate rejected superseded status"; else ok "validate accepts superseded status"; fi
 
+# --- #204: typed single-valued amount compares on the canonical scalar, not the
+# raw string, so equivalent notations (억 ↔ 조) don't false-positive while real
+# value differences still fire and the report preserves the original notation.
+printf '# single-valued\n\n- 주_속성\n- 매출\n' > "$KB/policy/single-valued.md"
+printf -- '- `매출` : amount as revenue\n' > "$KB/policy/typed-relations.md"
+
+# equivalent notations of the same value -> NOT a conflict (1 value)
+csv '갑사,매출,"amount(5400,""억"")",sources/x.md,confirmed,0.9,' '갑사,매출,"amount(0.54,""조"")",sources/x.md,confirmed,0.9,'
+if run_conflicts; then ok "typed amount: equivalent notations (5400억 == 0.54조) not flagged"; else bad "typed amount: equivalent notations wrongly flagged as conflict"; fi
+
+# real value difference -> CONFLICT, and the message keeps the ORIGINAL notation
+csv '갑사,매출,"amount(5000,""억"")",sources/x.md,confirmed,0.9,' '갑사,매출,"amount(5400,""억"")",sources/x.md,confirmed,0.9,'
+if run_conflicts; then bad "typed amount: real value difference (5000억 vs 5400억) NOT detected"; else ok "typed amount: real value difference detected"; fi
+cout="$("$PYTHON" "$CONFLICTS" --wiki "$KB" 2>&1 || true)"
+if printf '%s' "$cout" | grep -qF 'amount(5000,"억")' && printf '%s' "$cout" | grep -qF 'amount(5400,"억")'; then ok "typed amount: report preserves original notation (provenance)"; else bad "typed amount: report lost original notation"; fi
+
+# unparseable typed object degrades to the raw-string key (still detected)
+csv '갑사,매출,"amount(5400,""억"")",sources/x.md,confirmed,0.9,' '갑사,매출,not-a-number,sources/x.md,confirmed,0.9,'
+if run_conflicts; then bad "typed amount: parseable-vs-unparseable difference NOT detected"; else ok "typed amount: unparseable object degrades to raw key (detected)"; fi
+
+# restore the baseline single-valued policy for any later additions
+printf '# single-valued\n\n- 주_속성\n' > "$KB/policy/single-valued.md"
+rm -f "$KB/policy/typed-relations.md"
+
 echo ""
 echo "========================================"
 echo "test_conflicts: $pass passed, $fail failed"
