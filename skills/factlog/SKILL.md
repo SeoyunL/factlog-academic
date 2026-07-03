@@ -33,6 +33,42 @@ gate is also backed by a plugin hook (`hooks/hooks.json`).
    passes schema and engine re-validation; otherwise keep the original and log
    the attempt to `decisions/correction_trace.md`.
 
+## Resolve the active KB root first (every flow except setup)
+
+Before any LLM read/write in a flow (`sync`, `query`, `check`, `repair`, `add`,
+`ask`), determine the active KB root **deterministically** — do not assume
+`$FACTLOG_ROOT` is already exported:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog where
+```
+
+`factlog where` prints the resolved KB root and its source, using the exact same
+precedence the engine and CLI tools use (`factlog/config.py` `resolve_root`):
+
+> **`--wiki`/`--target` flag  >  `$FACTLOG_ROOT`  >  active-KB config file  >  cwd**
+
+Use that resolved path as the single KB root for the whole flow:
+
+- Read sources from `<kb-root>/sources/` and write extracted candidates to
+  `<kb-root>/runs/` at that path (the docs below write these as
+  `$FACTLOG_ROOT/sources/` and `$FACTLOG_ROOT/runs/`; treat `$FACTLOG_ROOT` as
+  that resolved root).
+- Pass that same root to every command's `--target`/`--wiki`.
+- If `$FACTLOG_ROOT` is already exported, it wins over the config file (matching
+  the precedence above), so honour it as-is.
+
+**Fallback (first-time users):** if `factlog where` reports the root came from
+`cwd` — i.e. no `--wiki`/`--target` flag, no `$FACTLOG_ROOT`, and no active-KB
+config — operate in the current working directory. This is the tutorial path
+where you copy `examples/sample-kb` and run `factlog use` (see
+`examples/sample-kb/README.md`).
+
+**When an active KB IS configured, never fall back to cwd or the bundled
+`examples/sample-kb`.** Running a slash command from inside the factlog source
+repo must still target the configured active KB, so the LLM extraction step and
+the engine step operate on the *same* KB.
+
 ## Canonical source value for fact extraction
 
 When writing extracted fact rows to `$FACTLOG_ROOT/runs/*.json`, the `source`

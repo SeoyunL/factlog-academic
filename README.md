@@ -296,6 +296,11 @@ factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 ```
 
+> **슬래시 명령(`/factlog …`)도 활성 KB에서 동작합니다.** 다만 factlog **소스
+> 저장소 안에서** 실행하면 번들 `examples/sample-kb` 와 혼동될 수 있으니, KB
+> 폴더에서 열거나 `factlog use <kb>` 로 활성 KB를 먼저 지정하세요. `factlog where`
+> 로 어느 KB가 대상인지 확인할 수 있습니다.
+
 #### 어휘 살펴보기 (`factlog vocab`)
 
 `ask` 와 `provenance` 는 정확한 엔티티/관계 이름을 필요로 합니다. `factlog vocab`

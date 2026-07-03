@@ -272,6 +272,101 @@ fi
 rm -rf "$KB_STUB" "$STUB_PATH"
 
 # ---------------------------------------------------------------------------
+# Config helpers for the active-KB resolution cases (#239).
+# XDG_CONFIG_HOME is already isolated to a throwaway dir at the top of this file,
+# so writing/clearing config.json here never touches the dev machine's config.
+# ---------------------------------------------------------------------------
+set_config_root() {
+  # Record an active-KB root in the isolated config, mirroring `factlog use`.
+  local root="$1"
+  local cfg_dir="$XDG_CONFIG_HOME/factlog"
+  mkdir -p "$cfg_dir"
+  printf '{"root": "%s"}\n' "$root" > "$cfg_dir/config.json"
+}
+
+clear_config() {
+  rm -f "$XDG_CONFIG_HOME/factlog/config.json"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 13: FACTLOG_ROOT UNSET + active-KB config set — gate resolves KB_ROOT
+# from config (not cwd). Engine input exists, no report → DENY.
+#
+# Reverting the config-aware resolver makes KB_ROOT fall back to cwd ("."), whose
+# facts/accepted.dl does not match the config KB's absolute target, so the gate
+# would treat the target as a non-engine-input and ALLOW (exit 0). This case pins
+# that the gate guards the SAME KB the tools write to (issue #239).
+# ---------------------------------------------------------------------------
+KB_CFG="$(mktemp -d)"
+make_kb "$KB_CFG"
+touch_file "$KB_CFG/facts/accepted.dl"   # existing engine input, no report → must DENY
+set_config_root "$KB_CFG"
+
+cfg_exit=0
+env -u FACTLOG_ROOT bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_CFG/facts/accepted.dl")" \
+  >/dev/null 2>&1 || cfg_exit=$?
+if [ "$cfg_exit" -eq 2 ]; then
+  echo "PASS: FACTLOG_ROOT unset, config KB used as KB_ROOT — deny (exit $cfg_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: FACTLOG_ROOT unset, config KB — expected config-resolved deny (exit 2), got $cfg_exit"
+  fail=$((fail + 1))
+fi
+clear_config
+rm -rf "$KB_CFG"
+
+# ---------------------------------------------------------------------------
+# CASE 14: FACTLOG_ROOT set + a DIFFERENT active-KB config — env wins.
+#
+# resolve_root precedence is FACTLOG_ROOT > config > cwd. Here the target is the
+# env KB's engine input with no report → DENY. If config wrongly took priority,
+# the env KB's target would not match the config KB and the gate would ALLOW.
+# ---------------------------------------------------------------------------
+KB_ENV="$(mktemp -d)"
+KB_OTHER="$(mktemp -d)"
+make_kb "$KB_ENV"
+make_kb "$KB_OTHER"
+touch_file "$KB_ENV/facts/accepted.dl"   # existing engine input in the ENV KB, no report → DENY
+set_config_root "$KB_OTHER"              # config points elsewhere; env must win
+
+env_exit=0
+FACTLOG_ROOT="$KB_ENV" bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_ENV/facts/accepted.dl")" \
+  >/dev/null 2>&1 || env_exit=$?
+if [ "$env_exit" -eq 2 ]; then
+  echo "PASS: FACTLOG_ROOT overrides config KB — deny (exit $env_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: FACTLOG_ROOT should override config KB — expected deny (exit 2), got $env_exit"
+  fail=$((fail + 1))
+fi
+clear_config
+rm -rf "$KB_ENV" "$KB_OTHER"
+
+# ---------------------------------------------------------------------------
+# CASE 15: neither FACTLOG_ROOT nor config set — cwd fallback preserved.
+#
+# The first-user path: with no active KB, KB_ROOT must fall back to cwd. Run the
+# gate from within a KB dir so cwd IS the KB; an existing engine input with no
+# report → DENY, proving cwd resolution still matches engine inputs.
+# ---------------------------------------------------------------------------
+KB_CWD="$(mktemp -d)"
+make_kb "$KB_CWD"
+touch_file "$KB_CWD/facts/accepted.dl"   # existing engine input, no report → DENY
+clear_config
+
+cwd_exit=0
+( cd "$KB_CWD" && env -u FACTLOG_ROOT bash "$GATE" <<< '{"file_path":"facts/accepted.dl"}' ) \
+  >/dev/null 2>&1 || cwd_exit=$?
+if [ "$cwd_exit" -eq 2 ]; then
+  echo "PASS: no FACTLOG_ROOT, no config — cwd fallback used as KB_ROOT — deny (exit $cwd_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: cwd fallback — expected deny (exit 2), got $cwd_exit"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_CWD"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

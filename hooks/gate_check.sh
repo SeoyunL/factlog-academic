@@ -31,8 +31,11 @@
 #     an existing input) returns exit 2. Running /factlog check (which calls
 #     run_logic_check.py and writes a fresh logic_report.txt) re-satisfies (C).
 #
-# KB root: set FACTLOG_ROOT to the knowledge-base root for sound path matching;
-# falls back to the current working directory when unset.
+# KB root resolution: FACTLOG_ROOT > active-KB config > cwd. This matches the
+# engine/CLI resolver (factlog.config.resolve_root(None)) so the gate guards the
+# same KB the slash-skill and tools operate on. If the resolver cannot run
+# (e.g. the factlog package is unavailable), it falls back to
+# ${FACTLOG_ROOT:-.} so the gate never breaks.
 #
 # Fail-closed: if a usable Python 3.11+ is unavailable or target-path extraction
 # fails for an engine-input-shaped payload, the gate denies rather than silently
@@ -42,7 +45,8 @@ set -euo pipefail
 
 payload="$(</dev/stdin)"
 
-# Determine the KB root: prefer FACTLOG_ROOT, fall back to cwd.
+# Determine the KB root: FACTLOG_ROOT > active-KB config > cwd.
+# Fail-safe fallback used until the config-aware resolver (below) succeeds.
 KB_ROOT="${FACTLOG_ROOT:-.}"
 
 HOOK_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
@@ -55,6 +59,19 @@ if ! "${PYTHON_RUNNER[@]}" -c 'import sys' >/dev/null 2>&1; then
   echo "[factlog GATE] DENIED: usable Python 3.11+ is required to evaluate the gate predicate." >&2
   echo "  Set FACTLOG_PYTHON to a venv/system python if python3 is unavailable or is a Windows Store stub." >&2
   exit 2
+fi
+
+# Resolve the KB root config-aware, matching the engine/CLI resolver so the gate
+# guards the same KB the tools write to: FACTLOG_ROOT > active-KB config > cwd.
+# factlog.config.resolve_root(None) implements exactly that precedence (no flag).
+# The factlog package lives beside this hook in the plugin root ($HOOK_DIR/..).
+# If resolution fails for any reason, KB_ROOT keeps its ${FACTLOG_ROOT:-.}
+# fallback so the gate's path matching never breaks.
+resolved_root="$(FACTLOG_HOOK_PLUGIN_ROOT="$HOOK_DIR/.." "${PYTHON_RUNNER[@]}" -c \
+  'import os, sys; sys.path.insert(0, os.path.abspath(os.environ["FACTLOG_HOOK_PLUGIN_ROOT"])); from factlog import config; print(config.resolve_root(None)[0])' \
+  2>/dev/null || true)"
+if [ -n "$resolved_root" ]; then
+  KB_ROOT="$resolved_root"
 fi
 
 # Extract the tool target from the hook payload.
