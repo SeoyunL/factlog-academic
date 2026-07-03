@@ -831,6 +831,18 @@ def surface_variants(canonical: str, aliases: dict[str, str]) -> set[str]:
     return {raw for raw, canon in aliases.items() if canon == canonical}
 
 
+def canonical_variants_of(relation: str, aliases: dict[str, str]) -> set[str]:
+    """Surface variants of *relation* when it is a declared canonical, else empty.
+
+    NFC-normalizes *relation* before the reverse lookup so a query-supplied name
+    matches the NFC-normalized alias keys (relation_aliases() normalizes on load).
+    Callers pass *aliases* (from relation_aliases()) so a hot path fetches it once;
+    an empty result doubles as "not a declared canonical" (the boolean use in
+    classify_query).
+    """
+    return surface_variants(unicodedata.normalize("NFC", relation), aliases)
+
+
 def attribute_relations() -> set[str]:
     """Relation names whose object is a LITERAL value, not a first-class entity
     (policy/attribute-relations.md).
@@ -1672,9 +1684,8 @@ def _relation_match_count(query: str, facts: list[dict[str, str]]) -> int:
         rel_arg = args[1]
         canonical_variants: set[str] = set()
         if _is_quoted_string(rel_arg):
-            _rel_name = unicodedata.normalize("NFC", _arg_value(rel_arg))
             _aliases = relation_aliases()
-            canonical_variants = surface_variants(_rel_name, _aliases)
+            canonical_variants = canonical_variants_of(_arg_value(rel_arg), _aliases)
         count = 0
         for row in facts:
             s_arg, r_arg, o_arg = args
@@ -1762,8 +1773,7 @@ def classify_query(
             # A declared canonical name (one whose surface_variants is non-empty)
             # counts as accepted even though the canonical itself may not appear
             # literally in accepted.dl — the stored facts use surface variants.
-            _rel_name = unicodedata.normalize("NFC", _arg_value(relation))
-            if not surface_variants(_rel_name, relation_aliases()):
+            if not canonical_variants_of(_arg_value(relation), relation_aliases()):
                 return False, QUERY_RELATION_NOT_ACCEPTED, f"relation name is not accepted: {_arg_value(relation)}"
         if not _is_variable(object_) and _canonical_value(_arg_value(object_)) not in {
             _canonical_value(v) for v in values
@@ -1798,8 +1808,7 @@ def classify_query(
             # A declared canonical name (one whose surface_variants is non-empty)
             # counts as accepted even though the canonical itself may not appear
             # literally in accepted.dl — the stored facts use surface variants.
-            _rel_name = unicodedata.normalize("NFC", _arg_value(relation))
-            if not surface_variants(_rel_name, relation_aliases()):
+            if not canonical_variants_of(_arg_value(relation), relation_aliases()):
                 return False, QUERY_RELATION_NOT_ACCEPTED, f"count relation is not accepted: {_arg_value(relation)}"
         return True, QUERY_OK, "passed"
     if predicate in policy_query_predicates:

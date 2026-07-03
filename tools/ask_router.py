@@ -44,7 +44,6 @@ import math
 import os
 import re
 import sys
-import unicodedata
 from pathlib import Path
 
 # Ensure tools/ is importable when run directly, and resolve the KB root BEFORE
@@ -69,6 +68,7 @@ from common import (  # noqa: E402
     FactlogError,
     arg_value,
     canonical_value,
+    canonical_variants_of,
     is_quoted_string,
     is_variable,
     query_args,
@@ -84,7 +84,6 @@ from common import (  # noqa: E402
     policy_predicates,
     relation_aliases,
     run_wirelog,
-    surface_variants,
 )
 from factlog import literal_types  # noqa: E402
 
@@ -238,8 +237,7 @@ def evaluate_relation(draft: str, facts: list[dict[str, str]]) -> list[list[str]
     # Pre-compute surface variants when the relation arg is a quoted canonical.
     rel_variants: set[str] = set()
     if is_quoted_string(r_arg):
-        _rel_name = unicodedata.normalize("NFC", arg_value(r_arg))
-        rel_variants = surface_variants(_rel_name, relation_aliases())
+        rel_variants = canonical_variants_of(arg_value(r_arg), relation_aliases())
     rows: list[list[str]] = []
     for row in facts:
         s_val, r_val, o_val = row["subject"], row["relation"], row["object"]
@@ -303,8 +301,7 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         subject, relation = arg_value(args[0]), arg_value(args[1])
         rel_variants: set[str] = set()
         if is_quoted_string(args[1]):
-            _rel_name = unicodedata.normalize("NFC", relation)
-            rel_variants = surface_variants(_rel_name, relation_aliases())
+            rel_variants = canonical_variants_of(relation, relation_aliases())
         objects = {
             row["object"]
             for row in facts
