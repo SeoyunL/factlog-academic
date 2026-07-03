@@ -33,13 +33,22 @@
 #
 # KB root resolution: FACTLOG_ROOT > active-KB config > cwd. This matches the
 # engine/CLI resolver (factlog.config.resolve_root(None)) so the gate guards the
-# same KB the slash-skill and tools operate on. If the resolver cannot run
-# (e.g. the factlog package is unavailable), it falls back to
-# ${FACTLOG_ROOT:-.} so the gate never breaks.
+# same KB the slash-skill and tools operate on.
 #
-# Fail-closed: if a usable Python 3.11+ is unavailable or target-path extraction
-# fails for an engine-input-shaped payload, the gate denies rather than silently
-# allowing.
+# SCOPE: the gate protects the *active* KB (the one resolved above). Directly
+# editing a NON-active KB's facts/accepted.dl or facts/query.dl — e.g. when an
+# active KB is configured but cwd is a different KB-B — is NOT the gate's target:
+# that write does not match the active KB_ROOT and is allowed. This is
+# intentional and consistent with the tools, which also resolve to the active KB.
+#
+# If the resolver cannot run (e.g. the factlog package is unavailable), KB_ROOT
+# safely degrades to the prior ${FACTLOG_ROOT:-.} behaviour (usually cwd). This
+# is a fail-to-previous-behaviour, NOT a fail-closed: it opens no new hole beyond
+# what existed before this resolver, but it is permissive for cross-KB writes.
+# The only true fail-closed here is the python-availability check below (which
+# DENYs when no usable Python 3.11+ is present, since the predicate cannot then
+# be evaluated). Target-path extraction failures for engine-input-shaped payloads
+# likewise deny.
 
 set -euo pipefail
 
@@ -65,8 +74,9 @@ fi
 # guards the same KB the tools write to: FACTLOG_ROOT > active-KB config > cwd.
 # factlog.config.resolve_root(None) implements exactly that precedence (no flag).
 # The factlog package lives beside this hook in the plugin root ($HOOK_DIR/..).
-# If resolution fails for any reason, KB_ROOT keeps its ${FACTLOG_ROOT:-.}
-# fallback so the gate's path matching never breaks.
+# If resolution fails for any reason, KB_ROOT safely degrades to the prior
+# ${FACTLOG_ROOT:-.} behaviour (fail-to-previous-behaviour, no new hole); it is
+# not fail-closed — the python-availability check above owns that.
 resolved_root="$(FACTLOG_HOOK_PLUGIN_ROOT="$HOOK_DIR/.." "${PYTHON_RUNNER[@]}" -c \
   'import os, sys; sys.path.insert(0, os.path.abspath(os.environ["FACTLOG_HOOK_PLUGIN_ROOT"])); from factlog import config; print(config.resolve_root(None)[0])' \
   2>/dev/null || true)"

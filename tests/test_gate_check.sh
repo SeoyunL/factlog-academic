@@ -317,30 +317,48 @@ rm -rf "$KB_CFG"
 
 # ---------------------------------------------------------------------------
 # CASE 14: FACTLOG_ROOT set + a DIFFERENT active-KB config — env wins.
+# DISCRIMINATING form (mutation-killing): env → a FRESH KB, config → a STALE KB,
+# and the TARGET is the STALE config KB's engine input.
 #
-# resolve_root precedence is FACTLOG_ROOT > config > cwd. Here the target is the
-# env KB's engine input with no report → DENY. If config wrongly took priority,
-# the env KB's target would not match the config KB and the gate would ALLOW.
+# resolve_root precedence is FACTLOG_ROOT > config > cwd. With env winning,
+# KB_ROOT is the FRESH env KB, so the stale config KB's file is NOT an engine
+# input under KB_ROOT → ALLOW (exit 0). This is exactly the scope in the hook
+# comment: the gate guards the ACTIVE KB (env here), and a write to a NON-active
+# KB is not the gate's target.
+#
+# Why this pins env > config: if config wrongly won, KB_ROOT would be the STALE
+# config KB, the target WOULD match, the stale-report guard would fire, and the
+# gate would DENY (exit 2) → this case FAILS. A resolver that ignored env (or
+# ranked config above env) is therefore killed, whereas the previous CASE 14
+# (target under the env KB, expect DENY) passed even if config had been ignored.
 # ---------------------------------------------------------------------------
-KB_ENV="$(mktemp -d)"
-KB_OTHER="$(mktemp -d)"
-make_kb "$KB_ENV"
-make_kb "$KB_OTHER"
-touch_file "$KB_ENV/facts/accepted.dl"   # existing engine input in the ENV KB, no report → DENY
-set_config_root "$KB_OTHER"              # config points elsewhere; env must win
+KB_ENV_FRESH="$(mktemp -d)"
+KB_CFG_STALE="$(mktemp -d)"
+make_kb "$KB_ENV_FRESH"
+make_kb "$KB_CFG_STALE"
+# ENV KB (active): fresh report → would ALLOW if this KB were guarded.
+touch_file "$KB_ENV_FRESH/facts/accepted.dl"
+set_mtime_past "$KB_ENV_FRESH/facts/accepted.dl"
+touch_file "$KB_ENV_FRESH/facts/logic_report.txt"
+# CONFIG KB (non-active): STALE (accepted.dl newer than report) → would DENY if
+# this KB were (wrongly) guarded.
+touch_file "$KB_CFG_STALE/facts/logic_report.txt"
+set_mtime_past "$KB_CFG_STALE/facts/logic_report.txt"
+touch_file "$KB_CFG_STALE/facts/accepted.dl"
+set_config_root "$KB_CFG_STALE"
 
 env_exit=0
-FACTLOG_ROOT="$KB_ENV" bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_ENV/facts/accepted.dl")" \
+FACTLOG_ROOT="$KB_ENV_FRESH" bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_CFG_STALE/facts/accepted.dl")" \
   >/dev/null 2>&1 || env_exit=$?
-if [ "$env_exit" -eq 2 ]; then
-  echo "PASS: FACTLOG_ROOT overrides config KB — deny (exit $env_exit)"
+if [ "$env_exit" -eq 0 ]; then
+  echo "PASS: FACTLOG_ROOT (active) overrides config — write to non-active stale config KB allowed (exit $env_exit)"
   pass=$((pass + 1))
 else
-  echo "FAIL: FACTLOG_ROOT should override config KB — expected deny (exit 2), got $env_exit"
+  echo "FAIL: env>config not honoured — expected allow (exit 0) for non-active config KB, got $env_exit"
   fail=$((fail + 1))
 fi
 clear_config
-rm -rf "$KB_ENV" "$KB_OTHER"
+rm -rf "$KB_ENV_FRESH" "$KB_CFG_STALE"
 
 # ---------------------------------------------------------------------------
 # CASE 15: neither FACTLOG_ROOT nor config set — cwd fallback preserved.

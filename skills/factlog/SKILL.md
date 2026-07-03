@@ -48,6 +48,11 @@ precedence the engine and CLI tools use (`factlog/config.py` `resolve_root`):
 
 > **`--wiki`/`--target` flag  >  `$FACTLOG_ROOT`  >  active-KB config file  >  cwd**
 
+Note: `factlog where` observes `$FACTLOG_ROOT`, the config, and cwd — it does
+**not** see a flow's `--target`/`--wiki`. Slash flows normally rely on the active
+KB with no flag, so this matches. If a flow does pass an explicit
+`--target`/`--wiki`, that value wins over what `factlog where` reports.
+
 Use that resolved path as the single KB root for the whole flow:
 
 - Read sources from `<kb-root>/sources/` and write extracted candidates to
