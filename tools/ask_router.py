@@ -66,6 +66,7 @@ from common import (  # noqa: E402
     LOGIC_POLICY_DL,
     QUERY_FACT_ABSENT,
     QUERY_OK,
+    FactlogError,
     arg_value,
     canonical_value,
     is_quoted_string,
@@ -90,29 +91,37 @@ from factlog import literal_types  # noqa: E402
 
 def _policy_program_optional() -> str:
     """Return the fully assembled policy text — the generated `logic-policy.dl`
-    PLUS the optional hand-authored `logic-policy.extra.dl` — or '' if the policy
-    has not been generated yet.
+    PLUS the optional hand-authored `logic-policy.extra.dl` — or '' if no usable
+    policy can be assembled yet.
 
     `/factlog ask` is interactive and must work before `/factlog check` compiles
-    `policy/logic-policy.dl`. When the compiled `logic-policy.dl` is present,
-    reading the *assembled* program (via `load_logic_policy()`, which concatenates
-    `logic-policy.extra.dl`) — not just the generated file — lets ask see and
-    evaluate user-authored comparison predicates declared in
-    `logic-policy.extra.dl` (#152), matching what `/factlog check` evaluates.
+    `policy/logic-policy.dl`. Reading the *assembled* program via the SAME loader
+    `/factlog check` uses — `load_logic_policy()` → `common._load_logic_policy_from`,
+    which merges `logic-policy.extra.dl` onto the compiled base — is the single
+    source of truth, so ask and check never drift on what the policy program IS.
+    That loader already merges `logic-policy.extra.dl` even when the compiled
+    `logic-policy.dl` is ABSENT (#190), so a hand-authored comparison predicate
+    that lives ONLY in extra.dl (no compiled .dl, no rules in logic-policy.md) is
+    now seen and evaluated here, matching check (#198 — closes the ask≠check gap
+    where extra.dl was silently ignored when the .dl was absent, #152/#120).
     Both the classify/route path and the evaluate/render path read this, so one
     source of truth fixes both.
 
-    LIMITATION (not yet parity with check): when `logic-policy.dl` is ABSENT this
-    short-circuits to '' — it does NOT merge a hand-authored `logic-policy.extra.dl`,
-    whereas `/factlog check` does (common._load_logic_policy_from). So an extra.dl
-    that carries the *only* policy (no compiled .dl, no rules in logic-policy.md)
-    is still silently unevaluated here. #193 closes the `logic-policy.md`-rules
-    case (see `_policy_uncompiled`, which warns on it); the extra.dl-only-when-.dl-
-    absent parity is a separate residual left for a follow-up.
+    NON-RAISING by contract (#193): `_load_logic_policy_from` fails loud in a few
+    cases (`logic-policy.dl` absent WHILE `logic-policy.md` defines uncompiled
+    rules; a `canonical/3` head in the policy text) — the right behavior for the
+    `check` verification gate, but ask is exploratory and must never hard-fail.
+    We reuse the whole loader and catch `FactlogError` here rather than forking
+    just its extra.dl-merge tail (which would duplicate logic and invite drift):
+    on any load failure ask degrades to '' (no policy applied). The uncompiled-
+    but-authored `logic-policy.md` case is still surfaced separately as a warning
+    by `_policy_uncompiled` (not silently dropped), so #193's behavior is intact —
+    an empty return here + that warning, exactly as before.
     """
-    if not LOGIC_POLICY_DL.is_file():
+    try:
+        return load_logic_policy()
+    except FactlogError:
         return ""
-    return load_logic_policy()
 
 
 # Greppable one-line hint shown when the author wrote policy rules but never
