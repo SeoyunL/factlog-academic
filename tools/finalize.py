@@ -6,7 +6,12 @@ After the in-session extraction step writes runs/*.json, this chains the
 deterministic engine steps into a single command so capturing knowledge is
 low-friction:
 
-    merge_candidates  ->  ensure policy/logic-policy.dl  ->  compile_facts  ->  run_logic_check
+    merge_candidates  ->  ensure policy/logic-policy.dl  ->  check_conflicts
+        ->  compile_facts  ->  run_logic_check
+
+The single-valued contradiction gate (check_conflicts) runs BEFORE compile_facts so
+a detected contradiction never reaches facts/accepted.dl, the engine's trusted input
+that ask/check read directly without recompiling (#212).
 
 It is read-through to the bundled scripts (no logic duplicated here) and prints a
 concise summary. The logic check needs pyrewire>=1.0.3; when that is absent the
@@ -208,20 +213,49 @@ def main(argv: list[str] | None = None) -> int:
             # behaviour change is visible rather than a silent recompile.
             print("finalize: policy/logic-policy.dl was stale; regenerated from logic-policy.md.")
 
-    # 3. compile confirmed/accepted facts -> facts/accepted.dl
+    # 3. detect single-valued contradictions BEFORE compiling (deterministic; no
+    #    pyrewire needed). #212: the pre-fix order compiled facts/accepted.dl FIRST
+    #    (step 3) and only then checked for conflicts (step 4), so when a
+    #    contradiction was found finalize returned 1 but left the two contradictory
+    #    facts sitting in accepted.dl — the engine's trusted input file, which
+    #    ask_router (and /factlog check) read directly from disk WITHOUT recompiling.
+    #    A failed finalize therefore silently poisoned the KB: the very next
+    #    `factlog ask` could answer from contradictory facts, defeating factlog's
+    #    deterministic contradiction gate. check_conflicts reads ONLY
+    #    facts/candidates.csv (never accepted.dl), so gating here — before any
+    #    compile — is correct and means contradictory facts never enter the engine
+    #    input in the first place (option (a)).
+    conflicts = _run("check_conflicts.py", "--wiki", str(root), env=env)
+    sys.stdout.write(conflicts.stdout)
+    if conflicts.returncode != 0:
+        sys.stderr.write(conflicts.stderr)
+        # Defensive heal (option (c)): a KB poisoned by a PRE-FIX finalize can still
+        # have a facts/accepted.dl on disk holding the contradictory pair. Gating
+        # before compile prevents NEW pollution, but it would leave that stale
+        # poisoned file untouched — so a downstream reader could keep answering from
+        # the contradiction. Since we are refusing to (re)compile while the
+        # contradiction stands, remove accepted.dl so no reader can trust it. On a
+        # clean-history KB it is either absent or a prior consistent snapshot;
+        # removing it here is the fail-safe the message already implies ("resolve
+        # them before trusting the KB"). This makes the invariant unconditional:
+        # after a conflict-failing finalize, accepted.dl never contains the
+        # contradictory facts.
+        (root / "facts" / "accepted.dl").unlink(missing_ok=True)
+        print(
+            "\nfinalize: CONTRADICTIONS were found (see CONFLICT lines above); "
+            "facts were NOT compiled to facts/accepted.dl. Resolve them (mark "
+            "outdated rows status='superseded') and re-run before trusting the KB.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 4. compile confirmed/accepted facts -> facts/accepted.dl (only when consistent)
     compile_proc = _run("compile_facts.py", env=env)
     sys.stdout.write(compile_proc.stdout)
     if compile_proc.returncode != 0:
         sys.stderr.write(compile_proc.stderr)
         print("finalize: compile_facts failed.", file=sys.stderr)
         return 1
-
-    # 4. detect single-valued contradictions (deterministic; no pyrewire needed)
-    conflicts = _run("check_conflicts.py", "--wiki", str(root), env=env)
-    sys.stdout.write(conflicts.stdout)
-    conflict_found = conflicts.returncode != 0
-    if conflict_found:
-        sys.stderr.write(conflicts.stderr)
 
     # 5. run the deterministic logic check (needs pyrewire) — graceful skip if absent
     if _pyrewire_ok():
@@ -239,14 +273,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         checked = "compiled (logic check skipped)"
 
-    if conflict_found:
-        print(
-            f"\nfinalize: merged and {checked}, but CONTRADICTIONS were found "
-            "(see CONFLICT lines above). Resolve them (mark outdated rows "
-            "status='superseded') before trusting the KB.",
-            file=sys.stderr,
-        )
-        return 1
     if policy_uncompiled:
         # Reached only when the logic check was skipped (no pyrewire); with the
         # engine present, run_logic_check above already failed loud on the absent
