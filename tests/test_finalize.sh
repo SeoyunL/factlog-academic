@@ -242,10 +242,22 @@ KB11="$(mktemp -d)/wiki"
 printf '# src\n\nAcme API uses FastAPI.\n' > "$KB11/sources/a.md"
 printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB11/runs/r1.json"
 printf '# Logic policy\n\n## Rules\n\n- [c1] flag when `foo bar` occurs\n' > "$KB11/policy/logic-policy.md"
-rc11=0; out11="$(PYTHONPATH="$SHADOW:$PYTHONPATH" "$PYTHON" "$FINALIZE" --target "$KB11" 2>&1)" || rc11=$?
+# Capture stdout and stderr SEPARATELY: the honest final summary prints to stdout
+# (finalize.py ~236 SKIPPED, ~254-257 summary), while the "policy is NOT applied"
+# WARNING prints to stderr (finalize.py ~192). Merging them (2>&1) would let the
+# WARNING's "so the policy is NOT applied" substring satisfy the summary pin even
+# if the honest summary were reworded/removed — a false pass. Pin the summary on
+# stdout only, and match a phrase UNIQUE to the honest summary ("gate on the
+# policy", finalize.py ~257) that the WARNING does not contain.
+err11="$(mktemp)"
+rc11=0; out11="$(PYTHONPATH="$SHADOW:$PYTHONPATH" "$PYTHON" "$FINALIZE" --target "$KB11" 2>"$err11")" || rc11=$?
 [ "$rc11" -eq 0 ] && ok "#219: no-pyrewire finalize completes with rc=0 (graceful skip)" || bad "#219: no-pyrewire finalize did not exit 0 (rc=$rc11)"
 printf '%s' "$out11" | grep -qF "Logic check SKIPPED" && ok "#219: no-pyrewire summary notes 'Logic check SKIPPED'" || bad "#219: missing 'Logic check SKIPPED' note on no-pyrewire path"
-printf '%s' "$out11" | grep -qF "policy is NOT applied" && ok "#219: no-pyrewire summary stays honest ('policy is NOT applied')" || bad "#219: missing 'policy is NOT applied' honest summary on no-pyrewire path"
+printf '%s' "$out11" | grep -qF "but the policy is NOT applied (see the WARNING above)" \
+  && printf '%s' "$out11" | grep -qF "gate on the policy" \
+  && ok "#219: no-pyrewire STDOUT summary stays honest ('policy is NOT applied' + 'gate on the policy')" \
+  || bad "#219: honest no-pyrewire summary reworded/missing on stdout (WARNING-only substring must not count)"
+rm -f "$err11"
 
 # --- #219 (gap 2): logic-policy.extra.dl interaction. A hand-authored typed
 # comparison predicate (#120/#152 shape: arity-2 (entity: symbol, reason: symbol)
