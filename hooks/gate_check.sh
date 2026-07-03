@@ -45,6 +45,9 @@
 # safely degrades to the prior ${FACTLOG_ROOT:-.} behaviour (usually cwd). This
 # is a fail-to-previous-behaviour, NOT a fail-closed: it opens no new hole beyond
 # what existed before this resolver, but it is permissive for cross-KB writes.
+# That degrade is made OBSERVABLE: when Python is available but the resolver
+# returns empty (package import failure), a one-line stderr note is emitted so
+# the silent permissive fallback is visible to an operator (see below).
 # The only true fail-closed here is the python-availability check below (which
 # DENYs when no usable Python 3.11+ is present, since the predicate cannot then
 # be evaluated). Target-path extraction failures for engine-input-shaped payloads
@@ -82,6 +85,17 @@ resolved_root="$(FACTLOG_HOOK_PLUGIN_ROOT="$HOOK_DIR/.." "${PYTHON_RUNNER[@]}" -
   2>/dev/null || true)"
 if [ -n "$resolved_root" ]; then
   KB_ROOT="$resolved_root"
+else
+  # Python IS available (the fail-closed check above passed) yet the resolver
+  # returned nothing. resolve_root(None) always yields a non-empty absolute path
+  # (its final fallback is cwd), so the only way to reach here is the factlog
+  # package failing to import in the child (corrupt/missing package under the
+  # plugin root). That silent, permissive degrade to ${FACTLOG_ROOT:-cwd} is
+  # intentional (fail-to-previous-behaviour, protects bootstrap/first-run UX and
+  # opens no new hole) — but make it OBSERVABLE with a one-line stderr note so an
+  # operator can see the resolver was bypassed. This does NOT change the
+  # exit-code contract or path matching.
+  echo "[factlog GATE] note: factlog config resolver unavailable; freshness gate falling back to \${FACTLOG_ROOT:-cwd} (KB_ROOT=$KB_ROOT)" >&2
 fi
 
 # Extract the tool target from the hook payload.

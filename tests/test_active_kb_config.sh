@@ -95,6 +95,27 @@ printf '%s' "$out" | grep -qF "sources/c.bin.docx" && ok "coverage (no --wiki) u
 set +e; "$PYTHON" -m factlog use "/no/such/kb/path" >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -ne 0 ] && ok "use on a missing path errors" || bad "use on missing path should error"
 
+# --- where --porcelain prints ONLY the root (no label), honouring precedence --
+# Active KB is currently $KB (set via `use` above). --porcelain must emit exactly
+# one line = the resolved root, with no "active KB:" / "resolved from:" prose.
+unset FACTLOG_ROOT
+porc="$("$PYTHON" -m factlog where --porcelain)"
+[ "$porc" = "$(cd "$KB" && pwd -P)" ] && ok "where --porcelain prints only the config-active KB root" || bad "porcelain (config) = '$porc', want '$(cd "$KB" && pwd -P)'"
+printf '%s' "$porc" | grep -qE 'active KB|resolved from|config file' && bad "porcelain output leaked a human label: $porc" || ok "where --porcelain emits no human labels"
+[ "$(printf '%s\n' "$porc" | wc -l | tr -d ' ')" = "1" ] && ok "where --porcelain emits a single line" || bad "porcelain emitted multiple lines: $porc"
+
+# $FACTLOG_ROOT wins over config in --porcelain too (precedence preserved).
+porc_env="$(FACTLOG_ROOT="$KB2" "$PYTHON" -m factlog where --porcelain)"
+[ "$porc_env" = "$(cd "$KB2" && pwd -P)" ] && ok "where --porcelain honours \$FACTLOG_ROOT over config" || bad "porcelain (env) = '$porc_env', want '$(cd "$KB2" && pwd -P)'"
+
+# --- plain `factlog where` (no flag) output is UNCHANGED ----------------------
+plain="$("$PYTHON" -m factlog where)"
+printf '%s' "$plain" | grep -qF "active KB: $(cd "$KB" && pwd -P)" \
+  && printf '%s' "$plain" | grep -qF "resolved from:" \
+  && printf '%s' "$plain" | grep -qF "config file:" \
+  && ok "plain factlog where output unchanged (active KB / resolved from / config file)" \
+  || bad "plain where output regressed: $plain"
+
 echo ""
 echo "========================================"
 echo "test_active_kb_config: $pass passed, $fail failed"

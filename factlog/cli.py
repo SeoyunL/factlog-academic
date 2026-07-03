@@ -584,6 +584,13 @@ def cmd_use(args: argparse.Namespace) -> int:
 
 def cmd_where(args: argparse.Namespace) -> int:
     root, source = factlog_config.resolve_root()
+    # --porcelain: emit ONLY the active KB root (absolute path), one line, no
+    # label. This is the machine-parseable contract for `export FACTLOG_ROOT=...`
+    # in SKILL.md / hooks — pin exactly this shape so LLMs never parse the prose
+    # form. The human output below (unchanged) stays diagnostic-only.
+    if getattr(args, "porcelain", False):
+        print(root)
+        return 0
     label = {"env": "env ($FACTLOG_ROOT)", "config": "config file", "cwd": "current directory"}.get(source, source)
     print(f"active KB: {root}")
     print(f"resolved from: {label} (precedence: --flag > $FACTLOG_ROOT > config > cwd)")
@@ -2520,6 +2527,11 @@ def build_parser() -> argparse.ArgumentParser:
     use.set_defaults(func=cmd_use)
 
     where = sub.add_parser("where", help="print the active KB and where it was resolved from")
+    where.add_argument(
+        "--porcelain",
+        action="store_true",
+        help="print only the active KB root (absolute path, one line, no label) for scripts",
+    )
     where.set_defaults(func=cmd_where)
 
     sources = sub.add_parser("sources", help="list registered sources (original, conversion, fact count)")

@@ -37,21 +37,34 @@ gate is also backed by a plugin hook (`hooks/hooks.json`).
 
 Before any LLM read/write in a flow (`sync`, `query`, `check`, `repair`, `add`,
 `ask`), determine the active KB root **deterministically** — do not assume
-`$FACTLOG_ROOT` is already exported:
+`$FACTLOG_ROOT` is already exported. Run this **once** at the start of the flow
+and export it, so every later sub-command and the PreToolUse gate hook inherit
+the *same* value instead of each re-resolving it:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog where
+export FACTLOG_ROOT="$("${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog where --porcelain)"
 ```
 
-`factlog where` prints the resolved KB root and its source, using the exact same
-precedence the engine and CLI tools use (`factlog/config.py` `resolve_root`):
+`factlog where --porcelain` prints **only** the resolved KB root (one absolute
+path, no label) — parse-free and stable, so do not scrape the human-readable
+`factlog where` output. Both use the exact same precedence the engine and CLI
+tools use (`factlog/config.py` `resolve_root`):
 
 > **`--wiki`/`--target` flag  >  `$FACTLOG_ROOT`  >  active-KB config file  >  cwd**
+
+Exporting once turns the hook↔tool agreement from a "same-env assumption" into an
+enforced invariant: every later command and the gate hook read this exact root.
+
+For diagnostics, the plain `factlog where` (no flag) additionally prints where the
+root was resolved from and the config file path — use it to debug, but always
+machine-read the root via `--porcelain`.
 
 Note: `factlog where` observes `$FACTLOG_ROOT`, the config, and cwd — it does
 **not** see a flow's `--target`/`--wiki`. Slash flows normally rely on the active
 KB with no flag, so this matches. If a flow does pass an explicit
-`--target`/`--wiki`, that value wins over what `factlog where` reports.
+`--target`/`--wiki`, that value wins over what `factlog where` reports. When you
+export `FACTLOG_ROOT` as above, resolution is idempotent (an exported root
+re-resolves to itself).
 
 Use that resolved path as the single KB root for the whole flow:
 
@@ -63,9 +76,10 @@ Use that resolved path as the single KB root for the whole flow:
 - If `$FACTLOG_ROOT` is already exported, it wins over the config file (matching
   the precedence above), so honour it as-is.
 
-**Fallback (first-time users):** if `factlog where` reports the root came from
-`cwd` — i.e. no `--wiki`/`--target` flag, no `$FACTLOG_ROOT`, and no active-KB
-config — operate in the current working directory. This is the tutorial path
+**Fallback (first-time users):** if the diagnostic `factlog where` (no flag)
+reports the root came from `cwd` — i.e. no `--wiki`/`--target` flag, no
+`$FACTLOG_ROOT`, and no active-KB config — operate in the current working
+directory. This is the tutorial path
 where you copy `examples/sample-kb` and run `factlog use` (see
 `examples/sample-kb/README.md`).
 

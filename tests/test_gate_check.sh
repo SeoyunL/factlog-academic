@@ -385,6 +385,90 @@ fi
 rm -rf "$KB_CWD"
 
 # ---------------------------------------------------------------------------
+# CASE 16: OBSERVABILITY (#244) — config resolver returns empty because the
+# factlog package fails to import, while Python IS available. The gate must emit
+# a one-line stderr note AND still degrade to the prior ${FACTLOG_ROOT:-cwd}
+# behaviour (no exit-code / path-matching regression).
+#
+# resolve_root(None) always yields a non-empty path (cwd fallback), so the only
+# way resolved_root goes empty is the factlog import failing in the child. We
+# reproduce that deterministically WITHOUT breaking the real install: a fake
+# plugin root whose factlog/__init__.py raises ImportError. The gate inserts that
+# fake root at sys.path[0] (FACTLOG_HOOK_PLUGIN_ROOT="$HOOK_DIR/.."), so the
+# broken package shadows the installed one for the resolver invocation only. The
+# python-availability check (import sys) is unaffected, so we are NOT in the
+# fail-closed window. FACTLOG_PYTHON_RUNNER points at the real runner so a usable
+# Python is still found.
+#
+# Reverting the warning (removing the else branch) makes this case FAIL: the
+# stderr note disappears while the degrade stays silent.
+# ---------------------------------------------------------------------------
+FAKE_PLUGIN="$(mktemp -d)"
+mkdir -p "$FAKE_PLUGIN/hooks" "$FAKE_PLUGIN/factlog"
+printf 'raise ImportError("factlog package intentionally broken for gate observability test (#244)")\n' \
+  > "$FAKE_PLUGIN/factlog/__init__.py"
+cp "$GATE" "$FAKE_PLUGIN/hooks/gate_check.sh"
+
+# KB with an existing engine input and NO report → the prior behaviour, once
+# KB_ROOT degrades to $FACTLOG_ROOT, is DENY (exit 2). This proves the fallback
+# KB_ROOT still resolves the engine input exactly as before the resolver ran.
+KB_OBS="$(mktemp -d)"
+make_kb "$KB_OBS"
+touch_file "$KB_OBS/facts/accepted.dl"   # existing engine input, no report → deny
+clear_config
+
+obs_err="$(mktemp)"
+obs_exit=0
+FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_OBS" \
+  bash "$FAKE_PLUGIN/hooks/gate_check.sh" \
+  <<< "$(printf '{"file_path":"%s"}' "$KB_OBS/facts/accepted.dl")" \
+  >/dev/null 2>"$obs_err" || obs_exit=$?
+
+if [ "$obs_exit" -eq 2 ]; then
+  echo "PASS: resolver import-failure — KB_ROOT degrades to \$FACTLOG_ROOT, deny preserved (exit $obs_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: resolver import-failure — expected prior-behaviour deny (exit 2), got $obs_exit"
+  fail=$((fail + 1))
+fi
+
+if grep -qF "factlog config resolver unavailable" "$obs_err"; then
+  echo "PASS: resolver import-failure emits one-line stderr observability note"
+  pass=$((pass + 1))
+else
+  echo "FAIL: resolver import-failure — expected stderr note 'factlog config resolver unavailable', got: $(cat "$obs_err")"
+  fail=$((fail + 1))
+fi
+rm -rf "$FAKE_PLUGIN" "$KB_OBS" "$obs_err"
+
+# ---------------------------------------------------------------------------
+# CASE 17: OBSERVABILITY companion — when the resolver IS healthy, NO warning is
+# emitted (the note must not become noise on the happy path). Uses the REAL gate
+# so factlog imports fine; a fresh-report allow case keeps exit 0.
+# ---------------------------------------------------------------------------
+KB_OK="$(mktemp -d)"
+make_kb "$KB_OK"
+touch_file "$KB_OK/facts/accepted.dl"
+set_mtime_past "$KB_OK/facts/accepted.dl"
+touch_file "$KB_OK/facts/logic_report.txt"   # fresh report → allow
+clear_config
+
+ok_err="$(mktemp)"
+ok_exit=0
+FACTLOG_ROOT="$KB_OK" bash "$GATE" \
+  <<< "$(printf '{"file_path":"%s"}' "$KB_OK/facts/accepted.dl")" \
+  >/dev/null 2>"$ok_err" || ok_exit=$?
+
+if [ "$ok_exit" -eq 0 ] && ! grep -qF "factlog config resolver unavailable" "$ok_err"; then
+  echo "PASS: healthy resolver — allow preserved and NO observability note emitted (exit $ok_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: healthy resolver — expected allow (exit 0) with no note; exit=$ok_exit stderr=$(cat "$ok_err")"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_OK" "$ok_err"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
