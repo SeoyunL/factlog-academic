@@ -251,11 +251,32 @@ via the existing policy-findings path, because its `.decl` name is auto-discover
 by `policy_predicates()`. With no `typed-relations.md` and no
 `logic-policy.extra.dl`, behaviour is byte-identical to a KB without the feature.
 
-**Relation aliases and canonical/3 (hand-authored rules, #227).** `policy/relation-aliases.md`
+**Relation aliases and canonical/3 (two authoring lanes).** `policy/relation-aliases.md`
 declares surface-to-canonical predicate mappings (one `` `raw` -> `canonical` `` bullet per
 line). At compile time, `compile_facts.py` emits a `canonical/3` EDB block in `facts/accepted.dl`
-for every alias-participating fact, so a logic-policy rule can fire over any surface variant
-without naming it explicitly:
+for every alias-participating fact, so a logic-policy rule whose body references `canonical/3`
+fires over any surface variant without naming it explicitly. There are two ways to author such a
+rule.
+
+**Lane A — declare it in `logic-policy.md` with a `{canonical}` prefix (preferred, #243).**
+Prefix the bullet text (the part after the `[id]` tag) with a literal, lowercase `{canonical}`
+token, anchored at the very start:
+
+```
+- [retracted_conclusion] {canonical} 문서가 `결론` 이면서 `철회상태` 이면 철회로 본다.
+```
+
+`generate_logic_policy.py` then emits `canonical(X, "결론", _)` bodies instead of
+`relation(X, "결론", _)`, and the result is byte-checked by `generate_logic_policy.py --check`
+like every other generated rule. Use Lane A for rules the `.md` DSL already expresses:
+`predicate(X, "reason") :- canonical(X, "rel", _), … .` — an arity-2 `(entity, reason)` head, a
+single `X` variable, and a body that is a pure conjunction of `canonical/3` atoms. The marker is
+**literal-lowercase and anchored-prefix only**: a mid-sentence or prose `{canonical}` (e.g.
+`이 규칙은 {canonical} 방식을 쓴다`) is NOT a marker and produces an ordinary `relation/3` rule.
+
+**Lane B — hand-author in `policy/logic-policy.extra.dl` (for what the DSL can't express).**
+Use `extra.dl` for canonical rules the `.md` DSL cannot represent: mixed relation+canonical
+bodies, negation, typed comparisons (#120), `path/2`, or a head/body variable other than `X`:
 
 ```
 // policy/logic-policy.extra.dl
@@ -265,21 +286,25 @@ conflict(X, "retracted_conclusion") :-
   canonical(X, "철회상태", _).
 ```
 
-Four authoring rules:
+`extra.dl` is the same channel used for typed-comparison predicates (#120); it is NOT regenerated
+or byte-checked by `generate_logic_policy.py --check`, so authors may edit it directly. A canonical
+rule placed in `logic-policy.dl` (the generated file) instead would be flagged STALE and can be
+regenerated away — use Lane A or `extra.dl`, never the generated file.
+
+**Rule of thumb:** if the rule is a pure conjunction of `canonical/3` atoms with an `X`-headed
+arity-2 finding, use Lane A (`{canonical}` in `logic-policy.md`); otherwise use Lane B (`extra.dl`).
+
+Two invariants hold for both lanes:
 
 1. **`policy/relation-aliases.md`** declares the surface→canonical mappings; `/factlog ask`
-   resolves canonical queries across all variants (Slice-1, already shipped).
-2. **A logic-policy rule that references `canonical/3` must be hand-authored in
-   `policy/logic-policy.extra.dl`** (NOT `logic-policy.dl`, which is regenerated from
-   `logic-policy.md` and byte-checked by `generate_logic_policy.py --check`; a canonical rule
-   there is flagged STALE and can be regenerated away). `extra.dl` is the same channel used for
-   typed-comparison predicates (#120); `--check` never touches it.
-3. **`canonical` is a reserved engine EDB predicate** — populated automatically from
+   resolves canonical queries across all variants (Slice-1, already shipped). With no aliases,
+   `canonical/3` is empty and a canonical-bodied rule simply no-ops (backward compatible).
+2. **`canonical` is a reserved engine EDB predicate** — populated automatically from
    `relation-aliases.md` into `accepted.dl`. Use it freely in rule *bodies* (right of `:-`),
    but **never as a rule head or bare fact** in `logic-policy(.extra).dl`. A head occurrence
    makes pyrewire treat `canonical` as IDB and silently drops all compile-emitted EDB atoms
    (wrong answers, rc=0). The engine rejects such policy text with a loud `FactlogError`.
-4. The predicate shape for the head must be arity-2 `(entity: symbol, reason: symbol)` with a
+   The predicate shape for the head must be arity-2 `(entity: symbol, reason: symbol)` with a
    quoted reason string — the same shape as typed-comparison and `requires_review` findings.
 
 Use `/factlog add` for quick capture; use the explicit `sync → query → check →

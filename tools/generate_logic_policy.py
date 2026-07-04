@@ -38,7 +38,23 @@ TRACE_OUT = RUNS_DIR / "natural-language-to-policy-trace.md"
 REASON_RE = re.compile(r"^[a-z0-9_]+$")
 PREDICATE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 RELATION_RE = re.compile(r"^[^\s\"`(),.]+$")
-RESERVED_PREDICATES = {"relation", "edge", "path", "review_required"}
+# "canonical" is cheap insurance: it is unreachable via infer_fixture_predicate
+# today and any canonical/3 head is already rejected at load by
+# common._assert_no_canonical_head, so adding it here is not load-bearing. It is
+# listed anyway so a bullet can never generate a canonical(...) HEAD if predicate
+# inference ever grows a path that returns "canonical".
+RESERVED_PREDICATES = {"relation", "edge", "path", "review_required", "canonical"}
+CANONICAL_PREFIX_RE = re.compile(r"^\{canonical\}\s+")
+
+
+def _strip_canonical_prefix(sentence: str) -> tuple[bool, str]:
+    """Return (is_canonical, sentence_without_marker). The marker is an ANCHORED
+    lowercase prefix; a mid-sentence or prose {canonical} does NOT count (so a
+    documentation bullet mentioning it never becomes a live rule)."""
+    m = CANONICAL_PREFIX_RE.match(sentence.strip())
+    if m:
+        return True, sentence.strip()[m.end():].strip()
+    return False, sentence
 
 
 def read_required(path: Path) -> str:
@@ -67,18 +83,20 @@ def fixture_policy_json(policy_text: str) -> dict[str, Any]:
     rules: list[dict[str, Any]] = []
     rejected: list[str] = []
     for lineno, reason, sentence in markdown_policy_items(policy_text):
-        relations = logic_policy_md_relations(sentence)
+        is_canonical, body_sentence = _strip_canonical_prefix(sentence)
+        relations = logic_policy_md_relations(body_sentence)
         if not relations:
             rejected.append(f"line {lineno}: expected at least one backtick relation name")
             continue
-        predicate = infer_fixture_predicate(sentence)
-        rules.append(
-            {
-                "predicate": predicate,
-                "reason": reason,
-                "conditions": [{"relation": relation} for relation in relations],
-            }
-        )
+        predicate = infer_fixture_predicate(body_sentence)
+        rule: dict[str, Any] = {
+            "predicate": predicate,
+            "reason": reason,
+            "conditions": [{"relation": relation} for relation in relations],
+        }
+        if is_canonical:
+            rule["canonical"] = True
+        rules.append(rule)
     if not rules:
         detail = "; ".join(rejected) if rejected else "no supported policy bullets"
         raise SystemExit(f"policy/logic-policy.md has no compilable policies: {detail}")
@@ -116,14 +134,15 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
     if set(value) != {"rules"} or not isinstance(value["rules"], list):
         raise ValueError("policy JSON must contain only a rules list")
     rules: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    seen: set[tuple[str, str, tuple[str, ...], bool]] = set()
     for idx, rule in enumerate(value["rules"], start=1):
         if not isinstance(rule, dict):
             raise ValueError(f"rule {idx} must be an object")
-        allowed = {"predicate", "reason", "conditions"}
-        if set(rule) != allowed:
-            unsupported = sorted(set(rule) - allowed)
-            missing = sorted(allowed - set(rule))
+        required = {"predicate", "reason", "conditions"}
+        optional = {"canonical"}
+        unsupported = sorted(set(rule) - (required | optional))
+        missing = sorted(required - set(rule))
+        if unsupported or missing:
             details = []
             if unsupported:
                 details.append(f"unsupported key(s): {', '.join(unsupported)}")
@@ -149,13 +168,27 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
             relations.append(relation)
         if len(set(relations)) != len(relations):
             raise ValueError(f"rule {idx} must not repeat relation names")
-        key = (predicate, reason, tuple(relations))
+        canonical = rule.get("canonical", False)
+        if not isinstance(canonical, bool):
+            raise ValueError(f"rule {idx} canonical flag must be a boolean")
+        key = (predicate, reason, tuple(relations), canonical)
         if key in seen:
             continue
         seen.add(key)
-        rules.append({"predicate": predicate, "reason": reason, "relations": relations})
+        rules.append({"predicate": predicate, "reason": reason, "relations": relations, "canonical": canonical})
     if not rules:
         raise ValueError("policy JSON has no rules")
+    # A (predicate, reason, relations) tuple appearing both canonical and
+    # non-canonical is an authoring error, not two distinct rules — reject it
+    # rather than silently emitting both a relation- and a canonical-bodied rule.
+    flag_by_tuple: dict[tuple[str, str, tuple[str, ...]], bool] = {}
+    for row in rules:
+        tuple_key = (row["predicate"], row["reason"], tuple(row["relations"]))
+        if tuple_key in flag_by_tuple and flag_by_tuple[tuple_key] != row["canonical"]:
+            raise ValueError(
+                f"rule ({row['predicate']}, {row['reason']}) appears both canonical and non-canonical"
+            )
+        flag_by_tuple[tuple_key] = row["canonical"]
     return sorted(rules, key=lambda row: (row["predicate"], row["reason"], *row["relations"]))
 
 
@@ -169,10 +202,11 @@ def compile_policy(rules: list[dict[str, Any]]) -> str:
         lines.append(f".decl {predicate}(entity: symbol, reason: symbol)")
     lines.append("")
     for rule in rules:
+        body_pred = "canonical" if rule["canonical"] else "relation"
         conditions = []
         for index, relation in enumerate(rule["relations"]):
             suffix = "." if index == len(rule["relations"]) - 1 else ","
-            conditions.append(f"  relation(X, {dl_string(relation)}, _){suffix}")
+            conditions.append(f"  {body_pred}(X, {dl_string(relation)}, _){suffix}")
         lines.extend([f"// {rule['reason']}", f"{rule['predicate']}(X, {dl_string(rule['reason'])}) :-", *conditions, ""])
     return "\n".join(lines)
 
