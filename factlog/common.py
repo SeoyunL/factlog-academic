@@ -1079,41 +1079,53 @@ def _assert_no_canonical_head(policy_text: str) -> None:
         "relation-aliases.md); it may appear only in rule bodies, not as a "
         "rule head/fact in logic-policy(.extra).dl"
     )
-    in_body = False  # True once we have seen a ':-' and the rule has not ended with '.'
-    for line in policy_text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("//") or stripped.startswith("#"):
+    # Drop comment lines, strip quoted literals, then split into logical
+    # STATEMENTS on clause-terminating '.' rather than per physical line. A period
+    # terminates a clause unless it opens a '.decl'-style directive (dot followed
+    # by a letter at a token start) or sits inside a float (dot between digits).
+    # Per-line tracking mis-classified a canonical head/fact that shares a physical
+    # line with a preceding rule's terminator as an in-body reference (#261); a
+    # statement is a full clause, so canonical-left-of-neck (or no neck at all)
+    # is unambiguously a head/fact.
+    kept = [
+        line
+        for line in policy_text.splitlines()
+        if line.strip() and not line.strip().startswith(("//", "#"))
+    ]
+    bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
+    for statement in _split_policy_statements(bare):
+        canon_pos = statement.find("canonical(")
+        if canon_pos < 0:
             continue
-        # Strip quoted string literals so tokens inside "..." are not scanned.
-        line_bare = re.sub(r'"[^"]*"', "", stripped)
-        # Detect neck (':-') and rule end ('.') on this bare line.
-        has_neck = ":-" in line_bare
-        has_end = line_bare.rstrip().endswith(".")
-        has_canonical = "canonical(" in line_bare
-        if has_canonical:
-            if in_body:
-                # canonical appearing inside a rule body → allowed.
-                pass
-            elif has_neck:
-                # canonical before the neck on the same line → head.
-                neck_pos = line_bare.find(":-")
-                canon_pos = line_bare.find("canonical(")
-                if canon_pos < neck_pos:
-                    raise FactlogError(_ERR)
-                # canonical after the neck on the same line → body → allowed.
-            else:
-                # No neck and not yet in a body → bare fact or a head continuation.
-                raise FactlogError(_ERR)
-        # Update body-tracking state.
-        if has_neck:
-            if has_end:
-                # Single-line rule: head :- body. — ends on the same line.
-                in_body = False
-            else:
-                in_body = True
-        elif in_body and has_end:
-            # Multi-line rule ended.
-            in_body = False
+        neck_pos = statement.find(":-")
+        if neck_pos < 0 or canon_pos < neck_pos:
+            # A bare canonical fact (no neck) or canonical left of the neck → head.
+            raise FactlogError(_ERR)
+        # canonical to the right of the neck → body reference → allowed.
+
+
+def _split_policy_statements(text: str) -> list[str]:
+    """Split Datalog policy text into logical statements on clause-terminating '.'.
+
+    A '.' ends a clause EXCEPT when it opens a directive (a '.decl'-style dot at a
+    token start: preceded by whitespace/start and followed by a letter) or sits
+    inside a float (a dot between two digits). This lets `_assert_no_canonical_head`
+    see each head/fact/rule as one unit even when several share a physical line."""
+    statements: list[str] = []
+    buf: list[str] = []
+    for i, ch in enumerate(text):
+        buf.append(ch)
+        if ch == ".":
+            prev = text[i - 1] if i > 0 else ""
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            is_directive = (prev == "" or prev.isspace()) and nxt.isalpha()
+            is_float = prev.isdigit() and nxt.isdigit()
+            if not is_directive and not is_float:
+                statements.append("".join(buf))
+                buf = []
+    if buf:
+        statements.append("".join(buf))
+    return statements
 
 
 _FLOAT_LITERAL_RE = re.compile(r"\d+\.\d+")

@@ -59,6 +59,26 @@ class TestAssertNoCanonicalHead:
         """Empty policy text must not raise."""
         fcommon._assert_no_canonical_head("")
 
+    def test_rejects_bare_canonical_fact_after_rule_end_same_line(self):
+        """A bare canonical fact sharing a physical line with a preceding rule's
+        terminating '.' must still be caught — the per-line state machine let it
+        through as an in-body reference (#261)."""
+        policy = 'foo(X, "r") :-\n  relation(X, "a", _). canonical(X, "b", "z").\n'
+        with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_rejects_canonical_head_after_rule_end_no_space(self):
+        """Same evasion with no whitespace after the terminator."""
+        policy = 'foo(X, "r") :- relation(X, "a", _).canonical(Y, "b", Z) :- bar(Y, Z).\n'
+        with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_allows_two_statements_one_line_both_legal(self):
+        """Two statements on one physical line, neither heading canonical, must
+        NOT raise (no false positive from the finer splitting)."""
+        policy = 'foo(X, "r") :- canonical(X, "a", _). bar("y", "z").\n'
+        fcommon._assert_no_canonical_head(policy)
+
     def test_comment_only_is_allowed(self):
         """Comment-only lines must not raise."""
         policy = "// canonical(X, Y, Z) :- something(X).\n# also a comment\n"
