@@ -655,6 +655,24 @@ def existing_superseded_keys(root: Path) -> set[tuple[str, str, str, str]]:
     return keys
 
 
+def existing_superseded_rows(root: Path) -> list[dict[str, str]]:
+    """Full candidates.csv rows currently marked 'superseded' (FACT_HEADER fields).
+
+    Companion to existing_superseded_keys: the keys drive re-status preservation
+    for a fact a run re-asserts; these full rows let a tombstone be carried over
+    even when NO run asserts the fact anymore, so a human supersession is durable
+    regardless of whether the backing run still exists (#260)."""
+    csv_path = root / "facts" / "candidates.csv"
+    if not csv_path.is_file():
+        return []
+    rows: list[dict[str, str]] = []
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if (row.get("status") or "").strip() in SUPERSEDED_STATUSES:
+                rows.append({k: (row.get(k) or "") for k in FACT_HEADER})
+    return rows
+
+
 def existing_engine_keys(root: Path) -> dict[tuple[str, str, str, str], str]:
     """Map (subject, relation, object, source-without-#anchor) -> engine status
     for rows currently marked confirmed/accepted in candidates.csv.
@@ -806,6 +824,31 @@ def main() -> int:
                 preserved += 1
         if preserved:
             print(f"  preserved {preserved} superseded row(s) from candidates.csv")
+
+    # Carry over superseded tombstones the current runs no longer assert (#260): a
+    # human supersession must be durable even if the backing run was replaced or
+    # removed (e.g. a source re-extracted without the fact). Rows a run re-asserts
+    # were re-marked superseded above; rows absent from this run are re-added from
+    # candidates.csv so a retired fact cannot silently resurrect as 'candidate' on
+    # a later re-assertion. Anchor-insensitive key, matching the preservation above.
+    present_keys = {
+        (row["subject"], row["relation"], row["object"], row["source"].partition("#")[0])
+        for row in rows
+    }
+    carried = 0
+    for tombstone in existing_superseded_rows(root):
+        key = (
+            tombstone["subject"],
+            tombstone["relation"],
+            tombstone["object"],
+            tombstone["source"].partition("#")[0],
+        )
+        if key not in present_keys:
+            rows.append(tombstone)
+            present_keys.add(key)
+            carried += 1
+    if carried:
+        print(f"  carried over {carried} superseded tombstone(s) not re-asserted by runs")
 
     # Preserve human acceptances across re-merge: a row a human set to
     # confirmed/accepted stays so even though extraction re-asserts it as
