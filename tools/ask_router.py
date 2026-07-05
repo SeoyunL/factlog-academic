@@ -404,6 +404,13 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # When the relation arg is a quoted canonical name (surface_variants
         # non-empty), count DISTINCT objects across the canonical AND all its
         # surface variants — symmetry with the relation branch (#227).
+        # Guard arity BEFORE unpacking: a count with != 2 args is malformed. Match
+        # classify_query (BAD_ARITY) and raise the same NotImplementedError the
+        # unknown-predicate fallthrough uses, so cmd_evaluate turns it into a clean
+        # error JSON instead of an uncaught IndexError (< 2 args) or a silently
+        # accepted, bogus count (> 2 args) (#257).
+        if len(args) != 2:
+            raise NotImplementedError("count query must have subject and relation arguments")
         subject, relation = arg_value(args[0]), arg_value(args[1])
         rel_variants: set[str] = set()
         if is_quoted_string(args[1]):
