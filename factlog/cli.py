@@ -1749,21 +1749,30 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 
 def _looks_binary(path, sniff: int = 8192) -> bool:
-    """Heuristic inverse of merge_candidates.is_text_source for --scan discovery.
+    """Strict boolean inverse of merge_candidates.is_text_source for --scan
+    discovery: ``_looks_binary(p) == (not is_text_source(p))`` for every file.
 
     Treats a file as binary if its first *sniff* bytes contain a NUL or do not
-    decode as UTF-8 (tolerating a multi-byte char truncated at the boundary).
+    decode as UTF-8. A multi-byte char truncated at the sniff boundary is
+    tolerated (not binary) ONLY when the file actually extends past the boundary;
+    a fully-read short file with an invalid trailing byte is binary. Previously
+    this read just ``[:sniff]`` and so could not tell a short truncated file from
+    a boundary-truncated long one, disagreeing with is_text_source on the former —
+    which left such a source classified as NEITHER text nor binary (#259). Read
+    one byte past *sniff* to recover the "extends past sniff" signal cheaply.
     """
     try:
-        chunk = path.read_bytes()[:sniff]
+        with path.open("rb") as fh:
+            raw = fh.read(sniff + 1)
     except OSError:
         return True
+    chunk = raw[:sniff]
     if b"\x00" in chunk:
         return True
     try:
         chunk.decode("utf-8")
     except UnicodeDecodeError as exc:
-        return exc.start < len(chunk) - 3
+        return not (len(raw) > sniff and exc.start >= len(chunk) - 3)
     return False
 
 
