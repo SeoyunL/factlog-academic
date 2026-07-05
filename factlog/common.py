@@ -437,7 +437,12 @@ def _load_accepted_facts_from(accepted_dl: Path) -> list[dict[str, str]]:
     if not accepted_dl.is_file():
         raise FactlogError("missing facts/accepted.dl; run tools/compile_facts.py first")
     rows: list[dict[str, str]] = []
-    for line in accepted_dl.read_text(encoding="utf-8").splitlines():
+    # Split on '\n' only, NOT str.splitlines(): a fact's object can legitimately
+    # contain U+2028/U+2029/U+0085 (routine in text copied from PDFs/web), which
+    # dl_string keeps as raw chars on one physical line and the wirelog engine
+    # parses fine — but .splitlines() would break the line on them and corrupt the
+    # whole file's parse (#255). '\r' from CRLF is handled by the .strip() below.
+    for line in accepted_dl.read_text(encoding="utf-8").split("\n"):
         line = line.strip()
         if not line or line.startswith("//"):
             continue
