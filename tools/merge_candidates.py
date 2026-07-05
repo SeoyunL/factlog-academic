@@ -445,11 +445,33 @@ def write_pages(root: Path, rows: list[dict[str, str]]) -> list[str]:
         if row["object"] and row["relation"] not in literal_rels:
             by_entity.setdefault(row["object"], []).append(row)
 
+    # Assign collision-safe page filenames deterministically (#258). slugify
+    # collapses every non-alphanumeric run to '-', so distinct entities like
+    # "A B" and "A-B" share one slug and would overwrite each other's page (a
+    # silent concept-page loss; the rows survive in candidates.csv). Group by base
+    # filename over the sorted entities; when a base name is claimed by >1 entity,
+    # suffix EACH colliding entity with a short stable hash of its full title — the
+    # same disambiguation the long-title (NAME_MAX) guard already uses. Non-
+    # colliding names are untouched, so the common case keeps its readable slug.
+    named_entities = [e for e in sorted(by_entity) if e.strip()]
+    base_name: dict[str, str] = {e: page_filename(e) for e in named_entities}
+    base_count: dict[str, int] = {}
+    for name in base_name.values():
+        base_count[name] = base_count.get(name, 0) + 1
+    page_name: dict[str, str] = {}
+    for entity in named_entities:
+        name = base_name[entity]
+        if base_count[name] > 1:
+            digest = hashlib.sha1(entity.encode("utf-8")).hexdigest()[:10]
+            page_name[entity] = f"{name[:-3]}-{digest}.md"  # strip '.md', re-add
+        else:
+            page_name[entity] = name
+
     written: list[str] = []
     for entity, entity_rows in sorted(by_entity.items()):
         if not entity.strip():
             continue
-        path = pages_dir / page_filename(entity)
+        path = pages_dir / page_name[entity]
         # Skip hand-authored pages that don't carry our marker.
         if path.exists() and GENERATED_PAGE_MARKER not in path.read_text(encoding="utf-8", errors="ignore"):
             continue
