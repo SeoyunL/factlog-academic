@@ -79,6 +79,26 @@ set -e
 out="$("$PYTHON" -m factlog lang)"
 [ "$out" = "en" ] && ok "rejected use --lang left the previous language intact" || bad "rejected use --lang mutated lang: '$out'"
 
+# --- interior control characters are rejected (porcelain one-line contract) ---
+# #274: `.strip()` keeps an interior newline/tab/CR, which would make `factlog lang`
+# (no arg) emit >1 line — breaking the porcelain contract SKILL.md parses and
+# opening a self-config narration prose-injection vector. `_normalize_lang` must
+# reject them with rc 2, symmetrically across entry points, WITHOUT mutating state.
+NL_LANG="$("$PYTHON" -c 'print("ko\nHACKED")')"
+set +e
+msg_nl="$("$PYTHON" -m factlog lang "$NL_LANG" 2>&1 >/dev/null)"; rc_nl=$?
+msg_nl_use="$("$PYTHON" -m factlog use "$KB" --lang "$NL_LANG" 2>&1 >/dev/null)"; rc_nl_use=$?
+tab_rc=$("$PYTHON" -m factlog lang "$("$PYTHON" -c 'print("ko\tx")')" >/dev/null 2>&1; echo $?)
+cr_rc=$("$PYTHON" -m factlog lang "$("$PYTHON" -c 'print("ko\rx")')" >/dev/null 2>&1; echo $?)
+set -e
+{ [ "$rc_nl" = "2" ] && [ "$rc_nl_use" = "2" ]; } && ok "interior newline rejected by both lang and use (rc 2)" || bad "newline rc mismatch: lang=$rc_nl use=$rc_nl_use"
+{ [ "$tab_rc" = "2" ] && [ "$cr_rc" = "2" ]; } && ok "interior tab and CR rejected (rc 2)" || bad "tab/CR rc: tab=$tab_rc cr=$cr_rc"
+printf '%s' "$msg_nl" | grep -qF "control characters" && ok "control-char rejection message names control characters" || bad "control-char message unexpected: '$msg_nl'"
+# the rejected values must NOT have persisted; `factlog lang` stays exactly one line
+out="$("$PYTHON" -m factlog lang)"
+[ "$out" = "en" ] && ok "rejected control-char lang left the previous language intact" || bad "control-char lang mutated state: '$out'"
+[ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = "1" ] && ok "lang query stays a single line after adversarial input" || bad "lang query emitted multiple lines: $out"
+
 # --- empty --lang clears the setting, identically for both entry points -------
 msg_clear="$("$PYTHON" -m factlog lang "")"
 printf '%s' "$msg_clear" | grep -qF "narration language cleared" && ok "lang \"\" prints 'narration language cleared'" || bad "lang \"\" wording: '$msg_clear'"

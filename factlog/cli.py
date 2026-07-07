@@ -581,10 +581,23 @@ def _normalize_lang(code: str) -> tuple[str | None, str | None]:
     * ``normalized`` is the trimmed code, or ``""`` to mean *clear* — an empty or
       whitespace-only value removes the setting and reverts to conversation-language
       auto-detection (a legitimate "unset" action, not an error).
-    * ``error`` is a message string when the value is invalid (too long); when set,
-      ``normalized`` is ``None`` and the caller rejects with exit code 2.
+    * ``error`` is a message string when the value is invalid (too long, or it
+      contains control characters); when set, ``normalized`` is ``None`` and the
+      caller rejects with exit code 2.
     """
     normalized = code.strip()
+    # Reject interior control characters (newline/tab/CR/etc.). `.strip()` only
+    # trims leading/trailing whitespace, so an interior newline survives — and
+    # `factlog lang` (no arg) is a one-line porcelain contract SKILL.md parses, plus
+    # the value is fed back as a narration-language instruction, so a multi-line
+    # value both breaks the contract and is a self-config prose-injection vector
+    # (#274). A whitespace-only value already collapsed to "" (clear) above, so this
+    # never blocks the legitimate unset action.
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in normalized):
+        return None, (
+            "language code must not contain control characters (e.g. newlines or "
+            "tabs); give a short code such as 'ko' or 'en'."
+        )
     if len(normalized) > _LANG_MAX_LEN:
         return None, (
             f"language code too long (max {_LANG_MAX_LEN} chars); give a short code "
