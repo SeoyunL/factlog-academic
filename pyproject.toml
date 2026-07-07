@@ -16,6 +16,9 @@ dependencies = ["pyrewire>=1.0.3,<2.0"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+# Zotero integration (roadmap phase 1). Kept optional so the core install never
+# pulls a Zotero client; `pip install factlog[zotero]` enables `zotero-import`.
+zotero = ["pyzotero>=1.5"]
 
 [project.urls]
 Homepage = "https://github.com/semantic-reasoning/factlog"
@@ -24,7 +27,7 @@ Homepage = "https://github.com/semantic-reasoning/factlog"
 factlog = "factlog.cli:main"
 
 [tool.setuptools]
-packages = ["factlog"]
+packages = ["factlog", "factlog.integrations", "factlog.integrations.zotero"]
 
 [tool.pytest.ini_options]
 # Python unit tests for the pure helpers live under tests/unit/; the legacy

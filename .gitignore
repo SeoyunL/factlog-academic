@@ -17,6 +17,12 @@ runs/
 # oh-my-claudecode session/runtime state — local only, never committed
 .omc/
 
+# Zotero integration — personal settings & secrets, never committed
+zotero-config.toml
+config.local.toml
+*.key
+credentials.json
+
 # OS / editor
 .DS_Store
 *.swp
