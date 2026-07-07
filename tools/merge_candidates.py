@@ -458,14 +458,38 @@ def write_pages(root: Path, rows: list[dict[str, str]]) -> list[str]:
     base_count: dict[str, int] = {}
     for name in base_name.values():
         base_count[name] = base_count.get(name, 0) + 1
+    # Assign GLOBALLY-unique names, not merely base-unique. A base-only collision
+    # check would let a hash-suffixed disambiguation (e.g. "A B" -> a-b-<sha1>.md)
+    # re-collide with ANOTHER entity whose own clean slug is literally that suffixed
+    # name (a distinct title `f"A B {sha1('A B')[:10]}"` slugifies to a-b-<sha1>),
+    # reopening the #258 silent overwrite by a second path. Walk entities in sorted
+    # order tracking every claimed name: keep a clean slug only when its base is
+    # unique AND still free; otherwise disambiguate with the full-title hash and, if
+    # that suffix is itself taken (adversarial), bump a counter until free.
+    # Deterministic: sorted input + deterministic tie-break.
+    used: set[str] = set()
     page_name: dict[str, str] = {}
     for entity in named_entities:
         name = base_name[entity]
-        if base_count[name] > 1:
-            digest = hashlib.sha1(entity.encode("utf-8")).hexdigest()[:10]
-            page_name[entity] = f"{name[:-3]}-{digest}.md"  # strip '.md', re-add
-        else:
+        if base_count[name] == 1 and name not in used:
             page_name[entity] = name
+            used.add(name)
+            continue
+        digest = hashlib.sha1(entity.encode("utf-8")).hexdigest()[:10]
+        stem = name[:-3]  # strip '.md', re-add below
+        candidate = f"{stem}-{digest}.md"
+        bump = 1
+        while candidate in used:
+            candidate = f"{stem}-{digest}-{bump}.md"
+            bump += 1
+        page_name[entity] = candidate
+        used.add(candidate)
+    # Defensive invariant: distinct named entities map to distinct pages. A breach
+    # would mean a silent page-view overwrite — exactly the #258 failure (and its
+    # reverse-collision variant) this pre-pass exists to prevent.
+    assert len(set(page_name.values())) == len(named_entities), (
+        "write_pages: page filename collision — distinct entities share a page"
+    )
 
     written: list[str] = []
     for entity, entity_rows in sorted(by_entity.items()):
