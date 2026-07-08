@@ -2,6 +2,8 @@
 """CLI tests for `factlog export --bibtex` (hermetic — no Zotero)."""
 from __future__ import annotations
 
+import pytest
+
 from factlog import cli
 
 
@@ -63,7 +65,25 @@ class TestExport:
         kb = _kb(tmp_path)
         rc = cli.main(["export", "--target", str(kb)])
         assert rc == 2
-        assert "specify a format" in capsys.readouterr().err
+        assert "exactly one format" in capsys.readouterr().err
+
+    def test_csl_emits_json_array(self, tmp_path, capsys):
+        import json
+
+        kb = _kb(tmp_path)
+        _src(kb, "doe-2020-a-study.md", BIB)
+        rc = cli.main(["export", "--csl", "--target", str(kb)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        data = json.loads(out)
+        assert data[0]["id"] == "doe-2020-a-study"
+        assert data[0]["type"] == "article-journal"
+        assert data[0]["DOI"] == "10.1/x"
+
+    def test_both_formats_rejected(self, tmp_path):
+        kb = _kb(tmp_path)
+        with pytest.raises(SystemExit):  # argparse mutually exclusive
+            cli.main(["export", "--bibtex", "--csl", "--target", str(kb)])
 
     def test_not_a_kb(self, tmp_path, capsys):
         rc = cli.main(["export", "--bibtex", "--target", str(tmp_path)])

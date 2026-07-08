@@ -234,14 +234,14 @@ factlog zotero-import --collection "neurosymbolic AI" --annotations --dry-run
 (Zotero→factlog 단방향을 넘어 인용 왕복을 닫음). 읽기 전용, 결정론(파일명 순).
 
 ```bash
-factlog export --bibtex                 # stdout으로
-factlog export --bibtex -o refs.bib     # 파일로
+factlog export --bibtex                 # BibTeX (LaTeX)
+factlog export --csl -o refs.json       # CSL-JSON (Pandoc/Zotero/Word)
 ```
 
-`sources/*.md` front matter의 provenance를 항목당 BibTeX 엔트리로 냅니다(citation key=슬러그
-stem, itemType→엔트리 타입, 저자·연도·저널·DOI·PMID). 주석 소스(`source_kind: annotations`)와
-provenance 없는 파일은 제외합니다. stdout 출력은 순수 BibTeX(진행 메시지는 stderr)라
-`> refs.bib`로 바로 저장할 수 있습니다.
+`--bibtex`|`--csl` 중 하나를 지정합니다. `sources/*.md` front matter의 provenance를 항목당
+한 엔트리로 냅니다(id/citation key=슬러그 stem, itemType→타입, 저자·연도·저널·DOI·PMID).
+주석 소스(`source_kind: annotations`)와 provenance 없는 파일은 제외합니다. stdout 출력은
+순수 BibTeX/JSON(진행 메시지는 stderr)이라 `> refs.bib`로 바로 저장할 수 있습니다.
 
 ## 설정 파일 (선택)
 

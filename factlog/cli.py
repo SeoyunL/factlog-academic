@@ -2759,18 +2759,21 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    """Export source provenance as BibTeX for citing in LaTeX/Word.
+    """Export source provenance as BibTeX or CSL-JSON for citing in LaTeX/Word.
 
-    Reads the YAML front matter each source records and emits one BibTeX entry
-    per bibliographic source (annotation companion files and sources without
+    Reads the YAML front matter each source records and emits one entry per
+    bibliographic source (annotation companion files and sources without
     provenance are skipped), in deterministic filename order. Read-only.
     """
+    import json
     from pathlib import Path
 
     from factlog.bibtex import is_annotation_source, read_front_matter, to_bibtex
+    from factlog.csl import to_csl
 
-    if not getattr(args, "bibtex", False):
-        print("factlog export: specify a format (--bibtex)", file=sys.stderr)
+    if getattr(args, "bibtex", False) == getattr(args, "csl", False):
+        # neither or both
+        print("factlog export: specify exactly one format (--bibtex or --csl)", file=sys.stderr)
         return 2
 
     target_str, _ = factlog_config.resolve_root(args.target)
@@ -2778,23 +2781,28 @@ def cmd_export(args: argparse.Namespace) -> int:
     if not _require_kb(target, "export"):
         return 1
 
-    entries: list[str] = []
+    sources = []
     for path in sorted((target / "sources").glob("*.md")):
         fm = read_front_matter(path)
         if not fm or is_annotation_source(fm):
             continue
         if not (fm.get("zotero_key") or fm.get("title")):
             continue
-        entries.append(to_bibtex(fm, path.stem))
+        sources.append((path.stem, fm))
 
-    text = "\n".join(entries)  # entries end in \n; blank line between them
+    if args.csl:
+        text = json.dumps([to_csl(fm, stem) for stem, fm in sources], ensure_ascii=False, indent=2)
+        text += "\n" if text else ""
+    else:
+        text = "\n".join(to_bibtex(fm, stem) for stem, fm in sources)
+
     if args.output:
         out = Path(args.output).expanduser()
         _atomic_write_text(out, text)
-        print(f"factlog export: wrote {len(entries)} entr(y/ies) to {out}", file=sys.stderr)
+        print(f"factlog export: wrote {len(sources)} entr(y/ies) to {out}", file=sys.stderr)
     else:
         sys.stdout.write(text)
-        print(f"factlog export: {len(entries)} entr(y/ies)", file=sys.stderr)
+        print(f"factlog export: {len(sources)} entr(y/ies)", file=sys.stderr)
     return 0
 
 
@@ -3020,8 +3028,10 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     status.set_defaults(func=cmd_status)
 
-    export = sub.add_parser("export", help="export source provenance as BibTeX for citations")
-    export.add_argument("--bibtex", action="store_true", help="emit BibTeX (the phase-1 format)")
+    export = sub.add_parser("export", help="export source provenance as BibTeX/CSL-JSON")
+    _fmt = export.add_mutually_exclusive_group()
+    _fmt.add_argument("--bibtex", action="store_true", help="emit BibTeX")
+    _fmt.add_argument("--csl", action="store_true", help="emit CSL-JSON (Pandoc/Zotero/Word)")
     export.add_argument(
         "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
     )
