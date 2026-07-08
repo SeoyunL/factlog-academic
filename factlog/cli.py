@@ -2758,6 +2758,46 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     return 1 if (report.errors or report.pdf_errors or report.annotation_errors or convert_rc) else 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export source provenance as BibTeX for citing in LaTeX/Word.
+
+    Reads the YAML front matter each source records and emits one BibTeX entry
+    per bibliographic source (annotation companion files and sources without
+    provenance are skipped), in deterministic filename order. Read-only.
+    """
+    from pathlib import Path
+
+    from factlog.bibtex import is_annotation_source, read_front_matter, to_bibtex
+
+    if not getattr(args, "bibtex", False):
+        print("factlog export: specify a format (--bibtex)", file=sys.stderr)
+        return 2
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not _require_kb(target, "export"):
+        return 1
+
+    entries: list[str] = []
+    for path in sorted((target / "sources").glob("*.md")):
+        fm = read_front_matter(path)
+        if not fm or is_annotation_source(fm):
+            continue
+        if not (fm.get("zotero_key") or fm.get("title")):
+            continue
+        entries.append(to_bibtex(fm, path.stem))
+
+    text = "\n".join(entries)  # entries end in \n; blank line between them
+    if args.output:
+        out = Path(args.output).expanduser()
+        _atomic_write_text(out, text)
+        print(f"factlog export: wrote {len(entries)} entr(y/ies) to {out}", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+        print(f"factlog export: {len(entries)} entr(y/ies)", file=sys.stderr)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="factlog", description="factlog environment and KB helpers")
     parser.add_argument("--version", action="version", version=f"factlog {__version__}")
@@ -2979,6 +3019,16 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="summarise KB state (sources, facts, vocabulary, conflicts, engine)")
     status.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     status.set_defaults(func=cmd_status)
+
+    export = sub.add_parser("export", help="export source provenance as BibTeX for citations")
+    export.add_argument("--bibtex", action="store_true", help="emit BibTeX (the phase-1 format)")
+    export.add_argument(
+        "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+    )
+    export.add_argument(
+        "--output", "-o", default=None, help="write to FILE instead of stdout"
+    )
+    export.set_defaults(func=cmd_export)
 
     zimport = sub.add_parser(
         "zotero-import",
