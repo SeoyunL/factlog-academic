@@ -19,6 +19,7 @@ from pathlib import Path
 from factlog.integrations.zotero.api_client import ZoteroClient
 from factlog.integrations.zotero.config import ZoteroConfig
 from factlog.integrations.zotero.item_parser import parse_item
+from factlog.integrations.zotero.pdf_importer import PdfOutcome, place_pdfs
 from factlog.integrations.zotero.source_writer import SourceWriter
 
 
@@ -36,6 +37,7 @@ class ItemOutcome:
 @dataclass
 class ImportReport:
     outcomes: list[ItemOutcome] = field(default_factory=list)
+    pdf_outcomes: list[PdfOutcome] = field(default_factory=list)
 
     @property
     def imported(self) -> int:
@@ -48,6 +50,18 @@ class ImportReport:
     @property
     def errors(self) -> int:
         return sum(1 for o in self.outcomes if o.status == "error")
+
+    @property
+    def pdf_placed(self) -> int:
+        return sum(1 for o in self.pdf_outcomes if o.status == "placed")
+
+    @property
+    def pdf_skipped(self) -> int:
+        return sum(1 for o in self.pdf_outcomes if o.status == "skipped")
+
+    @property
+    def pdf_errors(self) -> int:
+        return sum(1 for o in self.pdf_outcomes if o.status == "error")
 
 
 def fetch_items(
@@ -78,12 +92,19 @@ def import_items(
     items: list[str] | None = None,
     imported_at: str = "",
     dry_run: bool = False,
+    pdf: bool = False,
 ) -> ImportReport:
     """Fetch the selected items and write each into ``<target>/sources/``.
 
     With ``dry_run`` the same decision is computed (including collision suffixes)
     but no file is created — the report's "imported" outcomes are what *would* be
     written.
+
+    With ``pdf``, each item's PDF attachments are also placed under ``sources/``
+    (paired with the bibliographic file by stem). Placement runs for imported
+    *and* skipped items — a previously-imported item may still be missing its
+    PDFs — but not for an item that failed (no bibliographic file to pair with).
+    Conversion to text is left to the caller's ingest step.
     """
     config = config or ZoteroConfig()
     raw = fetch_items(client, collection=collection, tag=tag, items=items)
@@ -107,4 +128,14 @@ def import_items(
         report.outcomes.append(
             ItemOutcome(key, title, result.status, result.path, result.reason)
         )
+        if pdf and key and result.path is not None and result.status in ("imported", "skipped"):
+            report.pdf_outcomes.extend(
+                place_pdfs(
+                    client,
+                    item_key=key,
+                    base_stem=result.path.stem,
+                    target=target,
+                    dry_run=dry_run,
+                )
+            )
     return report
