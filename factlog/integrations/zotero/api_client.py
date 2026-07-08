@@ -35,6 +35,9 @@ _PDF_CONTENT_TYPE = "application/pdf"
 # them — they are skipped rather than surfaced as un-downloadable attachments.
 _DOWNLOADABLE_LINK_MODES = frozenset({"imported_file", "imported_url"})
 
+# Annotation types that carry no text (nothing to import as a source in phase 3).
+_NON_TEXT_ANNOTATION_TYPES = frozenset({"image", "ink"})
+
 
 class ZoteroError(Exception):
     """A Zotero request could not be satisfied (bad collection, web mode, ...)."""
@@ -221,3 +224,23 @@ class ZoteroClient:
         if not isinstance(key, str) or not key.strip():
             raise ZoteroError("fetch_file needs a non-empty attachment key.")
         return self._fetch(lambda: self.backend.file(key))
+
+    # -- notes & annotations (phase 3) -------------------------------------
+    def get_notes(self, item_key: str) -> list[dict]:
+        """Note children of a bibliographic item, in Zotero's order (read-only)."""
+        children = self._fetch(lambda: self._all(self.backend.children(item_key)))
+        return [c for c in children if _data(c).get("itemType") == "note"]
+
+    def get_annotations(self, attachment_key: str) -> list[dict]:
+        """Text-bearing annotation children of a PDF attachment, in order.
+
+        Image/ink annotations carry no text, so they are skipped; highlight,
+        underline, note, and text annotations are kept.
+        """
+        children = self._fetch(lambda: self._all(self.backend.children(attachment_key)))
+        return [
+            c
+            for c in children
+            if _data(c).get("itemType") == "annotation"
+            and _data(c).get("annotationType") not in _NON_TEXT_ANNOTATION_TYPES
+        ]
