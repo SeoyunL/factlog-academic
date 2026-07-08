@@ -202,8 +202,8 @@ factlog zotero-import --collection "neurosymbolic AI" --pdf --dry-run   # 변환
 
 동작:
 
-1. 항목의 노트(`note`)와 PDF 첨부의 하이라이트(highlight/underline/note/text —
-   image/ink 제외)를 Local API로 수집합니다.
+1. 항목의 노트(`note`)와 PDF 첨부의 하이라이트(**image/ink를 제외한 모든 주석 타입** —
+   highlight/underline/note/text 등)를 Local API로 수집합니다.
 2. 하이라이트는 페이지 라벨·강조 구절(인용)·메모로, 노트는 HTML을 텍스트로 풀어
    `## Highlights` / `## Notes` 섹션에 씁니다. front matter에 `zotero_key`와
    `source_kind: annotations` 마커가 실립니다.
@@ -221,7 +221,8 @@ factlog zotero-import --collection "neurosymbolic AI" --annotations --dry-run
 
 - **멱등·신선도**: `<stem>-notes.md`의 내용은 Zotero 상태의 순수 함수(import 시각 없음)라,
   변화 없으면 그대로 두고(skipped) 하이라이트가 늘면 다시 씁니다(updated). 요약에
-  `written`(신규)/`updated`(재작성)/`skipped`를 구분해 보고합니다.
+  `written`(신규)/`updated`(재작성)/`skipped`를 구분해 보고합니다. `skipped`에는 무변경뿐
+  아니라 아래 P4(사용자 소유 파일 미덮어쓰기) 케이스도 포함됩니다.
 - **P4**: 사용자가 직접 만든 `<stem>-notes.md`(우리 마커 없음)는 덮어쓰지 않고 건너뜁니다.
 - 부분 실패는 항목 단위로 격리됩니다 — 한 항목의 주석 수집이 실패해도 나머지는 계속되며
   `annotation_errors`에 반영됩니다.
