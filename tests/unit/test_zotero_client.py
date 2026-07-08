@@ -43,21 +43,39 @@ ATTACHMENT = {"key": "ATT1", "data": {"key": "ATT1", "itemType": "attachment", "
 NOTE = {"key": "NOTE1", "data": {"key": "NOTE1", "itemType": "note"}}
 
 
-class FakeBackend:
-    """Minimal pyzotero stand-in. Records calls; raises on demand."""
+# Fake exceptions whose class names mirror the real pyzotero/requests hierarchy,
+# so _classify (which inspects the MRO names) routes them like the real ones.
+class HTTPError(Exception):  # requests.exceptions.HTTPError / pyzotero HTTPError
+    pass
 
-    def __init__(self, collections=None, items=None, raise_os=False):
+
+class ConnectTimeout(OSError):  # requests.exceptions timeout family
+    pass
+
+
+class FakeBackend:
+    """Minimal pyzotero stand-in. Records calls; raises/pages on demand."""
+
+    def __init__(self, collections=None, items=None, raise_os=False, exc=None, extra_pages=None):
         self._collections = collections or []
         self._items = items or []
         self._raise_os = raise_os
+        self._exc = exc
+        self._extra_pages = extra_pages or []
         self.calls: list[tuple] = []
 
     def _maybe_raise(self):
+        if self._exc is not None:
+            raise self._exc
         if self._raise_os:
             raise ConnectionError("simulated: Zotero not running")
 
     def everything(self, page):
-        return page  # no real pagination in the fake
+        # Simulate link-following pagination: append the queued extra pages.
+        result = list(page)
+        for extra in self._extra_pages:
+            result.extend(extra)
+        return result
 
     def collections(self):
         self.calls.append(("collections",))
@@ -100,6 +118,30 @@ class TestBibliographicFilter:
         c = _client(items=[ATTACHMENT, PREPRINT])
         assert [i["key"] for i in c.get_items_by_ids(["KH78JUPE", "ATT1"])] == ["KH78JUPE"]
 
+    def test_ids_are_joined_into_itemkey(self):
+        backend = FakeBackend(items=[PREPRINT])
+        ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_ids(["A", "B", "C"])
+        assert backend.calls == [("items", {"itemKey": "A,B,C"})]
+
+    def test_ids_batched_over_fifty(self):
+        backend = FakeBackend(items=[])
+        ids = [f"K{i}" for i in range(120)]
+        ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_ids(ids)
+        item_calls = [c for c in backend.calls if c[0] == "items"]
+        assert len(item_calls) == 3  # 50 + 50 + 20
+        assert item_calls[0][1]["itemKey"].count(",") == 49
+
+
+class TestPagination:
+    def test_collection_follows_extra_pages(self):
+        second = {"key": "P2", "data": {"key": "P2", "itemType": "preprint", "title": "t2"}}
+        backend = FakeBackend(
+            collections=[_col("C", "K")], items=[PREPRINT], extra_pages=[[second]]
+        )
+        c = ZoteroClient(ZoteroConfig(), backend=backend)
+        out = c.get_items_by_collection("C")
+        assert {i["key"] for i in out} == {"KH78JUPE", "P2"}
+
 
 class TestCollectionResolution:
     def test_exact_name_resolves_key(self):
@@ -125,6 +167,16 @@ class TestCollectionResolution:
         with pytest.raises(ZoteroError, match="ambiguous"):
             c.get_items_by_collection("Dup")
 
+    def test_case_ambiguous_errors_not_not_found(self):
+        c = _client(collections=[_col("Dup", "K1"), _col("dup", "K2")])
+        with pytest.raises(ZoteroError, match="ambiguous by case"):
+            c.get_items_by_collection("DUP")
+
+    def test_empty_name_rejected(self):
+        c = _client(collections=[_col("A", "K1")])
+        with pytest.raises(ZoteroError, match="non-empty string"):
+            c.get_items_by_collection("   ")
+
 
 class TestConnectionErrors:
     def test_connection_failure_is_wrapped(self):
@@ -136,6 +188,24 @@ class TestConnectionErrors:
         c = _client(collections=[_col("X", "K")], items=[], raise_os=True)
         with pytest.raises(ZoteroConnectionError):
             c.get_items_by_collection("X")
+
+    def test_timeout_is_connection_error(self):
+        c = _client(exc=ConnectTimeout("slow"))
+        with pytest.raises(ZoteroConnectionError, match="ConnectTimeout"):
+            c.list_collections()
+
+    def test_http_error_is_not_misreported_as_unreachable(self):
+        # A live-but-erroring server (HTTP 4xx/5xx) must be a ZoteroError, not a
+        # "Zotero not running" ZoteroConnectionError.
+        c = _client(exc=HTTPError("404 Not Found"))
+        with pytest.raises(ZoteroError, match="request failed") as ei:
+            c.list_collections()
+        assert not isinstance(ei.value, ZoteroConnectionError)
+
+    def test_unknown_exception_propagates_unchanged(self):
+        c = _client(exc=ValueError("weird bug"))
+        with pytest.raises(ValueError, match="weird bug"):
+            c.list_collections()
 
 
 class TestModeGuard:
