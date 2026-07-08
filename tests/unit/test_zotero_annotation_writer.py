@@ -39,6 +39,16 @@ class TestHtmlToText:
     def test_non_string(self):
         assert html_to_text(None) == ""
 
+    def test_script_and_style_content_dropped(self):
+        assert html_to_text("<script>alert('x')</script>keep") == "keep"
+        assert html_to_text("<style>p{color:red}</style>body") == "body"
+
+    def test_comment_dropped(self):
+        assert html_to_text("a<!-- secret -->b") == "ab"
+
+    def test_control_chars_removed(self):
+        assert html_to_text("a\x1bb\x00c") == "abc"
+
 
 class TestRender:
     def test_highlight_with_page_quote_comment(self):
@@ -107,3 +117,45 @@ class TestWrite:
 
     def test_returns_result_type(self, tmp_path):
         assert isinstance(write_annotations(BIB, [_hl()], [], "s", tmp_path), AnnotationResult)
+
+    def test_marker_in_user_body_is_not_ours(self, tmp_path):
+        # A user's own front-matter file whose BODY mentions the marker must not
+        # be mistaken for ours (P4).
+        sources = _sources(tmp_path)
+        sources.mkdir()
+        squatter = sources / "s-notes.md"
+        squatter.write_text(
+            "---\ntitle: My note\n---\n\nI use source_kind: annotations in factlog.\n",
+            encoding="utf-8",
+        )
+        res = write_annotations(BIB, [_hl()], [], "s", tmp_path)
+        assert res.status == "skipped" and "not a zotero notes file" in res.reason
+        assert "My note" in squatter.read_text(encoding="utf-8")
+
+    def test_long_title_still_detected_as_ours(self, tmp_path):
+        bib = {"zotero_key": "K", "title": "T" * 600}
+        first = write_annotations(bib, [_hl("first")], [], "s", tmp_path)
+        assert first.status == "written"
+        res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", tmp_path)
+        assert res.status == "updated"  # our own file recognized despite long title
+
+    def test_updated_then_idempotent(self, tmp_path):
+        write_annotations(BIB, [_hl("a")], [], "s", tmp_path)
+        write_annotations(BIB, [_hl("a"), _hl("b")], [], "s", tmp_path)  # updated
+        res = write_annotations(BIB, [_hl("a"), _hl("b")], [], "s", tmp_path)
+        assert res.status == "skipped" and res.reason == "unchanged"
+
+    def test_multiline_highlight_quoted_per_line(self, tmp_path):
+        res = write_annotations(BIB, [_hl("line one\nline two")], [], "s", tmp_path)
+        text = res.path.read_text(encoding="utf-8")
+        assert "> line one\n> line two" in text
+
+    def test_missing_key_skipped(self, tmp_path):
+        res = write_annotations({"zotero_key": "", "title": "T"}, [_hl()], [], "s", tmp_path)
+        assert res.status == "skipped" and "zotero_key" in res.reason
+        assert not _sources(tmp_path).exists()
+
+    def test_unsafe_stem_skipped(self, tmp_path):
+        for bad in ("../evil", "a/b", "a\\b"):
+            res = write_annotations(BIB, [_hl()], [], bad, tmp_path)
+            assert res.status == "skipped" and "unsafe" in res.reason

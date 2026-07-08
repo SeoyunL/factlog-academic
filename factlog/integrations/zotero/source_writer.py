@@ -29,12 +29,13 @@ is sufficient; it double-quotes every string with the two escapes YAML needs.
 """
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from factlog.common import slugify
+from factlog.integrations.zotero._textio import atomic_write_text as _atomic_write
+from factlog.integrations.zotero._textio import yaml_scalar as _yaml_str
 
 # Byte budgets for the filename (most filesystems cap a name at 255 bytes).
 # Author and title are individually bounded, then the whole stem is capped with
@@ -48,10 +49,6 @@ _FRONT_MATTER_SCAN_BYTES = 2048
 
 _FRONT_MATTER_KEY_RE = re.compile(r'^zotero_key:\s*"?([^"\n]+?)"?\s*$', re.MULTILINE)
 
-# C0 control characters (except the whitespace we escape explicitly) that must
-# be rendered as \xNN inside a double-quoted YAML scalar.
-_YAML_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
-
 
 @dataclass(frozen=True)
 class WriteResult:
@@ -60,24 +57,6 @@ class WriteResult:
     path: Path | None
     status: str  # "imported" | "skipped" | "error"
     reason: str = ""
-
-
-def _yaml_str(value: str) -> str:
-    """Double-quote a scalar with the escapes a double-quoted YAML string needs.
-
-    Backslash and quote are escaped, whitespace controls become \\n/\\r/\\t, and
-    any remaining C0 control char becomes \\xNN — so an embedded newline/tab in a
-    Zotero title or journal name cannot break the front matter onto a stray line.
-    """
-    out = []
-    for ch in value:
-        if ch in _YAML_ESCAPES:
-            out.append(_YAML_ESCAPES[ch])
-        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
-            out.append(f"\\x{ord(ch):02x}")
-        else:
-            out.append(ch)
-    return '"' + "".join(out) + '"'
 
 
 def _yaml_list(items: list[str]) -> str:
@@ -291,16 +270,3 @@ class SourceWriter:
         sources_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write(decision.path, self.render(parsed, imported_at))
         return decision
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    """Write text via a temp file + atomic replace so a crash cannot leave a
-    half-written source. The temp file sits in the same dir to keep replace
-    atomic; a failed replace unlinks the temp so no stray file lingers."""
-    tmp = path.with_name(f".{path.name}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
