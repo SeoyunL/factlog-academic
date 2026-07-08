@@ -130,3 +130,79 @@ class TestRun:
         rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb)], client)
         assert rc == 0
         assert "한글 제목 논문" in capsys.readouterr().out
+
+
+class TestDryRun:
+    def test_dry_run_writes_no_files(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One"), _item("K2", "Two")])
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--dry-run"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Dry run: no files will be created." in out
+        assert "Would import: 2" in out
+        assert "Next step:" not in out  # no next-step on a dry run
+        assert not list((kb / "sources").glob("*.md"))
+
+
+class TestPorcelain:
+    def test_porcelain_is_tab_separated_counts(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One"), _item("", "NoKey")])
+        rc = _run(monkeypatch, ["zotero-import", "--tag", "t", "--target", str(kb), "--porcelain"], client)
+        out = capsys.readouterr().out
+        assert rc == 1  # one error
+        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+        assert rows["imported"] == "1"
+        assert rows["errors"] == "1"
+        assert rows["dry_run"] == "0"
+        assert rows["target"].endswith("sources")
+        # No human narration leaked into porcelain output.
+        assert "Connecting" not in out and "Summary" not in out
+
+    def test_porcelain_dry_run_combo(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One")])
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--porcelain", "--dry-run"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        lines = out.splitlines()
+        counts = dict(line.split("\t", 1) for line in lines if line.split("\t", 1)[0] in
+                      {"imported", "skipped", "errors", "dry_run", "target"})
+        assert counts["imported"] == "1" and counts["dry_run"] == "1"
+        # per-item plan row exposes the prospective filename.
+        item_rows = [line for line in lines if line.startswith("item\t")]
+        assert len(item_rows) == 1
+        assert item_rows[0].split("\t")[1] == "imported"  # status
+        assert item_rows[0].split("\t")[3].endswith(".md")  # would-be name
+        assert not list((kb / "sources").glob("*.md"))
+
+    def test_porcelain_connection_error_empty_stdout(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient(raise_exc=ZoteroConnectionError("not running"))
+        rc = _run(monkeypatch, ["zotero-import", "--tag", "t", "--target", str(kb), "--porcelain"], client)
+        cap = capsys.readouterr()
+        assert rc == 2
+        assert cap.out == ""  # porcelain stdout stays clean on hard error
+        assert "not running" in cap.err
+
+    def test_porcelain_empty_result_has_count_contract(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--porcelain"], FakeClient([]))
+        out = capsys.readouterr().out
+        assert rc == 0
+        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+        assert rows == {"imported": "0", "skipped": "0", "errors": "0", "dry_run": "0",
+                        "target": str(kb / "sources")}
+
+
+class TestDryRunSkip:
+    def test_dry_run_would_skip_existing(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        items = [_item("K1", "One")]
+        _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb)], FakeClient(items))
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--dry-run"], FakeClient(items))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "would skip" in out
+        assert "Would skip:  1" in out
