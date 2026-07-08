@@ -2557,6 +2557,88 @@ def cmd_eject(args: argparse.Namespace) -> int:
     return 1 if recompile_failed else 0
 
 
+def _make_zotero_client(config):
+    """Build the real Zotero client. Indirected so tests can inject a fake."""
+    from factlog.integrations.zotero.api_client import ZoteroClient
+
+    return ZoteroClient(config)
+
+
+def cmd_zotero_import(args: argparse.Namespace) -> int:
+    """Import Zotero bibliographic metadata into the active KB's sources/ (phase 1).
+
+    Fetches the selected items (one of --collection/--tag/--items) over the Local
+    API and writes one source markdown per item. Imported items remain plain
+    sources — they still pass the usual sync -> review -> accept gate before
+    becoming facts (P1/P2). Zotero is read-only (P4).
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from factlog.integrations.zotero.api_client import ZoteroConnectionError, ZoteroError
+    from factlog.integrations.zotero.config import ZoteroConfigError, load_config
+    from factlog.integrations.zotero.importer import import_items
+
+    target_str, source = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if source in ("config", "cwd"):
+        print(f"factlog zotero-import: target KB {target} (from {source})")
+    if not _require_kb(target, "zotero-import"):
+        return 1
+
+    # A malformed KB policy file is a user error, not a crash.
+    try:
+        config = load_config(kb_root=target)
+    except ZoteroConfigError as exc:
+        print(f"factlog zotero-import: {exc}", file=sys.stderr)
+        return 1
+
+    if args.items is not None:
+        items = [s.strip() for s in args.items.split(",") if s.strip()]
+        if not items:
+            print("factlog zotero-import: --items needs at least one item key", file=sys.stderr)
+            return 1
+        label = f"items ({len(items)} requested)"
+    else:
+        items = None
+        label = f'collection "{args.collection}"' if args.collection else f'tag "{args.tag}"'
+
+    print("Connecting to Zotero (Local API)...")
+    imported_at = datetime.now(timezone.utc).isoformat()
+    try:
+        report = import_items(
+            _make_zotero_client(config),
+            target=target,
+            config=config,
+            collection=args.collection,
+            tag=args.tag,
+            items=items,
+            imported_at=imported_at,
+        )
+    except ZoteroConnectionError as exc:
+        print(f"factlog zotero-import: {exc}", file=sys.stderr)
+        return 2
+    except (ZoteroError, ValueError) as exc:
+        print(f"factlog zotero-import: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Found {label}: {len(report.outcomes)} item(s)")
+    print(f"Importing to KB: {target}\n")
+    marks = {"imported": "✓", "skipped": "↷", "error": "⚠"}
+    for outcome in report.outcomes:
+        detail = f" ({outcome.reason})" if outcome.reason else ""
+        ident = f" ({outcome.key})" if outcome.key else ""
+        print(f"  {marks.get(outcome.status, '?')} {outcome.title}{ident} - {outcome.status}{detail}")
+
+    print("\nSummary:")
+    print(f"  Imported: {report.imported}")
+    print(f"  Skipped:  {report.skipped}")
+    print(f"  Errors:   {report.errors}")
+    if report.imported:
+        print("\nNext step: run '/factlog sync' to extract candidate facts.")
+    return 1 if report.errors else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="factlog", description="factlog environment and KB helpers")
     parser.add_argument("--version", action="version", version=f"factlog {__version__}")
@@ -2778,6 +2860,19 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="summarise KB state (sources, facts, vocabulary, conflicts, engine)")
     status.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     status.set_defaults(func=cmd_status)
+
+    zimport = sub.add_parser(
+        "zotero-import",
+        help="import Zotero bibliographic metadata into sources/ (phase 1, Local API)",
+    )
+    _sel = zimport.add_mutually_exclusive_group(required=True)
+    _sel.add_argument("--collection", help="Zotero collection name to import")
+    _sel.add_argument("--tag", help="Zotero tag to import")
+    _sel.add_argument("--items", help="comma-separated Zotero item keys to import")
+    zimport.add_argument(
+        "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+    )
+    zimport.set_defaults(func=cmd_zotero_import)
 
     return parser
 
