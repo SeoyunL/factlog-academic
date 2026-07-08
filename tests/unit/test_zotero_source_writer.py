@@ -73,7 +73,7 @@ class TestWrite:
         assert text.startswith("---\n")
         assert 'zotero_key: "ABCD1234"' in text
         assert 'title: "Omega-3 fatty acids and COPD"' in text
-        assert 'authors: ["Matsuyama W"]' in text
+        assert 'authors: ["Matsuyama, W"]' in text  # "Family, Given" for clean export
         assert "imported_from: zotero" in text
         assert 'imported_at: "2026-07-08T00:00:00Z"' in text
         assert "retracted: true" in text
@@ -82,6 +82,16 @@ class TestWrite:
         assert "zotero://select/library/items/ABCD1234" in text
         assert "DOI: 10.1378/chest.128.6.3817" in text
         assert "PMID: 16354850" in text
+
+    def test_compound_surname_uses_comma_form(self, tmp_path):
+        parsed = _parsed(authors=[{"last": "Faronius", "first": "Håkan Karlsson", "name": "x"}])
+        text = SourceWriter().write(parsed, tmp_path).path.read_text(encoding="utf-8")
+        assert 'authors: ["Faronius, Håkan Karlsson"]' in text  # no mis-split downstream
+
+    def test_single_field_author_has_no_comma(self, tmp_path):
+        parsed = _parsed(authors=[{"last": "", "first": "", "name": "World Health Organization"}])
+        text = SourceWriter().write(parsed, tmp_path).path.read_text(encoding="utf-8")
+        assert 'authors: ["World Health Organization"]' in text
 
     def test_front_matter_key_round_trips(self, tmp_path):
         res = SourceWriter().write(_parsed(), tmp_path)

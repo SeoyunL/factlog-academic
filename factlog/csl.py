@@ -31,9 +31,15 @@ def _csl_type(item_type: object) -> str:
 def _author(name: str) -> dict:
     """Split a display name into CSL family/given, or a literal for one token.
 
-    factlog stores authors as "Family Given" (from Zotero's two-field creators);
-    a single token (an institution, "et al.") becomes a literal name.
+    factlog writes authors as "Family, Given" (Zotero's two-field creators), which
+    splits unambiguously even for a compound surname. A legacy "Family Given"
+    (no comma) falls back to a first-space split, and a single token (an
+    institution, "et al.") becomes a literal name.
     """
+    if ", " in name:
+        family, given = name.split(", ", 1)
+        if family.strip() and given.strip():
+            return {"family": family.strip(), "given": given.strip()}
     parts = name.split(" ", 1)
     if len(parts) == 2 and parts[1].strip():
         return {"family": parts[0], "given": parts[1].strip()}
