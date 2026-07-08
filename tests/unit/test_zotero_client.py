@@ -53,6 +53,10 @@ class ConnectTimeout(OSError):  # requests.exceptions timeout family
     pass
 
 
+class ResourceNotFound(Exception):  # pyzotero.zotero_errors.ResourceNotFound (404)
+    pass
+
+
 class FakeBackend:
     """Minimal pyzotero stand-in. Records calls; raises/pages on demand."""
 
@@ -103,7 +107,9 @@ class FakeBackend:
     def file(self, key):
         self.calls.append(("file", key))
         self._maybe_raise()
-        return self._files.get(key, b"")
+        if key not in self._files:
+            raise ResourceNotFound(f"404: {key}")  # mirror pyzotero's not-found
+        return self._files[key]
 
 
 def _col(name, key):
@@ -242,44 +248,48 @@ class TestIdsEdge:
         assert backend.calls == []
 
 
-# A PDF attachment and a non-PDF (snapshot) child of a preprint.
-PDF_ATT = {
-    "key": "NZ4XXMUR",
-    "data": {"key": "NZ4XXMUR", "itemType": "attachment", "parentItem": "KH78JUPE",
-             "contentType": "application/pdf", "filename": "paper.pdf", "title": "Preprint PDF"},
-}
-SNAPSHOT = {
-    "key": "SNAP1",
-    "data": {"key": "SNAP1", "itemType": "attachment", "parentItem": "KH78JUPE",
-             "contentType": "text/html", "title": "Snapshot"},
-}
+def _pdf(key, **over):
+    data = {"key": key, "itemType": "attachment", "parentItem": "KH78JUPE",
+            "contentType": "application/pdf", "linkMode": "imported_url", "filename": f"{key}.pdf"}
+    data.update(over)
+    return {"key": key, "data": data}
+
+
+# A stored PDF, a snapshot, a note, and a *linked* (non-downloadable) PDF.
+PDF_ATT = _pdf("NZ4XXMUR")
+SNAPSHOT = {"key": "SNAP1", "data": {"key": "SNAP1", "itemType": "attachment",
+                                     "contentType": "text/html", "linkMode": "imported_url"}}
 CHILD_NOTE = {"key": "CN1", "data": {"key": "CN1", "itemType": "note", "parentItem": "KH78JUPE"}}
+LINKED_PDF = _pdf("LINK1", linkMode="linked_url")
 
 
 class TestPdfAttachments:
     def test_filters_to_pdf_attachments_only(self):
-        backend = FakeBackend(children=[SNAPSHOT, PDF_ATT, CHILD_NOTE])
+        backend = FakeBackend(children=[SNAPSHOT, PDF_ATT, CHILD_NOTE, LINKED_PDF])
         c = ZoteroClient(ZoteroConfig(), backend=backend)
         out = c.get_pdf_attachments("KH78JUPE")
-        assert [a["key"] for a in out] == ["NZ4XXMUR"]
+        assert [a["key"] for a in out] == ["NZ4XXMUR"]  # linked PDF excluded too
         assert ("children", "KH78JUPE") in backend.calls
 
     def test_no_pdf_children_returns_empty(self):
         c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[SNAPSHOT, CHILD_NOTE]))
         assert c.get_pdf_attachments("KH78JUPE") == []
 
-    def test_order_preserved(self):
-        second = {"key": "PDF2", "data": {"key": "PDF2", "itemType": "attachment",
-                                          "contentType": "application/pdf"}}
-        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[PDF_ATT, second]))
-        assert [a["key"] for a in c.get_pdf_attachments("P")] == ["NZ4XXMUR", "PDF2"]
+    def test_content_type_case_and_charset_normalised(self):
+        a = _pdf("A", contentType="Application/PDF")
+        b = _pdf("B", contentType="application/pdf; charset=binary")
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[a, b]))
+        assert [x["key"] for x in c.get_pdf_attachments("P")] == ["A", "B"]
 
-    def test_pagination_followed(self):
-        second = {"key": "PDF2", "data": {"key": "PDF2", "itemType": "attachment",
-                                          "contentType": "application/pdf"}}
-        backend = FakeBackend(children=[PDF_ATT], extra_pages=[[second]])
+    def test_linked_modes_excluded(self):
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[
+            _pdf("F", linkMode="linked_file"), _pdf("U", linkMode="linked_url")]))
+        assert c.get_pdf_attachments("P") == []
+
+    def test_order_preserved_across_pages(self):
+        backend = FakeBackend(children=[PDF_ATT], extra_pages=[[_pdf("PDF2")]])
         c = ZoteroClient(ZoteroConfig(), backend=backend)
-        assert {a["key"] for a in c.get_pdf_attachments("P")} == {"NZ4XXMUR", "PDF2"}
+        assert [a["key"] for a in c.get_pdf_attachments("P")] == ["NZ4XXMUR", "PDF2"]
 
     def test_connection_failure_wrapped(self):
         c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(raise_os=True))
@@ -293,6 +303,19 @@ class TestFetchFile:
         c = ZoteroClient(ZoteroConfig(), backend=backend)
         assert c.fetch_file("NZ4XXMUR") == b"%PDF-1.7 ..."
         assert ("file", "NZ4XXMUR") in backend.calls
+
+    def test_blank_key_rejected_without_backend_call(self):
+        backend = FakeBackend(files={"K": b"x"})
+        c = ZoteroClient(ZoteroConfig(), backend=backend)
+        with pytest.raises(ZoteroError, match="non-empty attachment key"):
+            c.fetch_file("  ")
+        assert backend.calls == []
+
+    def test_not_found_key_maps_to_zotero_error(self):
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(files={"K": b"x"}))
+        with pytest.raises(ZoteroError) as ei:
+            c.fetch_file("MISSING")
+        assert not isinstance(ei.value, ZoteroConnectionError)
 
     def test_connection_failure_wrapped(self):
         c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(raise_os=True))
