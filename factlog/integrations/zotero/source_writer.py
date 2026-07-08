@@ -146,10 +146,14 @@ class SourceWriter:
     def __init__(self, skip_duplicates: bool = True, include_abstract: bool = True):
         self.skip_duplicates = skip_duplicates
         self.include_abstract = include_abstract
-        # Per-directory index, scanned once then kept current as we write, so a
-        # batch import is O(files + N) rather than O(N x files). Maps a resolved
-        # sources dir to ({claimed filenames}, {zotero_key: path}).
-        self._dir_index: dict[str, tuple[set[str], dict[str, Path]]] = {}
+        # Per-(directory, mode) index, scanned once then kept current as we
+        # reserve, so a batch is O(files + N) rather than O(N x files). Keyed by
+        # (resolved sources dir, mode) where mode is "write" or "plan": a dry-run
+        # plan reserves in its OWN index so it can still predict collision
+        # suffixes across a batch WITHOUT polluting the write path (a plan() must
+        # never make a later write() on the same instance skip). Value is
+        # ({claimed filenames}, {zotero_key: path}).
+        self._dir_index: dict[tuple[str, str], tuple[set[str], dict[str, Path]]] = {}
 
     def generate_slug(self, parsed: dict) -> str:
         """Base filename ``{author}-{year}-{title}.md`` (no uniqueness suffix).
@@ -166,8 +170,8 @@ class SourceWriter:
         stem = _byte_trunc(f"{author}-{year}-{title}", _STEM_MAX_BYTES)
         return f"{stem}.md"
 
-    def _index(self, sources_dir: Path) -> tuple[set[str], dict[str, Path]]:
-        key = str(sources_dir.resolve())
+    def _index(self, sources_dir: Path, mode: str) -> tuple[set[str], dict[str, Path]]:
+        key = (str(sources_dir.resolve()), mode)
         cached = self._dir_index.get(key)
         if cached is None:
             claimed: set[str] = set()
@@ -240,13 +244,15 @@ class SourceWriter:
             parts.append(f"\n- PMID: {parsed['pmid']}")
         return "".join(parts) + "\n"
 
-    def _resolve(self, parsed: dict, target: Path | str) -> WriteResult:
+    def _resolve(self, parsed: dict, target: Path | str, mode: str) -> WriteResult:
         """Decide the outcome (imported/skipped/error) and reserve the target name.
 
-        Shared by :meth:`write` and :meth:`plan` so a dry run predicts exactly what
-        a real run would do, including collision suffixes: an "imported" decision
-        reserves its filename in the in-memory index so the next item in the same
-        batch sees it. No file is touched here.
+        Shared by :meth:`write` (mode "write") and :meth:`plan` (mode "plan") so a
+        dry run predicts exactly what a real run would do, including collision
+        suffixes: an "imported" decision reserves its filename in the *mode's* index
+        so the next item in the same batch sees it. The two modes hold separate
+        indexes, so a plan() never causes a later write() to skip. No file is
+        touched here.
 
         A missing ``zotero_key`` is an error rather than a write: without an
         identity there is no way to keep re-import idempotent, so a new file would
@@ -257,7 +263,7 @@ class SourceWriter:
             return WriteResult(None, "error", "missing zotero_key")
 
         sources_dir = Path(target) / "sources"
-        claimed, by_key = self._index(sources_dir)
+        claimed, by_key = self._index(sources_dir, mode)
 
         existing = by_key.get(zotero_key)
         if existing is not None and self.skip_duplicates:
@@ -269,12 +275,16 @@ class SourceWriter:
         return WriteResult(path, "imported")
 
     def plan(self, parsed: dict, target: Path | str) -> WriteResult:
-        """Predict :meth:`write`'s outcome without creating any file (dry run)."""
-        return self._resolve(parsed, target)
+        """Predict :meth:`write`'s outcome without creating any file (dry run).
+
+        Safe to interleave with :meth:`write` on the same instance — plan uses a
+        separate reservation index, so it never makes a later write() skip.
+        """
+        return self._resolve(parsed, target, "plan")
 
     def write(self, parsed: dict, target: Path | str, imported_at: str = "") -> WriteResult:
         """Write one source file under ``<target>/sources/`` and report the outcome."""
-        decision = self._resolve(parsed, target)
+        decision = self._resolve(parsed, target, "write")
         if decision.status != "imported":
             return decision
         sources_dir = Path(target) / "sources"

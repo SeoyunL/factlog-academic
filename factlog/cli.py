@@ -2632,7 +2632,19 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         return 1
 
     if porcelain:
-        # Stable machine contract: tab-separated field<TAB>value, one per line.
+        # Stable machine contract, tab-separated, LF-terminated. Order-independent
+        # (parse by first field). Count/target rows always present:
+        #   imported\t<n> / skipped\t<n> / errors\t<n> / dry_run\t<0|1>
+        #   target\t<abs sources dir>
+        # In --dry-run only, a per-item row precedes them so scripts can read the
+        # prospective filenames the human output shows:
+        #   item\t<status>\t<zotero_key>\t<would-be filename>
+        # On a hard error (connection/config) nothing is written to stdout and the
+        # exit code is non-zero — the error goes to stderr.
+        if dry_run:
+            for outcome in report.outcomes:
+                name = outcome.path.name if outcome.path is not None else ""
+                print(f"item\t{outcome.status}\t{outcome.key}\t{name}")
         print(f"imported\t{report.imported}")
         print(f"skipped\t{report.skipped}")
         print(f"errors\t{report.errors}")

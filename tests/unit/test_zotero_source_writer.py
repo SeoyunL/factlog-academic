@@ -194,6 +194,22 @@ class TestPlan:
     def test_plan_missing_key_is_error(self, tmp_path):
         assert SourceWriter().plan(_parsed(zotero_key=""), tmp_path).status == "error"
 
+    def test_plan_then_write_same_instance_still_writes(self, tmp_path):
+        # Regression: plan() must not pollute write()'s index and make it skip.
+        w = SourceWriter()
+        planned = w.plan(_parsed(), tmp_path)
+        written = w.write(_parsed(), tmp_path)
+        assert written.status == "imported"
+        assert written.path.name == planned.path.name
+        assert written.path.exists()
+
+    def test_repeated_plan_predicts_batch_collisions(self, tmp_path):
+        # Consecutive plans of distinct items sharing a slug base still predict -2.
+        w = SourceWriter()
+        a = w.plan(_parsed(zotero_key="A"), tmp_path)
+        b = w.plan(_parsed(zotero_key="B"), tmp_path)
+        assert b.path.name.endswith("-2.md") and a.path.name != b.path.name
+
 
 class TestReadZoteroKey:
     def test_missing_front_matter_returns_empty(self, tmp_path):

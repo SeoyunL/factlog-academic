@@ -166,6 +166,43 @@ class TestPorcelain:
         rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--porcelain", "--dry-run"], client)
         out = capsys.readouterr().out
         assert rc == 0
-        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
-        assert rows["imported"] == "1" and rows["dry_run"] == "1"
+        lines = out.splitlines()
+        counts = dict(line.split("\t", 1) for line in lines if line.split("\t", 1)[0] in
+                      {"imported", "skipped", "errors", "dry_run", "target"})
+        assert counts["imported"] == "1" and counts["dry_run"] == "1"
+        # per-item plan row exposes the prospective filename.
+        item_rows = [line for line in lines if line.startswith("item\t")]
+        assert len(item_rows) == 1
+        assert item_rows[0].split("\t")[1] == "imported"  # status
+        assert item_rows[0].split("\t")[3].endswith(".md")  # would-be name
         assert not list((kb / "sources").glob("*.md"))
+
+    def test_porcelain_connection_error_empty_stdout(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient(raise_exc=ZoteroConnectionError("not running"))
+        rc = _run(monkeypatch, ["zotero-import", "--tag", "t", "--target", str(kb), "--porcelain"], client)
+        cap = capsys.readouterr()
+        assert rc == 2
+        assert cap.out == ""  # porcelain stdout stays clean on hard error
+        assert "not running" in cap.err
+
+    def test_porcelain_empty_result_has_count_contract(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--porcelain"], FakeClient([]))
+        out = capsys.readouterr().out
+        assert rc == 0
+        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+        assert rows == {"imported": "0", "skipped": "0", "errors": "0", "dry_run": "0",
+                        "target": str(kb / "sources")}
+
+
+class TestDryRunSkip:
+    def test_dry_run_would_skip_existing(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        items = [_item("K1", "One")]
+        _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb)], FakeClient(items))
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--dry-run"], FakeClient(items))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "would skip" in out
+        assert "Would skip:  1" in out
