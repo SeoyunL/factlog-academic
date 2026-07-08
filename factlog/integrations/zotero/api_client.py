@@ -27,6 +27,9 @@ _NON_BIBLIOGRAPHIC = frozenset({"attachment", "note", "annotation"})
 # Max itemKeys per Zotero API request; larger id lists are fetched in batches.
 _ID_BATCH = 50
 
+# Attachment content type imported as a full-text source in phase 2.
+_PDF_CONTENT_TYPE = "application/pdf"
+
 
 class ZoteroError(Exception):
     """A Zotero request could not be satisfied (bad collection, web mode, ...)."""
@@ -180,3 +183,22 @@ class ZoteroClient:
                 )
             )
         return out
+
+    # -- attachments (phase 2) ---------------------------------------------
+    def get_pdf_attachments(self, parent_key: str) -> list[dict]:
+        """PDF child attachments of a bibliographic item, in Zotero's order.
+
+        Only ``attachment`` children with ``contentType == application/pdf`` are
+        returned — snapshots, notes, and non-PDF files are skipped.
+        """
+        children = self._fetch(lambda: self._all(self.backend.children(parent_key)))
+        return [
+            child
+            for child in children
+            if _data(child).get("itemType") == "attachment"
+            and _data(child).get("contentType") == _PDF_CONTENT_TYPE
+        ]
+
+    def fetch_file(self, key: str) -> bytes:
+        """Download an attachment's bytes over the Local API (read-only)."""
+        return self._fetch(lambda: self.backend.file(key))

@@ -56,12 +56,15 @@ class ConnectTimeout(OSError):  # requests.exceptions timeout family
 class FakeBackend:
     """Minimal pyzotero stand-in. Records calls; raises/pages on demand."""
 
-    def __init__(self, collections=None, items=None, raise_os=False, exc=None, extra_pages=None):
+    def __init__(self, collections=None, items=None, raise_os=False, exc=None, extra_pages=None,
+                 children=None, files=None):
         self._collections = collections or []
         self._items = items or []
         self._raise_os = raise_os
         self._exc = exc
         self._extra_pages = extra_pages or []
+        self._children = children or []
+        self._files = files or {}
         self.calls: list[tuple] = []
 
     def _maybe_raise(self):
@@ -91,6 +94,16 @@ class FakeBackend:
         self.calls.append(("items", kwargs))
         self._maybe_raise()
         return list(self._items)
+
+    def children(self, parent_key):
+        self.calls.append(("children", parent_key))
+        self._maybe_raise()
+        return list(self._children)
+
+    def file(self, key):
+        self.calls.append(("file", key))
+        self._maybe_raise()
+        return self._files.get(key, b"")
 
 
 def _col(name, key):
@@ -227,3 +240,61 @@ class TestIdsEdge:
         c = ZoteroClient(ZoteroConfig(), backend=backend)
         assert c.get_items_by_ids([" ", ""]) == []
         assert backend.calls == []
+
+
+# A PDF attachment and a non-PDF (snapshot) child of a preprint.
+PDF_ATT = {
+    "key": "NZ4XXMUR",
+    "data": {"key": "NZ4XXMUR", "itemType": "attachment", "parentItem": "KH78JUPE",
+             "contentType": "application/pdf", "filename": "paper.pdf", "title": "Preprint PDF"},
+}
+SNAPSHOT = {
+    "key": "SNAP1",
+    "data": {"key": "SNAP1", "itemType": "attachment", "parentItem": "KH78JUPE",
+             "contentType": "text/html", "title": "Snapshot"},
+}
+CHILD_NOTE = {"key": "CN1", "data": {"key": "CN1", "itemType": "note", "parentItem": "KH78JUPE"}}
+
+
+class TestPdfAttachments:
+    def test_filters_to_pdf_attachments_only(self):
+        backend = FakeBackend(children=[SNAPSHOT, PDF_ATT, CHILD_NOTE])
+        c = ZoteroClient(ZoteroConfig(), backend=backend)
+        out = c.get_pdf_attachments("KH78JUPE")
+        assert [a["key"] for a in out] == ["NZ4XXMUR"]
+        assert ("children", "KH78JUPE") in backend.calls
+
+    def test_no_pdf_children_returns_empty(self):
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[SNAPSHOT, CHILD_NOTE]))
+        assert c.get_pdf_attachments("KH78JUPE") == []
+
+    def test_order_preserved(self):
+        second = {"key": "PDF2", "data": {"key": "PDF2", "itemType": "attachment",
+                                          "contentType": "application/pdf"}}
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[PDF_ATT, second]))
+        assert [a["key"] for a in c.get_pdf_attachments("P")] == ["NZ4XXMUR", "PDF2"]
+
+    def test_pagination_followed(self):
+        second = {"key": "PDF2", "data": {"key": "PDF2", "itemType": "attachment",
+                                          "contentType": "application/pdf"}}
+        backend = FakeBackend(children=[PDF_ATT], extra_pages=[[second]])
+        c = ZoteroClient(ZoteroConfig(), backend=backend)
+        assert {a["key"] for a in c.get_pdf_attachments("P")} == {"NZ4XXMUR", "PDF2"}
+
+    def test_connection_failure_wrapped(self):
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(raise_os=True))
+        with pytest.raises(ZoteroConnectionError):
+            c.get_pdf_attachments("P")
+
+
+class TestFetchFile:
+    def test_returns_bytes(self):
+        backend = FakeBackend(files={"NZ4XXMUR": b"%PDF-1.7 ..."})
+        c = ZoteroClient(ZoteroConfig(), backend=backend)
+        assert c.fetch_file("NZ4XXMUR") == b"%PDF-1.7 ..."
+        assert ("file", "NZ4XXMUR") in backend.calls
+
+    def test_connection_failure_wrapped(self):
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(raise_os=True))
+        with pytest.raises(ZoteroConnectionError):
+            c.fetch_file("K")
