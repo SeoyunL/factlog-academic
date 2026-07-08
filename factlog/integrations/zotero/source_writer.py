@@ -240,19 +240,23 @@ class SourceWriter:
             parts.append(f"\n- PMID: {parsed['pmid']}")
         return "".join(parts) + "\n"
 
-    def write(self, parsed: dict, target: Path | str, imported_at: str = "") -> WriteResult:
-        """Write one source file under ``<target>/sources/`` and report the outcome.
+    def _resolve(self, parsed: dict, target: Path | str) -> WriteResult:
+        """Decide the outcome (imported/skipped/error) and reserve the target name.
 
-        A missing ``zotero_key`` is reported as an error rather than written:
-        without an identity there is no way to keep re-import idempotent, so a new
-        file would proliferate on every run. Every real Zotero item has a key.
+        Shared by :meth:`write` and :meth:`plan` so a dry run predicts exactly what
+        a real run would do, including collision suffixes: an "imported" decision
+        reserves its filename in the in-memory index so the next item in the same
+        batch sees it. No file is touched here.
+
+        A missing ``zotero_key`` is an error rather than a write: without an
+        identity there is no way to keep re-import idempotent, so a new file would
+        proliferate on every run. Every real Zotero item has a key.
         """
         zotero_key = parsed.get("zotero_key", "")
         if not zotero_key:
             return WriteResult(None, "error", "missing zotero_key")
 
         sources_dir = Path(target) / "sources"
-        sources_dir.mkdir(parents=True, exist_ok=True)
         claimed, by_key = self._index(sources_dir)
 
         existing = by_key.get(zotero_key)
@@ -260,11 +264,23 @@ class SourceWriter:
             return WriteResult(existing, "skipped", "already imported (zotero_key match)")
 
         path = self._unique_path(sources_dir, self.generate_slug(parsed), claimed)
-        _atomic_write(path, self.render(parsed, imported_at))
-        # Keep the in-memory index current so later writes in this batch see it.
         claimed.add(path.name)
         by_key.setdefault(zotero_key, path)
         return WriteResult(path, "imported")
+
+    def plan(self, parsed: dict, target: Path | str) -> WriteResult:
+        """Predict :meth:`write`'s outcome without creating any file (dry run)."""
+        return self._resolve(parsed, target)
+
+    def write(self, parsed: dict, target: Path | str, imported_at: str = "") -> WriteResult:
+        """Write one source file under ``<target>/sources/`` and report the outcome."""
+        decision = self._resolve(parsed, target)
+        if decision.status != "imported":
+            return decision
+        sources_dir = Path(target) / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(decision.path, self.render(parsed, imported_at))
+        return decision
 
 
 def _atomic_write(path: Path, text: str) -> None:

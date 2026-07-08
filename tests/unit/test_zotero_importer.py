@@ -109,6 +109,18 @@ class TestImport:
         bad = next(o for o in report.outcomes if o.key == "BAD")
         assert bad.status == "error" and "disk full" in bad.reason
 
+    def test_dry_run_writes_nothing_but_reports(self, tmp_path):
+        c = FakeClient([_item("K1", "One"), _item("K2", "Two")])
+        report = import_items(c, target=tmp_path, collection="X", dry_run=True)
+        assert report.imported == 2  # would import
+        assert not (tmp_path / "sources").exists() or not list((tmp_path / "sources").glob("*.md"))
+
+    def test_dry_run_then_real_matches(self, tmp_path):
+        items = [_item("K1", "One")]
+        planned = import_items(FakeClient(items), target=tmp_path, collection="X", dry_run=True)
+        real = import_items(FakeClient(items), target=tmp_path, collection="X")
+        assert [o.status for o in planned.outcomes] == [o.status for o in real.outcomes]
+
     def test_sort_uses_parsed_key_from_wrapper_fallback(self, tmp_path):
         # data has no key; parse_item falls back to the wrapper key. The sort must
         # honor that identity, not treat it as "".

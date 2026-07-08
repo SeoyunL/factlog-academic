@@ -166,6 +166,35 @@ class TestGlobalUnique:
         assert squatter.read_text(encoding="utf-8").startswith("# a user's own source")
 
 
+class TestPlan:
+    def test_plan_creates_no_file_but_predicts_path(self, tmp_path):
+        res = SourceWriter().plan(_parsed(), tmp_path)
+        assert res.status == "imported"
+        assert res.path.name.endswith(".md")
+        assert not (tmp_path / "sources").exists() or not list((tmp_path / "sources").glob("*.md"))
+
+    def test_plan_matches_write_decision(self, tmp_path):
+        planned = SourceWriter().plan(_parsed(), tmp_path)
+        written = SourceWriter().write(_parsed(), tmp_path)
+        assert planned.status == written.status
+        assert planned.path.name == written.path.name
+
+    def test_plan_predicts_collision_suffix_within_batch(self, tmp_path):
+        w = SourceWriter()
+        a = w.plan(_parsed(zotero_key="A"), tmp_path)
+        b = w.plan(_parsed(zotero_key="B"), tmp_path)  # same slug base
+        assert a.path.name != b.path.name
+        assert b.path.name.endswith("-2.md")
+        assert not (tmp_path / "sources").exists() or not list((tmp_path / "sources").glob("*.md"))
+
+    def test_plan_predicts_skip_for_existing_key(self, tmp_path):
+        SourceWriter().write(_parsed(), tmp_path)
+        assert SourceWriter().plan(_parsed(), tmp_path).status == "skipped"
+
+    def test_plan_missing_key_is_error(self, tmp_path):
+        assert SourceWriter().plan(_parsed(zotero_key=""), tmp_path).status == "error"
+
+
 class TestReadZoteroKey:
     def test_missing_front_matter_returns_empty(self, tmp_path):
         f = tmp_path / "plain.md"

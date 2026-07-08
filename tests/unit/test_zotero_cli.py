@@ -130,3 +130,42 @@ class TestRun:
         rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb)], client)
         assert rc == 0
         assert "한글 제목 논문" in capsys.readouterr().out
+
+
+class TestDryRun:
+    def test_dry_run_writes_no_files(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One"), _item("K2", "Two")])
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--dry-run"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Dry run: no files will be created." in out
+        assert "Would import: 2" in out
+        assert "Next step:" not in out  # no next-step on a dry run
+        assert not list((kb / "sources").glob("*.md"))
+
+
+class TestPorcelain:
+    def test_porcelain_is_tab_separated_counts(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One"), _item("", "NoKey")])
+        rc = _run(monkeypatch, ["zotero-import", "--tag", "t", "--target", str(kb), "--porcelain"], client)
+        out = capsys.readouterr().out
+        assert rc == 1  # one error
+        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+        assert rows["imported"] == "1"
+        assert rows["errors"] == "1"
+        assert rows["dry_run"] == "0"
+        assert rows["target"].endswith("sources")
+        # No human narration leaked into porcelain output.
+        assert "Connecting" not in out and "Summary" not in out
+
+    def test_porcelain_dry_run_combo(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One")])
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--porcelain", "--dry-run"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+        assert rows["imported"] == "1" and rows["dry_run"] == "1"
+        assert not list((kb / "sources").glob("*.md"))
