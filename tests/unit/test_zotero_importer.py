@@ -17,10 +17,18 @@ def _item(key, title="T", **data):
     return {"key": key, "data": d}
 
 
+def _pdf_att(key):
+    return {"key": key, "data": {"key": key, "itemType": "attachment",
+                                 "contentType": "application/pdf", "linkMode": "imported_url"}}
+
+
 class FakeClient:
-    def __init__(self, items):
+    def __init__(self, items, attachments=None, files=None):
         self._items = items
+        self._attachments = attachments or {}  # item_key -> [attachment dicts]
+        self._files = files or {}
         self.calls = []
+        self.fetched = []
 
     def get_items_by_collection(self, name):
         self.calls.append(("collection", name))
@@ -33,6 +41,13 @@ class FakeClient:
     def get_items_by_ids(self, ids):
         self.calls.append(("ids", tuple(ids)))
         return list(self._items)
+
+    def get_pdf_attachments(self, item_key):
+        return list(self._attachments.get(item_key, []))
+
+    def fetch_file(self, key):
+        self.fetched.append(key)
+        return self._files.get(key, b"%PDF-1 fake")
 
 
 class TestFetchRouting:
@@ -120,6 +135,41 @@ class TestImport:
         planned = import_items(FakeClient(items), target=tmp_path, collection="X", dry_run=True)
         real = import_items(FakeClient(items), target=tmp_path, collection="X")
         assert [o.status for o in planned.outcomes] == [o.status for o in real.outcomes]
+
+    def test_pdf_placement_when_enabled(self, tmp_path):
+        client = FakeClient([_item("K1", "One")], attachments={"K1": [_pdf_att("A1")]})
+        report = import_items(client, target=tmp_path, collection="X", pdf=True)
+        assert report.imported == 1
+        assert report.pdf_placed == 1
+        assert report.pdf_errors == 0
+        assert len(list((tmp_path / "sources").glob("*.pdf"))) == 1
+
+    def test_no_pdf_placement_without_flag(self, tmp_path):
+        client = FakeClient([_item("K1")], attachments={"K1": [_pdf_att("A1")]})
+        report = import_items(client, target=tmp_path, collection="X")  # pdf defaults False
+        assert report.pdf_outcomes == []
+        assert client.fetched == []
+
+    def test_pdf_placed_for_skipped_bib_item(self, tmp_path):
+        # Re-import: bib already present (skipped) but its PDF is still fetched.
+        items = [_item("K1", "One")]
+        import_items(FakeClient(items), target=tmp_path, collection="X")  # bib only
+        client = FakeClient(items, attachments={"K1": [_pdf_att("A1")]})
+        report = import_items(client, target=tmp_path, collection="X", pdf=True)
+        assert report.skipped == 1 and report.pdf_placed == 1
+
+    def test_pdf_skipped_for_errored_bib_item(self, tmp_path):
+        # Missing key -> bib error -> no stem to pair, so no PDF placement.
+        client = FakeClient([_item("", "NoKey")], attachments={"": [_pdf_att("A1")]})
+        report = import_items(client, target=tmp_path, collection="X", pdf=True)
+        assert report.errors == 1 and report.pdf_outcomes == []
+
+    def test_pdf_dry_run_places_nothing(self, tmp_path):
+        client = FakeClient([_item("K1")], attachments={"K1": [_pdf_att("A1")]})
+        report = import_items(client, target=tmp_path, collection="X", pdf=True, dry_run=True)
+        assert report.pdf_placed == 1  # would place
+        assert client.fetched == []
+        assert not (tmp_path / "sources").exists() or not list((tmp_path / "sources").glob("*.pdf"))
 
     def test_sort_uses_parsed_key_from_wrapper_fallback(self, tmp_path):
         # data has no key; parse_item falls back to the wrapper key. The sort must

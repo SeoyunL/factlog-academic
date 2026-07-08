@@ -2564,6 +2564,28 @@ def _make_zotero_client(config):
     return ZoteroClient(config)
 
 
+def _convert_placed_pdfs(target, paths, *, quiet: bool) -> int:
+    """Convert exactly the given PDF paths via the existing ingest pipeline.
+
+    Reuses `factlog ingest <paths>` (the same converter + provenance header
+    /factlog sync's ingest step uses) so placed PDFs become runs/sources/*.txt.
+    Passing explicit paths — rather than --scan — keeps the scope and the exit
+    code tied to *this import's* PDFs, not other binaries already in sources/.
+    Conversion is idempotent (an up-to-date one is skipped). Indirected so tests
+    can stub it; in quiet (porcelain) mode ingest's narration is suppressed.
+    Returns ingest's exit code (non-zero only on a genuine conversion failure).
+    """
+    argv = ["ingest", *[str(p) for p in paths], "--target", str(target)]
+    ingest_args = build_parser().parse_args(argv)
+    if not quiet:
+        return cmd_ingest(ingest_args)
+    import contextlib
+    import io
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return cmd_ingest(ingest_args)
+
+
 def cmd_zotero_import(args: argparse.Namespace) -> int:
     """Import Zotero bibliographic metadata into the active KB's sources/ (phase 1).
 
@@ -2581,6 +2603,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
 
     porcelain = getattr(args, "porcelain", False)
     dry_run = getattr(args, "dry_run", False)
+    pdf = getattr(args, "pdf", False)
 
     def _human(*a, **k):
         # Suppress human narration in porcelain mode; errors still go to stderr.
@@ -2635,6 +2658,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
             items=items,
             imported_at=imported_at,
             dry_run=dry_run,
+            pdf=pdf,
         )
     except ZoteroConnectionError as exc:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
@@ -2643,16 +2667,34 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
         return 1
 
+    # Convert this import's PDFs to text via the existing ingest pipeline. The
+    # set is every PDF now present for these items (placed or already-there), so a
+    # PDF whose conversion failed on a prior run is retried; ingest skips
+    # up-to-date ones. Skipped on a dry run. A conversion failure adds to the exit
+    # code but never aborts — the bibliographic import already succeeded.
+    pdf_files = [
+        o.path for o in report.pdf_outcomes
+        if o.status in ("placed", "skipped") and o.path is not None
+    ]
+
+    def _run_conversion(quiet: bool) -> int:
+        if pdf and not dry_run and pdf_files:
+            return _convert_placed_pdfs(target, pdf_files, quiet=quiet)
+        return 0
+
     if porcelain:
         # Stable machine contract, tab-separated, LF-terminated. Order-independent
         # (parse by first field). Count/target rows always present:
         #   imported\t<n> / skipped\t<n> / errors\t<n> / dry_run\t<0|1>
         #   target\t<abs sources dir>
+        # With --pdf, PDF placement counts are added:
+        #   pdf_placed\t<n> / pdf_skipped\t<n> / pdf_errors\t<n>
         # In --dry-run only, a per-item row precedes them so scripts can read the
         # prospective filenames the human output shows:
         #   item\t<status>\t<zotero_key>\t<would-be filename>
         # On a hard error (connection/config) nothing is written to stdout and the
         # exit code is non-zero — the error goes to stderr.
+        convert_rc = _run_conversion(quiet=True)
         if dry_run:
             for outcome in report.outcomes:
                 name = outcome.path.name if outcome.path is not None else ""
@@ -2660,9 +2702,13 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         print(f"imported\t{report.imported}")
         print(f"skipped\t{report.skipped}")
         print(f"errors\t{report.errors}")
+        if pdf:
+            print(f"pdf_placed\t{report.pdf_placed}")
+            print(f"pdf_skipped\t{report.pdf_skipped}")
+            print(f"pdf_errors\t{report.pdf_errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
         print(f"target\t{target / 'sources'}")
-        return 1 if report.errors else 0
+        return 1 if (report.errors or report.pdf_errors or convert_rc) else 0
 
     verb = "Would import" if dry_run else "Imported"
     if dry_run:
@@ -2684,9 +2730,20 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     _human(f"  {verb}: {report.imported}")
     _human(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
     _human(f"  Errors:   {report.errors}")
+    if pdf:
+        pdf_verb = "Would fetch" if dry_run else "PDFs"
+        _human(f"  {pdf_verb}:     placed {report.pdf_placed}, "
+               f"skipped {report.pdf_skipped}, errors {report.pdf_errors}")
+
+    # Convert after the import summary so the narration reads in order.
+    convert_rc = 0
+    if pdf and not dry_run and pdf_files:
+        _human("\nConverting PDFs to text (ingest)...")
+        convert_rc = _convert_placed_pdfs(target, pdf_files, quiet=False)
+
     if report.imported and not dry_run:
         _human("\nNext step: run '/factlog sync' to extract candidate facts.")
-    return 1 if report.errors else 0
+    return 1 if (report.errors or report.pdf_errors or convert_rc) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2926,6 +2983,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="show what would be imported without creating any files",
+    )
+    zimport.add_argument(
+        "--pdf",
+        action="store_true",
+        help="also fetch each item's PDF attachments into sources/ and convert them to text",
     )
     zimport.add_argument(
         "--porcelain",

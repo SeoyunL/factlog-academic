@@ -21,10 +21,16 @@ def _item(key, title="T"):
     return {"key": key, "data": {"key": key, "itemType": "journalArticle", "title": title}}
 
 
+def _pdf_att(key):
+    return {"key": key, "data": {"key": key, "itemType": "attachment",
+                                 "contentType": "application/pdf", "linkMode": "imported_url"}}
+
+
 class FakeClient:
-    def __init__(self, items=None, raise_exc=None):
+    def __init__(self, items=None, raise_exc=None, attachments=None):
         self._items = items or []
         self._raise = raise_exc
+        self._attachments = attachments or {}
 
     def _maybe(self):
         if self._raise is not None:
@@ -41,6 +47,12 @@ class FakeClient:
     def get_items_by_ids(self, ids):
         self._maybe()
         return list(self._items)
+
+    def get_pdf_attachments(self, item_key):
+        return list(self._attachments.get(item_key, []))
+
+    def fetch_file(self, key):
+        return b"%PDF-1 fake"
 
 
 def _run(monkeypatch, argv, client):
@@ -206,6 +218,93 @@ class TestPorcelain:
         rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
         assert rows == {"imported": "0", "skipped": "0", "errors": "0", "dry_run": "0",
                         "target": str(kb / "sources")}
+
+
+class TestPdf:
+    def test_pdf_registered_in_parser(self):
+        args = cli.build_parser().parse_args(["zotero-import", "--collection", "X", "--pdf"])
+        assert args.pdf is True
+
+    def test_pdf_places_and_triggers_conversion(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        calls = []
+        monkeypatch.setattr(cli, "_convert_placed_pdfs",
+                            lambda target, paths, *, quiet: calls.append((list(paths), quiet)) or 0)
+        client = FakeClient([_item("K1", "One")], attachments={"K1": [_pdf_att("A1")]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--pdf"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "placed 1" in out
+        assert "Converting PDFs to text" in out
+        assert len(calls) == 1 and calls[0][1] is False  # invoked, not quiet
+        assert [p.name for p in calls[0][0]] == [f"{list((kb / 'sources').glob('*.pdf'))[0].name}"]
+
+    def test_pdf_porcelain_rows_and_quiet_conversion(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        calls = []
+        monkeypatch.setattr(cli, "_convert_placed_pdfs",
+                            lambda target, paths, *, quiet: calls.append(quiet) or 0)
+        client = FakeClient([_item("K1", "One")], attachments={"K1": [_pdf_att("A1")]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--pdf", "--porcelain"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+        assert rows["pdf_placed"] == "1" and rows["pdf_skipped"] == "0" and rows["pdf_errors"] == "0"
+        assert calls == [True]  # conversion suppressed in porcelain
+
+    def test_pdf_dry_run_no_conversion(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        called = []
+        monkeypatch.setattr(cli, "_convert_placed_pdfs",
+                            lambda target, paths, *, quiet: called.append(1) or 0)
+        client = FakeClient([_item("K1")], attachments={"K1": [_pdf_att("A1")]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--pdf", "--dry-run"], client)
+        assert rc == 0
+        assert called == []  # no conversion on dry run
+        assert not list((kb / "sources").glob("*.pdf"))
+
+    def test_conversion_failure_makes_exit_nonzero(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        monkeypatch.setattr(cli, "_convert_placed_pdfs", lambda target, paths, *, quiet: 1)
+        client = FakeClient([_item("K1")], attachments={"K1": [_pdf_att("A1")]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--pdf"], client)
+        assert rc == 1
+
+    def test_conversion_retried_for_already_placed_pdf(self, tmp_path, monkeypatch, capsys):
+        # Re-run: bib skipped, PDF already present (skipped) -> conversion still
+        # runs on that existing PDF (retry path), passing its path.
+        kb = _kb(tmp_path)
+        items = [_item("K1", "One")]
+        atts = {"K1": [_pdf_att("A1")]}
+        monkeypatch.setattr(cli, "_convert_placed_pdfs", lambda target, paths, *, quiet: 0)
+        _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--pdf"],
+             FakeClient(items, attachments=atts))
+        calls = []
+        monkeypatch.setattr(cli, "_convert_placed_pdfs",
+                            lambda target, paths, *, quiet: calls.append([p.name for p in paths]) or 0)
+        _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--pdf"],
+             FakeClient(items, attachments=atts))
+        assert len(calls) == 1 and len(calls[0]) == 1  # skipped PDF still handed to convert
+
+    def test_convert_reentry_builds_ingest_args_and_porcelain_suppresses(self, tmp_path, monkeypatch, capsys):
+        # Do NOT stub _convert_placed_pdfs: exercise the real build_parser/cmd_ingest
+        # reentry and the porcelain redirect. Stub cmd_ingest to emit noise.
+        kb = _kb(tmp_path)
+        seen = {}
+
+        def fake_ingest(args):
+            seen["paths"] = list(args.paths)
+            seen["scan"] = args.scan
+            print("INGEST_NOISE_SHOULD_BE_SUPPRESSED")
+            return 0
+
+        monkeypatch.setattr(cli, "cmd_ingest", fake_ingest)
+        client = FakeClient([_item("K1")], attachments={"K1": [_pdf_att("A1")]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--pdf", "--porcelain"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "INGEST_NOISE_SHOULD_BE_SUPPRESSED" not in out  # redirected away in porcelain
+        assert seen["scan"] is False and len(seen["paths"]) == 1  # explicit path, not --scan
 
 
 class TestDryRunSkip:
