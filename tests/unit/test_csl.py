@@ -30,6 +30,12 @@ class TestToCsl:
         assert authors[0] == {"family": "Matsuyama", "given": "W"}
         assert authors[1] == {"literal": "UNESCO"}  # single token -> literal
 
+    def test_comma_form_compound_surname(self):
+        # "Family, Given" (what source_writer now emits) splits unambiguously.
+        item = to_csl({"authors": ["Faronius, Håkan Karlsson", "Martires, Pedro Zuidberg Dos"]}, "k")
+        assert item["author"][0] == {"family": "Faronius", "given": "Håkan Karlsson"}
+        assert item["author"][1] == {"family": "Martires", "given": "Pedro Zuidberg Dos"}
+
     def test_type_mapping_and_default(self):
         assert to_csl({"item_type": "book"}, "k")["type"] == "book"
         assert to_csl({"item_type": "weird"}, "k")["type"] == "document"

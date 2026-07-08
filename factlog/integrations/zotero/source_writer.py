@@ -96,6 +96,17 @@ def _first_author_token(parsed: dict) -> str:
     return "anonymous"
 
 
+def _author_display(author: dict) -> str:
+    """Front-matter author string. "Family, Given" when both are known (the
+    standard bibliographic form export can split unambiguously), else the single
+    field available — so a compound surname is never mis-split downstream."""
+    last = (author.get("last") or "").strip()
+    first = (author.get("first") or "").strip()
+    if last and first:
+        return f"{last}, {first}"
+    return last or (author.get("name") or "").strip() or first
+
+
 def read_zotero_key(path: Path) -> str:
     """Return the ``zotero_key`` recorded in a source file's front matter, or "".
 
@@ -193,7 +204,7 @@ class SourceWriter:
         if parsed.get("item_type"):
             lines.append(f"item_type: {_yaml_str(parsed['item_type'])}")
         lines.append(f"title: {_yaml_str(parsed.get('title', ''))}")
-        authors = [a.get("name", "") for a in (parsed.get("authors") or []) if a.get("name")]
+        authors = [_author_display(a) for a in (parsed.get("authors") or []) if _author_display(a)]
         if authors:
             lines.append(f"authors: {_yaml_list(authors)}")
         if parsed.get("year"):
