@@ -4,13 +4,14 @@ Zotero 개인 라이브러리의 **서지 메타데이터**를 factlog KB의 `so
 명령입니다. factlog는 Zotero의 대체재가 아니라 그 위에 얹히는 검증 층으로,
 Zotero는 계속 쓰면서 사실 추출·근거 추적·논리 검증만 factlog가 담당합니다.
 
-이 명령은 **로드맵 단계 1**에 해당합니다. 이관 결과는 여전히 후보(candidate)이며,
-평소의 `sync → review → accept` 게이트를 거쳐야 사실이 됩니다. Zotero 원본은 절대
-수정되지 않습니다(읽기 전용).
+기본 명령은 **서지 메타데이터**를 이관하고(로드맵 단계 1), `--pdf`를 주면 각 항목의
+**PDF 첨부 전문**까지 가져옵니다(단계 2 — 아래 참조). 어느 경우든 이관 결과는 여전히
+후보(candidate)이며, 평소의 `sync → review → accept` 게이트를 거쳐야 사실이 됩니다.
+Zotero 원본은 절대 수정되지 않습니다(읽기 전용).
 
 ## 사전 준비: Zotero Local API
 
-단계 1은 Zotero **Local API**(로컬 HTTP 서버, 포트 23119)를 씁니다.
+이 통합은 Zotero **Local API**(로컬 HTTP 서버, 포트 23119)를 씁니다.
 
 1. Zotero 7 데스크톱 앱 설치 후 실행.
 2. **Edit → Settings → Advanced**에서
@@ -164,15 +165,17 @@ imported_at: "2026-07-08T01:12:31+00:00"
    수동으로 PDF를 넣고 `/factlog sync`를 돌릴 때와 정확히 같은 경로입니다. 변환은
    `pdftotext`(poppler)가 필요합니다.
 3. `sync`는 `runs/sources/`도 읽으므로, 이 전문에서도 후보 사실이 추출됩니다. 서지
-   `.md`(메타데이터)와 PDF 전문은 같은 `zotero_key` 계보로 함께 유지됩니다.
+   `.md`(메타데이터·`zotero_key`)와 PDF 전문은 공유하는 `<stem>` 파일명으로 짝지어져
+   함께 유지됩니다.
 
 ```bash
 factlog zotero-import --collection "neurosymbolic AI" --pdf
 factlog zotero-import --collection "neurosymbolic AI" --pdf --dry-run   # 변환 없이 계획만
 ```
 
-- 스캔 PDF(텍스트 레이어 없음)는 `pdftotext`가 빈 텍스트를 내며, `sync`/`status`가
-  "converted-but-empty (likely scanned/needs OCR)"로 표시합니다(OCR은 단계 2 범위 밖).
+- 스캔 PDF(텍스트 레이어 없음)는 `pdftotext`가 빈 텍스트를 내며, import 시 인라인으로
+  도는 `ingest` 출력과 이후 `factlog status`가 "converted-but-empty (likely
+  scanned/needs OCR)"로 표시합니다(OCR은 범위 밖).
 - **저작권**: 원본 PDF 바이너리가 `sources/`에 저장되므로, KB를 버전관리한다면
   `.gitignore`에 `*.pdf`(또는 `sources/**/*.pdf`)를 넣어 커밋을 막으세요. 변환 텍스트가
   놓이는 `runs/`는 이미 생성물이라 커밋 대상이 아닙니다.
@@ -185,8 +188,8 @@ factlog zotero-import --collection "neurosymbolic AI" --pdf --dry-run   # 변환
 
 ```toml
 [connection]
-mode = "local"       # 단계 1은 local만
-local_port = 23119   # 단계 1은 23119 고정(다른 값은 거부됨)
+mode = "local"       # 현재는 local만 지원
+local_port = 23119   # 23119 고정(다른 값은 거부됨)
 
 [import]
 skip_duplicates = true    # 같은 zotero_key는 재이관 시 건너뜀(멱등)
@@ -195,7 +198,7 @@ include_abstract = true   # 초록을 본문에 포함
 
 > **보안**: web 자격증명(`web_user_id`/`web_api_key`)은 사용자 레벨 파일에서만
 > 읽고 KB 정책 파일에서는 무시합니다. KB가 별도로 버전관리될 때 API 키가 커밋되는
-> 것을 막기 위함입니다. (단계 1은 Local API만 지원하므로 web 자격증명은 아직 쓰이지
+> 것을 막기 위함입니다. (현재는 Local API만 지원하므로 web 자격증명은 아직 쓰이지
 > 않습니다.)
 
 ## 멱등성과 원본 불변
