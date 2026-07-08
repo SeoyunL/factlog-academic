@@ -77,8 +77,14 @@ def import_items(
     tag: str | None = None,
     items: list[str] | None = None,
     imported_at: str = "",
+    dry_run: bool = False,
 ) -> ImportReport:
-    """Fetch the selected items and write each into ``<target>/sources/``."""
+    """Fetch the selected items and write each into ``<target>/sources/``.
+
+    With ``dry_run`` the same decision is computed (including collision suffixes)
+    but no file is created — the report's "imported" outcomes are what *would* be
+    written.
+    """
     config = config or ZoteroConfig()
     raw = fetch_items(client, collection=collection, tag=tag, items=items)
     writer = SourceWriter(
@@ -94,7 +100,7 @@ def import_items(
         title = parsed.get("title") or "(untitled)"
         key = parsed.get("zotero_key", "")
         try:
-            result = writer.write(parsed, target, imported_at)
+            result = writer.plan(parsed, target) if dry_run else writer.write(parsed, target, imported_at)
         except OSError as exc:
             report.outcomes.append(ItemOutcome(key, title, "error", None, str(exc)))
             continue

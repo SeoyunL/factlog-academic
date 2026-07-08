@@ -2579,10 +2579,18 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     from factlog.integrations.zotero.config import ZoteroConfigError, load_config
     from factlog.integrations.zotero.importer import import_items
 
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    def _human(*a, **k):
+        # Suppress human narration in porcelain mode; errors still go to stderr.
+        if not porcelain:
+            print(*a, **k)
+
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
     if source in ("config", "cwd"):
-        print(f"factlog zotero-import: target KB {target} (from {source})")
+        _human(f"factlog zotero-import: target KB {target} (from {source})")
     if not _require_kb(target, "zotero-import"):
         return 1
 
@@ -2603,7 +2611,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         items = None
         label = f'collection "{args.collection}"' if args.collection else f'tag "{args.tag}"'
 
-    print("Connecting to Zotero (Local API)...")
+    _human("Connecting to Zotero (Local API)...")
     imported_at = datetime.now(timezone.utc).isoformat()
     try:
         report = import_items(
@@ -2614,6 +2622,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
             tag=args.tag,
             items=items,
             imported_at=imported_at,
+            dry_run=dry_run,
         )
     except ZoteroConnectionError as exc:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
@@ -2622,20 +2631,49 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Found {label}: {len(report.outcomes)} item(s)")
-    print(f"Importing to KB: {target}\n")
+    if porcelain:
+        # Stable machine contract, tab-separated, LF-terminated. Order-independent
+        # (parse by first field). Count/target rows always present:
+        #   imported\t<n> / skipped\t<n> / errors\t<n> / dry_run\t<0|1>
+        #   target\t<abs sources dir>
+        # In --dry-run only, a per-item row precedes them so scripts can read the
+        # prospective filenames the human output shows:
+        #   item\t<status>\t<zotero_key>\t<would-be filename>
+        # On a hard error (connection/config) nothing is written to stdout and the
+        # exit code is non-zero — the error goes to stderr.
+        if dry_run:
+            for outcome in report.outcomes:
+                name = outcome.path.name if outcome.path is not None else ""
+                print(f"item\t{outcome.status}\t{outcome.key}\t{name}")
+        print(f"imported\t{report.imported}")
+        print(f"skipped\t{report.skipped}")
+        print(f"errors\t{report.errors}")
+        print(f"dry_run\t{'1' if dry_run else '0'}")
+        print(f"target\t{target / 'sources'}")
+        return 1 if report.errors else 0
+
+    verb = "Would import" if dry_run else "Imported"
+    if dry_run:
+        _human("Dry run: no files will be created.")
+    _human(f"Found {label}: {len(report.outcomes)} item(s)")
+    _human(f"{'Would import to' if dry_run else 'Importing to'} KB: {target}\n")
     marks = {"imported": "✓", "skipped": "↷", "error": "⚠"}
     for outcome in report.outcomes:
+        name = outcome.path.name if outcome.path is not None else "-"
+        status = ("would import" if dry_run else "imported") if outcome.status == "imported" else (
+            ("would skip" if dry_run else "skipped") if outcome.status == "skipped" else "error"
+        )
         detail = f" ({outcome.reason})" if outcome.reason else ""
         ident = f" ({outcome.key})" if outcome.key else ""
-        print(f"  {marks.get(outcome.status, '?')} {outcome.title}{ident} - {outcome.status}{detail}")
+        suffix = f" -> {name}" if dry_run and outcome.status == "imported" else ""
+        _human(f"  {marks.get(outcome.status, '?')} {outcome.title}{ident} - {status}{detail}{suffix}")
 
-    print("\nSummary:")
-    print(f"  Imported: {report.imported}")
-    print(f"  Skipped:  {report.skipped}")
-    print(f"  Errors:   {report.errors}")
-    if report.imported:
-        print("\nNext step: run '/factlog sync' to extract candidate facts.")
+    _human("\nSummary:")
+    _human(f"  {verb}: {report.imported}")
+    _human(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
+    _human(f"  Errors:   {report.errors}")
+    if report.imported and not dry_run:
+        _human("\nNext step: run '/factlog sync' to extract candidate facts.")
     return 1 if report.errors else 0
 
 
@@ -2871,6 +2909,16 @@ def build_parser() -> argparse.ArgumentParser:
     _sel.add_argument("--items", help="comma-separated Zotero item keys to import")
     zimport.add_argument(
         "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+    )
+    zimport.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show what would be imported without creating any files",
+    )
+    zimport.add_argument(
+        "--porcelain",
+        action="store_true",
+        help="machine-readable output (tab-separated field/value counts) for scripts",
     )
     zimport.set_defaults(func=cmd_zotero_import)
 
