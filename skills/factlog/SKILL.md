@@ -225,12 +225,19 @@ and compiled.
 (one relation name per line) are treated as *functional* — at most one object
 per subject. If two distinct objects are asserted for the same
 (subject, single-valued relation), `finalize` reports a `CONFLICT` and exits
-non-zero. Resolve non-destructively by marking the outdated row's status as
-`superseded` in `facts/candidates.csv` (it stays for audit, drops out of
-`accepted.dl`, and the conflict clears). This resolution is **durable**: a
-re-`merge` preserves rows you marked `superseded` in `candidates.csv` even when
-a run re-asserts the retired fact. This keeps the KB free of the silently-
-accumulated contradictions a plain notes wiki cannot prevent.
+non-zero. Resolve it non-destructively **with a command, not by hand-editing
+`candidates.csv`**: retire the outdated fact so it drops out of `accepted.dl`
+and the conflict clears, while the row stays for audit (status `superseded`).
+
+- If the outdated fact is still pending (candidate/needs_review):
+  `factlog reject <subject> <relation> <object>` (`-` wildcards a position).
+- If it has already been accepted:
+  `factlog eject --fact <subject> <relation> <object>` (marks it `superseded` by
+  default, leaving the source in place; `--purge` removes the row entirely).
+
+This resolution is **durable**: a re-`merge` preserves the `superseded` status
+even when a run re-asserts the retired fact. This keeps the KB free of the
+silently-accumulated contradictions a plain notes wiki cannot prevent.
 
 **Entity vs literal typing.** Relations you list in `policy/attribute-relations.md`
 (same one-name-per-line format as `single-valued.md`) are treated as
