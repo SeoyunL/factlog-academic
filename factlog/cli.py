@@ -2564,16 +2564,19 @@ def _make_zotero_client(config):
     return ZoteroClient(config)
 
 
-def _convert_placed_pdfs(target, *, quiet: bool) -> int:
-    """Convert binaries under sources/ via the existing ingest pipeline.
+def _convert_placed_pdfs(target, paths, *, quiet: bool) -> int:
+    """Convert exactly the given PDF paths via the existing ingest pipeline.
 
-    Reuses `factlog ingest --scan` (the same deterministic conversion /factlog
-    sync runs) so placed PDFs become runs/sources/*.txt with the standard
-    provenance header. Indirected so tests can stub the conversion. In quiet
-    (porcelain) mode ingest's own narration is suppressed. Returns ingest's exit
-    code (non-zero only on a genuine conversion failure).
+    Reuses `factlog ingest <paths>` (the same converter + provenance header
+    /factlog sync's ingest step uses) so placed PDFs become runs/sources/*.txt.
+    Passing explicit paths — rather than --scan — keeps the scope and the exit
+    code tied to *this import's* PDFs, not other binaries already in sources/.
+    Conversion is idempotent (an up-to-date one is skipped). Indirected so tests
+    can stub it; in quiet (porcelain) mode ingest's narration is suppressed.
+    Returns ingest's exit code (non-zero only on a genuine conversion failure).
     """
-    ingest_args = build_parser().parse_args(["ingest", "--scan", "--target", str(target)])
+    argv = ["ingest", *[str(p) for p in paths], "--target", str(target)]
+    ingest_args = build_parser().parse_args(argv)
     if not quiet:
         return cmd_ingest(ingest_args)
     import contextlib
@@ -2664,13 +2667,19 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
         return 1
 
-    # Convert freshly-placed PDFs to text via the existing ingest pipeline (the
-    # same path a manually-dropped PDF takes on /factlog sync). Skipped on a dry
-    # run and when nothing was placed. A conversion failure adds to the exit code
-    # but never aborts — the bibliographic import already succeeded.
+    # Convert this import's PDFs to text via the existing ingest pipeline. The
+    # set is every PDF now present for these items (placed or already-there), so a
+    # PDF whose conversion failed on a prior run is retried; ingest skips
+    # up-to-date ones. Skipped on a dry run. A conversion failure adds to the exit
+    # code but never aborts — the bibliographic import already succeeded.
+    pdf_files = [
+        o.path for o in report.pdf_outcomes
+        if o.status in ("placed", "skipped") and o.path is not None
+    ]
+
     def _run_conversion(quiet: bool) -> int:
-        if pdf and not dry_run and report.pdf_placed:
-            return _convert_placed_pdfs(target, quiet=quiet)
+        if pdf and not dry_run and pdf_files:
+            return _convert_placed_pdfs(target, pdf_files, quiet=quiet)
         return 0
 
     if porcelain:
@@ -2728,9 +2737,9 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
 
     # Convert after the import summary so the narration reads in order.
     convert_rc = 0
-    if pdf and not dry_run and report.pdf_placed:
-        _human("\nConverting placed PDFs to text (ingest)...")
-        convert_rc = _convert_placed_pdfs(target, quiet=False)
+    if pdf and not dry_run and pdf_files:
+        _human("\nConverting PDFs to text (ingest)...")
+        convert_rc = _convert_placed_pdfs(target, pdf_files, quiet=False)
 
     if report.imported and not dry_run:
         _human("\nNext step: run '/factlog sync' to extract candidate facts.")
