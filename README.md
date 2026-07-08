@@ -81,6 +81,10 @@ factlog에는 두 종류의 사실이 있습니다.
 이 사람의 검토 단계가 factlog의 **신뢰 경계**입니다. 모델이 만들어 낸 것은 무엇이든
 사람이 accepted로 확정하기 전까지는 후보일 뿐입니다.
 
+> **처음이라면** `/factlog sync` 다음에 뭘 할지 막히기 쉽습니다. 명령만으로 끝까지 가는
+> 최소 경로(파일 편집·Datalog 없이)는 [docs/getting-started-verify.md](docs/getting-started-verify.md)
+> 를 보세요.
+
 #### 명령 한눈에 보기 — slash command · CLI command · KB 파일
 
 위 인트로에서 정의한 대로, factlog의 명령은 **어디서 실행하느냐**에 따라 두 계층으로
