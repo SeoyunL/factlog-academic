@@ -50,11 +50,6 @@ class ImportReport:
         return sum(1 for o in self.outcomes if o.status == "error")
 
 
-def _key(item: dict) -> str:
-    data = item.get("data") if isinstance(item, dict) else None
-    return (data or {}).get("key", "") if isinstance(data, dict) else ""
-
-
 def fetch_items(
     client: ZoteroClient,
     *,
@@ -91,8 +86,11 @@ def import_items(
         include_abstract=config.include_abstract,
     )
     report = ImportReport()
-    for item in sorted(raw, key=_key):
-        parsed = parse_item(item)
+    # Sort by the *parsed* identity key (parse_item's own fallback logic) so the
+    # order matches the writer's collision-suffix basis regardless of where the
+    # key sat in the raw item — keeping re-import deterministic (P3).
+    parsed_items = sorted((parse_item(item) for item in raw), key=lambda p: p.get("zotero_key", ""))
+    for parsed in parsed_items:
         title = parsed.get("title") or "(untitled)"
         key = parsed.get("zotero_key", "")
         try:

@@ -90,3 +90,29 @@ class TestImport:
         report = import_items(FakeClient([]), target=tmp_path, collection="X")
         assert report.outcomes == []
         assert report.imported == 0
+
+    def test_write_oserror_is_error_outcome_not_abort(self, tmp_path, monkeypatch):
+        from factlog.integrations.zotero import importer as imp
+
+        real_write = imp.SourceWriter.write
+
+        def flaky(self, parsed, target, imported_at=""):
+            if parsed.get("zotero_key") == "BAD":
+                raise OSError("disk full")
+            return real_write(self, parsed, target, imported_at)
+
+        monkeypatch.setattr(imp.SourceWriter, "write", flaky)
+        c = FakeClient([_item("AAA", "ok"), _item("BAD", "boom")])
+        report = import_items(c, target=tmp_path, collection="X")
+        assert report.imported == 1
+        assert report.errors == 1
+        bad = next(o for o in report.outcomes if o.key == "BAD")
+        assert bad.status == "error" and "disk full" in bad.reason
+
+    def test_sort_uses_parsed_key_from_wrapper_fallback(self, tmp_path):
+        # data has no key; parse_item falls back to the wrapper key. The sort must
+        # honor that identity, not treat it as "".
+        a = {"key": "AAA", "data": {"itemType": "journalArticle", "title": "a"}}
+        z = {"key": "ZZZ", "data": {"itemType": "journalArticle", "title": "z"}}
+        report = import_items(FakeClient([z, a]), target=tmp_path, collection="X")
+        assert [o.key for o in report.outcomes] == ["AAA", "ZZZ"]

@@ -2576,7 +2576,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     from factlog.integrations.zotero.api_client import ZoteroConnectionError, ZoteroError
-    from factlog.integrations.zotero.config import load_config
+    from factlog.integrations.zotero.config import ZoteroConfigError, load_config
     from factlog.integrations.zotero.importer import import_items
 
     target_str, source = factlog_config.resolve_root(args.target)
@@ -2586,15 +2586,22 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     if not _require_kb(target, "zotero-import"):
         return 1
 
-    config = load_config(kb_root=target)
-    items = [s.strip() for s in args.items.split(",") if s.strip()] if args.items else None
-    label = (
-        f'collection "{args.collection}"'
-        if args.collection
-        else f'tag "{args.tag}"'
-        if args.tag
-        else f"{len(items or [])} item(s)"
-    )
+    # A malformed KB policy file is a user error, not a crash.
+    try:
+        config = load_config(kb_root=target)
+    except ZoteroConfigError as exc:
+        print(f"factlog zotero-import: {exc}", file=sys.stderr)
+        return 1
+
+    if args.items is not None:
+        items = [s.strip() for s in args.items.split(",") if s.strip()]
+        if not items:
+            print("factlog zotero-import: --items needs at least one item key", file=sys.stderr)
+            return 1
+        label = f"items ({len(items)} requested)"
+    else:
+        items = None
+        label = f'collection "{args.collection}"' if args.collection else f'tag "{args.tag}"'
 
     print("Connecting to Zotero (Local API)...")
     imported_at = datetime.now(timezone.utc).isoformat()
@@ -2611,11 +2618,11 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     except ZoteroConnectionError as exc:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
         return 2
-    except ZoteroError as exc:
+    except (ZoteroError, ValueError) as exc:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
         return 1
 
-    print(f'Found {label}: {len(report.outcomes)} item(s)')
+    print(f"Found {label}: {len(report.outcomes)} item(s)")
     print(f"Importing to KB: {target}\n")
     marks = {"imported": "✓", "skipped": "↷", "error": "⚠"}
     for outcome in report.outcomes:

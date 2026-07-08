@@ -109,3 +109,24 @@ class TestRun:
         out = capsys.readouterr().out
         assert rc == 1
         assert "Errors:   1" in out
+
+    def test_empty_items_is_graceful_error(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        rc = _run(monkeypatch, ["zotero-import", "--items", ",,", "--target", str(kb)], FakeClient([]))
+        assert rc == 1
+        assert "at least one item key" in capsys.readouterr().err
+
+    def test_malformed_kb_config_is_graceful_error(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        (kb / "policy").mkdir()
+        (kb / "policy" / "zotero-config.toml").write_text("this = = not toml", encoding="utf-8")
+        rc = _run(monkeypatch, ["zotero-import", "--tag", "t", "--target", str(kb)], FakeClient([]))
+        assert rc == 1
+        assert "invalid TOML" in capsys.readouterr().err
+
+    def test_non_ascii_title_in_output(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "한글 제목 논문")])
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb)], client)
+        assert rc == 0
+        assert "한글 제목 논문" in capsys.readouterr().out
