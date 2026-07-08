@@ -116,6 +116,18 @@ class TestRun:
         assert rc == 1
         assert "at least one item key" in capsys.readouterr().err
 
+    def test_blank_collection_is_graceful_error(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "   ", "--target", str(kb)], FakeClient([]))
+        assert rc == 1
+        assert "non-empty name" in capsys.readouterr().err
+
+    def test_blank_tag_is_graceful_error(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        rc = _run(monkeypatch, ["zotero-import", "--tag", "", "--target", str(kb)], FakeClient([]))
+        assert rc == 1
+        assert "non-empty value" in capsys.readouterr().err
+
     def test_malformed_kb_config_is_graceful_error(self, tmp_path, monkeypatch, capsys):
         kb = _kb(tmp_path)
         (kb / "policy").mkdir()

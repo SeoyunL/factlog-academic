@@ -28,18 +28,28 @@ bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 
 fl() { "$PYTHON" -m factlog "$@"; }
 
+# Isolate user-level config discovery so load_config never reads the developer's
+# real ~/.config/factlog/zotero.toml (which, if malformed, would derail the
+# no-policy cases). Keeps the harness hermetic as its header claims.
+export XDG_CONFIG_HOME="$(mktemp -d)/cfg"
+export HOME="$(mktemp -d)/home"
+
 # A valid KB (has sources/) and one with a malformed Zotero policy file.
 KB="$(mktemp -d)/wiki"; mkdir -p "$KB/sources"
 BADCFG="$(mktemp -d)/wiki"; mkdir -p "$BADCFG/sources/" "$BADCFG/policy"
 printf 'this = = not toml\n' > "$BADCFG/policy/zotero-config.toml"
 NOKB="$(mktemp -d)/plain"; mkdir -p "$NOKB"  # no sources/
 
-# --- 1. --help lists the selectors ------------------------------------------
+# --- 1. --help lists the selectors and options ------------------------------
 out="$(fl zotero-import --help 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && grep -q -- "--collection" <<<"$out" && grep -q -- "--dry-run" <<<"$out"; then
+missing=""
+for opt in --collection --tag --items --target --dry-run --porcelain; do
+  grep -q -- "$opt" <<<"$out" || missing="$missing $opt"
+done
+if [ "$rc" -eq 0 ] && [ -z "$missing" ]; then
   ok "--help documents options"
 else
-  bad "--help (rc=$rc): $out"
+  bad "--help (rc=$rc, missing:$missing): $out"
 fi
 
 # --- 2. missing selector is an argparse error (exit 2) -----------------------
@@ -52,7 +62,7 @@ if [ "$rc" -eq 2 ]; then ok "mutually exclusive selectors -> exit 2"; else bad "
 
 # --- 4. target that is not a KB -> exit 1 with guidance ----------------------
 out="$(fl zotero-import --tag t --target "$NOKB" 2>&1)"; rc=$?
-if [ "$rc" -eq 1 ] && grep -q "not a factlog KB" <<<"$out"; then
+if [ "$rc" -eq 1 ] && grep -q "not a factlog KB" <<<"$out" && ! grep -q "Traceback" <<<"$out"; then
   ok "non-KB target -> graceful exit 1"
 else
   bad "non-KB target rc=$rc: $out"
@@ -60,10 +70,18 @@ fi
 
 # --- 5. empty --items -> exit 1 with guidance -------------------------------
 out="$(fl zotero-import --items ' , , ' --target "$KB" 2>&1)"; rc=$?
-if [ "$rc" -eq 1 ] && grep -q "at least one item key" <<<"$out"; then
+if [ "$rc" -eq 1 ] && grep -q "at least one item key" <<<"$out" && ! grep -q "Traceback" <<<"$out"; then
   ok "empty --items -> graceful exit 1"
 else
   bad "empty --items rc=$rc: $out"
+fi
+
+# --- 5b. blank --collection -> exit 1 (uniform with --items) -----------------
+out="$(fl zotero-import --collection '   ' --target "$KB" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && grep -q "non-empty name" <<<"$out" && ! grep -q "Traceback" <<<"$out"; then
+  ok "blank --collection -> graceful exit 1"
+else
+  bad "blank --collection rc=$rc: $out"
 fi
 
 # --- 6. malformed KB Zotero config -> exit 1, not a traceback ----------------

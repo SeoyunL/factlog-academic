@@ -2601,18 +2601,30 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
         return 1
 
+    # Exactly one selector is set (argparse mutually-exclusive, required). Reject a
+    # blank value for whichever was chosen, uniformly, before touching Zotero.
     if args.items is not None:
         items = [s.strip() for s in args.items.split(",") if s.strip()]
         if not items:
             print("factlog zotero-import: --items needs at least one item key", file=sys.stderr)
             return 1
         label = f"items ({len(items)} requested)"
-    else:
+    elif args.collection is not None:
+        if not args.collection.strip():
+            print("factlog zotero-import: --collection needs a non-empty name", file=sys.stderr)
+            return 1
         items = None
-        label = f'collection "{args.collection}"' if args.collection else f'tag "{args.tag}"'
+        label = f'collection "{args.collection}"'
+    else:
+        if not args.tag.strip():
+            print("factlog zotero-import: --tag needs a non-empty value", file=sys.stderr)
+            return 1
+        items = None
+        label = f'tag "{args.tag}"'
 
     _human("Connecting to Zotero (Local API)...")
-    imported_at = datetime.now(timezone.utc).isoformat()
+    # No microseconds: a tidy, stable provenance timestamp in the front matter.
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     try:
         report = import_items(
             _make_zotero_client(config),

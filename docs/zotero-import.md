@@ -40,7 +40,7 @@ factlog zotero-import (--collection <name> | --tag <tag> | --items <k1,k2,...>)
 
 | 옵션 | 설명 |
 |---|---|
-| `--collection <name>` | 컬렉션 이름으로 이관(정확 일치 → 대소문자 무시 폴백; 없으면 사용 가능한 이름 안내) |
+| `--collection <name>` | 컬렉션 이름으로 이관(정확 일치 → 대소문자 무시 폴백; 다중 일치는 모호성 오류, 없으면 사용 가능한 이름 안내) |
 | `--tag <tag>` | 태그로 이관 |
 | `--items <ids>` | 쉼표로 구분한 Zotero item 키 목록 |
 | `--target <path>` | 대상 KB(기본: 활성 KB — `factlog where` 참조) |
@@ -87,7 +87,7 @@ Next step: run '/factlog sync' to extract candidate facts.
 ```
 
 기계용(`--porcelain`): 탭 구분, 순서 무관, LF 종료. 하드 에러(연결/설정) 시 stdout은
-비고 종료 코드가 0이 아닙니다.
+비어 있고 종료 코드가 0이 아닙니다.
 
 ```
 imported	9
@@ -104,7 +104,9 @@ item	imported	64DA4TQJ	faronius-2025-independence-is-not-an-issue-in-neurosymbol
 ...
 ```
 
-**종료 코드**: `0` 정상 · `1` 요청/설정/아이템 오류(일부 실패 포함) · `2` Local API 연결 실패.
+**종료 코드**: `0` 정상 · `1` 요청/설정/아이템 오류(일부 실패 포함) · `2` Local API 연결
+실패 **또는** 잘못된 사용법(선택자 누락/상호배타 등 argparse 오류). `1`과 `2`는
+stderr 메시지로 구분합니다.
 
 ## 생성되는 source 파일
 
@@ -122,7 +124,7 @@ year: "2025"
 doi: "10.48550/arXiv.2504.07851"
 tags: ["Computer Science - Artificial Intelligence", "neurosymbolic AI"]
 imported_from: zotero
-imported_at: "2026-07-08T00:00:00Z"
+imported_at: "2026-07-08T01:12:31+00:00"
 ---
 
 # Independence Is Not an Issue in Neurosymbolic AI
@@ -142,7 +144,7 @@ imported_at: "2026-07-08T00:00:00Z"
 ```toml
 [connection]
 mode = "local"       # 단계 1은 local만
-local_port = 23119
+local_port = 23119   # 단계 1은 23119 고정(다른 값은 거부됨)
 
 [import]
 skip_duplicates = true    # 같은 zotero_key는 재이관 시 건너뜀(멱등)
