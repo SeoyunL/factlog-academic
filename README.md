@@ -324,11 +324,14 @@ factlog zotero-import --items "KH78JUPE,64DA4TQJ"        # 개별 항목
 `--target` 없으면 활성 KB로 이관하고, `--porcelain` 은 스크립트용 출력을 냅니다.
 `--pdf` 를 주면 각 항목의 PDF 첨부까지 가져와 기존 `ingest` 로 전문을 텍스트 변환합니다
 (원본 PDF는 `sources/` 에 저장되니 KB를 버전관리하면 `*.pdf` 를 `.gitignore` 하세요).
-이관 후 `/factlog sync` 로 후보 사실을 추출합니다. 자세한 옵션·설정 파일·provenance
-front matter 는 [docs/zotero-import.md](docs/zotero-import.md) 를 참고하세요.
+`--annotations` 를 주면 하이라이트·노트를 `sources/<stem>-notes.md` 로 이관합니다(여전히
+소스일 뿐 — candidate는 `sync` + 사람 게이트를 거칩니다). 이관 후 `/factlog sync` 로 후보
+사실을 추출합니다. 자세한 옵션·설정 파일·provenance front matter 는
+[docs/zotero-import.md](docs/zotero-import.md) 를 참고하세요.
 
 ```bash
-factlog zotero-import --collection "Systematic Review" --pdf   # 서지 + PDF 전문
+factlog zotero-import --collection "Systematic Review" --pdf            # 서지 + PDF 전문
+factlog zotero-import --collection "Systematic Review" --annotations    # + 하이라이트·노트
 ```
 
 #### 어휘 살펴보기 (`factlog vocab`)

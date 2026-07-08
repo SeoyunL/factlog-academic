@@ -43,7 +43,7 @@ NOKB="$(mktemp -d)/plain"; mkdir -p "$NOKB"  # no sources/
 # --- 1. --help lists the selectors and options ------------------------------
 out="$(fl zotero-import --help 2>&1)"; rc=$?
 missing=""
-for opt in --collection --tag --items --target --dry-run --porcelain --pdf; do
+for opt in --collection --tag --items --target --dry-run --porcelain --pdf --annotations; do
   grep -q -- "$opt" <<<"$out" || missing="$missing $opt"
 done
 if [ "$rc" -eq 0 ] && [ -z "$missing" ]; then
@@ -100,6 +100,14 @@ if [ "$rc" -eq 1 ] && grep -q "not a factlog KB" <<<"$out" && ! grep -q "Traceba
   ok "--pdf accepted, still gated by KB check"
 else
   bad "--pdf gating rc=$rc: $out"
+fi
+
+# --- 8. --annotations is accepted and still gated by the KB check ------------
+out="$(fl zotero-import --collection Foo --annotations --target "$NOKB" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && grep -q "not a factlog KB" <<<"$out" && ! grep -q "Traceback" <<<"$out"; then
+  ok "--annotations accepted, still gated by KB check"
+else
+  bad "--annotations gating rc=$rc: $out"
 fi
 
 echo

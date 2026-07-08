@@ -48,6 +48,7 @@ factlog zotero-import (--collection <name> | --tag <tag> | --items <k1,k2,...>)
 | `--dry-run` | 파일을 만들지 않고 이관 계획(예상 파일명 포함)만 표시 |
 | `--porcelain` | 스크립트용 기계 출력(탭 구분) |
 | `--pdf` | 각 항목의 PDF 첨부도 `sources/`로 가져와 텍스트로 변환(아래 참조) |
+| `--annotations` | 각 항목의 하이라이트·노트를 `sources/<stem>-notes.md`로 이관(아래 참조) |
 
 컬렉션에 섞여 있는 첨부(PDF)·노트는 제외하고 **top-level 서지 아이템만** 가져옵니다.
 
@@ -66,6 +67,9 @@ factlog zotero-import --items "KH78JUPE,64DA4TQJ"
 
 # 서지 + PDF 전문까지 한 번에
 factlog zotero-import --collection "neurosymbolic AI" --pdf
+
+# 하이라이트·노트까지
+factlog zotero-import --collection "neurosymbolic AI" --annotations
 ```
 
 이관 후 후보 사실을 추출하려면 `/factlog sync`를 실행합니다.
@@ -117,9 +121,18 @@ pdf_skipped	1
 pdf_errors	0
 ```
 
-**종료 코드**: `0` 정상 · `1` 요청/설정/아이템/PDF 오류 또는 변환 실패(일부 실패 포함)
-· `2` Local API 연결 실패 **또는** 잘못된 사용법(선택자 누락/상호배타 등 argparse 오류).
-`1`과 `2`는 stderr 메시지로 구분합니다.
+`--annotations`를 주면 주석 카운트 행이 추가됩니다(`written`=신규, `updated`=변경 재작성):
+
+```
+annotations_written	6
+annotations_updated	0
+annotations_skipped	0
+annotation_errors	0
+```
+
+**종료 코드**: `0` 정상 · `1` 요청/설정/아이템/PDF/주석 오류 또는 변환 실패(일부 실패
+포함) · `2` Local API 연결 실패 **또는** 잘못된 사용법(선택자 누락/상호배타 등 argparse
+오류). `1`과 `2`는 stderr 메시지로 구분합니다.
 
 ## 생성되는 source 파일
 
@@ -182,6 +195,38 @@ factlog zotero-import --collection "neurosymbolic AI" --pdf --dry-run   # 변환
 - 부분 실패는 첨부 단위로 격리됩니다 — PDF 하나를 못 받아도 나머지는 계속되며, 실패
   개수가 요약/`pdf_errors`에 반영됩니다.
 
+## 하이라이트·노트 가져오기 (`--annotations`)
+
+`--annotations`를 주면 각 항목의 **PDF 하이라이트**와 **노트**를 항목당
+`sources/<stem>-notes.md`로 이관합니다(서지 `<stem>.md`와 짝지어짐).
+
+동작:
+
+1. 항목의 노트(`note`)와 PDF 첨부의 하이라이트(highlight/underline/note/text —
+   image/ink 제외)를 Local API로 수집합니다.
+2. 하이라이트는 페이지 라벨·강조 구절(인용)·메모로, 노트는 HTML을 텍스트로 풀어
+   `## Highlights` / `## Notes` 섹션에 씁니다. front matter에 `zotero_key`와
+   `source_kind: annotations` 마커가 실립니다.
+3. **변환 불필요** — 이미 markdown이라 `sync`가 `sources/*.md`를 직접 읽어 candidate를
+   추출합니다.
+
+**P1 경계**: 하이라이트·노트는 candidate로 직접 쓰이지 않고 **소스 텍스트**로만
+들어갑니다. candidate는 여전히 `sync`(LLM 추출)와 사람의 `accept` 게이트를 거칩니다 —
+에이전트는 결론을 내리지 않습니다.
+
+```bash
+factlog zotero-import --collection "neurosymbolic AI" --annotations
+factlog zotero-import --collection "neurosymbolic AI" --annotations --dry-run
+```
+
+- **멱등·신선도**: `<stem>-notes.md`의 내용은 Zotero 상태의 순수 함수(import 시각 없음)라,
+  변화 없으면 그대로 두고(skipped) 하이라이트가 늘면 다시 씁니다(updated). 요약에
+  `written`(신규)/`updated`(재작성)/`skipped`를 구분해 보고합니다.
+- **P4**: 사용자가 직접 만든 `<stem>-notes.md`(우리 마커 없음)는 덮어쓰지 않고 건너뜁니다.
+- 부분 실패는 항목 단위로 격리됩니다 — 한 항목의 주석 수집이 실패해도 나머지는 계속되며
+  `annotation_errors`에 반영됩니다.
+- `--pdf`와 함께 쓸 수 있습니다: `--pdf --annotations`로 전문 + 주석을 한 번에.
+
 ## 설정 파일 (선택)
 
 `~/.config/factlog/zotero.toml` 또는 KB의 `policy/zotero-config.toml`:
@@ -209,6 +254,6 @@ include_abstract = true   # 초록을 본문에 포함
 
 ## 아직 지원하지 않는 것
 
-하이라이트·주석 이관(단계 3), 스캔 PDF의 OCR, 비-PDF 첨부(스냅샷/HTML) 변환,
-양방향 동기화, 그룹 라이브러리, Web API. 이후 단계에서 다룹니다.
-(PDF 텍스트 자동 변환은 `--pdf`로 지원 — 위 참조.)
+스캔 PDF의 OCR, image/ink 주석, 비-PDF 첨부(스냅샷/HTML) 변환, 독립(부모 없는) 노트,
+양방향 동기화, 그룹 라이브러리, Web API.
+(PDF 텍스트 변환은 `--pdf`, 하이라이트·노트는 `--annotations`로 지원 — 위 참조.)
