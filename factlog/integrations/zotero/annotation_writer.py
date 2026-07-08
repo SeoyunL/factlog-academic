@@ -28,10 +28,17 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from factlog.integrations.zotero._textio import atomic_write_text, yaml_scalar
+from factlog.integrations.zotero._textio import (
+    ANNOTATION_MARKER_RE as _MARKER_LINE_RE,
+)
+from factlog.integrations.zotero._textio import (
+    ANNOTATION_SOURCE_MARKER as _MARKER,
+)
+from factlog.integrations.zotero._textio import (
+    atomic_write_text,
+    yaml_scalar,
+)
 
-_MARKER = "source_kind: annotations"
-_MARKER_LINE_RE = re.compile(r"^source_kind:\s*annotations\s*$", re.MULTILINE)
 _HEAD_SCAN_BYTES = 4096
 
 # Strip script/style/comment *contents* (not just the tags) before removing tags.
@@ -143,8 +150,13 @@ def write_annotations(
     notes: list[dict],
     base_stem: str,
     target: Path | str,
+    dry_run: bool = False,
 ) -> AnnotationResult:
-    """Write ``sources/<base_stem>-notes.md`` from the item's highlights/notes."""
+    """Write ``sources/<base_stem>-notes.md`` from the item's highlights/notes.
+
+    With ``dry_run`` the same decision (written/updated/skipped) is returned but no
+    file is created — a "written"/"updated" outcome is what *would* happen.
+    """
     if not _clean(parsed_bib.get("zotero_key")):
         return AnnotationResult(None, "skipped", "missing zotero_key")
     if not base_stem or "/" in base_stem or "\\" in base_stem or ".." in base_stem:
@@ -165,10 +177,12 @@ def write_annotations(
                 return AnnotationResult(path, "skipped", "unchanged")
         except OSError:
             pass  # unreadable -> fall through and rewrite
-        sources_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, content)
+        if not dry_run:
+            sources_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(path, content)
         return AnnotationResult(path, "updated")
 
-    sources_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, content)
+    if not dry_run:
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, content)
     return AnnotationResult(path, "written")

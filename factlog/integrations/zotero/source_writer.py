@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from factlog.common import slugify
+from factlog.integrations.zotero._textio import ANNOTATION_MARKER_RE
 from factlog.integrations.zotero._textio import atomic_write_text as _atomic_write
 from factlog.integrations.zotero._textio import yaml_scalar as _yaml_str
 
@@ -102,6 +103,11 @@ def read_zotero_key(path: Path) -> str:
     closing ``---``) is consulted, and only the first bytes are read — so a plain
     user source, or the literal text ``zotero_key:`` in a body, is not mistaken
     for a prior Zotero import.
+
+    An annotation source (``source_kind: annotations``, i.e. a ``<stem>-notes.md``)
+    returns "" even though it carries a ``zotero_key`` — it is a companion file,
+    not the bibliographic import, so it must not be picked as the existing source
+    for that key (which would mis-pair the item on re-import).
     """
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -115,6 +121,8 @@ def read_zotero_key(path: Path) -> str:
     rest = head[3:]
     end = rest.find("\n---")
     block = rest if end == -1 else rest[:end]
+    if ANNOTATION_MARKER_RE.search(block):
+        return ""
     match = _FRONT_MATTER_KEY_RE.search(block)
     return match.group(1).strip() if match else ""
 

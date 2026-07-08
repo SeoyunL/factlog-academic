@@ -8,7 +8,16 @@ of copying it (or importing each other's private symbols).
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+# Front-matter marker identifying a companion annotation source (<stem>-notes.md).
+# Shared so the annotation writer (which stamps it) and the bibliographic writer
+# (which must ignore such files when de-duplicating by zotero_key) agree, and so
+# both match it line-anchored — a title/tag that merely contains the text is not
+# mistaken for the marker.
+ANNOTATION_SOURCE_MARKER = "source_kind: annotations"
+ANNOTATION_MARKER_RE = re.compile(r"^source_kind:\s*annotations\s*$", re.MULTILINE)
 
 # Backslash/quote plus the whitespace controls a double-quoted YAML scalar needs.
 _YAML_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
