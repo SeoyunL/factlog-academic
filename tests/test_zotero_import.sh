@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# tests/test_zotero_import.sh — CLI surface of `factlog zotero-import` (Zotero phase 1)
+#
+# Pins the hermetic (no live Zotero) behaviour of the command: argument parsing,
+# selector rules, KB/target validation, and graceful error exit codes. The happy
+# path (a real fetch -> parse -> write) is covered deterministically by the unit
+# tests with a fake client (tests/unit/test_zotero_{client,importer,cli}.py) and
+# by a manual live smoke against a running Zotero Local API; it is intentionally
+# NOT exercised here so this test never depends on a running Zotero app or on the
+# optional pyzotero extra.
+#
+# All cases below fail BEFORE the Zotero client is constructed (argparse, the
+# _require_kb gate, selector normalisation, or KB config loading), so they are
+# deterministic in CI.
+#
+# Usage: PYTHON=~/.factlog-venv/bin/python bash tests/test_zotero_import.sh
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+PYTHON="${PYTHON:-python3}"
+
+pass=0
+fail=0
+ok() { echo "PASS: $*"; pass=$((pass + 1)); }
+bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
+
+fl() { "$PYTHON" -m factlog "$@"; }
+
+# A valid KB (has sources/) and one with a malformed Zotero policy file.
+KB="$(mktemp -d)/wiki"; mkdir -p "$KB/sources"
+BADCFG="$(mktemp -d)/wiki"; mkdir -p "$BADCFG/sources/" "$BADCFG/policy"
+printf 'this = = not toml\n' > "$BADCFG/policy/zotero-config.toml"
+NOKB="$(mktemp -d)/plain"; mkdir -p "$NOKB"  # no sources/
+
+# --- 1. --help lists the selectors ------------------------------------------
+out="$(fl zotero-import --help 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && grep -q -- "--collection" <<<"$out" && grep -q -- "--dry-run" <<<"$out"; then
+  ok "--help documents options"
+else
+  bad "--help (rc=$rc): $out"
+fi
+
+# --- 2. missing selector is an argparse error (exit 2) -----------------------
+out="$(fl zotero-import --target "$KB" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ]; then ok "missing selector -> exit 2"; else bad "missing selector rc=$rc: $out"; fi
+
+# --- 3. two selectors are mutually exclusive (exit 2) ------------------------
+out="$(fl zotero-import --collection A --tag b --target "$KB" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ]; then ok "mutually exclusive selectors -> exit 2"; else bad "two selectors rc=$rc: $out"; fi
+
+# --- 4. target that is not a KB -> exit 1 with guidance ----------------------
+out="$(fl zotero-import --tag t --target "$NOKB" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && grep -q "not a factlog KB" <<<"$out"; then
+  ok "non-KB target -> graceful exit 1"
+else
+  bad "non-KB target rc=$rc: $out"
+fi
+
+# --- 5. empty --items -> exit 1 with guidance -------------------------------
+out="$(fl zotero-import --items ' , , ' --target "$KB" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && grep -q "at least one item key" <<<"$out"; then
+  ok "empty --items -> graceful exit 1"
+else
+  bad "empty --items rc=$rc: $out"
+fi
+
+# --- 6. malformed KB Zotero config -> exit 1, not a traceback ----------------
+out="$(fl zotero-import --tag t --target "$BADCFG" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && grep -q "invalid TOML" <<<"$out" && ! grep -q "Traceback" <<<"$out"; then
+  ok "malformed KB config -> graceful exit 1"
+else
+  bad "malformed config rc=$rc: $out"
+fi
+
+echo
+echo "zotero-import CLI surface: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

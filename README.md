@@ -303,6 +303,28 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 > **활성 KB**(`FACTLOG_ROOT > config > cwd` 로 해석된)를 보호합니다 — 활성 KB가
 > 아닌 다른 KB의 엔진 입력을 직접 편집하는 경우는 게이트의 대상이 아닙니다.
 
+#### Zotero 서지 가져오기 (`factlog zotero-import`)
+
+이미 Zotero에 문헌을 관리 중이라면, 컬렉션·태그·개별 항목을 factlog `sources/` 로
+한 번에 이관할 수 있습니다. factlog는 Zotero의 대체재가 아니라 그 위에 얹히는 검증
+층입니다 — Zotero는 계속 쓰고, factlog가 사실 추출·근거 추적·논리 검증을 맡습니다.
+이관된 항목은 여전히 **후보**이며 `sync → review → accept` 게이트를 거칩니다. Zotero
+원본은 절대 수정되지 않습니다(읽기 전용).
+
+Zotero 7의 **Local API**(Settings → Advanced에서 활성화, 포트 23119)와 `pip install
+'factlog[zotero]'` 가 필요합니다.
+
+```bash
+factlog zotero-import --collection "Systematic Review"   # 컬렉션 이관
+factlog zotero-import --collection "Systematic Review" --dry-run   # 계획만 미리보기
+factlog zotero-import --tag "to-review"                  # 태그로
+factlog zotero-import --items "KH78JUPE,64DA4TQJ"        # 개별 항목
+```
+
+`--target` 없으면 활성 KB로 이관하고, `--porcelain` 은 스크립트용 출력을 냅니다.
+이관 후 `/factlog sync` 로 후보 사실을 추출합니다. 자세한 옵션·설정 파일·provenance
+front matter 는 [docs/zotero-import.md](docs/zotero-import.md) 를 참고하세요.
+
 #### 어휘 살펴보기 (`factlog vocab`)
 
 `ask` 와 `provenance` 는 정확한 엔티티/관계 이름을 필요로 합니다. `factlog vocab`
