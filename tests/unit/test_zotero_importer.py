@@ -22,11 +22,22 @@ def _pdf_att(key):
                                  "contentType": "application/pdf", "linkMode": "imported_url"}}
 
 
+def _pdf_note(html="<p>a note</p>"):
+    return {"data": {"itemType": "note", "note": html}}
+
+
+def _pdf_annotation(text="highlighted", page="2"):
+    return {"key": "ANN", "data": {"itemType": "annotation", "annotationType": "highlight",
+                                   "annotationText": text, "annotationPageLabel": page}}
+
+
 class FakeClient:
-    def __init__(self, items, attachments=None, files=None):
+    def __init__(self, items, attachments=None, files=None, notes=None, annotations=None):
         self._items = items
         self._attachments = attachments or {}  # item_key -> [attachment dicts]
         self._files = files or {}
+        self._notes = notes or {}              # item_key -> [note dicts]
+        self._annotations = annotations or {}  # attachment_key -> [annotation dicts]
         self.calls = []
         self.fetched = []
 
@@ -48,6 +59,12 @@ class FakeClient:
     def fetch_file(self, key):
         self.fetched.append(key)
         return self._files.get(key, b"%PDF-1 fake")
+
+    def get_notes(self, item_key):
+        return list(self._notes.get(item_key, []))
+
+    def get_annotations(self, attachment_key):
+        return list(self._annotations.get(attachment_key, []))
 
 
 class TestFetchRouting:
@@ -170,6 +187,64 @@ class TestImport:
         assert report.pdf_placed == 1  # would place
         assert client.fetched == []
         assert not (tmp_path / "sources").exists() or not list((tmp_path / "sources").glob("*.pdf"))
+
+    def test_annotations_written_when_enabled(self, tmp_path):
+        client = FakeClient([_item("K1", "One")], notes={"K1": [_pdf_note("<p>my note</p>")]})
+        report = import_items(client, target=tmp_path, collection="X", annotations=True)
+        assert report.imported == 1
+        assert report.annotations_written == 1
+        assert (tmp_path / "sources").glob("*-notes.md")
+        text = next((tmp_path / "sources").glob("*-notes.md")).read_text(encoding="utf-8")
+        assert "my note" in text
+
+    def test_annotations_from_pdf_attachment(self, tmp_path):
+        client = FakeClient(
+            [_item("K1", "One")],
+            attachments={"K1": [_pdf_att("ATT1")]},
+            annotations={"ATT1": [_pdf_annotation("key claim", "5")]},
+        )
+        report = import_items(client, target=tmp_path, collection="X", annotations=True)
+        assert report.annotations_written == 1
+        text = next((tmp_path / "sources").glob("*-notes.md")).read_text(encoding="utf-8")
+        assert "> key claim" in text and "### p. 5" in text
+
+    def test_no_annotations_flag_no_notes_file(self, tmp_path):
+        client = FakeClient([_item("K1")], notes={"K1": [_pdf_note()]})
+        report = import_items(client, target=tmp_path, collection="X")  # annotations False
+        assert report.annotation_outcomes == []
+        assert not list((tmp_path / "sources").glob("*-notes.md"))
+
+    def test_item_without_annotations_not_reported(self, tmp_path):
+        # An item with no notes/highlights produces no annotation outcome (no noise).
+        client = FakeClient([_item("K1")])
+        report = import_items(client, target=tmp_path, collection="X", annotations=True)
+        assert report.annotation_outcomes == []
+
+    def test_annotations_idempotent(self, tmp_path):
+        client = FakeClient([_item("K1")], notes={"K1": [_pdf_note("<p>n</p>")]})
+        import_items(client, target=tmp_path, collection="X", annotations=True)
+        report = import_items(FakeClient([_item("K1")], notes={"K1": [_pdf_note("<p>n</p>")]}),
+                              target=tmp_path, collection="X", annotations=True)
+        # second run: bib skipped, notes file unchanged -> reported skipped, not written
+        assert report.annotations_written == 0 and report.annotations_skipped == 1
+
+    def test_annotation_fetch_error_isolated(self, tmp_path):
+        from factlog.integrations.zotero.api_client import ZoteroError
+
+        class Boom(FakeClient):
+            def get_notes(self, item_key):
+                raise ZoteroError("boom")
+
+        client = Boom([_item("K1")])
+        report = import_items(client, target=tmp_path, collection="X", annotations=True)
+        assert report.imported == 1  # bib still succeeded
+        assert report.annotation_errors == 1
+
+    def test_annotations_dry_run_writes_nothing(self, tmp_path):
+        client = FakeClient([_item("K1")], notes={"K1": [_pdf_note("<p>n</p>")]})
+        report = import_items(client, target=tmp_path, collection="X", annotations=True, dry_run=True)
+        assert report.annotations_written == 1  # would write
+        assert not list((tmp_path / "sources").glob("*-notes.md"))
 
     def test_sort_uses_parsed_key_from_wrapper_fallback(self, tmp_path):
         # data has no key; parse_item falls back to the wrapper key. The sort must

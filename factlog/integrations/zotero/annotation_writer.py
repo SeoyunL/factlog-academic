@@ -143,8 +143,13 @@ def write_annotations(
     notes: list[dict],
     base_stem: str,
     target: Path | str,
+    dry_run: bool = False,
 ) -> AnnotationResult:
-    """Write ``sources/<base_stem>-notes.md`` from the item's highlights/notes."""
+    """Write ``sources/<base_stem>-notes.md`` from the item's highlights/notes.
+
+    With ``dry_run`` the same decision (written/updated/skipped) is returned but no
+    file is created — a "written"/"updated" outcome is what *would* happen.
+    """
     if not _clean(parsed_bib.get("zotero_key")):
         return AnnotationResult(None, "skipped", "missing zotero_key")
     if not base_stem or "/" in base_stem or "\\" in base_stem or ".." in base_stem:
@@ -165,10 +170,12 @@ def write_annotations(
                 return AnnotationResult(path, "skipped", "unchanged")
         except OSError:
             pass  # unreadable -> fall through and rewrite
-        sources_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, content)
+        if not dry_run:
+            sources_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(path, content)
         return AnnotationResult(path, "updated")
 
-    sources_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, content)
+    if not dry_run:
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, content)
     return AnnotationResult(path, "written")

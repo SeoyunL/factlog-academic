@@ -27,10 +27,11 @@ def _pdf_att(key):
 
 
 class FakeClient:
-    def __init__(self, items=None, raise_exc=None, attachments=None):
+    def __init__(self, items=None, raise_exc=None, attachments=None, notes=None):
         self._items = items or []
         self._raise = raise_exc
         self._attachments = attachments or {}
+        self._notes = notes or {}
 
     def _maybe(self):
         if self._raise is not None:
@@ -53,6 +54,12 @@ class FakeClient:
 
     def fetch_file(self, key):
         return b"%PDF-1 fake"
+
+    def get_notes(self, item_key):
+        return list(self._notes.get(item_key, []))
+
+    def get_annotations(self, attachment_key):
+        return []
 
 
 def _run(monkeypatch, argv, client):
@@ -305,6 +312,56 @@ class TestPdf:
         assert rc == 0
         assert "INGEST_NOISE_SHOULD_BE_SUPPRESSED" not in out  # redirected away in porcelain
         assert seen["scan"] is False and len(seen["paths"]) == 1  # explicit path, not --scan
+
+
+def _note(html="<p>a note</p>"):
+    return {"data": {"itemType": "note", "note": html}}
+
+
+class TestAnnotations:
+    def test_annotations_registered_in_parser(self):
+        args = cli.build_parser().parse_args(["zotero-import", "--collection", "X", "--annotations"])
+        assert args.annotations is True
+
+    def test_annotations_written_and_reported(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One")], notes={"K1": [_note("<p>my note</p>")]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--annotations"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "written 1" in out
+        assert list((kb / "sources").glob("*-notes.md"))
+
+    def test_annotations_porcelain_rows(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1", "One")], notes={"K1": [_note()]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--annotations", "--porcelain"], client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        rows = dict(line.split("\t", 1) for line in out.splitlines() if "\t" in line)
+        assert rows["annotations_written"] == "1"
+        assert rows["annotations_skipped"] == "0"
+        assert rows["annotation_errors"] == "0"
+
+    def test_annotations_dry_run_no_file(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        client = FakeClient([_item("K1")], notes={"K1": [_note()]})
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--annotations", "--dry-run"], client)
+        assert rc == 0
+        assert not list((kb / "sources").glob("*-notes.md"))
+
+    def test_annotation_error_makes_exit_nonzero(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+
+        class Boom(FakeClient):
+            def get_notes(self, item_key):
+                raise ZoteroError("boom")
+
+        rc = _run(monkeypatch, ["zotero-import", "--collection", "X", "--target", str(kb), "--annotations"],
+                  Boom([_item("K1")]))
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "errors 1" in out
 
 
 class TestDryRunSkip:

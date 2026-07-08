@@ -220,6 +220,13 @@ class TestReadZoteroKey:
     def test_nonexistent_file_returns_empty(self, tmp_path):
         assert read_zotero_key(tmp_path / "nope.md") == ""
 
+    def test_annotation_source_not_treated_as_bib_key(self, tmp_path):
+        # A companion notes file carries a zotero_key but must not be picked as the
+        # bibliographic source for that key (would mis-pair on re-import).
+        f = tmp_path / "x-notes.md"
+        f.write_text('---\nsource_kind: annotations\nzotero_key: "K1"\n---\n', encoding="utf-8")
+        assert read_zotero_key(f) == ""
+
     def test_body_zotero_key_text_not_matched(self, tmp_path):
         # A `zotero_key:` line in the BODY (after the closing fence) must not be
         # mistaken for the front-matter key.

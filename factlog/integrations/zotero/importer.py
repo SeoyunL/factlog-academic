@@ -16,7 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from factlog.integrations.zotero.api_client import ZoteroClient
+from factlog.integrations.zotero.annotation_writer import AnnotationResult, write_annotations
+from factlog.integrations.zotero.api_client import ZoteroClient, ZoteroError
 from factlog.integrations.zotero.config import ZoteroConfig
 from factlog.integrations.zotero.item_parser import parse_item
 from factlog.integrations.zotero.pdf_importer import PdfOutcome, place_pdfs
@@ -38,6 +39,7 @@ class ItemOutcome:
 class ImportReport:
     outcomes: list[ItemOutcome] = field(default_factory=list)
     pdf_outcomes: list[PdfOutcome] = field(default_factory=list)
+    annotation_outcomes: list[AnnotationResult] = field(default_factory=list)
 
     @property
     def imported(self) -> int:
@@ -62,6 +64,19 @@ class ImportReport:
     @property
     def pdf_errors(self) -> int:
         return sum(1 for o in self.pdf_outcomes if o.status == "error")
+
+    @property
+    def annotations_written(self) -> int:
+        # A newly written or refreshed notes file.
+        return sum(1 for o in self.annotation_outcomes if o.status in ("written", "updated"))
+
+    @property
+    def annotations_skipped(self) -> int:
+        return sum(1 for o in self.annotation_outcomes if o.status == "skipped")
+
+    @property
+    def annotation_errors(self) -> int:
+        return sum(1 for o in self.annotation_outcomes if o.status == "error")
 
 
 def fetch_items(
@@ -93,6 +108,7 @@ def import_items(
     imported_at: str = "",
     dry_run: bool = False,
     pdf: bool = False,
+    annotations: bool = False,
 ) -> ImportReport:
     """Fetch the selected items and write each into ``<target>/sources/``.
 
@@ -128,7 +144,8 @@ def import_items(
         report.outcomes.append(
             ItemOutcome(key, title, result.status, result.path, result.reason)
         )
-        if pdf and key and result.path is not None and result.status in ("imported", "skipped"):
+        pairable = key and result.path is not None and result.status in ("imported", "skipped")
+        if pdf and pairable:
             report.pdf_outcomes.extend(
                 place_pdfs(
                     client,
@@ -138,4 +155,29 @@ def import_items(
                     dry_run=dry_run,
                 )
             )
+        if annotations and pairable:
+            ann = _import_annotations(client, parsed, result.path.stem, target, dry_run)
+            # Skip the no-op "item has no notes/highlights" case so the report
+            # reflects only items that actually had annotations.
+            if ann.path is not None or ann.status == "error":
+                report.annotation_outcomes.append(ann)
     return report
+
+
+def _import_annotations(client, parsed, base_stem, target, dry_run) -> AnnotationResult:
+    """Collect an item's notes + PDF-attachment annotations and write the source.
+
+    Per-item isolation: any client/write failure becomes an error outcome so one
+    bad item never aborts the whole import.
+    """
+    key = parsed.get("zotero_key", "")
+    try:
+        notes = client.get_notes(key)
+        anns: list[dict] = []
+        for attachment in client.get_pdf_attachments(key):
+            att_key = (attachment.get("data") or {}).get("key") or attachment.get("key", "")
+            if att_key:
+                anns.extend(client.get_annotations(att_key))
+        return write_annotations(parsed, anns, notes, base_stem, target, dry_run=dry_run)
+    except (ZoteroError, OSError) as exc:
+        return AnnotationResult(None, "error", str(exc))

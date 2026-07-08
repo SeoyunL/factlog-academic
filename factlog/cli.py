@@ -2604,6 +2604,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     porcelain = getattr(args, "porcelain", False)
     dry_run = getattr(args, "dry_run", False)
     pdf = getattr(args, "pdf", False)
+    annotations = getattr(args, "annotations", False)
 
     def _human(*a, **k):
         # Suppress human narration in porcelain mode; errors still go to stderr.
@@ -2659,6 +2660,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
             imported_at=imported_at,
             dry_run=dry_run,
             pdf=pdf,
+            annotations=annotations,
         )
     except ZoteroConnectionError as exc:
         print(f"factlog zotero-import: {exc}", file=sys.stderr)
@@ -2706,9 +2708,13 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
             print(f"pdf_placed\t{report.pdf_placed}")
             print(f"pdf_skipped\t{report.pdf_skipped}")
             print(f"pdf_errors\t{report.pdf_errors}")
+        if annotations:
+            print(f"annotations_written\t{report.annotations_written}")
+            print(f"annotations_skipped\t{report.annotations_skipped}")
+            print(f"annotation_errors\t{report.annotation_errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
         print(f"target\t{target / 'sources'}")
-        return 1 if (report.errors or report.pdf_errors or convert_rc) else 0
+        return 1 if (report.errors or report.pdf_errors or report.annotation_errors or convert_rc) else 0
 
     verb = "Would import" if dry_run else "Imported"
     if dry_run:
@@ -2734,6 +2740,10 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         pdf_verb = "Would fetch" if dry_run else "PDFs"
         _human(f"  {pdf_verb}:     placed {report.pdf_placed}, "
                f"skipped {report.pdf_skipped}, errors {report.pdf_errors}")
+    if annotations:
+        ann_verb = "Would write" if dry_run else "Annotations"
+        _human(f"  {ann_verb}: written {report.annotations_written}, "
+               f"skipped {report.annotations_skipped}, errors {report.annotation_errors}")
 
     # Convert after the import summary so the narration reads in order.
     convert_rc = 0
@@ -2743,7 +2753,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
 
     if report.imported and not dry_run:
         _human("\nNext step: run '/factlog sync' to extract candidate facts.")
-    return 1 if (report.errors or report.pdf_errors or convert_rc) else 0
+    return 1 if (report.errors or report.pdf_errors or report.annotation_errors or convert_rc) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2988,6 +2998,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--pdf",
         action="store_true",
         help="also fetch each item's PDF attachments into sources/ and convert them to text",
+    )
+    zimport.add_argument(
+        "--annotations",
+        action="store_true",
+        help="also import each item's highlights and notes into sources/<stem>-notes.md",
     )
     zimport.add_argument(
         "--porcelain",
