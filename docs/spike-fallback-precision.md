@@ -23,44 +23,55 @@
 - Candidate pool per paper: OpenAlex `search=<title>` top 25.
 - Cost: OpenAlex title search = 10 credits/paper, DOI lookup = 0.
 
-**Why this size means something, and its bias.** A precision estimate on the fired matches has a standard error near sqrt(p(1-p)/n); at these counts a false-merge rate above a few percent is distinguishable from zero, which is what #75/#76 need — the question is whether false merges happen at all, not their third decimal. The sample is biased *toward* the matcher: DOI-carrying papers are published work with clean, canonical metadata, whereas #57 shows the fallback would mostly run on fresh preprints with none. Confusion found here is a floor.
+**Why this size means something, and its bias.** A precision estimate on the fired matches has a standard error near sqrt(p(1-p)/n); at these counts a false-merge rate above a few percent is distinguishable from zero, which is what #75/#76 need — the question is whether false merges happen at all, not their third decimal. The sample is biased *toward* the matcher: DOI-carrying papers are published work with clean, canonical metadata, whereas #57 shows the fallback would mostly run on fresh preprints with none. **Which way that biases the harmful-merge rate is unmeasured.** A DOI-less preprint usually has one OpenAlex record and no published twin, so its decoy pool is smaller and same-title collisions may be rarer; equally, its metadata is thinner. This report does not claim to bound that population — there is no ground truth for it.
 
 ## Precision / recall
 
-The swept score is normalized-title token Jaccard. First-author surname agreement and year agreement are required conjuncts (a match must clear all three). A *false merge* (FP) is the matcher firing on a candidate whose DOI differs from the paper's own. `ambiguous` counts papers where two or more distinct works clear every gate at that threshold.
+The swept score is normalized-title token Jaccard. First-author surname agreement and year agreement are required conjuncts (a match must clear all three).
+
+**Two of these columns are traps, and the corrected ones sit beside them.** `FP` is the matcher firing on a candidate whose DOI differs from the paper's own — but most of those are the paper's *own arXiv preprint mirror* under a second OpenAlex record, and merging one of those is arguably right. `of which harmful` counts only the merges onto a genuinely different source record. Likewise `ambiguous` counts a paper and its own mirror as two rival works; `ambiguous (mirrors collapsed)` does not. Read the corrected columns. The uncorrected ones are kept because they are what a naive evaluation reports, and the gap between them is the point.
 
 ### Year tolerance ±1 (preprint vs publication year)
 
-| title threshold | fired | TP | FP (false merge) | FN | precision | recall | ambiguous |
-|---|---|---|---|---|---|---|---|
-| 0.50 | 87 | 73 | 14 | 3 | 0.839 | 0.961 | 35 |
-| 0.60 | 87 | 73 | 14 | 3 | 0.839 | 0.961 | 35 |
-| 0.70 | 86 | 72 | 14 | 4 | 0.837 | 0.947 | 35 |
-| 0.80 | 86 | 72 | 14 | 4 | 0.837 | 0.947 | 35 |
-| 0.90 | 86 | 72 | 14 | 4 | 0.837 | 0.947 | 35 |
-| 1.00 | 86 | 72 | 14 | 4 | 0.837 | 0.947 | 35 |
+| title threshold | fired | TP | FP | of which harmful | FN | precision | precision (mirrors=TP) | recall | ambiguous | ambiguous (mirrors collapsed) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.50 | 87 | 73 | 14 | 2 | 3 | 0.839 | 0.977 | 0.961 | 35 | 1 |
+| 0.60 | 87 | 73 | 14 | 2 | 3 | 0.839 | 0.977 | 0.961 | 35 | 1 |
+| 0.70 | 86 | 72 | 14 | 2 | 4 | 0.837 | 0.977 | 0.947 | 35 | 1 |
+| 0.80 | 86 | 72 | 14 | 2 | 4 | 0.837 | 0.977 | 0.947 | 35 | 1 |
+| 0.90 | 86 | 72 | 14 | 2 | 4 | 0.837 | 0.977 | 0.947 | 35 | 1 |
+| 1.00 | 86 | 72 | 14 | 2 | 4 | 0.837 | 0.977 | 0.947 | 35 | 1 |
 
 ### Year must match exactly
 
-| title threshold | fired | TP | FP (false merge) | FN | precision | recall | ambiguous |
-|---|---|---|---|---|---|---|---|
-| 0.50 | 74 | 60 | 14 | 15 | 0.811 | 0.800 | 30 |
-| 0.60 | 74 | 60 | 14 | 15 | 0.811 | 0.800 | 30 |
-| 0.70 | 73 | 59 | 14 | 16 | 0.808 | 0.787 | 30 |
-| 0.80 | 73 | 59 | 14 | 16 | 0.808 | 0.787 | 30 |
-| 0.90 | 73 | 59 | 14 | 16 | 0.808 | 0.787 | 30 |
-| 1.00 | 73 | 59 | 14 | 16 | 0.808 | 0.787 | 30 |
+| title threshold | fired | TP | FP | of which harmful | FN | precision | precision (mirrors=TP) | recall | ambiguous | ambiguous (mirrors collapsed) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.50 | 74 | 60 | 14 | 1 | 15 | 0.811 | 0.986 | 0.800 | 30 | 0 |
+| 0.60 | 74 | 60 | 14 | 1 | 15 | 0.811 | 0.986 | 0.800 | 30 | 0 |
+| 0.70 | 73 | 59 | 14 | 1 | 16 | 0.808 | 0.986 | 0.787 | 30 | 0 |
+| 0.80 | 73 | 59 | 14 | 1 | 16 | 0.808 | 0.986 | 0.787 | 30 | 0 |
+| 0.90 | 73 | 59 | 14 | 1 | 16 | 0.808 | 0.986 | 0.787 | 30 | 0 |
+| 1.00 | 73 | 59 | 14 | 1 | 16 | 0.808 | 0.986 | 0.787 | 30 | 0 |
 
 ## Confusion cases (named individually)
 
-At title threshold 0.80, year tolerance ±1, the matcher fired on the wrong DOI for **14 of 97** papers. Every one shares the arXiv paper's first author, an adjacent year, and — at threshold 1.00 — a byte-identical title with the record it was merged into; only the DOI differs. Separately, in **35 of 97** papers two or more *distinct* records cleared every gate at once: the matcher had no signal to prefer the DOI-true one over an equally-scoring decoy.
+At title threshold 0.80, year tolerance ±1, the matcher fired on the wrong DOI for **14 of 97** papers. Every one shares the arXiv paper's first author, an adjacent year, and — at threshold 1.00 — a byte-identical title with the record it was merged into; only the DOI differs.
+
+**But 12 of those 14 are the paper's own arXiv preprint mirror**, a second OpenAlex record of the same work. Merging one is arguably correct. Only **2 of 86** fired matches landed on a genuinely different source record — a harmful-merge rate of **2.3%** (95% Wilson CI 0.6%–8.1%).
+
+The same correction applies to ambiguity. Counting a paper and its own mirror as two rival works gives **35 of 97**; collapsing the mirror onto the work it mirrors gives **1 of 97**. Ambiguity between *genuinely distinct* works is rare, not endemic. An earlier draft of this report leaned on the uncollapsed figure; it was inflated by more than an order of magnitude.
 
 What the wrong record actually was:
-- 11× — arXiv-preprint mirror (same work, distinct OpenAlex record)
+- 12× — arXiv-preprint mirror (same work, distinct OpenAlex record)
 - 2× — distinct non-arXiv DOI (a different source record; may be a different work)
-- 1× — no-DOI record (same title, source unidentifiable)
 
-The distinction matters and the matcher cannot draw it: an arXiv-preprint mirror is arguably the *same* work under a second OpenAlex record, while a distinct non-arXiv DOI (a conference paper vs a medRxiv posting of the same title, a dataset registered twice) may be a genuinely different source. Title+author+year is identical across both, so nothing in the matcher's inputs separates the benign duplicate from the harmful one — the human gate is the only thing that can (#75, #76).
+**A benign mirror is trivially separable, and an earlier draft of this report said otherwise.** Its DOI carries the `10.48550/arxiv.` prefix, or the record echoes the paper's own arXiv id. Both are fields a real matcher has, and this script uses them to classify. Nothing subtle is required.
+
+What remains after that correction is the harmful category, and it is small: a merge onto a genuinely different source record. Those *are* unreachable by title+author+year, because at threshold 1.00 the two works have a byte-identical title, the same first-author surname, and adjacent years. No similarity function defined over those three fields can separate them, so no threshold helps.
+
+Richer OpenAlex metadata *does* separate the two harmful cases — checked live: `work_type` is `article` (AAAI) against `preprint` (medRxiv) for one, and `conference-paper` against `article` for the other. But it separates them without saying **which one is this paper**: there is no rule over `work_type` that picks the right record in both cases, and a preprint's own published version is exactly as plausible a target as an unrelated posting of the same title. Distinguishable is not the same as identifiable, and only the second would license an automatic merge.
+
+So the case for the human gate (#75, #76) does not rest on a bad precision number. It rests on this: a small but real rate of merges onto genuinely different source records, which the fallback's own inputs cannot rule out, and which fail **silently** — a false merge attaches one paper's provenance to another paper's text and nothing errors (P2).
 
 Named individually — arXiv paper on the left, the different-DOI OpenAlex record it was merged into on the right:
 
@@ -142,7 +153,7 @@ Named individually — arXiv paper on the left, the different-DOI OpenAlex recor
   - OpenAlex:W4414789398 (2025) — 'Enrich-on-Graph: Query-Graph Alignment for Complex Reasoning with LLM Enriching'
     - first author: 'Songze Li'; DOI `10.48550/arxiv.2509.20810`
 
-- **title Jaccard 1.00** — _no-DOI record (same title, source unidentifiable)_
+- **title Jaccard 1.00** — _arXiv-preprint mirror (same work, distinct OpenAlex record)_
   - arXiv:2511.07204 (2025) — 'Evaluating Online Moderation Via LLM-Powered Counterfactual Simulations'
     - first author: 'Giacomo Fidone'; DOI `10.1609/aaai.v40i45.41186`
   - OpenAlex:W7105507688 (2025) — 'Evaluating Online Moderation Via LLM-Powered Counterfactual Simulations'
@@ -166,10 +177,11 @@ Named individually — arXiv paper on the left, the different-DOI OpenAlex recor
 
 ## Reading of the numbers
 
-- **Precision is flat at ~0.84 across every title threshold from 0.50 to 1.00.** The score does not separate right from wrong matches, because the wrong ones have title Jaccard 1.00 — a byte-identical title. There is no knee in the curve to tune to; a stricter threshold buys nothing and only costs recall.
+- **No threshold separates right from wrong.** Precision is flat from 0.50 to 1.00, because the wrong matches have title Jaccard 1.00 — a byte-identical title. There is no knee to tune to; a stricter threshold buys nothing and costs recall. This holds for the uncorrected and the harm-corrected precision alike.
+- **The uncorrected precision (~0.84) overstates the harm by counting a paper's own arXiv mirror as a false merge.** With mirrors read as the same work, precision is ~0.98 and the harmful-merge rate is 2/86. The conclusion does not depend on the larger number, and this report no longer leans on it.
 - Of 14 false merges at threshold 0.80, 12 point at the *same paper* under a second OpenAlex record (chiefly the arXiv-preprint DOI `10.48550/arxiv.*`, which OpenAlex keeps separate from the published record the arXiv metadata names). Merging those still attaches the wrong source record — a different DOI, a different peer-review status — to the paper. The remaining 2 point at a genuinely distinct source: an AAAI paper vs a medRxiv posting of the same title (arXiv:2509.00891), a dataset registered under two DOIs (arXiv:2506.18120).
 - In 35 of 97 papers, two or more distinct records cleared every gate simultaneously. Even when the matcher happened to pick the DOI-true record, it did so with no signal distinguishing it from an equally-scoring decoy — the successes are as blind as the failures.
 
 **Recommendation.** No title+author+year threshold is safe to auto-merge on. The failures are not low-similarity near-misses that a higher bar would exclude; they are exact-title, same-author, same-year collisions between distinct source records, which is precisely the case #76 says no threshold saves. Title, author and year are identical across the benign duplicate and the harmful one, so nothing the matcher can see separates them. Implement the fallback as #75 specifies — surface a candidate for the human gate, never merge, and remember a rejected pairing so it is not re-proposed. The measured floor for #75's threshold constant: precision ~0.84 on published papers with clean metadata (a friendly upper-bound population), with the residual error being a category the matcher is structurally unable to resolve.
 
-**What this spike could not measure.** (1) The real target population — fresh preprints without DOIs (#57) — has no DOI ground truth, so its false-merge rate is unmeasured and can only be worse than this published-paper floor. (2) OpenAlex title search is the candidate generator; a different generator (filtered search, fuzzy title) would change recall and the decoy pool. (3) Precision here counts a wrong DOI as a false merge; whether merging an arXiv-preprint record into its published twin is *harmful* to a specific KB depends on what was already imported — a question for #75's flow, not this measurement. (4) One day's OpenAlex budget capped the resolved sample at 97/113; the 9 papers whose DOI-true record did not surface in the title search (recall denominator 88) are a retrieval limit, not a matcher limit.
+**What this spike could not measure.** (1) The real target population — fresh preprints without DOIs (#57) — has no DOI ground truth, so its false-merge rate is unmeasured, and this sample does not bound it in either direction. (2) OpenAlex title search is the candidate generator; a different generator (filtered search, fuzzy title) would change recall and the decoy pool. (3) Precision here counts a wrong DOI as a false merge; whether merging an arXiv-preprint record into its published twin is *harmful* to a specific KB depends on what was already imported — a question for #75's flow, not this measurement. (4) One day's OpenAlex budget capped the resolved sample at 97/113; the 9 papers whose DOI-true record did not surface in the title search (recall denominator 88) are a retrieval limit, not a matcher limit.
