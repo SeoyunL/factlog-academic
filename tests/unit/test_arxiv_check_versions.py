@@ -362,3 +362,51 @@ class TestCli:
         code = run(["arxiv-check-versions", "--target", str(tmp_path)])
         assert code == 0
         assert "no arXiv records" in capsys.readouterr().out
+
+
+class TestAKbWithNoLedgerIsStillChecked:
+    """Every arXiv record got a provenance ledger only as of #82. A KB imported
+    before that has front matter and no ledger, and reading only the ledgers made
+    the command answer "no arXiv records" and exit 0 — silently checking nothing,
+    for most of an existing library."""
+
+    def _old_style_source(self, kb, arxiv_id="1706.03762", version=5):
+        (kb / "sources").mkdir(parents=True, exist_ok=True)
+        path = kb / "sources" / "old.md"
+        path.write_text(
+            f'---\narxiv_id: "{arxiv_id}"\narxiv_version: {version}\n'
+            f"imported_from: arxiv\n---\n# T\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_front_matter_alone_is_enough_to_be_checked(self, tmp_path):
+        self._old_style_source(tmp_path)
+        entries, errors = cv.collect_ledger_entries(tmp_path)
+        assert errors == []
+        assert [(e.arxiv_id, e.recorded_version) for e in entries] == [("1706.03762", 5)]
+        assert entries[0].sources == ("sources/old.md",)
+
+    def test_a_ledger_wins_over_front_matter_when_both_exist(self, tmp_path):
+        # The ledger is what a refresh updates, so it is authoritative, and its
+        # `sources` name the ledgers a reader should open.
+        _seed(tmp_path, "1706.03762", 7, name="a")
+        self._old_style_source(tmp_path, "1706.03762", version=5)
+        entries, _ = cv.collect_ledger_entries(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].recorded_version == 7
+        assert entries[0].sources == ("source-provenance/a.json",)
+
+    def test_a_source_without_an_arxiv_id_is_ignored(self, tmp_path):
+        (tmp_path / "sources").mkdir(parents=True)
+        (tmp_path / "sources" / "zotero.md").write_text(
+            '---\nzotero_key: "ABC"\nimported_from: zotero\n---\n', encoding="utf-8")
+        assert cv.collect_ledger_entries(tmp_path) == ([], [])
+
+    def test_a_malformed_arxiv_version_does_not_crash_the_enumeration(self, tmp_path):
+        (tmp_path / "sources").mkdir(parents=True)
+        (tmp_path / "sources" / "bad.md").write_text(
+            '---\narxiv_id: "1706.03762"\narxiv_version: "seven"\n---\n', encoding="utf-8")
+        entries, errors = cv.collect_ledger_entries(tmp_path)
+        assert errors == []
+        assert entries[0].recorded_version is None  # unknown, not a crash
