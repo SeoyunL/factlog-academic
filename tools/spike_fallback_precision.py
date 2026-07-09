@@ -274,16 +274,45 @@ def same_work(cand: Candidate, truth_doi: str, truth_id: str | None) -> bool:
 _ARXIV_DOI_PREFIX = "10.48550/arxiv"
 
 
-def fp_kind(paper: Paper, cand: Candidate) -> str:
-    """Classify a false merge: same work under another record, or a distinct source."""
+def wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval. Two events in 86 is a small number; the interval
+    is what says how small, and a point estimate alone would not."""
+    if n == 0:
+        return (0.0, 0.0)
+    p_hat = successes / n
+    denom = 1 + z * z / n
+    centre = (p_hat + z * z / (2 * n)) / denom
+    margin = z * ((p_hat * (1 - p_hat) / n + z * z / (4 * n * n)) ** 0.5) / denom
+    return (max(0.0, centre - margin), min(1.0, centre + margin))
+
+
+def is_mirror(paper: Paper, cand: Candidate) -> bool:
+    """Is *cand* the arXiv preprint mirror of *paper* — the same work under a
+    second OpenAlex record?
+
+    This is not a subtle judgement: the DOI carries the `10.48550/arxiv.` prefix,
+    or the record simply echoes the paper's own arXiv id. Both are fields a real
+    matcher has. Merging such a record is arguably correct, so counting it as a
+    false merge overstates the harm — and counting it as a *second distinct work*
+    overstates the ambiguity.
+    """
+    if (cand.arxiv_id or "") == paper.key:
+        return True
     if cand.doi is None:
-        return "no-DOI record (same title, source unidentifiable)"
+        return False
     try:
         nd = normalize_doi(cand.doi)
     except OpenAlexError:
         nd = cand.doi.lower()
-    if nd.startswith(_ARXIV_DOI_PREFIX) or (cand.arxiv_id or "") == paper.key:
+    return nd.startswith(_ARXIV_DOI_PREFIX)
+
+
+def fp_kind(paper: Paper, cand: Candidate) -> str:
+    """Classify a false merge: same work under another record, or a distinct source."""
+    if is_mirror(paper, cand):
         return "arXiv-preprint mirror (same work, distinct OpenAlex record)"
+    if cand.doi is None:
+        return "no-DOI record (same title, source unidentifiable)"
     return "distinct non-arXiv DOI (a different source record; may be a different work)"
 
 
@@ -295,6 +324,14 @@ class Counts:
     tn: int = 0
     confusions: list = field(default_factory=list)
     ambiguous: int = 0
+    #: Papers where two or more works clear every gate *after* an arXiv mirror is
+    #: collapsed onto the work it mirrors. `ambiguous` double-counts a paper and
+    #: its own mirror as two works, which inflates it by an order of magnitude.
+    ambiguous_collapsed: int = 0
+    #: A false merge onto a genuinely different source record. The subset of `fp`
+    #: that can corrupt provenance; the rest are the paper's own mirror.
+    harmful_fp: int = 0
+    benign_fp: int = 0
 
     @property
     def precision(self) -> float | None:
@@ -469,6 +506,16 @@ def evaluate(results: list[PaperResult], threshold: float, year_tolerance: int) 
         ]
         if len({c.doi or c.openalex_id for c in passing}) >= 2:
             counts.ambiguous += 1
+        # A paper's own mirror is not a competing work. Collapse it — and the
+        # truth record it mirrors — onto one identity before counting rivals.
+        collapsed = {
+            "this-work"
+            if (same_work(c, paper.doi, res.truth_id) or is_mirror(paper, c))
+            else (c.doi or c.openalex_id)
+            for c in passing
+        }
+        if len(collapsed) >= 2:
+            counts.ambiguous_collapsed += 1
 
         if proposed is None:
             if res.truth_in_candidates:
@@ -480,6 +527,10 @@ def evaluate(results: list[PaperResult], threshold: float, year_tolerance: int) 
             counts.tp += 1
         else:
             counts.fp += 1
+            if is_mirror(paper, proposed):
+                counts.benign_fp += 1
+            else:
+                counts.harmful_fp += 1
             counts.confusions.append((paper, proposed, score, threshold, fp_kind(paper, proposed)))
     return counts
 
@@ -613,40 +664,65 @@ def build_report(papers, results, sweep_tol1, sweep_tol0, probes, credits_note, 
       "what #75/#76 need — the question is whether false merges happen at all, not "
       "their third decimal. The sample is biased *toward* the matcher: DOI-carrying "
       "papers are published work with clean, canonical metadata, whereas #57 shows "
-      "the fallback would mostly run on fresh preprints with none. Confusion found "
-      "here is a floor.\n")
+      "the fallback would mostly run on fresh preprints with none. **Which way that "
+      "biases the harmful-merge rate is unmeasured.** A DOI-less preprint usually has "
+      "one OpenAlex record and no published twin, so its decoy pool is smaller and "
+      "same-title collisions may be rarer; equally, its metadata is thinner. This "
+      "report does not claim to bound that population — there is no ground truth for "
+      "it.\n")
 
     def sweep_table(title, sweep):
         w(f"### {title}\n")
-        w("| title threshold | fired | TP | FP (false merge) | FN | precision | recall | ambiguous |")
-        w("|---|---|---|---|---|---|---|---|")
+        w("| title threshold | fired | TP | FP | of which harmful | FN | precision | "
+          "precision (mirrors=TP) | recall | ambiguous | ambiguous (mirrors collapsed) |")
+        w("|---|---|---|---|---|---|---|---|---|---|---|")
         for thr in THRESHOLDS:
             c = sweep[thr]
             fired = c.tp + c.fp
             prec = f"{c.precision:.3f}" if c.precision is not None else "n/a"
+            gen = f"{(fired - c.harmful_fp) / fired:.3f}" if fired else "n/a"
             rec = f"{c.recall:.3f}" if c.recall is not None else "n/a"
-            w(f"| {thr:.2f} | {fired} | {c.tp} | {c.fp} | {c.fn} | {prec} | {rec} | {c.ambiguous} |")
+            w(f"| {thr:.2f} | {fired} | {c.tp} | {c.fp} | {c.harmful_fp} | {c.fn} | "
+              f"{prec} | {gen} | {rec} | {c.ambiguous} | {c.ambiguous_collapsed} |")
         w("")
 
     w("## Precision / recall\n")
     w("The swept score is normalized-title token Jaccard. First-author surname "
       "agreement and year agreement are required conjuncts (a match must clear all "
-      "three). A *false merge* (FP) is the matcher firing on a candidate whose DOI "
-      "differs from the paper's own. `ambiguous` counts papers where two or more "
-      "distinct works clear every gate at that threshold.\n")
+      "three).\n")
+    w("**Two of these columns are traps, and the corrected ones sit beside them.** "
+      "`FP` is the matcher firing on a candidate whose DOI differs from the paper's "
+      "own — but most of those are the paper's *own arXiv preprint mirror* under a "
+      "second OpenAlex record, and merging one of those is arguably right. `of which "
+      "harmful` counts only the merges onto a genuinely different source record. "
+      "Likewise `ambiguous` counts a paper and its own mirror as two rival works; "
+      "`ambiguous (mirrors collapsed)` does not. Read the corrected columns. The "
+      "uncorrected ones are kept because they are what a naive evaluation reports, "
+      "and the gap between them is the point.\n")
     sweep_table(f"Year tolerance ±{YEAR_TOLERANCE} (preprint vs publication year)", sweep_tol1)
     sweep_table("Year must match exactly", sweep_tol0)
 
     w("## Confusion cases (named individually)\n")
     confusions = dedupe_confusions(sweep_tol1[0.80].confusions)
-    ambiguous = sweep_tol1[0.80].ambiguous
+    counts80 = sweep_tol1[0.80]
+    fired80 = counts80.tp + counts80.fp
+    lo, hi = wilson_ci(counts80.harmful_fp, fired80)
     w(f"At title threshold 0.80, year tolerance ±1, the matcher fired on the wrong "
       f"DOI for **{len(confusions)} of {len(papers)}** papers. Every one shares the "
       "arXiv paper's first author, an adjacent year, and — at threshold 1.00 — a "
-      "byte-identical title with the record it was merged into; only the DOI differs. "
-      f"Separately, in **{ambiguous} of {len(papers)}** papers two or more *distinct* "
-      "records cleared every gate at once: the matcher had no signal to prefer the "
-      "DOI-true one over an equally-scoring decoy.\n")
+      "byte-identical title with the record it was merged into; only the DOI differs.\n")
+    w(f"**But {counts80.benign_fp} of those {counts80.fp} are the paper's own arXiv "
+      "preprint mirror**, a second OpenAlex record of the same work. Merging one is "
+      f"arguably correct. Only **{counts80.harmful_fp} of {fired80}** fired matches "
+      f"landed on a genuinely different source record — a harmful-merge rate of "
+      f"**{counts80.harmful_fp / fired80:.1%}** (95% Wilson CI "
+      f"{lo:.1%}–{hi:.1%}).\n")
+    w(f"The same correction applies to ambiguity. Counting a paper and its own mirror "
+      f"as two rival works gives **{counts80.ambiguous} of {len(papers)}**; collapsing "
+      f"the mirror onto the work it mirrors gives **{counts80.ambiguous_collapsed} of "
+      f"{len(papers)}**. Ambiguity between *genuinely distinct* works is rare, not "
+      "endemic. An earlier draft of this report leaned on the uncollapsed figure; it "
+      "was inflated by more than an order of magnitude.\n")
     by_kind: dict[str, int] = {}
     for row in confusions:
         by_kind[row[4]] = by_kind.get(row[4], 0) + 1
@@ -654,13 +730,29 @@ def build_report(papers, results, sweep_tol1, sweep_tol0, probes, credits_note, 
     for kind, count in sorted(by_kind.items(), key=lambda x: -x[1]):
         w(f"- {count}× — {kind}")
     w("")
-    w("The distinction matters and the matcher cannot draw it: an arXiv-preprint "
-      "mirror is arguably the *same* work under a second OpenAlex record, while a "
-      "distinct non-arXiv DOI (a conference paper vs a medRxiv posting of the same "
-      "title, a dataset registered twice) may be a genuinely different source. "
-      "Title+author+year is identical across both, so nothing in the matcher's "
-      "inputs separates the benign duplicate from the harmful one — the human gate "
-      "is the only thing that can (#75, #76).\n")
+    w("**A benign mirror is trivially separable, and an earlier draft of this report "
+      "said otherwise.** Its DOI carries the `10.48550/arxiv.` prefix, or the record "
+      "echoes the paper's own arXiv id. Both are fields a real matcher has, and this "
+      "script uses them to classify. Nothing subtle is required.\n")
+    w("What remains after that correction is the harmful category, and it is small: "
+      "a merge onto a genuinely different source record. Those *are* unreachable by "
+      "title+author+year, because at threshold 1.00 the two works have a "
+      "byte-identical title, the same first-author surname, and adjacent years. No "
+      "similarity function defined over those three fields can separate them, so no "
+      "threshold helps.\n")
+    w("Richer OpenAlex metadata *does* separate the two harmful cases — checked "
+      "live: `work_type` is `article` (AAAI) against `preprint` (medRxiv) for one, "
+      "and `conference-paper` against `article` for the other. But it separates them "
+      "without saying **which one is this paper**: there is no rule over `work_type` "
+      "that picks the right record in both cases, and a preprint's own published "
+      "version is exactly as plausible a target as an unrelated posting of the same "
+      "title. Distinguishable is not the same as identifiable, and only the second "
+      "would license an automatic merge.\n")
+    w("So the case for the human gate (#75, #76) does not rest on a bad precision "
+      "number. It rests on this: a small but real rate of merges onto genuinely "
+      "different source records, which the fallback's own inputs cannot rule out, "
+      "and which fail **silently** — a false merge attaches one paper's provenance "
+      "to another paper's text and nothing errors (P2).\n")
     w("Named individually — arXiv paper on the left, the different-DOI OpenAlex "
       "record it was merged into on the right:\n")
     if not confusions:
@@ -681,11 +773,17 @@ def build_report(papers, results, sweep_tol1, sweep_tol0, probes, credits_note, 
 
     w("## Reading of the numbers\n")
     distinct = sum(1 for row in confusions if "distinct non-arXiv" in row[4])
-    w("- **Precision is flat at ~0.84 across every title threshold from 0.50 to "
-      "1.00.** The score does not separate right from wrong matches, because the "
-      "wrong ones have title Jaccard 1.00 — a byte-identical title. There is no knee "
-      "in the curve to tune to; a stricter threshold buys nothing and only costs "
-      "recall.")
+    w("- **No threshold separates right from wrong.** Precision is flat from 0.50 to "
+      "1.00, because the wrong matches have title Jaccard 1.00 — a byte-identical "
+      "title. There is no knee to tune to; a stricter threshold buys nothing and "
+      "costs recall. This holds for the uncorrected and the harm-corrected precision "
+      "alike.")
+    w(f"- **The uncorrected precision (~{sweep_tol1[0.80].precision:.2f}) overstates "
+      "the harm by counting a paper's own arXiv mirror as a false merge.** With "
+      "mirrors read as the same work, precision is "
+      f"~{(fired80 - counts80.harmful_fp) / fired80:.2f} and the harmful-merge rate "
+      f"is {counts80.harmful_fp}/{fired80}. The conclusion does not depend on the "
+      "larger number, and this report no longer leans on it.")
     w(f"- Of {len(confusions)} false merges at threshold 0.80, {len(confusions) - distinct} "
       "point at the *same paper* under a second OpenAlex record (chiefly the "
       "arXiv-preprint DOI `10.48550/arxiv.*`, which OpenAlex keeps separate from the "
@@ -712,7 +810,7 @@ def build_report(papers, results, sweep_tol1, sweep_tol0, probes, credits_note, 
       "being a category the matcher is structurally unable to resolve.\n")
     w("**What this spike could not measure.** (1) The real target population — fresh "
       "preprints without DOIs (#57) — has no DOI ground truth, so its false-merge "
-      "rate is unmeasured and can only be worse than this published-paper floor. "
+      "rate is unmeasured, and this sample does not bound it in either direction. "
       "(2) OpenAlex title search is the candidate generator; a different generator "
       "(filtered search, fuzzy title) would change recall and the decoy pool. "
       "(3) Precision here counts a wrong DOI as a false merge; whether merging an "
