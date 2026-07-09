@@ -324,3 +324,156 @@ def test_module_exports():
     # The two names later steps depend on are public on the module.
     assert prov.SIDECAR_DIR == "source-provenance"
     assert callable(prov.is_sidecar)
+
+
+class TestSidecarPathAnchoring:
+    """`sources/a/x.md` and `sources/b/x.md` must not share one ledger.
+
+    The enumerators use `rglob`, and `ingest` mirrors an original's subtree, so a
+    source can legitimately sit in a subdirectory. A stem-only mapping put both
+    of these at `source-provenance/x.json` — and, worse, put it *inside*
+    `sources/`, the one place the sidecar must never be.
+    """
+
+    def test_nested_sources_do_not_collide(self, tmp_path):
+        a = prov.sidecar_path(tmp_path / "sources" / "a" / "x.md")
+        b = prov.sidecar_path(tmp_path / "sources" / "b" / "x.md")
+        assert a != b
+        assert a == tmp_path / prov.SIDECAR_DIR / "a" / "x.json"
+
+    def test_a_nested_source_sidecar_stays_out_of_sources(self, tmp_path):
+        path = prov.sidecar_path(tmp_path / "sources" / "deep" / "er" / "x.md")
+        assert "sources" not in path.relative_to(tmp_path).parts
+
+    def test_flat_source_is_unchanged(self, tmp_path):
+        assert prov.sidecar_path(tmp_path / "sources" / "x.md") == (
+            tmp_path / prov.SIDECAR_DIR / "x.json"
+        )
+
+    def test_runs_sources_anchors_on_its_own_root(self, tmp_path):
+        # `runs/sources/` is the other SOURCE_ROOT; its sidecar is a sibling of
+        # that directory, not of the KB's top-level sources/.
+        assert prov.sidecar_path(tmp_path / "runs" / "sources" / "x.md") == (
+            tmp_path / "runs" / prov.SIDECAR_DIR / "x.json"
+        )
+
+    def test_a_path_outside_sources_is_refused(self, tmp_path):
+        # Silently producing `<kb>/source-provenance/x.json` for an arbitrary
+        # path would write a ledger for a file that is not a source.
+        with pytest.raises(ValueError, match="not under a 'sources/' directory"):
+            prov.sidecar_path(tmp_path / "elsewhere" / "x.md")
+
+    def test_is_sidecar_recognises_a_nested_sidecar(self):
+        from pathlib import Path
+        assert prov.is_sidecar(Path("kb") / prov.SIDECAR_DIR / "a" / "x.json")
+        assert not prov.is_sidecar(Path("kb") / "sources" / "a" / "x.json")
+
+
+class TestReadRejectsCorruptLedgers:
+    """A corrupt sidecar must raise, never read as empty: the next write would
+    erase real provenance. These shapes all parse as JSON, so only a read-boundary
+    check catches them."""
+
+    def _write(self, tmp_path, payload):
+        path = tmp_path / "x.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def _record(self, **over):
+        return {"type": "arxiv", "id": "2311.09277", "imported_at": "t", **over}
+
+    def test_duplicate_type_id_records_are_refused(self, tmp_path):
+        # add_source guarantees one record per (type, id). A file breaking it was
+        # not written by us, and read-modify-write would pick one arbitrarily.
+        path = self._write(tmp_path, {"schema_version": 1, "records": [
+            self._record(version=1), self._record(version=9)]})
+        with pytest.raises(ProvenanceError, match="two arxiv records"):
+            prov.read_provenance(path)
+
+    def test_a_future_schema_version_is_refused(self, tmp_path):
+        # Reading a v2 layout as v1 would misparse it, and the next write would
+        # persist the misparse.
+        path = self._write(tmp_path, {"schema_version": SCHEMA_VERSION + 1,
+                                      "records": [self._record()]})
+        with pytest.raises(ProvenanceError, match="newer than this factlog"):
+            prov.read_provenance(path)
+
+    def test_an_older_schema_version_is_accepted(self, tmp_path):
+        path = self._write(tmp_path, {"schema_version": 0, "records": []})
+        assert prov.read_provenance(path).schema_version == 0
+
+    @pytest.mark.parametrize("bad", [123, None, ["x"], {"a": 1}])
+    def test_a_non_string_id_is_refused_at_read_not_at_write(self, tmp_path, bad):
+        # Left unchecked, this survives read and makes _serialize's sort compare
+        # an int against a str, dying with a bare TypeError at write time — far
+        # from the corrupt file that caused it.
+        path = self._write(tmp_path, {"schema_version": 1, "records": [self._record(id=bad)]})
+        with pytest.raises(ProvenanceError, match="'id' must be a string"):
+            prov.read_provenance(path)
+
+    def test_a_non_string_type_is_refused(self, tmp_path):
+        path = self._write(tmp_path, {"schema_version": 1, "records": [self._record(type=7)]})
+        with pytest.raises(ProvenanceError, match="'type' must be a string"):
+            prov.read_provenance(path)
+
+    @pytest.mark.parametrize("payload", [{}, {"schema_version": 1}, {"records": []}])
+    def test_a_file_missing_a_required_key_is_refused(self, tmp_path, payload):
+        path = self._write(tmp_path, payload)
+        with pytest.raises(ProvenanceError, match="has no"):
+            prov.read_provenance(path)
+
+    @pytest.mark.parametrize("version", ["1", 1.5, True, None])
+    def test_a_non_integer_schema_version_is_refused(self, tmp_path, version):
+        path = self._write(tmp_path, {"schema_version": version, "records": []})
+        with pytest.raises(ProvenanceError, match="not an integer"):
+            prov.read_provenance(path)
+
+    def test_a_missing_file_still_reads_as_empty(self, tmp_path):
+        # The one case that must NOT raise: a source with no ledger yet.
+        assert prov.read_provenance(tmp_path / "absent.json").records == []
+
+
+class TestUpdateSource:
+    """`arxiv-check-versions --auto-update` (#58) exists to change an arXiv
+    record's version in place. `add_source` refuses that by design, so a
+    legitimate refresh needs its own verb."""
+
+    def _record(self, **over):
+        return SourceRecord(type="arxiv", id="2311.09277", imported_at="t",
+                            fields={"version": 2, **over.pop("fields", {})}, **over)
+
+    def test_update_replaces_a_diverged_record(self, tmp_path):
+        p = Provenance(records=[self._record()])
+        prov.update_source(p, SourceRecord(type="arxiv", id="2311.09277",
+                                           imported_at="t", fields={"version": 3}))
+        assert len(p.records) == 1
+        assert p.records[0].fields["version"] == 3
+
+    def test_add_source_still_refuses_the_same_change(self, tmp_path):
+        # The split is the point: an import has no authority to revise an entry.
+        p = Provenance(records=[self._record()])
+        with pytest.raises(ProvenanceConflict, match="update_source"):
+            prov.add_source(p, SourceRecord(type="arxiv", id="2311.09277",
+                                            imported_at="t", fields={"version": 3}))
+
+    def test_update_appends_when_absent(self):
+        p = Provenance()
+        prov.update_source(p, self._record())
+        assert [r.key for r in p.records] == [("arxiv", "2311.09277")]
+
+    def test_update_leaves_other_sources_alone(self):
+        openalex = SourceRecord(type="openalex", id="W1", imported_at="t")
+        p = Provenance(records=[openalex, self._record()])
+        prov.update_source(p, SourceRecord(type="arxiv", id="2311.09277",
+                                           imported_at="t", fields={"version": 9}))
+        assert openalex in p.records
+        assert len(p.records) == 2
+
+    def test_an_updated_ledger_still_round_trips(self, tmp_path):
+        path = tmp_path / "sources" / "x.md"
+        p = Provenance(records=[self._record()])
+        prov.update_source(p, SourceRecord(type="arxiv", id="2311.09277",
+                                           imported_at="t", fields={"version": 3}))
+        sidecar = prov.sidecar_path(path)
+        prov.write_provenance(sidecar, p)
+        assert prov.read_provenance(sidecar).records[0].fields["version"] == 3
