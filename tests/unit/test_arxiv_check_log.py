@@ -468,3 +468,48 @@ class TestVersionIsAnIntEverywhere:
         raw = json.loads(path.read_text(encoding="utf-8"))
         assert raw["entries"][0]["version"] == 7
         assert isinstance(raw["entries"][0]["version"], int)
+
+
+class TestTheWriteBoundaryIsGuardedToo:
+    """`provenance.py` guarded its reader and left its writer open. A value only a
+    *read* rejects is a value a *write* can still put on disk, and then every later
+    read of that file fails — one bad call bricks the KB's check-log.
+
+    No test here passed a non-int to `record_check`, so a `version: str` annotation
+    survived 62 green tests.
+    """
+
+    @pytest.mark.parametrize("bad", ["7", 1.5, True, None, [7]])
+    def test_a_non_integer_version_is_refused_at_write(self, bad):
+        with pytest.raises(CheckLogError, match="must be an integer"):
+            record_check(CheckLog(), "1706.03762", T1, bad)
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_a_version_below_one_is_refused_at_write(self, bad):
+        with pytest.raises(CheckLogError, match=">= 1"):
+            record_check(CheckLog(), "1706.03762", T1, bad)
+
+    def test_a_refused_write_leaves_the_log_untouched(self):
+        log = CheckLog()
+        record_check(log, "1706.03762", T1, 7)
+        before = dict(log.entries)
+        with pytest.raises(CheckLogError):
+            record_check(log, "1706.03762", T1, "8")
+        assert log.entries == before
+
+    def test_the_log_cannot_be_bricked_by_one_bad_call(self, tmp_path):
+        # The end-to-end shape of the bug: a bad write, then every read fails.
+        path = check_log_path(tmp_path)
+        with pytest.raises(CheckLogError):
+            log = CheckLog()
+            record_check(log, "1706.03762", T1, "7")
+            write_check_log(path, log)
+        assert not path.exists()
+
+    def test_record_check_declares_the_type_it_enforces(self):
+        import inspect
+
+        annotation = inspect.signature(record_check).parameters["version"].annotation
+        assert annotation == "int", (
+            "the signature invites the very value the reader rejects"
+        )

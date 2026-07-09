@@ -139,6 +139,29 @@ def check_log_path(kb_root: Path | str) -> Path:
     return Path(kb_root) / CHECK_LOG_DIR / CHECK_LOG_NAME
 
 
+def _validate_version(value: object, where: str = "") -> int:
+    """An arXiv version: an ``int`` >= 1. Enforced at *both* boundaries.
+
+    ``provenance.py`` guarded its reader and left its writer open, and a value that
+    only a read rejects is a value a write can still put on disk — one bad call
+    bricks the file for every later read. So :func:`record_check` validates too,
+    and rejects at the point of the mistake rather than at the next process's read.
+
+    ``bool`` is an ``int`` subclass, so ``True`` would otherwise read as v1.
+    """
+    suffix = f": {where}" if where else ""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise CheckLogError(
+            f"check-log version must be an integer, got {type(value).__name__}{suffix}"
+        )
+    if value < 1:
+        raise CheckLogError(
+            f"check-log version must be >= 1 (arXiv numbers versions from v1), "
+            f"got {value}{suffix}"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class CheckRecord:
     """One paper's last check: the timestamp the tool looked, and the version it
@@ -170,7 +193,7 @@ class CheckLog:
 
 
 def record_check(
-    log: CheckLog, arxiv_id: str, last_checked_at: str, version: str
+    log: CheckLog, arxiv_id: str, last_checked_at: str, version: int
 ) -> CheckLog:
     """Record that *arxiv_id* was checked at *last_checked_at*, seeing *version*.
     Mutates and returns *log*.
@@ -184,7 +207,8 @@ def record_check(
     whether *last_checked_at* moves forward or *version* changed: the caller
     (``arxiv-check-versions``, #58) owns those decisions and supplies the values.
     """
-    log.entries[arxiv_id] = CheckRecord(last_checked_at=last_checked_at, version=version)
+    log.entries[arxiv_id] = CheckRecord(
+        last_checked_at=last_checked_at, version=_validate_version(version))
     return log
 
 
@@ -285,18 +309,7 @@ def read_check_log(path: Path | str) -> CheckLog:
                     f"check-log entry field {name!r} must be a string, got "
                     f"{type(raw[name]).__name__}: {raw!r} in {p}"
                 )
-        # bool is an int subclass; `true` must not read as version 1.
-        version = raw["version"]
-        if not isinstance(version, int) or isinstance(version, bool):
-            raise CheckLogError(
-                f"check-log entry field 'version' must be an integer, got "
-                f"{type(version).__name__}: {raw!r} in {p}"
-            )
-        if version < 1:
-            raise CheckLogError(
-                f"check-log entry field 'version' must be >= 1 (arXiv numbers "
-                f"versions from v1), got {version}: {raw!r} in {p}"
-            )
+        version = _validate_version(raw["version"], f"{raw!r} in {p}")
         arxiv_id = raw["arxiv_id"]
         # One record per paper. A file with two entries for one id was not written
         # by this module, and folding it into the dict would drop one silently.
