@@ -368,3 +368,33 @@ class TestAStaleSidecarNeverAttachesToANewPaper:
         result = ArxivSourceWriter().write(work, tmp_path, imported_at="t1")
         assert result.status == "imported"
         assert sidecar_path(result.path).read_bytes() == before
+
+
+class TestAFailedRecordDoesNotFreeItsSlug:
+    """`_reserve` claims the filename before `_record` runs, and a `_record`
+    failure does not release it. That is deliberate: the module promises
+    reproducible collision suffixes for a deterministic input order, and a suffix
+    that depended on whether an unrelated IO error occurred would not be
+    reproducible. The failed slot stays unused rather than shifting every later
+    name."""
+
+    def test_a_later_paper_keeps_the_suffix_it_would_have_had_anyway(self, tmp_path):
+        (tmp_path / "sources").mkdir()
+        writer = ArxivSourceWriter()
+        first = _arxiv(arxiv_id="1111.11111")
+        second = _arxiv(arxiv_id="2222.22222")  # same author/year/title -> same base slug
+        assert writer.generate_slug(first) == writer.generate_slug(second)
+
+        # Make the first paper's sidecar write fail: occupy its path with a dir.
+        doomed = sidecar_path(tmp_path / "sources" / writer.generate_slug(first))
+        doomed.mkdir(parents=True, exist_ok=True)
+
+        a = writer.write(first, tmp_path, imported_at="t")
+        b = writer.write(second, tmp_path, imported_at="t")
+
+        assert a.status == "error"
+        assert b.status == "imported"
+        # `-2`, exactly as if the first import had succeeded. The suffix does not
+        # depend on whether an unrelated write happened to fail.
+        assert b.path.name.endswith("-2.md")
+        assert [r.id for r in _arxiv_records(sidecar_path(b.path))] == ["2222.22222"]

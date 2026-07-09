@@ -371,9 +371,11 @@ class ArxivSourceWriter(BaseSourceWriter):
         that is not merely dangling but false, naming a source this record never
         had. An audit ledger that lies is worse than no ledger.
 
-        Replacement is also what makes a retry after a failed ``.md`` write
-        byte-identical: the sidecar this call wrote a moment ago holds exactly the
-        record it is about to write again.
+        Replacement also makes a retry after a failed ``.md`` write converge: the
+        sidecar this call wrote a moment ago holds exactly the record it writes
+        again, byte-for-byte when the retry carries the same batch
+        ``imported_at`` (a later run stamps a new one, and the record is rewritten
+        with it — the ledger records the import that produced the file on disk).
         """
         record = self._provenance_record(parsed, imported_at)
         sidecar = sidecar_path(decision.path)
