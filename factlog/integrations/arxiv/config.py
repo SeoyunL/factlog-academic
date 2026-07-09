@@ -121,7 +121,8 @@ _FIELD_TOKEN_RE = re.compile(r'(?:^|[\s(])([A-Za-z_]+):("[^"]*"|\S+)')
 
 # arXiv's Lucene-ish boolean operators. A query using one is expressing structure,
 # not a phrase, and must be passed through untouched.
-_BOOLEAN_RE = re.compile(r"(?:^|\s)(?:AND|OR|ANDNOT)(?:\s|$)")
+_BOOLEAN_RE = re.compile(r"\S\s+(?:AND|OR|ANDNOT)\s+\S")
+
 
 # `sortBy` values. Unlike the above, a bogus one *is* rejected (HTTP 400).
 SORT_FIELDS = {"submitted": "submittedDate", "updated": "lastUpdatedDate",
@@ -240,12 +241,33 @@ def as_phrase(query: str) -> str:
     uniform.
     """
     stripped = query.strip()
-    if not stripped or '"' in stripped:
+    if not stripped or " " not in stripped:
         return stripped
     if _FIELD_TOKEN_RE.search(stripped) or _BOOLEAN_RE.search(stripped):
         return stripped
-    if " " not in stripped:
+    quotes = stripped.count('"')
+    if quotes:
+        # An even count is the user quoting deliberately: leave it alone. An odd one
+        # is a quote that went missing, and arXiv ignores the stray character and
+        # matches loosely — the exact 15x over-match this function exists to
+        # prevent, slipping past unannounced. Refuse it before a request is spent,
+        # as `validate_search_query` refuses an unknown field.
+        if quotes % 2:
+            raise ArxivValidationError(
+                f"unbalanced quote in query {query!r}. arXiv would ignore it and "
+                "match the words loosely rather than as a phrase. Quote the whole "
+                "phrase, or drop the quote and let factlog quote it for you."
+            )
         return stripped
+
+    if "\\" in stripped:
+        # A trailing backslash escapes the closing quote we are about to add, and
+        # arXiv rejects the query. Escaping is possible but arXiv's rules for it are
+        # undocumented; refusing is honest and costs one keystroke.
+        raise ArxivValidationError(
+            f"backslash in query {query!r} cannot be quoted safely. Supply your own "
+            'field prefix, e.g. all:"...", to search it verbatim.'
+        )
     return f'all:"{stripped}"'
 
 
