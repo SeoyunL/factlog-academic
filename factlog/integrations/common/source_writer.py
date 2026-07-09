@@ -35,13 +35,28 @@ the caller must feed records in a deterministic order for reproducible suffixes.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from factlog.common import slugify
 from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
 from factlog.integrations.common._textio import atomic_write_text
-from factlog.integrations.common.front_matter import read_scalars
+from factlog.integrations.common.front_matter import read_first_author, read_scalars
+from factlog.integrations.common.matcher import (
+    MatchInput,
+    TITLE_SIMILARITY_THRESHOLD,
+    score_pair,
+    surname,
+)
+from factlog.integrations.common.merge_candidates import (
+    STATE_PENDING,
+    CandidatePair,
+    MergeCandidatesError,
+    add_candidate,
+    candidates_path,
+    read_candidates,
+    write_candidates,
+)
 from factlog.integrations.common.provenance import (
     Provenance,
     ProvenanceConflict,
@@ -71,6 +86,17 @@ CROSS_SOURCE_IDS = (("doi", "DOI"), ("pmid", "PMID"), ("arxiv_id", "arXiv id"))
 # provenance (see :meth:`BaseSourceWriter._index`).
 IMPORTED_FROM_KEY = "imported_from"
 
+# Each integration's own identity front-matter key, by the ``imported_from`` value
+# it emits. Used only by the candidate matcher (#75) to read an *existing* source's
+# own identity so a surfaced pair keys on the two sources' identities, not their
+# filenames. Distinct from ``identity_key`` (this writer's key): the matcher must
+# name whichever integration wrote the file it matched against.
+IDENTITY_KEYS_BY_SOURCE = {
+    "openalex": "openalex_id",
+    "arxiv": "arxiv_id",
+    "zotero": "zotero_key",
+}
+
 
 def _same_source(imported_from: str, source_name: str) -> bool:
     """Did *source_name*'s integration write a file whose provenance is *imported_from*?
@@ -86,6 +112,28 @@ _CROSS_SOURCE_KINDS = frozenset(kind for kind, _ in CROSS_SOURCE_IDS)
 
 
 @dataclass(frozen=True)
+class CandidateMatch:
+    """A title+author+year match a human should look at, surfaced but never merged (#75).
+
+    Produced by :meth:`BaseSourceWriter._find_candidate` when the incoming paper is
+    imported as a *new* file yet resembles an existing source that shares no exact
+    identifier. It is a *report*, not an outcome: the paper still imports, the status
+    stays ``"imported"``, and nothing is merged (the spike proved the harmful cases
+    are unreachable by these three fields — see :mod:`factlog.integrations.common.matcher`).
+
+    ``incoming`` and ``existing`` are the two sources' own ``(type, id)`` identities,
+    the key the ledger records so the pair is never re-proposed. ``existing_path``
+    names the file already in ``sources/`` (unchanged), and ``score`` is the title
+    Jaccard that cleared :data:`~factlog.integrations.common.matcher.TITLE_SIMILARITY_THRESHOLD`.
+    """
+
+    incoming: tuple[str, str]
+    existing: tuple[str, str]
+    existing_path: Path
+    score: float
+
+
+@dataclass(frozen=True)
 class WriteResult:
     """Outcome of a single :meth:`BaseSourceWriter.write` call.
 
@@ -95,11 +143,18 @@ class WriteResult:
     database's* view of a paper already in ``sources/``, so instead of writing a
     new original it is appended to the existing file's provenance sidecar (§7.3).
     ``path`` then points at the **existing** original, which is never rewritten.
+
+    ``candidate`` is a **field, never a status** (#75). A title+author+year match
+    that could not rule out a merge onto a genuinely different source record is
+    surfaced here while ``status`` stays ``"imported"`` — the counters and exit codes
+    are untouched, and the CLI must keep it out of its status ternary (the #65 trap).
+    It is ``None`` unless the incoming paper both imported as a new file and matched.
     """
 
     path: Path | None
     status: str  # "imported" | "skipped" | "error" | "merged"
     reason: str = ""
+    candidate: CandidateMatch | None = None
 
 
 @dataclass
@@ -122,6 +177,20 @@ class _DirIndex:
     # view of the paper: two arXiv deposits that share a DOI are a plain
     # duplicate, not a cross-source merge.
     by_cross_id: dict[tuple[str, str], tuple[Path, str]] = field(default_factory=dict)
+    # Per-file title+author+year data for the candidate matcher (#75), populated
+    # ONLY when a writer opts in via :attr:`BaseSourceWriter.surfaces_candidates`, so
+    # a non-surfacing writer's scan is byte-identical to before. Each row is the
+    # file's own identity and the three fields the matcher compares.
+    match_rows: list[_MatchRow] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _MatchRow:
+    """One existing source's identity and matchable fields, for the candidate scan."""
+
+    path: Path
+    identity: tuple[str, str]  # (imported_from, that source's own id)
+    match: MatchInput
 
 
 def byte_trunc(slug: str, max_bytes: int) -> str:
@@ -220,6 +289,15 @@ class BaseSourceWriter:
     #: When False, a cross-source duplicate stays ``skipped`` exactly as before, so
     #: Zotero is unchanged.
     merges_cross_source: bool = False
+    #: Opt-in: does this writer surface a title+author+year *candidate* (#75) when an
+    #: imported paper resembles an existing source that shares no exact identifier?
+    #: **False by default**, which is what keeps Zotero from ever surfacing one (#75
+    #: H2 — a Zotero item is the same paper as seen by the *user*, not by a database,
+    #: so cross-source candidates against it are noise) and keeps a non-surfacing
+    #: writer's ``sources/`` scan byte-identical (no extra reads). ``ArxivSourceWriter``
+    #: and ``OpenAlexSourceWriter`` set it True. Surfacing NEVER merges and never
+    #: changes ``status`` — the paper still imports as a new file.
+    surfaces_candidates: bool = False
     #: Fields in a provenance record whose change an *import* has no authority to
     #: absorb; a drift in one is a per-id ``error`` only a refresh command may
     #: clear. **Empty by default, and that is load-bearing.** A writer with no
@@ -281,7 +359,48 @@ class BaseSourceWriter:
         return build_slug(*self.slug_fields(parsed))
 
     def _scan_keys(self) -> tuple[str, ...]:
-        return (self.identity_key, IMPORTED_FROM_KEY, *(kind for kind, _ in CROSS_SOURCE_IDS))
+        keys = (self.identity_key, IMPORTED_FROM_KEY, *(kind for kind, _ in CROSS_SOURCE_IDS))
+        if self.surfaces_candidates:
+            # The matcher also needs each file's title, year and own identity key.
+            # Only a surfacing writer reads them, so a non-surfacing writer's scan is
+            # unchanged. ``dict.fromkeys`` dedups while preserving order (``arxiv_id``
+            # is both a cross-source id and arXiv's own identity key).
+            keys = tuple(dict.fromkeys(
+                (*keys, "title", "year", *IDENTITY_KEYS_BY_SOURCE.values())))
+        return keys
+
+    def _match_row(self, path: Path, scalars: dict[str, str]) -> _MatchRow | None:
+        """Build a matcher row for an existing source, or None if it has no usable
+        identity or no readable first author.
+
+        Identity is ``(imported_from, that source's own id)``. A tool-written file
+        always carries ``imported_from``; a legacy/hand-written file without it falls
+        back to whichever recognised identity key is present. A file whose identity
+        cannot be pinned, or whose first author cannot be read, yields no row — the
+        matcher then simply never proposes a pair against it (fails closed).
+        """
+        provenance = scalars.get(IMPORTED_FROM_KEY, "").strip().lower()
+        source_type, identity = "", ""
+        if provenance in IDENTITY_KEYS_BY_SOURCE:
+            source_type = provenance
+            identity = scalars.get(IDENTITY_KEYS_BY_SOURCE[provenance], "").strip()
+        else:
+            # No (or unrecognised) provenance: infer the type from the first
+            # recognised identity key the file actually carries.
+            for stype, ikey in IDENTITY_KEYS_BY_SOURCE.items():
+                value = scalars.get(ikey, "").strip()
+                if value:
+                    source_type, identity = stype, value
+                    break
+        if not source_type or not identity:
+            return None
+        first_author = read_first_author(path, self.ignore_re)
+        if not surname(first_author):
+            return None
+        year_raw = scalars.get("year", "").strip()
+        year = int(year_raw) if year_raw.isdigit() else None
+        match = MatchInput(first_author, year, scalars.get("title", ""))
+        return _MatchRow(path, (source_type, identity), match)
 
     def _index(self, sources_dir: Path, mode: str) -> _DirIndex:
         key = (str(sources_dir.resolve()), mode)
@@ -312,6 +431,10 @@ class BaseSourceWriter:
                             cached.by_cross_id.setdefault(
                                 (kind, normalize_cross_id(kind, value)),
                                 (path, scalars.get(IMPORTED_FROM_KEY, "")))
+                    if self.surfaces_candidates:
+                        row = self._match_row(path, scalars)
+                        if row is not None:
+                            cached.match_rows.append(row)
             self._dir_index[key] = cached
         return cached
 
@@ -409,6 +532,88 @@ class BaseSourceWriter:
                     (kind, normalize_cross_id(kind, value)), (path, self.source_name))
         return WriteResult(path, "imported")
 
+    def _find_candidate(self, parsed, index: _DirIndex, kb_root: Path) -> CandidateMatch | None:
+        """A title+author+year candidate for an imported paper, or None (#75).
+
+        Pure: reads the ``sources/`` index and the candidate ledger, writes nothing.
+        Runs in both ``plan`` and ``write`` (so ``--dry-run`` previews a candidate);
+        only ``write`` records it, in :meth:`_record_candidate`.
+
+        Fails closed at every step. A writer that does not opt in
+        (:attr:`surfaces_candidates`) never proposes one; an incoming paper with no
+        first-author surname or no year cannot clear the gate; a pair already in the
+        ledger in any state is suppressed; and a corrupt/unreadable ledger surfaces
+        nothing rather than acting on an unknown state or crashing the import.
+
+        The gate (surname + year agreement) is applied first so title Jaccard is
+        computed only on the surname/year-agreeing subset — the scan is bounded by
+        that subset, not the whole directory. On a tie the lowest existing identity
+        wins, so a batch's ``--porcelain`` output is reproducible.
+        """
+        if not self.surfaces_candidates or not index.match_rows:
+            return None
+        first_author, year_raw, title = self.slug_fields(parsed)
+        if not surname(first_author):
+            return None
+        year = int(year_raw) if year_raw.strip().isdigit() else None
+        if year is None:
+            return None
+        incoming_match = MatchInput(first_author, year, title)
+        incoming_identity = (self.source_name, self.identity_of(parsed))
+
+        best: tuple[float, _MatchRow] | None = None
+        for row in index.match_rows:
+            if row.identity == incoming_identity:
+                continue  # never propose a paper against itself
+            score = score_pair(incoming_match, row.match)
+            if score is None or score < TITLE_SIMILARITY_THRESHOLD:
+                continue
+            if best is None or score > best[0] or (
+                    score == best[0] and row.identity < best[1].identity):
+                best = (score, row)
+        if best is None:
+            return None
+        score, row = best
+
+        try:
+            ledger = read_candidates(candidates_path(kb_root))
+        except (MergeCandidatesError, OSError):
+            # A corrupt ledger is a human-fixable condition (see the module
+            # docstring). Surface nothing rather than crash the batch or act on an
+            # unknown state; the read boundary itself still raises for direct callers.
+            return None
+        if ledger.has_pair(incoming_identity, row.identity):
+            return None
+        return CandidateMatch(
+            incoming=incoming_identity, existing=row.identity,
+            existing_path=row.path, score=score)
+
+    def _record_candidate(self, kb_root: Path, candidate: CandidateMatch,
+                          recorded_at: str) -> None:
+        """Record a surfaced pair as ``pending`` in the KB ledger. Write mode only.
+
+        Called from :meth:`write` **after** the ``.md`` is written — the ledger is
+        not a skip key, so a pair recorded before a failed ``.md`` write would point
+        at a file that never appeared. Idempotent: a pair already present in any
+        state is a no-op (a human's ``rejected`` is never overwritten). A
+        corrupt/unreadable ledger is left untouched — never erased, never a crash;
+        the import already succeeded and the pair simply is not recorded.
+        """
+        path = candidates_path(kb_root)
+        try:
+            ledger = read_candidates(path)
+        except (MergeCandidatesError, OSError):
+            return
+        if ledger.has_pair(candidate.incoming, candidate.existing):
+            return
+        add_candidate(ledger, CandidatePair.create(
+            candidate.incoming, candidate.existing,
+            state=STATE_PENDING, score=candidate.score, recorded_at=recorded_at))
+        try:
+            write_candidates(path, ledger)
+        except (MergeCandidatesError, OSError):
+            return
+
     def _resolve(self, parsed, target: Path | str, mode: str) -> WriteResult:
         """Decide the outcome (imported/skipped/error) and reserve the target name.
 
@@ -431,7 +636,15 @@ class BaseSourceWriter:
             if duplicate is not None:
                 return duplicate
 
-        return self._reserve(parsed, sources_dir, index)
+        reserved = self._reserve(parsed, sources_dir, index)
+        # A candidate is only meaningful for a NEW file (an imported outcome): a
+        # skip/merge already matched an exact identifier. The matcher runs before the
+        # reservation pollutes ``match_rows`` (it never adds to it), so it compares
+        # only against files already on disk.
+        candidate = self._find_candidate(parsed, index, Path(target))
+        if candidate is not None:
+            reserved = replace(reserved, candidate=candidate)
+        return reserved
 
     def plan(self, parsed, target: Path | str) -> WriteResult:
         """Predict :meth:`write`'s outcome without creating any file (dry run).
@@ -615,4 +828,9 @@ class BaseSourceWriter:
         sources_dir = Path(target) / "sources"
         sources_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(decision.path, self.render(parsed, imported_at))
+        # The candidate ledger is written LAST — after the ``.md`` — because it is
+        # not a skip key: a pair recorded before a failed ``.md`` write would
+        # reference a file that never appeared. It never touches the ``.md`` (P4).
+        if decision.candidate is not None:
+            self._record_candidate(Path(target), decision.candidate, imported_at)
         return decision

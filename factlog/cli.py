@@ -2837,9 +2837,50 @@ def _openalex_placeholder_warnings(report) -> list[str]:
     ]
 
 
+def _candidate_porcelain_lines(report) -> list[str]:
+    """The ``candidate``/``candidates`` porcelain rows for surfaced merge candidates (#75).
+
+    A NEW leading token, added to stdout without touching the six summary lines a
+    consumer already parses (imported/skipped/merged/errors/dry_run/target). Existing
+    consumers parse by first field and ignore an unknown token (the contract stated
+    at the porcelain blocks below), so this is compatible:
+
+        candidate\t<new-source-id>\t<existing-source-filename>\t<title-similarity>
+        candidates\t<n>
+
+    One ``candidate`` row per surfaced pair, in report order, then the count. Nothing
+    is emitted through the per-work status ternary — a candidate is never a status
+    (the #65 trap, where an unhandled status fell to ``error`` with a ``?`` glyph).
+    """
+    lines = [
+        f"candidate\t{o.key}\t{o.candidate.existing_path.name}\t{o.candidate.score:.4f}"
+        for o in report.candidates
+    ]
+    lines.append(f"candidates\t{len(report.candidates)}")
+    return lines
+
+
+def _candidate_notes(report) -> list[str]:
+    """Human-readable stderr notes for surfaced merge candidates (#75).
+
+    The paper imported as a new file; the note points a human at the existing source
+    it resembles and at the ledger, where a pair is rejected by hand-editing the JSON
+    (there is no ``reject`` command in this release, by design — #75 H4)."""
+    notes = []
+    for o in report.candidates:
+        notes.append(
+            f"⚠ {o.key} resembles an existing source "
+            f"({o.candidate.existing_path.name}, title similarity "
+            f"{o.candidate.score:.2f}) but shares no DOI/PMID/arXiv id. Imported as a "
+            "new file; nothing was merged. Review the pair in "
+            "merge-candidates/candidates.json (reject it by hand-editing its state)."
+        )
+    return notes
+
+
 def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning: str) -> int:
     """Emit the shared summary for an openalex import and return the exit code."""
-    notes = _openalex_placeholder_warnings(report)
+    notes = _openalex_placeholder_warnings(report) + _candidate_notes(report)
     if porcelain:
         # Stable machine contract, tab-separated, LF-terminated. Order-independent
         # (parse by first field):
@@ -2857,6 +2898,10 @@ def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning:
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
         print(f"target\t{target / 'sources'}")
+        # Surfaced merge candidates (#75): a new token on stdout, after the six
+        # summary lines those stay byte-unchanged.
+        for line in _candidate_porcelain_lines(report):
+            print(line)
         # Warnings go to stderr so they never pollute the machine contract.
         for note in notes:
             print(note, file=sys.stderr)
@@ -3164,9 +3209,15 @@ def _arxiv_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
         print(f"target\t{target / 'sources'}")
+        # Surfaced merge candidates (#75): a new token on stdout, after the six
+        # summary lines those stay byte-unchanged.
+        for line in _candidate_porcelain_lines(report):
+            print(line)
         # Warnings go to stderr so they never pollute the machine contract.
         for warning in warnings:
             print(warning, file=sys.stderr)
+        for note in _candidate_notes(report):
+            print(note, file=sys.stderr)
         return 1 if report.errors else 0
 
     print(f"\n{'Would import to' if dry_run else 'Importing to'} KB: {target}\n")
@@ -3181,6 +3232,8 @@ def _arxiv_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -
     print(f"  Errors:   {report.errors}")
     for warning in warnings:
         print(f"\n{warning}", file=sys.stderr)
+    for note in _candidate_notes(report):
+        print(f"\n{note}", file=sys.stderr)
     if report.imported and not dry_run:
         print("\nNext step: run '/factlog sync' to extract candidate facts.")
     return 1 if report.errors else 0

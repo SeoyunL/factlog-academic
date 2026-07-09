@@ -35,6 +35,7 @@ from pathlib import Path
 
 from factlog.integrations.arxiv.config import ArxivConfig
 from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
+from factlog.integrations.common.source_writer import CandidateMatch
 
 __all__ = ["WorkOutcome", "ImportReport", "import_works"]
 
@@ -48,6 +49,11 @@ class WorkOutcome:
     this arXiv deposit was folded into that original's provenance sidecar (§7.3)
     rather than written as a second file; ``path`` names that existing original.
     A merge is a success — it does not affect the exit code.
+
+    ``candidate`` is a title+author+year match surfaced for a human (#75): the paper
+    still imported as a new file, but it resembles an existing source that shares no
+    exact identifier. It is a field, never a status — the counters and exit code are
+    untouched.
     """
 
     status: str  # "imported" | "skipped" | "error" | "merged"
@@ -55,6 +61,7 @@ class WorkOutcome:
     title: str
     path: Path | None = None
     reason: str = ""
+    candidate: CandidateMatch | None = None
 
 
 @dataclass
@@ -79,6 +86,12 @@ class ImportReport:
     @property
     def errors(self) -> int:
         return self._count("error")
+
+    @property
+    def candidates(self) -> list[WorkOutcome]:
+        """Imported works that surfaced a title+author+year candidate (#75), in
+        report order — the CLI reports one line per entry."""
+        return [o for o in self.outcomes if o.candidate is not None]
 
 
 def import_works(
@@ -140,6 +153,7 @@ def import_works(
                 title=work.title or "(untitled)",
                 path=result.path,
                 reason=reason,
+                candidate=result.candidate,
             ),
         ))
     work_outcomes.sort(key=lambda item: (item[0], item[1]))
