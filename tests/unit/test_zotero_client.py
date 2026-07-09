@@ -45,7 +45,22 @@ NOTE = {"key": "NOTE1", "data": {"key": "NOTE1", "itemType": "note"}}
 
 # Fake exceptions whose class names mirror the real pyzotero/requests hierarchy,
 # so _classify (which inspects the MRO names) routes them like the real ones.
-class HTTPError(Exception):  # requests.exceptions.HTTPError / pyzotero HTTPError
+class HTTPError(Exception):  # httpx base / requests.HTTPError / pyzotero HTTPError
+    pass
+
+
+# Mimic httpx's real hierarchy: every transport failure derives from RequestError
+# which derives from HTTPError — so a connection error ALSO carries "HTTPError" in
+# its MRO. This is what broke the original (HTTPError-first) classifier.
+class RequestError(HTTPError):  # httpx.RequestError
+    pass
+
+
+class ConnectError(RequestError):  # httpx.ConnectError (connection refused)
+    pass
+
+
+class HTTPStatusError(HTTPError):  # httpx: a real 4xx/5xx response
     pass
 
 
@@ -217,6 +232,22 @@ class TestConnectionErrors:
         # A live-but-erroring server (HTTP 4xx/5xx) must be a ZoteroError, not a
         # "Zotero not running" ZoteroConnectionError.
         c = _client(exc=HTTPError("404 Not Found"))
+        with pytest.raises(ZoteroError, match="request failed") as ei:
+            c.list_collections()
+        assert not isinstance(ei.value, ZoteroConnectionError)
+
+    def test_httpx_connect_error_is_connection_not_request(self):
+        # Regression: httpx.ConnectError carries "HTTPError" in its MRO, but a
+        # refused connection must map to ZoteroConnectionError ("is Zotero
+        # running?"), not a "request failed" ZoteroError.
+        c = _client(exc=ConnectError("[Errno 61] Connection refused"))
+        with pytest.raises(ZoteroConnectionError, match="is Zotero running") as ei:
+            c.list_collections()
+        assert isinstance(ei.value, ZoteroConnectionError)
+
+    def test_httpx_status_error_is_request_failed(self):
+        # httpx.HTTPStatusError = server responded with 4xx/5xx -> ZoteroError.
+        c = _client(exc=HTTPStatusError("500 Server Error"))
         with pytest.raises(ZoteroError, match="request failed") as ei:
             c.list_collections()
         assert not isinstance(ei.value, ZoteroConnectionError)
