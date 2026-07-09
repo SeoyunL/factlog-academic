@@ -254,9 +254,11 @@ class TestCli:
         assert "WITHDRAWN by arXiv administrators" in out
         assert "retracted" not in out.lower()
 
-    def test_withdrawn_surfaced_regardless_of_older_than_skip(self, tmp_path, fake, capsys):
-        # Even a "recently checked" paper must still surface a *new* withdrawal:
-        # here the paper is stale-in-log so it is checked, proving the note fires.
+    def test_a_stale_entry_surfaces_a_new_withdrawal(self, tmp_path, fake, capsys):
+        # A paper past the freshness window is checked, and a withdrawal recorded
+        # nowhere in its ledger surfaces. The name used to claim this held
+        # "regardless of --older-than skip"; it does not, and
+        # `TestAFreshPapersWithdrawalIsNotDetected` pins what actually happens.
         _seed(tmp_path, "1904.09773", 1)
         now = datetime.now(timezone.utc)
         write_check_log(check_log_path(tmp_path), CheckLog(entries={
@@ -410,3 +412,66 @@ class TestAKbWithNoLedgerIsStillChecked:
         entries, errors = cv.collect_ledger_entries(tmp_path)
         assert errors == []
         assert entries[0].recorded_version is None  # unknown, not a crash
+
+
+class TestAFreshPapersWithdrawalIsNotDetected:
+    """`--older-than` skips a recently-checked paper without querying arXiv, and
+    the check-log stores only `last_checked_at` and `version` — not withdrawal
+    state. So a withdrawal that appears *inside* the freshness window is invisible
+    until the window expires.
+
+    This is inherent: arXiv only says a paper is withdrawn when asked. What matters
+    is that the command does not pretend otherwise. Nothing pinned this, and the
+    test that claimed to had quietly made its paper stale.
+    """
+
+    def _fresh_kb(self, tmp_path, days_ago=1):
+        _seed(tmp_path, "1904.09773", 1)
+        now = datetime.now(timezone.utc)
+        write_check_log(check_log_path(tmp_path), CheckLog(entries={
+            "1904.09773": CheckRecord((now - timedelta(days=days_ago)).isoformat(), 1)}))
+        return tmp_path
+
+    def test_a_withdrawal_inside_the_window_is_not_surfaced(self, tmp_path, fake, capsys):
+        kb = self._fresh_kb(tmp_path)
+        client = fake(FakeClient([_work("1904.09773", version=1, withdrawn_by="admin")]))
+        assert run(["arxiv-check-versions", "--target", str(kb)]) == 0
+        out = capsys.readouterr().out
+        assert client.calls == [], "a skipped paper must not be queried"
+        assert "WITHDRAWN" not in out
+
+    def test_the_skip_note_says_a_withdrawal_would_be_missed(self, tmp_path, fake, capsys):
+        # The command must not let a reader infer "0 newly withdrawn" means "none".
+        kb = self._fresh_kb(tmp_path)
+        fake(FakeClient([_work("1904.09773", version=1, withdrawn_by="admin")]))
+        run(["arxiv-check-versions", "--target", str(kb)])
+        out = capsys.readouterr().out
+        assert "NOT detected" in out
+        assert "--older-than 0" in out
+
+    def test_forcing_the_recheck_surfaces_it(self, tmp_path, fake, capsys):
+        kb = self._fresh_kb(tmp_path)
+        fake(FakeClient([_work("1904.09773", version=1, withdrawn_by="admin")]))
+        assert run(["arxiv-check-versions", "--target", str(kb), "--older-than", "0"]) == 0
+        assert "WITHDRAWN by arXiv administrators" in capsys.readouterr().out
+
+
+class TestAFrontMatterOnlyPaperIsNotCalledALedger:
+    """A paper imported before #82 has no ledger. Saying "ledger records v5" for it
+    names a file that does not exist."""
+
+    def test_the_report_says_front_matter_when_there_is_no_ledger(self, tmp_path, fake, capsys):
+        (tmp_path / "sources").mkdir(parents=True)
+        (tmp_path / "sources" / "old.md").write_text(
+            '---\narxiv_id: "1706.03762"\narxiv_version: 5\n---\n', encoding="utf-8")
+        fake(FakeClient([_work("1706.03762", version=7)]))
+        run(["arxiv-check-versions", "--target", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert "front matter records v5" in out
+        assert "ledger records" not in out
+
+    def test_a_ledger_backed_paper_still_says_ledger(self, tmp_path, fake, capsys):
+        _seed(tmp_path, "1706.03762", 5)
+        fake(FakeClient([_work("1706.03762", version=7)]))
+        run(["arxiv-check-versions", "--target", str(tmp_path)])
+        assert "ledger records v5" in capsys.readouterr().out

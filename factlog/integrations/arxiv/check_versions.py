@@ -416,6 +416,19 @@ def _sources_suffix(result: VersionCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
 
+def _recorded_in(result) -> str:
+    """Where the recorded version came from: a ledger, or a source's front matter.
+
+    A paper imported before #82 has no ledger, and saying "ledger records v5" for it
+    names a file that does not exist. Ledger sources live under
+    ``source-provenance/``; front-matter ones are the ``sources/*.md`` themselves.
+    """
+    sources = getattr(result, "sources", ()) or ()
+    if sources and all(str(s).startswith("sources/") for s in sources):
+        return "front matter records"
+    return "ledger records"
+
+
 def report_lines(
     results: Sequence[VersionCheck],
     skipped: Sequence[VersionCheck],
@@ -431,7 +444,9 @@ def report_lines(
     if skipped:
         header += (
             f"\n  ({len(skipped)} skipped: checked within the last "
-            f"{_days(older_than_days)}; run with --older-than 0 to force a re-check)"
+            f"{_days(older_than_days)}. A withdrawal or a version bump that "
+            "appeared since their last check is NOT detected — arXiv only says so "
+            "when asked. Run with --older-than 0 to force a re-check.)"
         )
     lines = [header]
 
@@ -457,8 +472,9 @@ def report_lines(
         lines.append("\nVersion diverged (the source evolved; this is a report, not a verdict):")
         for result in changed:
             lines.append(
-                f"  ~ {result.arxiv_id}: ledger records v{result.recorded_version}, "
-                f"arXiv now serves v{result.current_version}{_sources_suffix(result)}"
+                f"  ~ {result.arxiv_id}: {_recorded_in(result)} "
+                f"v{result.recorded_version}, arXiv now serves "
+                f"v{result.current_version}{_sources_suffix(result)}"
             )
 
     if errors:
