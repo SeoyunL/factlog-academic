@@ -71,21 +71,31 @@ from factlog.integrations.common.front_matter import read_scalars
 from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
+    SourceRecord,
     read_provenance,
+    update_source,
+    write_provenance,
 )
 
 __all__ = [
     "BATCH_SIZE",
     "LedgerEntry",
     "VersionCheck",
+    "LedgerUpdate",
     "STATUS_UNCHANGED",
     "STATUS_CHANGED",
     "STATUS_ERROR",
     "STATUS_SKIPPED",
+    "UPDATE_WRITTEN",
+    "UPDATE_UNCHANGED",
+    "UPDATE_NO_LEDGER",
+    "UPDATE_ERROR",
+    "AUTO_UPDATE_FIELDS",
     "collect_ledger_entries",
     "partition_by_freshness",
     "check_entries",
     "summarize",
+    "apply_auto_update",
 ]
 
 #: A provenance record's ``type`` for an arXiv contribution.
@@ -133,12 +143,20 @@ class VersionCheck:
     agent (``"author"``/``"admin"``) when the paper is withdrawn now. For an error
     result the ``arxiv_id`` may instead be a ledger path (a corrupt file), and
     ``reason`` explains it.
+
+    ``current_last_updated`` (an ISO date string) and ``current_comment`` carry the
+    two *other* version-tracking values arXiv returned, alongside
+    ``current_version``. They exist for ``--auto-update`` (#79), which writes exactly
+    those three fields into the ledger. Report-only (#78) never reads them. They are
+    ``None`` for a skipped/errored/missing result, which never reaches a write.
     """
 
     arxiv_id: str
     status: str
     recorded_version: int | None = None
     current_version: int | None = None
+    current_last_updated: str | None = None
+    current_comment: str | None = None
     newly_withdrawn: bool = False
     withdrawn_by: str | None = None
     reason: str = ""
@@ -306,6 +324,12 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
         status=STATUS_CHANGED if changed else STATUS_UNCHANGED,
         recorded_version=recorded,
         current_version=current,
+        # The two other version-tracking values --auto-update writes. Dates are
+        # serialized to ISO strings here (the ledger stores strings, not `date`,
+        # for the same reason the arXiv writer does: `json` cannot serialize a
+        # `date`, and `provenance` refuses to guess). `comment` is stored verbatim.
+        current_last_updated=work.last_updated.isoformat() if work.last_updated else None,
+        current_comment=work.comment,
         newly_withdrawn=newly_withdrawn,
         withdrawn_by=work.withdrawn_by,
         sources=entry.sources,
@@ -391,6 +415,206 @@ def summarize(
     return summary
 
 
+# --------------------------------------------------------------------------- #
+# --auto-update: the one legitimate caller of provenance.update_source (#79)
+# --------------------------------------------------------------------------- #
+
+#: The exact fields ``--auto-update`` may rewrite in an arXiv ledger record. This
+#: is the whole of the narrow contract (#79): the version and the two other
+#: values arXiv edits as a version evolves. It never includes the abstract, title,
+#: authors, ``imported_at``, ``submitted``, ``primary_category`` — or
+#: ``withdrawn_by`` (see :func:`apply_auto_update` for why a withdrawal is
+#: surfaced but never absorbed).
+AUTO_UPDATE_FIELDS = ("version", "last_updated", "comment")
+
+#: A ledger was rewritten (a version-tracking field genuinely moved).
+UPDATE_WRITTEN = "updated"
+#: The upstream version-tracking fields already matched the ledger — nothing was
+#: written, so the file stays byte- and ``mtime_ns``-identical.
+UPDATE_UNCHANGED = "unchanged"
+#: The paper is known only from front matter (imported before #82), so there is no
+#: ledger to update. ``--auto-update`` does **not** create one (see below).
+UPDATE_NO_LEDGER = "no-ledger"
+#: A ledger could not be read while updating it — that paper's problem, reported
+#: per-id, never a batch crash.
+UPDATE_ERROR = "error"
+
+
+@dataclass(frozen=True)
+class LedgerUpdate:
+    """What ``--auto-update`` did (or declined to do) for one paper.
+
+    ``status`` is one of the ``UPDATE_*`` constants. ``ledgers`` names the sidecars
+    actually rewritten (empty unless ``status`` is :data:`UPDATE_WRITTEN`).
+    ``recorded_version``/``current_version`` mirror the check so the report can say
+    "ledger v5 -> v7 recorded". ``reason`` explains a :data:`UPDATE_NO_LEDGER` or
+    :data:`UPDATE_ERROR` outcome.
+    """
+
+    arxiv_id: str
+    status: str
+    ledgers: tuple[str, ...] = ()
+    recorded_version: int | None = None
+    current_version: int | None = None
+    reason: str = ""
+
+
+def _refreshed_fields(existing: SourceRecord, result: VersionCheck) -> dict:
+    """The record's fields with *only* the three version-tracking values replaced.
+
+    Everything else — ``imported_at`` (top level, untouched by construction),
+    ``submitted``, ``primary_category``, and any recorded ``withdrawn_by`` — is
+    copied through verbatim. A ``None`` incoming value (arXiv dropped a comment, or
+    reports no ``updated`` date) is written as ``None`` and dropped on serialization
+    by :meth:`SourceRecord.to_dict`, so it reflects the current upstream state
+    rather than freezing a stale one.
+    """
+    fields = dict(existing.fields)
+    fields["version"] = result.current_version
+    fields["last_updated"] = result.current_last_updated
+    fields["comment"] = result.current_comment
+    return fields
+
+
+def apply_auto_update(
+    results: Sequence[VersionCheck],
+    kb_root: Path | str,
+) -> list[LedgerUpdate]:
+    """Write the three version-tracking fields (:data:`AUTO_UPDATE_FIELDS`) of each
+    checked paper into its provenance ledger(s), and nothing else.
+
+    This is the sole legitimate caller of :func:`provenance.update_source` (#58/#79).
+    An *import* calls ``add_source``, which refuses to revise a diverging entry
+    because an import has no authority to; a *refresh* has gone to the upstream API
+    to learn the new value, so replacing the entry is correct. The narrow contract:
+
+    * Only ``version``, ``last_updated`` and ``comment`` are rewritten. Every other
+      ledger field, every non-arXiv record in the same ledger, and — critically —
+      the original ``sources/*.md`` are left untouched. The ``.md`` is never opened,
+      so it stays byte- and ``mtime_ns``-identical (P4 needs no narrowing).
+    * A paper whose three fields already match the ledger is a **byte-identical
+      no-op**: the file is not rewritten, so its bytes and ``mtime_ns`` do not move.
+    * **A withdrawal is surfaced but never absorbed.** ``withdrawn_by`` is not in
+      :data:`AUTO_UPDATE_FIELDS`, so ``--auto-update`` never records it. That is
+      deliberate: writing it would flip ``newly_withdrawn`` to ``False`` on the next
+      run and silence the very signal the issue says must "never pass quietly". The
+      withdrawal keeps surfacing in the report on every run until a human records
+      it. ``--auto-update`` may still update the *version* of a withdrawn paper (the
+      withdrawal often ships as a new version); the withdrawal itself stays for the
+      P1 human gate.
+    * **A front-matter-only paper gets no ledger.** A paper imported before #82 has
+      front matter but no ledger. Creating one here would be an *import*'s write —
+      it fabricates ``imported_at`` and the initial provenance record, which only
+      the import path has the authority and the true values to write (#58). A
+      refresh knows the new *version*, not where the source came from. So the paper
+      is reported as :data:`UPDATE_NO_LEDGER` and left for a re-import/backfill to
+      give it a ledger; its check-log timestamp still advances (that is KB-level
+      housekeeping, not a source-provenance write).
+    * A ledger that will not read is that paper's problem — a per-id
+      :data:`UPDATE_ERROR`, never a batch crash (#65/#71).
+
+    Results with no observed version (skipped, missing, corrupt at collection) are
+    ignored: there is nothing to write. Returns one :class:`LedgerUpdate` per paper
+    acted on, in ``arxiv_id`` order.
+    """
+    root = Path(kb_root)
+    outcomes: list[LedgerUpdate] = []
+    for result in results:
+        # Only a paper the API actually answered has a version to record. Errors,
+        # skips and missing ids carry no current version and are never written.
+        if result.status == STATUS_ERROR or result.current_version is None:
+            continue
+
+        # A paper spoken for only by `sources/*.md` has no ledger (imported before
+        # #82). `collect_ledger_entries` marks its sources with the `sources/`
+        # prefix; a ledger-backed paper's sources are `source-provenance/*.json`.
+        sidecars = [s for s in result.sources if not str(s).startswith("sources/")]
+        if not sidecars:
+            outcomes.append(
+                LedgerUpdate(
+                    arxiv_id=result.arxiv_id,
+                    status=UPDATE_NO_LEDGER,
+                    recorded_version=result.recorded_version,
+                    current_version=result.current_version,
+                    reason=(
+                        "imported before #82: front matter only, no provenance "
+                        "ledger to update. Re-import to create one; --auto-update "
+                        "will not fabricate an import record."
+                    ),
+                )
+            )
+            continue
+
+        written: list[str] = []
+        errors: list[str] = []
+        for rel in sidecars:
+            path = root / rel
+            try:
+                provenance = read_provenance(path)
+            except ProvenanceError as exc:
+                errors.append(f"{rel}: {exc}")
+                continue
+            existing = next(
+                (
+                    r
+                    for r in provenance.records
+                    if r.type == _ARXIV_TYPE and r.id == result.arxiv_id
+                ),
+                None,
+            )
+            if existing is None:
+                # The ledger named this paper at collection but no longer carries
+                # the record: treat as nothing to do rather than inventing one.
+                continue
+            record = SourceRecord(
+                type=existing.type,
+                id=existing.id,
+                imported_at=existing.imported_at,
+                fields=_refreshed_fields(existing, result),
+            )
+            # A no-op must not touch the file: compare the serialized forms so an
+            # unchanged paper leaves the ledger byte- and mtime_ns-identical.
+            if record.to_dict() == existing.to_dict():
+                continue
+            update_source(provenance, record)
+            write_provenance(path, provenance)
+            written.append(rel)
+
+        if errors and not written:
+            outcomes.append(
+                LedgerUpdate(
+                    arxiv_id=result.arxiv_id,
+                    status=UPDATE_ERROR,
+                    recorded_version=result.recorded_version,
+                    current_version=result.current_version,
+                    reason="; ".join(errors),
+                )
+            )
+        elif written:
+            outcomes.append(
+                LedgerUpdate(
+                    arxiv_id=result.arxiv_id,
+                    status=UPDATE_WRITTEN,
+                    ledgers=tuple(sorted(written)),
+                    recorded_version=result.recorded_version,
+                    current_version=result.current_version,
+                    reason="; ".join(errors),
+                )
+            )
+        else:
+            outcomes.append(
+                LedgerUpdate(
+                    arxiv_id=result.arxiv_id,
+                    status=UPDATE_UNCHANGED,
+                    recorded_version=result.recorded_version,
+                    current_version=result.current_version,
+                )
+            )
+
+    outcomes.sort(key=lambda u: u.arxiv_id)
+    return outcomes
+
+
 def format_eta(papers: int, batch_size: int, delay: float) -> str:
     """A human ETA for ``papers`` in ``ceil(papers/batch_size)`` delayed requests."""
     batches = (papers + batch_size - 1) // batch_size
@@ -436,9 +660,11 @@ def report_lines(
     *,
     target: Path,
     older_than_days: float,
+    updates: Sequence[LedgerUpdate] = (),
 ) -> list[str]:
     """The human-readable stdout report. Withdrawals lead, prominently, whatever the
-    version outcome; then version divergences; then per-id errors; then the tally."""
+    version outcome; then version divergences; then per-id errors; then, under
+    ``--auto-update``, what was written to the ledgers; then the tally."""
     total = len(results) + len(skipped)
     header = f"Checked {len(results)} of {total} arXiv record(s) in KB: {target}"
     if skipped:
@@ -482,6 +708,8 @@ def report_lines(
         for result in errors:
             lines.append(f"  ✗ {result.arxiv_id}: {result.reason}{_sources_suffix(result)}")
 
+    lines.extend(_auto_update_lines(updates))
+
     lines.append("\nSummary:")
     lines.append(f"  Checked:         {summary.checked}")
     lines.append(f"  Up to date:      {summary.unchanged}")
@@ -489,6 +717,44 @@ def report_lines(
     lines.append(f"  Newly withdrawn: {summary.withdrawn}")
     lines.append(f"  Errors:          {summary.errors}")
     lines.append(f"  Skipped:         {summary.skipped}")
+    if updates:
+        lines.append(
+            f"  Ledgers updated: {sum(1 for u in updates if u.status == UPDATE_WRITTEN)}"
+        )
+    return lines
+
+
+def _auto_update_lines(updates: Sequence[LedgerUpdate]) -> list[str]:
+    """The ``--auto-update`` section: what was written, what already matched, what
+    has no ledger, and any per-id write error. Empty when the flag is off."""
+    if not updates:
+        return []
+    written = [u for u in updates if u.status == UPDATE_WRITTEN]
+    no_ledger = [u for u in updates if u.status == UPDATE_NO_LEDGER]
+    errors = [u for u in updates if u.status == UPDATE_ERROR]
+    lines: list[str] = []
+    if written:
+        lines.append(
+            "\nLedger updated (version-tracking fields only — "
+            "version, last_updated, comment):"
+        )
+        for u in written:
+            ledgers = f"  ({', '.join(u.ledgers)})" if u.ledgers else ""
+            lines.append(
+                f"  ✎ {u.arxiv_id}: recorded v{u.current_version} "
+                f"(was v{u.recorded_version}){ledgers}"
+            )
+    if no_ledger:
+        lines.append(
+            "\nNot auto-updated (no ledger; front matter only, imported before #82 — "
+            "re-import to create one):"
+        )
+        for u in no_ledger:
+            lines.append(f"  · {u.arxiv_id}: arXiv now serves v{u.current_version}")
+    if errors:
+        lines.append("\nCould not auto-update:")
+        for u in errors:
+            lines.append(f"  ✗ {u.arxiv_id}: {u.reason}")
     return lines
 
 
@@ -498,13 +764,19 @@ def porcelain_lines(
     summary: Summary,
     *,
     target: Path,
+    updates: Sequence[LedgerUpdate] = (),
 ) -> list[str]:
     """The machine contract on stdout: one tab-separated ``check`` row per record
-    (checked, skipped, or errored), then the tallies. Parse by the first field.
+    (checked, skipped, or errored), then — only under ``--auto-update`` — one
+    ``update`` row per acted-on paper, then the tallies. Parse by the first field.
 
     ``check\t<id>\t<status>\t<recorded>\t<current>\t<withdrawn_by>\t<newly_withdrawn>\t<reason>``
     with empty fields for absent values, ``newly_withdrawn`` as ``0``/``1``, and
-    versions as bare integers. The progress/ETA never appears here — it is stderr.
+    versions as bare integers. The ``update`` rows are
+    ``update\t<id>\t<status>\t<recorded>\t<current>\t<ledgers>`` where ``status`` is
+    one of ``updated``/``unchanged``/``no-ledger``/``error`` and ``ledgers`` is a
+    comma-joined list (empty unless ``updated``). They are absent when the flag is
+    off, so an existing #78 parser is unaffected. The progress/ETA is stderr only.
     """
     rows: list[str] = []
     for result in sorted([*results, *skipped], key=lambda r: r.arxiv_id):
@@ -521,12 +793,26 @@ def porcelain_lines(
                 reason=result.reason,
             )
         )
+    for u in updates:
+        recorded = "" if u.recorded_version is None else str(u.recorded_version)
+        current = "" if u.current_version is None else str(u.current_version)
+        rows.append(
+            "update\t{id}\t{status}\t{recorded}\t{current}\t{ledgers}".format(
+                id=u.arxiv_id,
+                status=u.status,
+                recorded=recorded,
+                current=current,
+                ledgers=",".join(u.ledgers),
+            )
+        )
     rows.append(f"checked\t{summary.checked}")
     rows.append(f"unchanged\t{summary.unchanged}")
     rows.append(f"changed\t{summary.changed}")
     rows.append(f"withdrawn\t{summary.withdrawn}")
     rows.append(f"errors\t{summary.errors}")
     rows.append(f"skipped\t{summary.skipped}")
+    if updates:
+        rows.append(f"updated\t{sum(1 for u in updates if u.status == UPDATE_WRITTEN)}")
     rows.append(f"target\t{target}")
     return rows
 

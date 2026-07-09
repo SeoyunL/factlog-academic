@@ -3413,10 +3413,20 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
             print(warning, file=sys.stderr)
     return 0
 def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
-    """Report-only: is any arXiv record in the KB behind arXiv's latest? (#78, §11
-    Step 6). Reads the provenance ledgers and a KB-level check-log, queries arXiv,
-    and reports version divergences and newly-withdrawn papers. Never writes to
-    sources/ or a ledger; only the check-log's last-checked timestamps advance.
+    """Is any arXiv record in the KB behind arXiv's latest? (#78/#79, §11 Step 6).
+    Reads the provenance ledgers and a KB-level check-log, queries arXiv, and
+    reports version divergences and newly-withdrawn papers.
+
+    Without ``--auto-update`` this is report-only: it never writes to sources/ or a
+    ledger; only the check-log's last-checked timestamps advance (#78).
+
+    With ``--auto-update`` (#79) it additionally records the three version-tracking
+    fields — version, last_updated, comment — into each changed paper's provenance
+    ledger via the one legitimate caller of ``provenance.update_source``. It never
+    opens the original ``.md`` (P4 holds byte- and mtime_ns-identical), never
+    rewrites any other ledger field, and never absorbs a withdrawal: a
+    newly-withdrawn paper is surfaced for human review under both modes and its
+    ``withdrawn_by`` is never written, so it keeps surfacing until a human acts.
     """
     from datetime import datetime, timezone
 
@@ -3436,6 +3446,7 @@ def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     target, config = prepared
     porcelain = getattr(args, "porcelain", False)
     older_than_days = args.older_than
+    auto_update = getattr(args, "auto_update", False)
 
     # A corrupt check-log is one KB-level file; surface it as a clear failure
     # rather than a traceback, and never as an empty log (which the next write
@@ -3495,17 +3506,30 @@ def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     if recorded_any:
         write_check_log(log_path, check_log)
 
+    # --auto-update writes only the three version-tracking fields into each changed
+    # paper's ledger (the sole legitimate caller of update_source). It never opens a
+    # source .md; a paper whose fields already match is a byte-identical no-op; a
+    # front-matter-only paper has no ledger and is reported, not fabricated; a
+    # corrupt ledger is a per-id error, not a crash. A withdrawal is surfaced by the
+    # report under both modes and is never written, so it keeps surfacing for human
+    # review. Only `results` (papers actually checked this run) are eligible.
+    updates = cv.apply_auto_update(results, target) if auto_update else []
+
     all_results = results + ledger_errors
     summary = cv.summarize(all_results, skipped)
     if porcelain:
-        for line in cv.porcelain_lines(all_results, skipped, summary, target=target):
+        for line in cv.porcelain_lines(
+            all_results, skipped, summary, target=target, updates=updates
+        ):
             print(line)
     else:
         for line in cv.report_lines(
-            all_results, skipped, summary, target=target, older_than_days=older_than_days
+            all_results, skipped, summary, target=target,
+            older_than_days=older_than_days, updates=updates,
         ):
             print(line)
-    return 1 if summary.errors else 0
+    update_errors = any(u.status == cv.UPDATE_ERROR for u in updates)
+    return 1 if summary.errors or update_errors else 0
 
 
 def cmd_openalex_cite(args: argparse.Namespace) -> int:
@@ -4000,8 +4024,9 @@ def build_parser() -> argparse.ArgumentParser:
     ax_search.set_defaults(func=cmd_arxiv_search)
     ax_check = sub.add_parser(
         "arxiv-check-versions",
-        help="report arXiv records whose version is behind arXiv's latest "
-             "(report-only; never writes sources/)",
+        help="report arXiv records whose version is behind arXiv's latest; with "
+             "--auto-update record the new version-tracking fields in the ledger "
+             "(never touches sources/*.md)",
     )
     ax_check.add_argument(
         "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
@@ -4010,6 +4035,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--older-than", type=float, default=30.0, metavar="DAYS",
         help="skip records checked within DAYS (read from the check-log, not the "
              "source files); default 30. Use 0 to force a re-check of every record.",
+    )
+    ax_check.add_argument(
+        "--auto-update", action="store_true",
+        help="record the new version, last_updated and comment in each changed "
+             "paper's provenance ledger. Never touches the original .md, never "
+             "rewrites any other ledger field, and never absorbs a withdrawal "
+             "(surfaced for human review under both modes). Without this flag, "
+             "nothing is written but the check-log timestamp.",
     )
     ax_check.add_argument(
         "--porcelain", action="store_true",
