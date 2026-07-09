@@ -54,6 +54,11 @@ class WorkOutcome:
 @dataclass
 class ImportReport:
     outcomes: list[WorkOutcome] = field(default_factory=list)
+    #: Why the merge-candidate ledger could not be consulted, if it could not.
+    #: The import still succeeded; the #75 fallback was disabled for this run, and
+    #: the CLI must say so — a silently disabled check is the failure that layer
+    #: exists to prevent.
+    candidate_ledger_error: str | None = None
 
     def _count(self, status: str) -> int:
         return sum(1 for o in self.outcomes if o.status == status)
@@ -127,6 +132,7 @@ def import_works(
                 candidate=result.candidate,
             )
         )
+    report.candidate_ledger_error = writer.candidate_ledger_error
     return report
 
 

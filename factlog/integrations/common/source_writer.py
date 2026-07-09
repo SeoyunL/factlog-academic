@@ -310,6 +310,13 @@ class BaseSourceWriter:
     #: the divergence it raises.
     _IDENTIFYING_FIELDS: tuple[str, ...] = ()
 
+    #: Set when the merge-candidate ledger could not be read or written. The
+    #: import still succeeds — a paper the user asked for should arrive (P1) — but
+    #: the fallback is disabled for that run, and a silently disabled check is the
+    #: failure this whole detection layer exists to prevent. The importer copies it
+    #: into the report so the CLI can say so once.
+    candidate_ledger_error: str | None = None
+
     def __init__(self, skip_duplicates: bool = True, include_abstract: bool = True):
         self.skip_duplicates = skip_duplicates
         self.include_abstract = include_abstract
@@ -577,10 +584,12 @@ class BaseSourceWriter:
 
         try:
             ledger = read_candidates(candidates_path(kb_root))
-        except (MergeCandidatesError, OSError):
-            # A corrupt ledger is a human-fixable condition (see the module
-            # docstring). Surface nothing rather than crash the batch or act on an
-            # unknown state; the read boundary itself still raises for direct callers.
+        except (MergeCandidatesError, OSError) as exc:
+            # A corrupt ledger is human-fixable. Do not crash the batch, and do not
+            # act on an unknown state — a pair a human already rejected must not be
+            # re-proposed. But do not swallow it either: the operator would import a
+            # paper with the fallback silently disabled and never learn it.
+            self.candidate_ledger_error = str(exc)
             return None
         if ledger.has_pair(incoming_identity, row.identity):
             return None
@@ -602,7 +611,8 @@ class BaseSourceWriter:
         path = candidates_path(kb_root)
         try:
             ledger = read_candidates(path)
-        except (MergeCandidatesError, OSError):
+        except (MergeCandidatesError, OSError) as exc:
+            self.candidate_ledger_error = str(exc)
             return
         if ledger.has_pair(candidate.incoming, candidate.existing):
             return
@@ -611,7 +621,8 @@ class BaseSourceWriter:
             state=STATE_PENDING, score=candidate.score, recorded_at=recorded_at))
         try:
             write_candidates(path, ledger)
-        except (MergeCandidatesError, OSError):
+        except (MergeCandidatesError, OSError) as exc:
+            self.candidate_ledger_error = str(exc)
             return
 
     def _resolve(self, parsed, target: Path | str, mode: str) -> WriteResult:

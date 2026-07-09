@@ -2867,6 +2867,15 @@ def _candidate_notes(report) -> list[str]:
     it resembles and at the ledger, where a pair is rejected by hand-editing the JSON
     (there is no ``reject`` command in this release, by design — #75 H4)."""
     notes = []
+    if report.candidate_ledger_error:
+        # The import succeeded, but the duplicate check that would have caught a
+        # near-identical existing source never ran. Saying nothing would leave the
+        # operator believing it did.
+        notes.append(
+            "⚠ merge-candidate detection was disabled for this run: "
+            f"{report.candidate_ledger_error}. Repair or delete "
+            "merge-candidates/candidates.json, then re-import to re-check."
+        )
     for o in report.candidates:
         notes.append(
             f"⚠ {o.key} resembles an existing source "

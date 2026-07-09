@@ -371,3 +371,63 @@ class TestCliCandidateOutput:
         # arXiv's porcelain key is the versioned id.
         assert any(ln.startswith("candidate\t2509.00891v1\t") for ln in out.splitlines())
         assert "candidates\t1" in out.splitlines()
+
+
+def _seeded_kb(tmp_path):
+    """A KB holding the AAAI record of the spike's real false-merge pair."""
+    (tmp_path / "sources").mkdir(exist_ok=True)
+    oa_import([_oa("W_AAAI", "10.1609/aaai.v40i46.41305")], target=tmp_path,
+                 imported_at="2026-07-09T00:00:00Z")
+    return tmp_path
+
+
+def _import_the_near_duplicate(kb):
+    """The medRxiv record: same title, same first author, adjacent year, other DOI."""
+    return oa_import([_oa("W_MEDRXIV", "10.1101/2025.09.02.25334973")], target=kb,
+                        imported_at="2026-07-09T00:00:00Z")
+
+
+class TestADisabledCheckIsNeverSilent:
+    """A corrupt candidate ledger must not crash the batch, and it must not silently
+    turn the fallback off. The paper the user asked for should arrive (P1); what it
+    may not do is arrive with a duplicate check the operator believes ran."""
+
+    def _corrupt(self, kb, text="{ corrupt"):
+        path = candidates_path(kb)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_the_import_still_succeeds(self, tmp_path):
+        kb = _seeded_kb(tmp_path)
+        self._corrupt(kb)
+        report = _import_the_near_duplicate(kb)
+        assert report.imported == 1
+        assert report.errors == 0
+
+    def test_the_disabled_check_is_reported(self, tmp_path):
+        kb = _seeded_kb(tmp_path)
+        self._corrupt(kb)
+        report = _import_the_near_duplicate(kb)
+        assert report.candidate_ledger_error
+        assert "not valid JSON" in report.candidate_ledger_error
+
+    def test_no_candidate_is_surfaced_from_an_unknown_state(self, tmp_path):
+        # A pair a human already rejected must not be re-proposed, and a corrupt
+        # ledger cannot tell us whether they did.
+        kb = _seeded_kb(tmp_path)
+        self._corrupt(kb)
+        report = _import_the_near_duplicate(kb)
+        assert report.candidates == []
+
+    def test_the_corrupt_ledger_is_left_exactly_as_found(self, tmp_path):
+        kb = _seeded_kb(tmp_path)
+        path = self._corrupt(kb)
+        _import_the_near_duplicate(kb)
+        assert path.read_text(encoding="utf-8") == "{ corrupt"
+
+    def test_a_healthy_ledger_reports_no_error(self, tmp_path):
+        kb = _seeded_kb(tmp_path)
+        report = _import_the_near_duplicate(kb)
+        assert report.candidate_ledger_error is None
+        assert len(report.candidates) == 1
