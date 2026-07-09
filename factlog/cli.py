@@ -2758,6 +2758,344 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     return 1 if (report.errors or report.pdf_errors or report.annotation_errors or convert_rc) else 0
 
 
+def _make_openalex_client(config):
+    """Build the real OpenAlex client. Indirected so tests can inject a fake."""
+    from factlog.integrations.openalex.api_client import OpenAlexClient
+
+    return OpenAlexClient(config)
+
+
+def _openalex_budget_warning(client) -> str:
+    """A warning when too little of the daily credit budget remains, else "".
+
+    OpenAlex bills a search 10 credits against a ~1000/day budget, so roughly a
+    hundred searches a day (#51). The operator is told, never blocked.
+    """
+    rate = getattr(client, "rate_limit", None)
+    if rate is None or not rate.is_low:
+        return ""
+    return (
+        f"⚠ OpenAlex daily credit budget is nearly spent: {rate.remaining} left "
+        f"(a search costs 10). It refills about {round((rate.reset_seconds or 0) / 3600)}h "
+        "from now."
+    )
+
+
+def _openalex_report_lines(report, dry_run: bool) -> list[str]:
+    """The per-work narration shared by the openalex-* commands."""
+    marks = {"imported": "✓", "skipped": "↷", "error": "⚠"}
+    lines = []
+    for outcome in report.outcomes:
+        status = ("would import" if dry_run else "imported") if outcome.status == "imported" else (
+            ("would skip" if dry_run else "skipped") if outcome.status == "skipped" else "error"
+        )
+        detail = f" ({outcome.reason})" if outcome.reason else ""
+        name = outcome.path.name if outcome.path is not None else "-"
+        suffix = f" -> {name}" if dry_run and outcome.status == "imported" else ""
+        lines.append(
+            f"  {marks.get(outcome.status, '?')} {outcome.title} ({outcome.key})"
+            f" - {status}{detail}{suffix}"
+        )
+    return lines
+
+
+def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning: str) -> int:
+    """Emit the shared summary for an openalex import and return the exit code."""
+    if porcelain:
+        # Stable machine contract, tab-separated, LF-terminated. Order-independent
+        # (parse by first field):
+        #   imported\t<n> / skipped\t<n> / errors\t<n> / dry_run\t<0|1>
+        #   target\t<abs sources dir>
+        # In --dry-run only, a per-work row precedes them:
+        #   work\t<status>\t<openalex_id>\t<would-be filename>
+        if dry_run:
+            for outcome in report.outcomes:
+                name = outcome.path.name if outcome.path is not None else ""
+                print(f"work\t{outcome.status}\t{outcome.key}\t{name}")
+        print(f"imported\t{report.imported}")
+        print(f"skipped\t{report.skipped}")
+        print(f"errors\t{report.errors}")
+        print(f"dry_run\t{'1' if dry_run else '0'}")
+        print(f"target\t{target / 'sources'}")
+        if warning:
+            print(warning, file=sys.stderr)
+        return 1 if report.errors else 0
+
+    print(f"\n{'Would import to' if dry_run else 'Importing to'} KB: {target}\n")
+    for line in _openalex_report_lines(report, dry_run):
+        print(line)
+    print("\nSummary:")
+    print(f"  {'Would import' if dry_run else 'Imported'}: {report.imported}")
+    print(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
+    print(f"  Errors:   {report.errors}")
+    if warning:
+        print(f"\n{warning}", file=sys.stderr)
+    if report.imported and not dry_run:
+        print("\nNext step: run '/factlog sync' to extract candidate facts.")
+    return 1 if report.errors else 0
+
+
+def _openalex_prepare(args, command: str):
+    """Resolve the target KB and OpenAlex settings, or None on a user error."""
+    from pathlib import Path
+
+    from factlog.integrations.openalex.config import OpenAlexConfigError, load_config
+
+    porcelain = getattr(args, "porcelain", False)
+    target_str, source = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if source in ("config", "cwd") and not porcelain:
+        print(f"factlog {command}: target KB {target} (from {source})")
+    if not _require_kb(target, command):
+        return None
+    try:
+        return target, load_config(kb_root=target)
+    except OpenAlexConfigError as exc:
+        print(f"factlog {command}: {exc}", file=sys.stderr)
+        return None
+
+
+def _openalex_select(works, *, interactive: bool) -> list:
+    """Ask which of the search results to import (spec §5.3).
+
+    Without a terminal — a pipe, a script, ``--porcelain``, ``--dry-run`` — no
+    prompt is issued and nothing is selected: a command that cannot ask must not
+    guess, and writing every hit would be a surprise. ``--all`` is the explicit
+    way to import a whole result set.
+    """
+    if not works or not interactive:
+        return []
+    try:
+        answer = input("\nImport which? (comma-separated numbers, or 'all', or 'none')\n> ").strip()
+    except EOFError:
+        return []
+
+    if not answer or answer.lower() == "none":
+        return []
+    if answer.lower() == "all":
+        return list(works)
+
+    chosen = []
+    for token in answer.split(","):
+        token = token.strip()
+        if not token.isdigit() or not 1 <= int(token) <= len(works):
+            print(f"factlog openalex-search: ignoring '{token}'", file=sys.stderr)
+            continue
+        candidate = works[int(token) - 1]
+        if candidate not in chosen:
+            chosen.append(candidate)
+    return chosen
+
+
+def _openalex_check_limit(args, config, command: str) -> bool:
+    """Reject an out-of-range --limit before any network call is made."""
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        return True
+    if limit < 1 or limit > config.max_limit:
+        print(
+            f"factlog {command}: --limit must be between 1 and {config.max_limit}, got {limit}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _openalex_show_results(works, count: int, *, porcelain: bool, scope: str = "",
+                           heading: str = "") -> None:
+    if porcelain:
+        # `scope` distinguishes the two directions of openalex-cite, which emit
+        # two result blocks into one stream; openalex-search leaves it empty.
+        prefix = f"\t{scope}" if scope else ""
+        for index, work in enumerate(works, 1):
+            flag = "retracted" if work.openalex_is_retracted else "-"
+            print(f"result{prefix}\t{index}\t{work.openalex_id}\t{flag}\t{work.title or ''}")
+        print(f"found{prefix}\t{count}")
+        return
+
+    print(heading or f"Found {count} results, showing top {len(works)}:\n")
+    for index, work in enumerate(works, 1):
+        authors = f"{work.authors[0]}" if work.authors else "anonymous"
+        year = work.year or "n.d."
+        cites = f", cited by {work.cited_by_count}" if work.cited_by_count is not None else ""
+        print(f"  {index}. {work.openalex_id} \"{work.title or '(untitled)'}\" "
+              f"({authors} {year}{cites})")
+        if work.openalex_is_retracted:
+            print("      ⚠ OpenAlex flags this as RETRACTED (unverified; confirm against PubMed)")
+
+
+def cmd_openalex_search(args: argparse.Namespace) -> int:
+    """Search OpenAlex and import the chosen works into the active KB's sources/.
+
+    Costs 10 credits of the ~1000/day budget per search (#51). Results are shown,
+    then imported only on an explicit selection — or wholesale with --all.
+    Imported works remain plain sources: they still pass the usual
+    sync -> review -> accept gate (P1/P2). OpenAlex is read-only (P4).
+    """
+    from datetime import datetime, timezone
+
+    from factlog.integrations.openalex.api_client import (
+        OpenAlexConnectionError,
+        OpenAlexError,
+    )
+    from factlog.integrations.openalex.importer import import_works, parse_works
+
+    prepared = _openalex_prepare(args, "openalex-search")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+    if not _openalex_check_limit(args, config, "openalex-search"):
+        return 1
+
+    client = _make_openalex_client(config)
+    if not porcelain:
+        print(f'Searching OpenAlex: "{args.query}"...')
+    try:
+        page = client.search_works(
+            args.query, year=args.year, work_type=args.type, limit=args.limit
+        )
+    except OpenAlexConnectionError as exc:
+        print(f"factlog openalex-search: {exc}", file=sys.stderr)
+        return 2
+    except OpenAlexError as exc:
+        print(f"factlog openalex-search: {exc}", file=sys.stderr)
+        return 1
+
+    works = parse_works(page.results)
+    _openalex_show_results(works, page.count, porcelain=porcelain)
+    warning = _openalex_budget_warning(client)
+
+    if args.all:
+        chosen = works
+    else:
+        interactive = not porcelain and not dry_run and sys.stdin.isatty()
+        chosen = _openalex_select(works, interactive=interactive)
+        if not chosen and not porcelain:
+            hint = " Re-run with --all to import every result." if works and not dry_run else ""
+            print(f"\nNothing selected; no files written.{hint}")
+            if warning:
+                print(f"\n{warning}", file=sys.stderr)
+            return 0
+    if not chosen:
+        if warning:
+            print(warning, file=sys.stderr)
+        return 0
+
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report = import_works(
+        chosen, target=target, config=config, imported_at=imported_at, dry_run=dry_run
+    )
+    return _openalex_finish(report, target, dry_run=dry_run, porcelain=porcelain, warning=warning)
+
+
+def cmd_openalex_import(args: argparse.Namespace) -> int:
+    """Import one OpenAlex work by id or DOI. Costs no credits (#51)."""
+    from datetime import datetime, timezone
+
+    from factlog.integrations.openalex.api_client import (
+        OpenAlexConnectionError,
+        OpenAlexError,
+    )
+    from factlog.integrations.openalex.importer import fetch_work, import_works
+
+    prepared = _openalex_prepare(args, "openalex-import")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    client = _make_openalex_client(config)
+    try:
+        work = fetch_work(client, work_id=args.work_id or "", doi=args.doi or "")
+    except OpenAlexConnectionError as exc:
+        print(f"factlog openalex-import: {exc}", file=sys.stderr)
+        return 2
+    except OpenAlexError as exc:
+        print(f"factlog openalex-import: {exc}", file=sys.stderr)
+        return 1
+
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report = import_works(
+        [work], target=target, config=config, imported_at=imported_at, dry_run=dry_run
+    )
+    return _openalex_finish(
+        report, target, dry_run=dry_run, porcelain=porcelain,
+        warning=_openalex_budget_warning(client),
+    )
+
+
+def cmd_openalex_cite(args: argparse.Namespace) -> int:
+    """Show the citation neighbourhood of a source already in the KB (spec §5.2).
+
+    Traversal uses OpenAlex's `cites:`/`cited_by:` filters (1 credit each), not a
+    search (10) — the `cited_by_api_url` field the plan assumed no longer exists
+    (#51). Nothing is written unless --auto-import is given.
+    """
+    from datetime import datetime, timezone
+
+    from factlog.integrations.openalex.api_client import (
+        OpenAlexConnectionError,
+        OpenAlexError,
+    )
+    from factlog.integrations.openalex.importer import (
+        import_works,
+        parse_works,
+        resolve_work_id,
+    )
+
+    prepared = _openalex_prepare(args, "openalex-cite")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+    if not _openalex_check_limit(args, config, "openalex-cite"):
+        return 1
+
+    client = _make_openalex_client(config)
+    try:
+        work_id = resolve_work_id(target, args.for_slug)
+        directions = ("citing", "cited") if args.direction == "both" else (args.direction,)
+        found = {}
+        for direction in directions:
+            fetch = client.citing_works if direction == "citing" else client.cited_works
+            page = fetch(work_id, limit=args.limit)
+            works = parse_works(page.results)
+            label = "cite it" if direction == "citing" else "it cites"
+            _openalex_show_results(
+                works, page.count, porcelain=porcelain, scope=direction,
+                heading=f"\nWorks that {label} ({page.count} total, showing {len(works)}):\n",
+            )
+            for work in works:
+                found.setdefault(work.openalex_id, work)
+    except OpenAlexConnectionError as exc:
+        print(f"factlog openalex-cite: {exc}", file=sys.stderr)
+        return 2
+    except OpenAlexError as exc:
+        print(f"factlog openalex-cite: {exc}", file=sys.stderr)
+        return 1
+
+    warning = _openalex_budget_warning(client)
+    if not args.auto_import:
+        if not porcelain:
+            print("\nNothing written. Re-run with --auto-import to import these works.")
+        if warning:
+            print(warning, file=sys.stderr)
+        return 0
+
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report = import_works(
+        found.values(), target=target, config=config, imported_at=imported_at, dry_run=dry_run
+    )
+    return _openalex_finish(report, target, dry_run=dry_run, porcelain=porcelain, warning=warning)
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     """Export source provenance as BibTeX or CSL-JSON for citing in LaTeX/Word.
 
@@ -3072,6 +3410,61 @@ def build_parser() -> argparse.ArgumentParser:
         help="machine-readable output (tab-separated field/value counts) for scripts",
     )
     zimport.set_defaults(func=cmd_zotero_import)
+
+    def _openalex_common(p):
+        p.add_argument(
+            "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+        )
+        p.add_argument(
+            "--dry-run", action="store_true",
+            help="show what would be imported without creating any files",
+        )
+        p.add_argument(
+            "--porcelain", action="store_true",
+            help="machine-readable output (tab-separated field/value counts) for scripts",
+        )
+        return p
+
+    oa_search = _openalex_common(sub.add_parser(
+        "openalex-search",
+        help="search OpenAlex and import chosen works into sources/ (costs 10 credits/search)",
+    ))
+    oa_search.add_argument("--query", required=True, help="search text (required)")
+    oa_search.add_argument("--year", help="publication year or range, e.g. 2023 or 2020-2025")
+    oa_search.add_argument("--type", help="work type filter, e.g. article, book, dataset")
+    oa_search.add_argument(
+        "--limit", type=int, default=None,
+        help="number of results (default: 25, max: 200; cost is the same either way)",
+    )
+    oa_search.add_argument(
+        "--all", action="store_true",
+        help="import every result without prompting (needed when stdin is not a terminal)",
+    )
+    oa_search.set_defaults(func=cmd_openalex_search)
+
+    oa_import = _openalex_common(sub.add_parser(
+        "openalex-import", help="import one OpenAlex work by id or DOI into sources/ (free)",
+    ))
+    _oa_sel = oa_import.add_mutually_exclusive_group(required=True)
+    _oa_sel.add_argument("--work-id", help="OpenAlex Work ID, e.g. W2741809807")
+    _oa_sel.add_argument("--doi", help="DOI, e.g. 10.1007/s10462-023-10448-w")
+    oa_import.set_defaults(func=cmd_openalex_import)
+
+    oa_cite = _openalex_common(sub.add_parser(
+        "openalex-cite", help="show the citation neighbourhood of a source already in the KB",
+    ))
+    oa_cite.add_argument(
+        "--for", dest="for_slug", required=True, help="factlog source slug to traverse from"
+    )
+    oa_cite.add_argument(
+        "--direction", choices=("citing", "cited", "both"), default="citing",
+        help="citing: works that cite it; cited: works it cites; both (default: citing)",
+    )
+    oa_cite.add_argument("--limit", type=int, default=None, help="number of results per direction")
+    oa_cite.add_argument(
+        "--auto-import", action="store_true", help="import the listed works (use with care)"
+    )
+    oa_cite.set_defaults(func=cmd_openalex_cite)
 
     return parser
 
