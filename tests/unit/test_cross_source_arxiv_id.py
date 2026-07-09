@@ -240,3 +240,77 @@ class TestNoRegression:
 ])
 def test_each_writer_declares_its_source_name(writer_cls, name):
     assert writer_cls.source_name == name
+
+
+class TestProvenanceNeverGatesTheIdentityLookup:
+    """`imported_from` chooses how a skip is *reported*. It must never decide
+    whether the existing file is *found*.
+
+    Scoping the identity index by provenance breaks P3 in silence: `openalex_id`
+    and `zotero_key` are not cross-source ids, so a file whose `imported_from` a
+    human capitalised or misspelled would not be found at all, and re-importing
+    it would write a second file.
+    """
+
+    def _kb(self, tmp_path, front_matter):
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / "existing.md").write_text(front_matter, encoding="utf-8")
+        return tmp_path
+
+    @pytest.mark.parametrize(
+        "imported_from",
+        ["openalex", "OpenAlex", "OPENALEX", " openalex ", None, "openalexx", "hand-entered"],
+    )
+    def test_openalex_reimport_always_skips_whatever_provenance_says(
+        self, tmp_path, imported_from
+    ):
+        line = f"imported_from: {imported_from}\n" if imported_from else ""
+        kb = self._kb(tmp_path, f'---\nopenalex_id: "W1"\n{line}---\n')
+        result = OpenAlexSourceWriter().plan(_openalex(), kb)
+        assert result.status == "skipped", (
+            f"imported_from={imported_from!r} made a re-import write a second file"
+        )
+
+    @pytest.mark.parametrize("imported_from", ["arxiv", "ArXiv", None, "typo"])
+    def test_arxiv_reimport_always_skips_whatever_provenance_says(
+        self, tmp_path, imported_from
+    ):
+        line = f"imported_from: {imported_from}\n" if imported_from else ""
+        kb = self._kb(tmp_path, f'---\narxiv_id: "2311.09277"\n{line}---\n')
+        assert ArxivSourceWriter().plan(_arxiv(), kb).status == "skipped"
+
+    @pytest.mark.parametrize("imported_from", ["openalex", "OpenAlex", None])
+    def test_provenance_case_does_not_change_the_reported_reason(
+        self, tmp_path, imported_from
+    ):
+        # A human editing the case of `imported_from` must not reclassify the file
+        # as a foreign one.
+        line = f"imported_from: {imported_from}\n" if imported_from else ""
+        kb = self._kb(tmp_path, f'---\nopenalex_id: "W1"\n{line}---\n')
+        assert "already imported" in OpenAlexSourceWriter().plan(_openalex(), kb).reason
+
+
+class TestSourceNameMatchesEmittedProvenance:
+    """`source_name` and the `imported_from:` a writer emits are two independent
+    literals. If they drift, the writer stops recognising its own files and every
+    re-import writes a duplicate. Pin them together."""
+
+    @pytest.mark.parametrize(
+        ("writer", "parsed"),
+        [
+            (ArxivSourceWriter(), _arxiv()),
+            (OpenAlexSourceWriter(), _openalex()),
+        ],
+    )
+    def test_a_writer_declares_the_provenance_it_writes(self, writer, parsed):
+        rendered = writer.render(parsed, imported_at="t")
+        assert f"imported_from: {writer.source_name}" in rendered
+
+    def test_a_writer_recognises_a_file_it_just_rendered(self, tmp_path):
+        # The end-to-end form of the same guard, independent of the exact key name.
+        (tmp_path / "sources").mkdir()
+        writer = ArxivSourceWriter()
+        writer.write(_arxiv(), tmp_path, imported_at="t")
+        again = ArxivSourceWriter().plan(_arxiv(), tmp_path)
+        assert again.status == "skipped"
+        assert "already imported" in again.reason

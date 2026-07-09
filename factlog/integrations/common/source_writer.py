@@ -57,6 +57,17 @@ CROSS_SOURCE_IDS = (("doi", "DOI"), ("pmid", "PMID"), ("arxiv_id", "arXiv id"))
 # provenance (see :meth:`BaseSourceWriter._index`).
 IMPORTED_FROM_KEY = "imported_from"
 
+
+def _same_source(imported_from: str, source_name: str) -> bool:
+    """Did *source_name*'s integration write a file whose provenance is *imported_from*?
+
+    An absent value means a legacy or hand-written file and counts as this
+    writer's own, so re-import stays idempotent (P3). The comparison ignores case
+    and surrounding space: writers always emit lowercase, and a human editing the
+    front matter must not be able to reclassify the file by typing ``OpenAlex``.
+    """
+    return imported_from.strip().lower() in ("", source_name.lower())
+
 _CROSS_SOURCE_KINDS = frozenset(kind for kind, _ in CROSS_SOURCE_IDS)
 
 
@@ -74,10 +85,12 @@ class _DirIndex:
     """One scan of a ``sources/`` directory, kept current as names are reserved."""
 
     claimed: set[str] = field(default_factory=set)
-    # Identity is scoped to this writer's own provenance (see _index); a foreign
-    # file that carries this writer's identity key only as a cross-source id does
-    # not register here.
-    by_identity: dict[str, Path] = field(default_factory=dict)
+    # identity value -> (path, that file's ``imported_from``; "" when it has none).
+    # EVERY file carrying this writer's identity key registers here, whichever
+    # integration wrote it. Provenance rides along so :meth:`_duplicate` can tell
+    # "this record was re-imported" from "this paper is already here via another
+    # database" — it must never decide whether the file is *found*.
+    by_identity: dict[str, tuple[Path, str]] = field(default_factory=dict)
     # ("doi", "10.1234/x") -> path. Populated from every source file regardless
     # of which integration wrote it, which is what makes §7.1 detection work.
     by_cross_id: dict[tuple[str, str], Path] = field(default_factory=dict)
@@ -233,18 +246,19 @@ class BaseSourceWriter:
                     cached.claimed.add(path.name)
                     scalars = read_scalars(path, self._scan_keys(), self.ignore_re)
                     identity = scalars.get(self.identity_key, "")
-                    # Scope identity registration by provenance. ``arxiv_id`` is
-                    # both the arXiv writer's identity key and a cross-source id,
-                    # so an OpenAlex file that merely carries ``arxiv_id:`` would
-                    # otherwise land in the arXiv writer's identity index and make
-                    # a re-import report "already imported" instead of "duplicate
-                    # arXiv id ..." — the distinction Step 4c needs to tell "same
-                    # record re-imported" from "same paper from another database".
-                    # A file with no ``imported_from`` (legacy or hand-written) is
-                    # still registered, preserving P3 idempotence.
-                    imported_from = scalars.get(IMPORTED_FROM_KEY, "")
-                    if identity and imported_from in ("", self.source_name):
-                        cached.by_identity.setdefault(identity, path)
+                    # Registration is unconditional, and provenance rides along.
+                    # Gating registration on ``imported_from`` is tempting —
+                    # ``arxiv_id`` is both the arXiv writer's identity key and a
+                    # cross-source id, so an OpenAlex file carrying ``arxiv_id:``
+                    # lands here too — but then a file whose ``imported_from`` a
+                    # human capitalised or misspelled would not register at all,
+                    # and re-importing it would write a *second* file.
+                    # ``openalex_id`` and ``zotero_key`` are not cross-source ids,
+                    # so nothing catches the miss: P3 breaks in silence.
+                    # Provenance decides the *report*, never the lookup.
+                    if identity:
+                        cached.by_identity.setdefault(
+                            identity, (path, scalars.get(IMPORTED_FROM_KEY, "")))
                     for kind, _ in CROSS_SOURCE_IDS:
                         value = scalars.get(kind, "")
                         if value:
@@ -271,9 +285,21 @@ class BaseSourceWriter:
         a preprint and its journal version share a DOI).
         """
         identity = self.identity_of(parsed)
-        existing = index.by_identity.get(identity)
-        if existing is not None:
-            return WriteResult(existing, "skipped", f"already imported ({self.identity_key} match)")
+        found = index.by_identity.get(identity)
+        if found is not None:
+            existing, imported_from = found
+            # Whoever wrote the file, the record is already here: it is skipped
+            # either way, so P3 never depends on a provenance string. Provenance
+            # only chooses how to say it. A file this writer produced (or a legacy
+            # one with no ``imported_from``) is the same record re-imported;
+            # anything else is the same *paper* reached through another database,
+            # which is what Step 4c will merge rather than re-report.
+            if _same_source(imported_from, self.source_name):
+                return WriteResult(existing, "skipped",
+                                   f"already imported ({self.identity_key} match)")
+            label = dict(CROSS_SOURCE_IDS).get(self.identity_key, self.identity_key)
+            return WriteResult(existing, "skipped",
+                               f"duplicate {label} {identity} (already in {existing.name})")
 
         cross_ids = self._cross_id_values(parsed)
         for kind, label in CROSS_SOURCE_IDS:
@@ -291,7 +317,8 @@ class BaseSourceWriter:
     def _reserve(self, parsed, sources_dir: Path, index: _DirIndex) -> WriteResult:
         path = self._unique_path(sources_dir, self.generate_slug(parsed), index.claimed)
         index.claimed.add(path.name)
-        index.by_identity.setdefault(self.identity_of(parsed), path)
+        # A file this writer is about to create carries its own ``imported_from``.
+        index.by_identity.setdefault(self.identity_of(parsed), (path, self.source_name))
         cross_ids = self._cross_id_values(parsed)
         for kind, _ in CROSS_SOURCE_IDS:
             value = cross_ids.get(kind, "")
