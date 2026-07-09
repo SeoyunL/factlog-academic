@@ -333,7 +333,7 @@ class TestCrossSourceDuplicates:
         assert second.path == first.path
         assert "duplicate DOI" in second.reason
 
-    def test_openalex_import_detects_an_existing_zotero_source(self, tmp_path):
+    def test_openalex_import_merges_into_an_existing_zotero_source(self, tmp_path):
         zotero_item = {
             "zotero_key": "ABCD1234",
             "title": "Neurosymbolic AI",
@@ -341,10 +341,17 @@ class TestCrossSourceDuplicates:
             "year": "2023",
             "doi": "10.1007/S10462-023-10448-W",  # upper case; DOIs are case-insensitive
         }
-        ZoteroWriter().write(zotero_item, tmp_path)
+        z = ZoteroWriter().write(zotero_item, tmp_path)
+        # The same published work reached via the shared DOI. Zotero writes no
+        # sidecar, but OpenAlex is a §7.3 merger (#73): it records its own view in a
+        # sidecar beside the Zotero original rather than writing a second file.
         result = OpenAlexSourceWriter().write(_work(), tmp_path)
-        assert result.status == "skipped"
+        assert result.status == "merged"
+        assert result.path == z.path
         assert "duplicate DOI" in result.reason
+        from factlog.integrations.common.provenance import read_provenance, sidecar_path
+        recs = read_provenance(sidecar_path(z.path)).records
+        assert [r.type for r in recs] == ["openalex"]
 
     def test_pmid_match_without_doi(self, tmp_path):
         w = OpenAlexSourceWriter()

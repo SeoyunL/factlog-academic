@@ -2843,6 +2843,7 @@ def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning:
                 print(f"work\t{outcome.status}\t{outcome.key}\t{name}")
         print(f"imported\t{report.imported}")
         print(f"skipped\t{report.skipped}")
+        print(f"merged\t{report.merged}")
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
         print(f"target\t{target / 'sources'}")
@@ -2859,6 +2860,9 @@ def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning:
     print("\nSummary:")
     print(f"  {'Would import' if dry_run else 'Imported'}: {report.imported}")
     print(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
+    # A merge is a success (this OpenAlex view recorded against an existing
+    # original, §7.3), so it is its own line, never folded into errors.
+    print(f"  {'Would merge' if dry_run else 'Merged'}:   {report.merged}")
     print(f"  Errors:   {report.errors}")
     for note in notes:
         print(f"\n{note}", file=sys.stderr)

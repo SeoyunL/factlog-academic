@@ -253,13 +253,27 @@ class TestPreexistingSidecarRisk3:
         assert sidecar.read_bytes() == before  # idempotent no-op on the ledger
 
 
-class TestZoteroAndOpenAlexNeverRecord:
-    """`_record` is gated by `merges_cross_source` and no-op on the base, so a
-    genuine `imported` outcome from Zotero or OpenAlex writes no sidecar."""
+class TestRecordingIsGatedByMergesCrossSource:
+    """`_record` is gated by `merges_cross_source`. Zotero opts out and writes no
+    sidecar; OpenAlex now opts in (#73) and leaves its own one-record ledger."""
 
-    def test_openalex_import_writes_no_sidecar(self, tmp_path):
+    def test_openalex_import_writes_its_own_one_record_sidecar(self, tmp_path):
+        # The inverse of the old #72 gap: an OpenAlex-primary import now records a
+        # ledger of its own, symmetric with arXiv.
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W9", arxiv_id="9999.99999"), tmp_path, imported_at="t")
+        assert result.status == "imported"
+        sidecar = sidecar_path(result.path)
+        assert sidecar.exists()
+        recs = read_provenance(sidecar).records
+        assert [r.type for r in recs] == ["openalex"]
+        assert recs[0].id == "W9"
+
+    def test_zotero_import_writes_no_sidecar(self, tmp_path):
+        result = ZoteroWriter().write(
+            {"zotero_key": "ABCD1234", "title": "A Zotero Paper",
+             "authors": [{"last": "Lovelace", "first": "Ada"}], "year": "2023"},
+            tmp_path, imported_at="t")
         assert result.status == "imported"
         assert not (tmp_path / "source-provenance").exists()
 
@@ -269,9 +283,9 @@ class TestZoteroAndOpenAlexNeverRecord:
         assert out is decision
         assert not (tmp_path / "source-provenance").exists()
 
-    def test_the_writers_that_do_not_record_are_exactly_the_non_mergers(self):
+    def test_the_writers_that_record_are_exactly_the_mergers(self):
         assert ArxivSourceWriter.merges_cross_source is True
-        assert OpenAlexSourceWriter.merges_cross_source is False
+        assert OpenAlexSourceWriter.merges_cross_source is True
         assert ZoteroWriter.merges_cross_source is False
 
 

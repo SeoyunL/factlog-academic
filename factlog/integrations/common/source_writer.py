@@ -23,9 +23,9 @@ Four invariants hold for every integration:
   paper arriving from a second database is reported rather than written twice.
   Detection lives here; the *merge* itself (§7.3) is a side effect deferred to
   :meth:`BaseSourceWriter._merge`, a no-op unless a writer opts in via
-  :attr:`BaseSourceWriter.merges_cross_source` (only ``ArxivSourceWriter`` does).
-  So classification stays pure and ``plan``/``write`` agree, while the sidecar
-  write happens only in ``write``.
+  :attr:`BaseSourceWriter.merges_cross_source` (``ArxivSourceWriter`` and
+  ``OpenAlexSourceWriter`` do; Zotero does not). So classification stays pure and
+  ``plan``/``write`` agree, while the sidecar write happens only in ``write``.
 
 ``imported_at`` is injected by the caller rather than read from a clock here, so
 writers stay pure and unit-testable and the CLI controls the (single, batch)
@@ -42,6 +42,16 @@ from factlog.common import slugify
 from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
 from factlog.integrations.common._textio import atomic_write_text
 from factlog.integrations.common.front_matter import read_scalars
+from factlog.integrations.common.provenance import (
+    Provenance,
+    ProvenanceConflict,
+    ProvenanceError,
+    SourceRecord,
+    add_source,
+    read_provenance,
+    sidecar_path,
+    write_provenance,
+)
 
 # Byte budgets for the filename (most filesystems cap a name at 255 bytes).
 # Author and title are individually bounded, then the whole stem is capped with
@@ -204,11 +214,23 @@ class BaseSourceWriter:
     ignore_re: re.Pattern[str] | None = None
     #: Opt-in: does this writer merge a cross-source duplicate into the existing
     #: file's provenance sidecar (§7.3) instead of reporting a bare ``skipped``?
-    #: **False by default**, which is what keeps Zotero and OpenAlex from ever
-    #: touching a sidecar. Only :class:`ArxivSourceWriter` sets it, and only it
-    #: overrides :meth:`_merge`. When False, a cross-source duplicate stays
-    #: ``skipped`` exactly as before, so those integrations are unchanged.
+    #: **False by default**, which is what keeps Zotero from ever touching a
+    #: sidecar. :class:`ArxivSourceWriter` and :class:`OpenAlexSourceWriter` set it
+    #: True; the shared :meth:`_merge`/:meth:`_record` machinery below reads it.
+    #: When False, a cross-source duplicate stays ``skipped`` exactly as before, so
+    #: Zotero is unchanged.
     merges_cross_source: bool = False
+    #: Fields in a provenance record whose change an *import* has no authority to
+    #: absorb; a drift in one is a per-id ``error`` only a refresh command may
+    #: clear. **Empty by default, and that is load-bearing.** A writer with no
+    #: refresh command must leave it empty, or a drift becomes a *permanently*
+    #: unclearable error — nothing exists to call :func:`update_source`. OpenAlex
+    #: has no refresh command (nothing calls ``update_source`` for it), so it keeps
+    #: the empty default: every field drifts silently, first-import-wins, and
+    #: :meth:`_divergence` is never reached. Only :class:`ArxivSourceWriter` sets a
+    #: non-empty tuple, because only arXiv ships ``arxiv-check-versions`` to clear
+    #: the divergence it raises.
+    _IDENTIFYING_FIELDS: tuple[str, ...] = ()
 
     def __init__(self, skip_duplicates: bool = True, include_abstract: bool = True):
         self.skip_duplicates = skip_duplicates
@@ -324,7 +346,20 @@ class BaseSourceWriter:
         found = index.by_identity.get(identity)
         if found is not None:
             existing, imported_from = found
-            if _same_source(imported_from, self.source_name):
+            # An identity match on a key that is ALSO a cross-source id (arXiv's
+            # ``arxiv_id``) can land in a file another database wrote — OpenAlex
+            # echoes ``arxiv_id`` into its front matter — so a foreign
+            # ``imported_from`` there means "same paper via another database" and
+            # is a merge for a writer that opts in. But a key no other database
+            # emits (``openalex_id``, ``zotero_key``) can only be *this* writer's
+            # own record; a mistyped ``imported_from`` beside it is corruption, not
+            # another database, so it stays a same-source skip. P3 idempotency must
+            # never turn a plain re-import into a merge because a human fat-fingered
+            # a provenance string — and, now that OpenAlex records on import, a
+            # spurious merge would write a sidecar on re-import, breaking P3's
+            # "re-running leaves the filesystem unchanged".
+            if _same_source(imported_from, self.source_name) or \
+                    self.identity_key not in _CROSS_SOURCE_KINDS:
                 return WriteResult(existing, "skipped",
                                    f"already imported ({self.identity_key} match)")
             label = dict(CROSS_SOURCE_IDS).get(self.identity_key, self.identity_key)
@@ -406,44 +441,153 @@ class BaseSourceWriter:
         """
         return self._resolve(parsed, target, "plan")
 
-    def _merge(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
-        """Fold *parsed* into the existing original's provenance sidecar.
+    # -- §7.3 provenance sidecar (shared; only opt-in writers reach the disk) --
+    def _identity_fields(self, record: SourceRecord) -> dict:
+        """The subset of *record* an import may not revise (see :attr:`_IDENTIFYING_FIELDS`).
 
-        The one place a merge's side effect lives, so it is reached only from
-        :meth:`write` and never from :meth:`plan` — that is what keeps
-        ``--dry-run`` from touching the filesystem. **No-op on the base class**:
-        it returns the ``merged`` decision unchanged without writing anything. A
-        base writer never even reaches here (it cannot produce ``merged`` while
-        :attr:`merges_cross_source` is False); the no-op exists so the hook is
-        safe by construction and only a writer that opts in overrides it. The
-        override owns building a source-specific record and read-modify-writing
-        the sidecar at ``sidecar_path(decision.path)`` — ``decision.path`` is the
-        **existing** original, never a would-be new file.
+        ``imported_at`` is deliberately absent: it records when factlog first saw
+        the provenance, not a fact about the paper, and the CLI stamps a fresh one
+        every run — comparing it would make a plain re-import look like a conflict.
+        With the default empty tuple this is ``{}`` for every record, so no drift
+        is ever a divergence and :meth:`_divergence` is never reached.
         """
+        return {name: record.fields.get(name) for name in self._IDENTIFYING_FIELDS}
+
+    def _provenance_record(self, parsed, imported_at: str) -> SourceRecord:
+        """This source's contribution to a paper's provenance ledger.
+
+        Overridden by every writer that opts into §7.3 merging
+        (:attr:`merges_cross_source`). The base raises, because a non-merger never
+        records and so never needs to build one.
+        """
+        raise NotImplementedError
+
+    def _divergence(self, existing: SourceRecord, incoming: SourceRecord) -> str:
+        """Why an import refuses to revise the ledger. Generic, refresh-agnostic.
+
+        Reached only when :attr:`_IDENTIFYING_FIELDS` is non-empty and one of those
+        fields moved, so a writer keeping the empty default never uses it. A writer
+        with a refresh command overrides this to name it (arXiv points at
+        ``arxiv-check-versions``); the default must **not** name any command, so it
+        never sends a user to one that does not apply to their integration.
+        """
+        return (
+            f"provenance ledger already records a different {existing.type} entry "
+            f"for id {existing.id!r}; an import may not revise it"
+        )
+
+    def _upsert_sidecar(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
+        """Read-modify-write this source's record into ``sidecar_path(decision.path)``.
+
+        The shared mechanism behind both :meth:`_merge` (fold into an *existing*
+        original's ledger) and :meth:`_record` (write a *new* original's own
+        ledger). Both derive the sidecar from ``decision.path`` and add the very
+        same :meth:`_provenance_record`, so the disk operation is identical; only
+        which file ``decision.path`` names differs, and that is the caller's
+        concern. The ``.md`` is never opened here — only its sidecar — so the
+        original stays byte- and mtime-immutable (P4). The disk ledger is re-read
+        every call (never cached), so a prior write is respected.
+
+        Idempotence (P3) is judged on :meth:`_identity_fields`, never the import
+        clock: a record already present with the same identifying fields is a
+        no-op that keeps the *first* import's timestamp, so the ledger stays
+        byte-identical across re-imports that carry a fresh ``imported_at``. With
+        an empty :attr:`_IDENTIFYING_FIELDS` that comparison is always equal, so
+        the incumbent record wins and all drift is absorbed silently.
+
+        A divergence in an identifying field is a change an import has no authority
+        to make: it becomes a per-id ``error`` pointing at the refresh path via
+        :meth:`_divergence`. Every failure — a corrupt/unreadable sidecar, a write
+        fault — is a per-id ``error``, never a batch crash: one paper's problem
+        does not stop the imports queued behind it.
+        """
+        sidecar = sidecar_path(decision.path)
+        record = self._provenance_record(parsed, imported_at)
+        try:
+            provenance = read_provenance(sidecar)
+        except (ProvenanceError, OSError) as exc:
+            # ProvenanceError: the ledger is malformed. OSError: the path cannot be
+            # read at all (a permission fault, or ``source-provenance`` occupied by
+            # a plain file so the sidecar cannot exist under it). Either way it is
+            # this one paper's problem — a per-id error, never a batch crash.
+            return WriteResult(
+                decision.path, "error",
+                f"provenance sidecar is unreadable ({exc}); repair or delete "
+                f"{sidecar.name} and re-import",
+            )
+
+        existing = next((r for r in provenance.records if r.key == record.key), None)
+        if existing is not None:
+            if self._identity_fields(existing) == self._identity_fields(record):
+                return decision  # already recorded; keep the first timestamp
+            return WriteResult(decision.path, "error", self._divergence(existing, record))
+
+        try:
+            add_source(provenance, record)
+            write_provenance(sidecar, provenance)
+        except ProvenanceConflict:  # pragma: no cover - guarded by the check above
+            return WriteResult(
+                decision.path, "error",
+                f"provenance ledger diverged for {record.type} id {record.id!r}",
+            )
+        except (ProvenanceError, OSError) as exc:
+            return WriteResult(
+                decision.path, "error", f"cannot write {sidecar.name}: {exc}",
+            )
         return decision
 
-    def _record(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
-        """Write the source's *own* provenance record for a new-file import.
+    def _merge(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
+        """Fold *parsed* into the **existing** original's provenance sidecar (§7.3).
 
-        The sibling of :meth:`_merge`. Where ``_merge`` folds a *second*
-        database's view into an existing original's sidecar, ``_record`` writes
-        the record for the file this writer is *itself* creating, so an ordinary
-        import — a new paper, no duplicate — still leaves a ledger. Without it the
-        sidecar would exist only where a collision happened, an artifact of import
-        order rather than a record of every source (#72).
-
-        Same opt-in posture as :meth:`_merge` and **no-op on the base class**: it
-        returns the ``imported`` decision unchanged without touching the
-        filesystem, so Zotero and OpenAlex — which never override it — stay
-        byte-identical. Only :class:`ArxivSourceWriter` overrides it, behind the
-        same ``merges_cross_source`` opt-in. Reached only from :meth:`write` and
-        only on an ``imported`` outcome, never from :meth:`plan`, so ``--dry-run``
-        writes nothing. The override read-modify-writes ``sidecar_path(decision.path)``
-        for the **new** original's final (suffix-resolved) name.
-
-        On success it returns the ``imported`` decision; on failure it returns an
-        ``error`` so :meth:`write` can refuse to create the ``.md`` (see there).
+        Gated by :attr:`merges_cross_source`. A writer that does not opt in returns
+        the ``merged`` decision unchanged and touches nothing — and in fact never
+        even produces a ``merged`` status (see :meth:`_cross_source`), so the guard
+        is belt-and-braces. Reached only from :meth:`write`, never :meth:`plan`, so
+        ``--dry-run`` stays side-effect-free. ``decision.path`` is the original
+        another database already wrote; this appends this source's view of the same
+        paper to its ledger via :meth:`_upsert_sidecar`, never a second ``.md``.
         """
+        if not self.merges_cross_source:
+            return decision
+        return self._upsert_sidecar(parsed, decision, imported_at)
+
+    def _record(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
+        """Write this source's OWN record for a **new** original (#72).
+
+        Gated by the SAME :attr:`merges_cross_source` flag as :meth:`_merge`, and
+        that coupling is deliberate, not incidental. Splitting the two would allow
+        an order-dependent ledger: ``_record`` on with ``_merge`` off makes an
+        arXiv-first import of a paper leave ``{arxiv}`` while an OpenAlex-first
+        import of the *same* paper leaves ``{openalex, arxiv}``. Keeping one flag
+        for both is what guarantees the two import orders converge on the same
+        record set (#73). A non-merger (Zotero) returns the ``imported`` decision
+        unchanged and writes no sidecar, so it stays byte-identical.
+
+        ``decision.path`` is the file this writer is about to create — its final,
+        suffix-resolved name (a ``-2`` collision lands the sidecar beside the right
+        ``.md`` because :func:`sidecar_path` derives from that name). Called from
+        :meth:`write` *before* the ``.md`` is written, so a sidecar failure aborts
+        the import with no orphaned original.
+
+        **A sidecar already at that path is stale and is replaced, never appended
+        to** (#72 risk 3). The ``.md`` does not exist yet — that is precisely why
+        this outcome is ``imported`` and not ``skipped`` — so no ledger for *this*
+        original can legitimately be there. What can be there is a deleted source's
+        ledger whose slug this paper now reuses; appending it would make the new
+        original's ledger assert it came from a source it never had, an audit
+        ledger that lies. Replacement also makes a retry after a failed ``.md``
+        write converge byte-for-byte when it carries the same batch ``imported_at``.
+        """
+        if not self.merges_cross_source:
+            return decision
+        record = self._provenance_record(parsed, imported_at)
+        sidecar = sidecar_path(decision.path)
+        fresh = Provenance()
+        add_source(fresh, record)
+        try:
+            write_provenance(sidecar, fresh)
+        except (ProvenanceError, OSError) as exc:
+            return WriteResult(decision.path, "error", f"cannot write {sidecar.name}: {exc}")
         return decision
 
     def write(self, parsed, target: Path | str, imported_at: str = "") -> WriteResult:
@@ -462,8 +606,9 @@ class BaseSourceWriter:
         # nothing is orphaned, and a retry re-runs cleanly. The reverse order would
         # leave an orphaned ``.md`` whose existence permanently suppresses the
         # ledger, since the original is never rewritten (P4) and the re-import skips
-        # (#72, risk 2). ``_record`` is a no-op unless a writer opts in, so a
-        # base/Zotero/OpenAlex import writes the ``.md`` exactly as before.
+        # (#72, risk 2). ``_record`` is a no-op unless a writer opts in via
+        # :attr:`merges_cross_source`, so a Zotero import writes the ``.md``
+        # exactly as before; arXiv and OpenAlex write their ledger first (#73).
         recorded = self._record(parsed, decision, imported_at)
         if recorded.status != "imported":
             return recorded
