@@ -3062,6 +3062,158 @@ def cmd_openalex_import(args: argparse.Namespace) -> int:
     )
 
 
+def _make_arxiv_client(config):
+    """Build the real arXiv client. Indirected so tests can inject a fake."""
+    from factlog.integrations.arxiv.client import ArxivClient
+
+    return ArxivClient(config)
+
+
+def _arxiv_prepare(args, command: str):
+    """Resolve the target KB and arXiv settings, or None on a user error."""
+    from pathlib import Path
+
+    from factlog.integrations.arxiv.config import ArxivConfigError, load_config
+
+    porcelain = getattr(args, "porcelain", False)
+    target_str, source = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if source in ("config", "cwd") and not porcelain:
+        print(f"factlog {command}: target KB {target} (from {source})")
+    if not _require_kb(target, command):
+        return None
+    try:
+        return target, load_config(kb_root=target)
+    except ArxivConfigError as exc:
+        print(f"factlog {command}: {exc}", file=sys.stderr)
+        return None
+
+
+def _arxiv_withdrawal_warnings(report, works) -> list[str]:
+    """One stderr line per *imported* withdrawn paper, naming the agent.
+
+    Withdrawal is arXiv's own signal, not a fact: the note says so, names who
+    withdrew the paper, and never uses the word "retracted" (#57). Skipped and
+    errored records carry no such warning. Warnings go to stderr only, never
+    stdout or the ``--porcelain`` contract.
+    """
+    from factlog.integrations.arxiv.source_writer import withdrawal_agent
+
+    by_key = {w.versioned_id: w for w in works}
+    lines = []
+    for outcome in report.outcomes:
+        if outcome.status != "imported":
+            continue
+        work = by_key.get(outcome.key)
+        if work is not None and work.withdrawn:
+            agent = withdrawal_agent(work.withdrawn_by)
+            lines.append(
+                f"⚠ arXiv reports {outcome.key} as withdrawn (by {agent}). Withdrawal "
+                "is not retraction; this unverified signal flags the paper for human "
+                "review before any claim from it is trusted."
+            )
+    return lines
+
+
+def _arxiv_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -> int:
+    """Emit the shared summary for an arXiv import and return the exit code.
+
+    Mirrors :func:`_openalex_finish`'s porcelain contract exactly; the only
+    difference is the warning source (withdrawal notes, not placeholder titles or
+    a credit budget — arXiv is free).
+    """
+    if porcelain:
+        # Stable machine contract, tab-separated, LF-terminated. Order-independent
+        # (parse by first field):
+        #   imported\t<n> / skipped\t<n> / errors\t<n> / dry_run\t<0|1>
+        #   target\t<abs sources dir>
+        # In --dry-run only, a per-work row precedes them:
+        #   work\t<status>\t<versioned arxiv id>\t<would-be filename>
+        if dry_run:
+            for outcome in report.outcomes:
+                name = outcome.path.name if outcome.path is not None else ""
+                print(f"work\t{outcome.status}\t{outcome.key}\t{name}")
+        print(f"imported\t{report.imported}")
+        print(f"skipped\t{report.skipped}")
+        print(f"errors\t{report.errors}")
+        print(f"dry_run\t{'1' if dry_run else '0'}")
+        print(f"target\t{target / 'sources'}")
+        # Warnings go to stderr so they never pollute the machine contract.
+        for warning in warnings:
+            print(warning, file=sys.stderr)
+        return 1 if report.errors else 0
+
+    print(f"\n{'Would import to' if dry_run else 'Importing to'} KB: {target}\n")
+    for line in _openalex_report_lines(report, dry_run):
+        print(line)
+    print("\nSummary:")
+    print(f"  {'Would import' if dry_run else 'Imported'}: {report.imported}")
+    print(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
+    print(f"  Errors:   {report.errors}")
+    for warning in warnings:
+        print(f"\n{warning}", file=sys.stderr)
+    if report.imported and not dry_run:
+        print("\nNext step: run '/factlog sync' to extract candidate facts.")
+    return 1 if report.errors else 0
+
+
+def cmd_arxiv_import(args: argparse.Namespace) -> int:
+    """Import arXiv papers by id into sources/. Free; up to 100 ids per run (§11)."""
+    from datetime import datetime, timezone
+
+    from factlog.integrations.arxiv.client import (
+        ArxivConnectionError,
+        ArxivError,
+    )
+    from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
+    from factlog.integrations.arxiv.importer import import_works
+
+    prepared = _arxiv_prepare(args, "arxiv-import")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    # Normalize each id individually: a syntactically bad id is a per-id error,
+    # not a batch failure. Only a transport failure (below) is fatal for the run.
+    valid, invalid = [], []
+    for raw in args.id:
+        try:
+            valid.append(normalize_arxiv_id(raw))
+        except ArxivIdError as exc:
+            invalid.append((raw, str(exc)))
+
+    works, missing = [], []
+    if valid:
+        client = _make_arxiv_client(config)
+        try:
+            # dry-run still hits the network: the title, withdrawal signal and slug
+            # are all needed to predict the outcome. It writes no files. The client
+            # re-normalizes, so the already-canonical string form is passed.
+            batch = client.fetch_works([str(identifier) for identifier in valid])
+        except ArxivConnectionError as exc:
+            print(f"factlog arxiv-import: {exc}", file=sys.stderr)
+            return 2
+        except ArxivError as exc:
+            # Service, response, >100-ids and other transport failures are fatal
+            # for the whole request — the batch cannot be trusted partial.
+            print(f"factlog arxiv-import: {exc}", file=sys.stderr)
+            return 1
+        works, missing = batch.works, batch.missing
+
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report = import_works(
+        works, missing, invalid,
+        target=target, config=config, imported_at=imported_at, dry_run=dry_run,
+    )
+    warnings = _arxiv_withdrawal_warnings(report, works)
+    return _arxiv_finish(
+        report, target, dry_run=dry_run, porcelain=porcelain, warnings=warnings
+    )
+
+
 def cmd_openalex_cite(args: argparse.Namespace) -> int:
     """Show the citation neighbourhood of a source already in the KB (spec §5.2).
 
@@ -3498,6 +3650,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-import", action="store_true", help="import the listed works (use with care)"
     )
     oa_cite.set_defaults(func=cmd_openalex_cite)
+
+    def _arxiv_common(p):
+        p.add_argument(
+            "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+        )
+        p.add_argument(
+            "--dry-run", action="store_true",
+            help="show what would be imported without creating any files",
+        )
+        p.add_argument(
+            "--porcelain", action="store_true",
+            help="machine-readable output (tab-separated field/value counts) for scripts",
+        )
+        return p
+
+    ax_import = _arxiv_common(sub.add_parser(
+        "arxiv-import",
+        help="import arXiv papers by id into sources/ (free; up to 100 ids per run)",
+    ))
+    ax_import.add_argument(
+        "--id", action="append", required=True, dest="id",
+        help="arXiv id to import, repeatable; pin a version inline, e.g. 2311.09277v2 "
+             "(no separate --version flag). Up to 100 ids per run.",
+    )
+    ax_import.set_defaults(func=cmd_arxiv_import)
 
     return parser
 
