@@ -23,6 +23,12 @@ zotero = ["pyzotero>=1.5"]
 # needs is two GET endpoints, so `pyalex` (and its requests/urllib3 chain) is
 # not worth the dependency — see #51.
 openalex = ["httpx>=0.27"]
+# arXiv integration (roadmap phase 3). The `arxiv` PyPI wrapper is deliberately
+# not used: the API is one GET endpoint and hidden defaults cost more than they
+# save — same reasoning as `pyalex` above. feedparser handles Atom, but note it
+# reports a truncated body only via `bozo` rather than raising, so `client.py`
+# treats `bozo` as a hard failure — see #57.
+arxiv = ["httpx>=0.27", "feedparser>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/semantic-reasoning/factlog"
@@ -37,6 +43,7 @@ packages = [
     "factlog.integrations.common",
     "factlog.integrations.zotero",
     "factlog.integrations.openalex",
+    "factlog.integrations.arxiv",
 ]
 
 [tool.pytest.ini_options]
