@@ -538,7 +538,8 @@ def apply_auto_update(
                     current_version=result.current_version,
                     reason=(
                         "imported before #82: front matter only, no provenance "
-                        "ledger to update. Re-import to create one; --auto-update "
+                        "ledger to update. Run `factlog arxiv-import --id "
+                        "<arxiv_id>` to create one; --auto-update "
                         "will not fabricate an import record."
                     ),
                 )
@@ -549,9 +550,15 @@ def apply_auto_update(
         errors: list[str] = []
         for rel in sidecars:
             path = root / rel
+            # Reading AND writing are that paper's problem. Guarding only the read
+            # is how #65 and #71 shipped a batch crash twice: an unwritable
+            # `source-provenance/`, a full disk, or a permission error would abort
+            # the whole run with a traceback, after earlier papers' ledgers were
+            # already written. `write_provenance` re-raises `OSError`, and its
+            # `mkdir` raises one too.
             try:
                 provenance = read_provenance(path)
-            except ProvenanceError as exc:
+            except (ProvenanceError, OSError) as exc:
                 errors.append(f"{rel}: {exc}")
                 continue
             existing = next(
@@ -576,15 +583,25 @@ def apply_auto_update(
             # unchanged paper leaves the ledger byte- and mtime_ns-identical.
             if record.to_dict() == existing.to_dict():
                 continue
-            update_source(provenance, record)
-            write_provenance(path, provenance)
+            try:
+                update_source(provenance, record)
+                write_provenance(path, provenance)
+            except (ProvenanceError, OSError) as exc:
+                errors.append(f"{rel}: {exc}")
+                continue
             written.append(rel)
 
-        if errors and not written:
+        if errors:
+            # Any failure is an error, even when a sibling ledger was written. One
+            # paper can be cited by two ledgers (an arXiv-primary original and an
+            # OpenAlex-primary one referencing the same preprint); reporting the
+            # pair as "updated" would bury the half that did not land, and only the
+            # error status reaches the exit code.
             outcomes.append(
                 LedgerUpdate(
                     arxiv_id=result.arxiv_id,
                     status=UPDATE_ERROR,
+                    ledgers=tuple(sorted(written)),
                     recorded_version=result.recorded_version,
                     current_version=result.current_version,
                     reason="; ".join(errors),
@@ -598,7 +615,6 @@ def apply_auto_update(
                     ledgers=tuple(sorted(written)),
                     recorded_version=result.recorded_version,
                     current_version=result.current_version,
-                    reason="; ".join(errors),
                 )
             )
         else:
@@ -747,7 +763,7 @@ def _auto_update_lines(updates: Sequence[LedgerUpdate]) -> list[str]:
     if no_ledger:
         lines.append(
             "\nNot auto-updated (no ledger; front matter only, imported before #82 — "
-            "re-import to create one):"
+            "run `factlog arxiv-import --id <arxiv_id>` to create one):"
         )
         for u in no_ledger:
             lines.append(f"  · {u.arxiv_id}: arXiv now serves v{u.current_version}")

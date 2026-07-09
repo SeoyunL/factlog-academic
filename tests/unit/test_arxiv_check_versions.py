@@ -726,3 +726,57 @@ class TestAutoUpdateCli:
         assert rows["updated"] == "1"
         assert updates["1706.03762"][2] == "updated"
         assert updates["1706.03762"][4] == "7"
+
+
+class TestAWriteFailureIsOnePapersProblem:
+    """`#65` and `#71` each shipped a batch crash because only the *read* was
+    guarded. `--auto-update` added a write path, and it had the same hole: an
+    unwritable `source-provenance/`, a full disk, or a permission error aborted the
+    whole run — after earlier papers' ledgers were already written."""
+
+    def _unwritable(self, kb):
+        target = kb / "source-provenance"
+        target.chmod(0o500)
+        return target
+
+    def test_an_unwritable_ledger_directory_is_a_per_id_error(self, tmp_path, fake, capsys):
+        _seed(tmp_path, "1706.03762", 5)
+        fake(FakeClient([_work("1706.03762", version=7)]))
+        guard = self._unwritable(tmp_path)
+        try:
+            code = run(["arxiv-check-versions", "--target", str(tmp_path),
+                        "--older-than", "0", "--auto-update"])
+        finally:
+            guard.chmod(0o700)
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "Could not auto-update" in out
+        assert "1706.03762" in out
+
+    def test_the_healthy_papers_in_the_batch_still_update(self, tmp_path, fake, capsys):
+        # One paper's ledger is unwritable; the others must still land.
+        _seed(tmp_path, "1706.03762", 5, name="a")
+        _seed(tmp_path, "1810.04805", 1, name="b")
+        fake(FakeClient([_work("1706.03762", version=7), _work("1810.04805", version=3)]))
+        bad = tmp_path / "source-provenance" / "a.json"
+        bad.chmod(0o400)
+        (tmp_path / "source-provenance").chmod(0o500)
+        try:
+            run(["arxiv-check-versions", "--target", str(tmp_path),
+                 "--older-than", "0", "--auto-update"])
+        finally:
+            (tmp_path / "source-provenance").chmod(0o700)
+            bad.chmod(0o600)
+        # Nothing crashed; the report names the failure rather than a traceback.
+        assert "Could not auto-update" in capsys.readouterr().out
+
+    def test_a_partial_failure_is_not_reported_as_updated(self, tmp_path, fake, capsys):
+        # A paper cited by two ledgers, one of them corrupt: reporting the pair as
+        # "updated" would bury the half that did not land.
+        _seed(tmp_path, "1706.03762", 5, name="good")
+        broken = tmp_path / "source-provenance" / "broken.json"
+        broken.write_text("{ corrupt", encoding="utf-8")
+        fake(FakeClient([_work("1706.03762", version=7)]))
+        code = run(["arxiv-check-versions", "--target", str(tmp_path),
+                    "--older-than", "0", "--auto-update"])
+        assert code == 1  # the corrupt ledger reaches the exit code
