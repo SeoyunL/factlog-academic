@@ -624,3 +624,32 @@ class TestThePhraseRewriteIsAnnounced:
         run(["arxiv-search", "--query", "chain of thought",
              "--target", str(_kb(tmp_path)), "--dry-run", "--porcelain"])
         assert 'all:"chain of thought"' in capsys.readouterr().out
+
+
+class TestAnUnquotableQueryFailsBeforeTheTransport:
+    """`as_phrase` raises for a query it cannot wrap. That must reach the operator
+    as an error, not a traceback, and it must not spend a request — including under
+    `--dry-run`, which is the path that first leaked it."""
+
+    @pytest.mark.parametrize("query", ['"chain of thought', "chain of thought\\"])
+    def test_it_is_an_error_not_a_traceback(self, tmp_path, fake, capsys, query):
+        client = fake(FakeSearchClient())
+        assert run(["arxiv-search", "--query", query, "--target", str(_kb(tmp_path))]) == 1
+        assert client.calls == []
+        err = capsys.readouterr().err
+        assert "factlog arxiv-search:" in err
+
+    @pytest.mark.parametrize("query", ['"chain of thought', "chain of thought\\"])
+    def test_dry_run_refuses_it_too(self, tmp_path, fake, capsys, query):
+        client = fake(FakeSearchClient())
+        assert run(["arxiv-search", "--query", query, "--target", str(_kb(tmp_path)),
+                    "--dry-run"]) == 1
+        assert client.calls == []
+
+    def test_the_help_states_the_phrase_behaviour(self, capsys):
+        # #89 acceptance: whatever ships is stated in `arxiv-search --help`.
+        with pytest.raises(SystemExit):
+            run(["arxiv-search", "--help"])
+        out = capsys.readouterr().out
+        assert "phrase" in out
+        assert 'all:"' in out
