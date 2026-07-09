@@ -365,12 +365,41 @@ def paired_conversion(
     return None
 
 
+def is_hidden_source(path: Path, source_root: Path) -> bool:
+    """True when *path* has a dot-prefixed component below *source_root* (#67).
+
+    "Hidden" under sources/ means ANY path component beneath the source root
+    starts with '.', so a top-level `.DS_Store` is hidden and so is every file
+    inside a hidden directory — `sources/.provenance/x.json`, a nested
+    `sources/.git/…` checkout, `sources/.obsidian/…` editor state. This is the
+    single definition shared by every sources/ enumerator; before #67 four call
+    sites checked only `path.name`, so a file inside a hidden *directory* was
+    treated as a real source by `factlog sources`/`ingest --scan`/eject while
+    sync and coverage (which check every component) skipped it — the counts
+    disagreed and the `[no facts]` hint pointed at a file sync would never touch.
+
+    A source whose own name begins with '.' (`sources/.hidden.md`) is likewise
+    hidden: factlog has never enumerated dot-prefixed source filenames, and this
+    keeps the one rule uniform across depths.
+    """
+    return any(part.startswith(".") for part in path.relative_to(source_root).parts)
+
+
 def source_files(root: Path) -> list[Path]:
+    """Every real source file under the KB's SOURCE_ROOTS, hidden paths excluded.
+
+    Hidden files (any dot-prefixed component below the source root — see
+    is_hidden_source) are filtered here, at the single enumeration point, so no
+    caller can forget the rule and disagree about what counts as a source (#67).
+    """
     files: list[Path] = []
     for rel in SOURCE_ROOTS:
         base = root / rel
         if base.is_dir():
-            files.extend(path for path in base.rglob("*") if path.is_file())
+            files.extend(
+                path for path in base.rglob("*")
+                if path.is_file() and not is_hidden_source(path, base)
+            )
     return sorted(files)
 
 
