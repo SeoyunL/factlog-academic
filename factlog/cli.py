@@ -3243,6 +3243,102 @@ def cmd_arxiv_import(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
+    """Report-only: is any arXiv record in the KB behind arXiv's latest? (#78, §11
+    Step 6). Reads the provenance ledgers and a KB-level check-log, queries arXiv,
+    and reports version divergences and newly-withdrawn papers. Never writes to
+    sources/ or a ledger; only the check-log's last-checked timestamps advance.
+    """
+    from datetime import datetime, timezone
+
+    from factlog.integrations.arxiv import check_versions as cv
+    from factlog.integrations.arxiv.check_log import (
+        CheckLogError,
+        check_log_path,
+        read_check_log,
+        record_check,
+        write_check_log,
+    )
+    from factlog.integrations.arxiv.client import ArxivConnectionError, ArxivError
+
+    prepared = _arxiv_prepare(args, "arxiv-check-versions")
+    if prepared is None:
+        return 1
+    target, config = prepared
+    porcelain = getattr(args, "porcelain", False)
+    older_than_days = args.older_than
+
+    # A corrupt check-log is one KB-level file; surface it as a clear failure
+    # rather than a traceback, and never as an empty log (which the next write
+    # would then persist over the real one).
+    log_path = check_log_path(target)
+    try:
+        check_log = read_check_log(log_path)
+    except CheckLogError as exc:
+        print(f"factlog arxiv-check-versions: {exc}", file=sys.stderr)
+        return 1
+
+    # A corrupt *ledger* is one source's problem (a per-id error), never a crash.
+    entries, ledger_errors = cv.collect_ledger_entries(target)
+    if not entries and not ledger_errors:
+        if not porcelain:
+            print(f"factlog arxiv-check-versions: no arXiv records in {target}")
+        else:
+            for line in cv.porcelain_lines([], [], cv.summarize([], []), target=target):
+                print(line)
+        return 0
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    to_check, skipped = cv.partition_by_freshness(entries, check_log, older_than_days, now)
+
+    results: list = []
+    if to_check:
+        client = _make_arxiv_client(config)
+        eta = cv.format_eta(len(to_check), cv.BATCH_SIZE, config.request_delay)
+        print(
+            f"Checking {len(to_check)} arXiv record(s) against the API ({eta})...",
+            file=sys.stderr,
+        )
+
+        def _progress(done: int, total: int) -> None:
+            print(f"  checked {done}/{total}", file=sys.stderr)
+
+        try:
+            results = cv.check_entries(to_check, client, progress=_progress)
+        except ArxivConnectionError as exc:
+            print(f"factlog arxiv-check-versions: {exc}", file=sys.stderr)
+            return 2
+        except ArxivError as exc:
+            # Service/response/transport failures cannot be trusted partial; the
+            # check-log is left untouched so a re-run starts clean.
+            print(f"factlog arxiv-check-versions: {exc}", file=sys.stderr)
+            return 1
+
+    # Record what was actually observed this run: a paper the API answered gets a
+    # fresh timestamp and its current (int) version. Missing/errored papers and the
+    # skipped ones are left as they were. Nothing under sources/ is touched.
+    now_iso = now.isoformat()
+    recorded_any = False
+    for result in results:
+        if result.current_version is not None:
+            record_check(check_log, result.arxiv_id, now_iso, result.current_version)
+            recorded_any = True
+    if recorded_any:
+        write_check_log(log_path, check_log)
+
+    all_results = results + ledger_errors
+    summary = cv.summarize(all_results, skipped)
+    if porcelain:
+        for line in cv.porcelain_lines(all_results, skipped, summary, target=target):
+            print(line)
+    else:
+        for line in cv.report_lines(
+            all_results, skipped, summary, target=target, older_than_days=older_than_days
+        ):
+            print(line)
+    return 1 if summary.errors else 0
+
+
 def cmd_openalex_cite(args: argparse.Namespace) -> int:
     """Show the citation neighbourhood of a source already in the KB (spec §5.2).
 
@@ -3704,6 +3800,26 @@ def build_parser() -> argparse.ArgumentParser:
              "(no separate --version flag). Up to 100 ids per run.",
     )
     ax_import.set_defaults(func=cmd_arxiv_import)
+
+    ax_check = sub.add_parser(
+        "arxiv-check-versions",
+        help="report arXiv records whose version is behind arXiv's latest "
+             "(report-only; never writes sources/)",
+    )
+    ax_check.add_argument(
+        "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+    )
+    ax_check.add_argument(
+        "--older-than", type=float, default=30.0, metavar="DAYS",
+        help="skip records checked within DAYS (read from the check-log, not the "
+             "source files); default 30. Use 0 to force a re-check of every record.",
+    )
+    ax_check.add_argument(
+        "--porcelain", action="store_true",
+        help="machine-readable output (tab-separated rows) for scripts; progress "
+             "and ETA stay on stderr",
+    )
+    ax_check.set_defaults(func=cmd_arxiv_check_versions)
 
     return parser
 
