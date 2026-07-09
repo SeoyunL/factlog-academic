@@ -142,12 +142,18 @@ def check_log_path(kb_root: Path | str) -> Path:
 @dataclass(frozen=True)
 class CheckRecord:
     """One paper's last check: the timestamp the tool looked, and the version it
-    saw then. Both are strings — ``version`` is an arXiv version label (``"1"``,
-    ``"2"``); numeric comparison, if a future consumer wants it, is the consumer's
-    business, not this ledger's."""
+    saw then.
+
+    ``version`` is an **int**, matching ``ParsedArxivWork.version`` and the
+    ``version`` field of an arXiv provenance record. A string here would be a
+    silent trap for the one consumer this log exists for: ``arxiv-check-versions``
+    (#78) compares the logged version against the one the API returns, and
+    ``7 != "7"`` would report every paper as changed. arXiv numbers versions from
+    v1, so a value below 1 is corruption.
+    """
 
     last_checked_at: str
-    version: str
+    version: int
 
 
 @dataclass
@@ -271,14 +277,26 @@ def read_check_log(path: Path | str) -> CheckLog:
             raise CheckLogError(
                 f"check-log entry has unexpected key(s) {sorted(extra)}: {raw!r} in {p}"
             )
-        # A non-string value survives json and later breaks the sort/serialization
-        # far from the corrupt file that caused it; reject it at the boundary.
-        for name in ("arxiv_id", "last_checked_at", "version"):
+        # A wrong-typed value survives json and later breaks a comparison or the
+        # sort far from the corrupt file that caused it; reject it at the boundary.
+        for name in ("arxiv_id", "last_checked_at"):
             if not isinstance(raw[name], str):
                 raise CheckLogError(
                     f"check-log entry field {name!r} must be a string, got "
                     f"{type(raw[name]).__name__}: {raw!r} in {p}"
                 )
+        # bool is an int subclass; `true` must not read as version 1.
+        version = raw["version"]
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise CheckLogError(
+                f"check-log entry field 'version' must be an integer, got "
+                f"{type(version).__name__}: {raw!r} in {p}"
+            )
+        if version < 1:
+            raise CheckLogError(
+                f"check-log entry field 'version' must be >= 1 (arXiv numbers "
+                f"versions from v1), got {version}: {raw!r} in {p}"
+            )
         arxiv_id = raw["arxiv_id"]
         # One record per paper. A file with two entries for one id was not written
         # by this module, and folding it into the dict would drop one silently.

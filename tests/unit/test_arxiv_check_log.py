@@ -40,8 +40,8 @@ T2 = "2026-07-08T00:00:00Z"
 def _two_paper_log() -> CheckLog:
     """The canonical two-paper example from the issue."""
     log = CheckLog()
-    record_check(log, "2311.09277", T1, "2")
-    record_check(log, "2210.03629", T2, "1")
+    record_check(log, "2311.09277", T1, 2)
+    record_check(log, "2210.03629", T2, 1)
     return log
 
 
@@ -78,7 +78,7 @@ class TestRoundTrip:
         path = check_log_path(tmp_path)
         write_check_log(path, _two_paper_log())
         loaded = read_check_log(path)
-        assert loaded.entries["2311.09277"] == CheckRecord("2026-07-09T00:00:00Z", "2")
+        assert loaded.entries["2311.09277"] == CheckRecord("2026-07-09T00:00:00Z", 2)
 
     def test_exact_two_paper_bytes(self, tmp_path):
         # Pins the on-disk format: records sorted by arxiv_id, keys sorted,
@@ -91,12 +91,12 @@ class TestRoundTrip:
             "    {\n"
             '      "arxiv_id": "2210.03629",\n'
             '      "last_checked_at": "2026-07-08T00:00:00Z",\n'
-            '      "version": "1"\n'
+            '      "version": 1\n'
             "    },\n"
             "    {\n"
             '      "arxiv_id": "2311.09277",\n'
             '      "last_checked_at": "2026-07-09T00:00:00Z",\n'
-            '      "version": "2"\n'
+            '      "version": 2\n'
             "    }\n"
             "  ],\n"
             '  "schema_version": 1\n'
@@ -117,11 +117,11 @@ class TestDeterminism:
 
     def test_insertion_order_does_not_affect_bytes(self, tmp_path):
         forward = CheckLog()
-        record_check(forward, "2311.09277", T1, "2")
-        record_check(forward, "2210.03629", T2, "1")
+        record_check(forward, "2311.09277", T1, 2)
+        record_check(forward, "2210.03629", T2, 1)
         reverse = CheckLog()
-        record_check(reverse, "2210.03629", T2, "1")
-        record_check(reverse, "2311.09277", T1, "2")
+        record_check(reverse, "2210.03629", T2, 1)
+        record_check(reverse, "2311.09277", T1, 2)
         f = tmp_path / CHECK_LOG_DIR / "f.json"
         r = tmp_path / CHECK_LOG_DIR / "r.json"
         write_check_log(f, forward)
@@ -134,31 +134,31 @@ class TestDeterminism:
 class TestRecordCheck:
     def test_records_a_new_paper(self):
         log = CheckLog()
-        record_check(log, "2311.09277", T1, "1")
-        assert log.entries == {"2311.09277": CheckRecord(T1, "1")}
+        record_check(log, "2311.09277", T1, 1)
+        assert log.entries == {"2311.09277": CheckRecord(T1, 1)}
 
     def test_re_recording_identical_is_a_noop_on_bytes(self, tmp_path):
         path = check_log_path(tmp_path)
         log = CheckLog()
-        record_check(log, "2311.09277", T1, "1")
+        record_check(log, "2311.09277", T1, 1)
         write_check_log(path, log)
         before = path.read_bytes()
-        record_check(log, "2311.09277", T1, "1")
+        record_check(log, "2311.09277", T1, 1)
         write_check_log(path, log)
         assert path.read_bytes() == before
 
     def test_re_check_replaces_timestamp_and_version(self):
         # The whole point of --older-than: the latest observation wins.
         log = CheckLog()
-        record_check(log, "2311.09277", T2, "1")
-        record_check(log, "2311.09277", T1, "2")
+        record_check(log, "2311.09277", T2, 1)
+        record_check(log, "2311.09277", T1, 2)
         assert len(log.entries) == 1
-        assert log.entries["2311.09277"] == CheckRecord(T1, "2")
+        assert log.entries["2311.09277"] == CheckRecord(T1, 2)
 
     def test_recording_a_second_paper_leaves_the_first(self):
         log = CheckLog()
-        record_check(log, "2311.09277", T1, "1")
-        record_check(log, "2210.03629", T2, "3")
+        record_check(log, "2311.09277", T1, 1)
+        record_check(log, "2210.03629", T2, 3)
         assert set(log.entries) == {"2311.09277", "2210.03629"}
 
 
@@ -173,9 +173,9 @@ class TestMissingFile:
     def test_a_first_run_can_write_after_an_empty_read(self, tmp_path):
         path = check_log_path(tmp_path)
         log = read_check_log(path)  # missing -> empty
-        record_check(log, "2311.09277", T1, "1")
+        record_check(log, "2311.09277", T1, 1)
         write_check_log(path, log)
-        assert read_check_log(path).entries["2311.09277"] == CheckRecord(T1, "1")
+        assert read_check_log(path).entries["2311.09277"] == CheckRecord(T1, 1)
 
 
 # --- read robustness: every corrupt shape must raise -------------------------
@@ -193,7 +193,7 @@ class TestReadRejectsCorruptLogs:
         return self._write(tmp_path, json.dumps(payload))
 
     def _entry(self, **over):
-        return {"arxiv_id": "2311.09277", "last_checked_at": T1, "version": "1", **over}
+        return {"arxiv_id": "2311.09277", "last_checked_at": T1, "version": 1, **over}
 
     def test_invalid_json_raises(self, tmp_path):
         path = self._write(tmp_path, "{not json")
@@ -257,7 +257,7 @@ class TestReadRejectsCorruptLogs:
         with pytest.raises(CheckLogError, match="'arxiv_id' must be a string"):
             read_check_log(path)
 
-    @pytest.mark.parametrize("field", ["last_checked_at", "version"])
+    @pytest.mark.parametrize("field", ["last_checked_at"])  # `version` has its own int guard
     def test_non_string_value_raises(self, tmp_path, field):
         path = self._json(tmp_path, {"schema_version": 1,
                                      "entries": [self._entry(**{field: 7})]})
@@ -266,7 +266,7 @@ class TestReadRejectsCorruptLogs:
 
     def test_two_records_for_one_id_raises(self, tmp_path):
         path = self._json(tmp_path, {"schema_version": 1, "entries": [
-            self._entry(version="1"), self._entry(version="9")]})
+            self._entry(version=1), self._entry(version=9)]})
         with pytest.raises(CheckLogError, match="two records for arxiv_id"):
             read_check_log(path)
 
@@ -274,7 +274,7 @@ class TestReadRejectsCorruptLogs:
         # json.loads keeps the last duplicate silently; the object_pairs_hook
         # refuses it. Hand-written because json.dumps cannot emit a duplicate key.
         text = ('{"schema_version": 1, "entries": [{"arxiv_id": "a", '
-                '"arxiv_id": "b", "last_checked_at": "t", "version": "1"}]}')
+                '"arxiv_id": "b", "last_checked_at": "t", "version": 1}]}')
         path = self._write(tmp_path, text)
         with pytest.raises(CheckLogError, match="duplicate key"):
             read_check_log(path)
@@ -304,7 +304,7 @@ class TestAtomicWrite:
     def test_overwrite_is_atomic_and_complete(self, tmp_path):
         path = check_log_path(tmp_path)
         first = CheckLog()
-        record_check(first, "2311.09277", T1, "1")
+        record_check(first, "2311.09277", T1, 1)
         write_check_log(path, first)
         write_check_log(path, _two_paper_log())
         loaded = read_check_log(path)
@@ -398,3 +398,73 @@ def test_import_factlog_does_not_load_check_log():
 def test_module_exports():
     assert clog.CHECK_LOG_DIR == "check-log"
     assert callable(clog.check_log_path)
+
+
+class TestVersionIsAnIntEverywhere:
+    """`version` must be the same type here, on `ParsedArxivWork`, and in an arXiv
+    provenance record. A string in the log is a silent trap for the one consumer
+    this file exists for: `arxiv-check-versions` (#78) compares the logged version
+    with the one the API returns, and `7 != "7"` reports every paper as changed."""
+
+    def test_the_log_agrees_with_the_parsed_work_and_the_provenance_record(self):
+        # Runtime types, not annotations: `from __future__ import annotations`
+        # makes the latter strings, and a string that says "int" proves nothing.
+        from datetime import date
+
+        from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
+        from factlog.integrations.arxiv.work_parser import ParsedArxivWork
+
+        work = ParsedArxivWork(
+            arxiv_id="1706.03762", version=7, title="T", authors=("A",),
+            abstract="x", primary_category="cs.CL", categories=("cs.CL",),
+            submitted=date(2017, 6, 12), last_updated=date(2017, 6, 12))
+        provenance_version = ArxivSourceWriter()._provenance_record(work, "t").fields["version"]
+
+        log = CheckLog()
+        record_check(log, work.arxiv_id, T1, work.version)
+        logged = log.entries[work.arxiv_id].version
+
+        assert type(work.version) is type(provenance_version) is type(logged) is int
+
+    def test_the_comparison_check_versions_will_make(self, tmp_path):
+        # The whole point of the log. Round-trip through disk, then compare with an
+        # int as `ParsedArxivWork.version` hands it over.
+        path = check_log_path(tmp_path)
+        log = CheckLog()
+        record_check(log, "1706.03762", T1, 7)
+        write_check_log(path, log)
+
+        logged = read_check_log(path).entries["1706.03762"].version
+        api_version = 7  # what ParsedArxivWork.version carries
+        assert logged == api_version
+        assert logged is not None and isinstance(logged, int)
+
+    @pytest.mark.parametrize("bad", ["1", 1.5, True, None, [1]])
+    def test_a_non_integer_version_is_refused_at_read(self, tmp_path, bad):
+        path = check_log_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema_version": 1, "entries": [
+            {"arxiv_id": "1706.03762", "last_checked_at": T1, "version": bad}]}),
+            encoding="utf-8")
+        with pytest.raises(CheckLogError, match="must be an integer"):
+            read_check_log(path)
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_a_version_below_one_is_refused(self, tmp_path, bad):
+        # arXiv numbers versions from v1; v0 does not exist.
+        path = check_log_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema_version": 1, "entries": [
+            {"arxiv_id": "1706.03762", "last_checked_at": T1, "version": bad}]}),
+            encoding="utf-8")
+        with pytest.raises(CheckLogError, match=">= 1"):
+            read_check_log(path)
+
+    def test_the_version_is_written_as_a_json_number(self, tmp_path):
+        path = check_log_path(tmp_path)
+        log = CheckLog()
+        record_check(log, "1706.03762", T1, 7)
+        write_check_log(path, log)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["entries"][0]["version"] == 7
+        assert isinstance(raw["entries"][0]["version"], int)
