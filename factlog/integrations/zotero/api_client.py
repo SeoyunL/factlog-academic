@@ -52,6 +52,15 @@ def _data(item: dict) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _unreachable_msg(exc: Exception) -> str:
+    return (
+        f"cannot reach the Zotero Local API on localhost:{DEFAULT_LOCAL_PORT} "
+        f"({type(exc).__name__}) — is Zotero running with 'Allow other "
+        "applications on this computer to communicate with Zotero' enabled? "
+        "(Settings > Advanced)"
+    )
+
+
 def _is_downloadable_pdf(data: dict) -> bool:
     if data.get("itemType") != "attachment":
         return False
@@ -125,27 +134,31 @@ class ZoteroClient:
     @staticmethod
     def _classify(exc: Exception) -> ZoteroError | None:
         names = {cls.__name__ for cls in type(exc).__mro__}
-        # Server reachable but returned an error status, or pyzotero rejected the
-        # request (bad key, unauthorised, rate limit, ...).
-        if "HTTPError" in names or "PyZoteroError" in names or names & {
-            "ResourceNotFound",
-            "UserNotAuthorised",
-            "UnsupportedParams",
-            "TooManyRetries",
-            "HTTPError",
+        # Order matters: a transport failure must be tested BEFORE HTTP status,
+        # because modern pyzotero uses httpx whose ConnectError/timeouts derive
+        # from RequestError -> HTTPError — i.e. a connection failure also carries
+        # "HTTPError" in its MRO. Classify "could not reach/complete the request"
+        # first (httpx RequestError family, requests ConnectionError/Timeout,
+        # builtin ConnectionError). httpx exceptions are NOT OSError subclasses,
+        # so we match by name, keeping a bare-OSError socket fallback last.
+        if names & {
+            "RequestError",       # httpx base for every transport-level failure
+            "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+            "PoolTimeout", "NetworkError", "TransportError", "ProxyError",
+            "ConnectionError", "Timeout", "SSLError",  # requests + builtins
+        }:
+            return ZoteroConnectionError(_unreachable_msg(exc))
+        # Server responded with an error status, or pyzotero rejected the request.
+        if names & {
+            "HTTPStatusError",    # httpx: a real 4xx/5xx response
+            "HTTPError",          # requests HTTPError (status) / pyzotero
+            "PyZoteroError", "ResourceNotFound", "UserNotAuthorised",
+            "UnsupportedParams", "TooManyRetries",
         }:
             return ZoteroError(f"Zotero Local API request failed: {exc}")
-        # Could not reach the server: dedicated connection/timeout types, or a
-        # bare socket-level OSError.
-        if names & {"ConnectionError", "ConnectTimeout", "Timeout", "ReadTimeout", "SSLError"} or (
-            isinstance(exc, OSError)
-        ):
-            return ZoteroConnectionError(
-                f"cannot reach the Zotero Local API on localhost:{DEFAULT_LOCAL_PORT} "
-                f"({type(exc).__name__}) — is Zotero running with 'Allow other "
-                "applications on this computer to communicate with Zotero' enabled? "
-                "(Settings > Advanced)"
-            )
+        # Bare socket-level OSError not otherwise named.
+        if isinstance(exc, OSError):
+            return ZoteroConnectionError(_unreachable_msg(exc))
         return None
 
     def _all(self, first_page):
