@@ -412,3 +412,102 @@ class TestRetractionIsSourceScoped:
     @pytest.mark.parametrize("falsy", [None, False, 0, ""])
     def test_absent_or_false_flag_is_false(self, falsy):
         assert parse_work({**WORK, "is_retracted": falsy}).openalex_is_retracted is False
+
+
+class TestArxivIdExtraction:
+    """§7.1 / #64: the arXiv id is mined from ``locations[]``, never from ``ids``.
+
+    Real URL shapes and the ``best_oa_location`` trap were measured live in #57/#64
+    (W2972343689, W3017961061). The id is the join key that lets an OpenAlex work
+    be recognised as the same paper as an arXiv record.
+    """
+
+    def test_no_locations_means_no_arxiv_id(self):
+        assert parse_work(WORK).arxiv_id is None
+
+    def test_arxiv_id_is_never_taken_from_ids(self):
+        # Even if `ids` somehow carried an arxiv key, it must not be read.
+        work = {**WORK, "ids": {**WORK["ids"], "arxiv": "http://arxiv.org/abs/2005.13421"}}
+        assert parse_work(work).arxiv_id is None
+
+    def test_landing_page_url_yields_the_base_id(self):
+        work = {**WORK, "locations": [
+            {"landing_page_url": "http://arxiv.org/abs/2005.13421"},
+        ]}
+        assert parse_work(work).arxiv_id == "2005.13421"
+
+    def test_pdf_url_is_used_when_landing_is_absent(self):
+        work = {**WORK, "locations": [
+            {"pdf_url": "https://arxiv.org/pdf/2005.13421"},
+        ]}
+        assert parse_work(work).arxiv_id == "2005.13421"
+
+    def test_version_is_stripped_to_the_base(self):
+        work = {**WORK, "locations": [
+            {"landing_page_url": "https://arxiv.org/abs/2311.09277v2"},
+        ]}
+        assert parse_work(work).arxiv_id == "2311.09277"
+
+    def test_export_arxiv_org_subdomain_is_admitted(self):
+        # export.arxiv.org is arXiv; its host ends with `.arxiv.org`.
+        work = {**WORK, "locations": [
+            {"pdf_url": "http://export.arxiv.org/pdf/2004.10964"},
+        ]}
+        assert parse_work(work).arxiv_id == "2004.10964"
+
+    def test_doi_org_arxiv_datacite_shape_is_ignored(self):
+        # A real locations[] entry: host is doi.org, not arxiv.org. Feeding it to
+        # normalize_arxiv_id would RAISE; the host filter must exclude it.
+        work = {**WORK, "locations": [
+            {"landing_page_url": "https://doi.org/10.48550/arxiv.2004.10964"},
+        ]}
+        assert parse_work(work).arxiv_id is None
+
+    def test_doi_org_then_export_arxiv_finds_the_arxiv_one(self):
+        # Multi-location: the doi.org shape is skipped, export.arxiv.org parses.
+        work = {**WORK, "locations": [
+            {"landing_page_url": "https://doi.org/10.48550/arxiv.2004.10964"},
+            {"pdf_url": "http://export.arxiv.org/pdf/2004.10964"},
+        ]}
+        assert parse_work(work).arxiv_id == "2004.10964"
+
+    def test_non_arxiv_preprint_hosts_are_ignored(self):
+        work = {**WORK, "locations": [
+            {"landing_page_url": "https://www.biorxiv.org/content/10.1101/2020.01.01.123456"},
+            {"pdf_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1234567"},
+        ]}
+        assert parse_work(work).arxiv_id is None
+
+    def test_best_oa_location_is_not_read(self):
+        # For a published paper best_oa_location is the JOURNAL, not arXiv (#64).
+        work = {**WORK,
+                "best_oa_location": {"landing_page_url": "http://arxiv.org/abs/2005.13421"},
+                "locations": [
+                    {"landing_page_url": "https://aclanthology.org/W19-3302"},
+                ]}
+        assert parse_work(work).arxiv_id is None
+
+    def test_first_arxiv_location_in_order_wins(self):
+        # landing before pdf within a location; locations in array order.
+        work = {**WORK, "locations": [
+            {"landing_page_url": "https://arxiv.org/abs/2005.13421",
+             "pdf_url": "https://arxiv.org/pdf/9999.99999"},
+        ]}
+        assert parse_work(work).arxiv_id == "2005.13421"
+
+    def test_old_style_id_is_canonicalised(self):
+        work = {**WORK, "locations": [
+            {"landing_page_url": "https://arxiv.org/abs/math.GT/0309136"},
+        ]}
+        assert parse_work(work).arxiv_id == "math/0309136"
+
+    def test_malformed_arxiv_url_does_not_crash_the_parse(self):
+        # An arXiv-hosted URL that is not an id (homepage) is skipped, not fatal.
+        work = {**WORK, "locations": [
+            {"landing_page_url": "https://arxiv.org/"},
+            {"pdf_url": "https://arxiv.org/pdf/2005.13421"},
+        ]}
+        assert parse_work(work).arxiv_id == "2005.13421"
+
+    def test_non_list_locations_degrade_to_none(self):
+        assert parse_work({**WORK, "locations": "oops"}).arxiv_id is None

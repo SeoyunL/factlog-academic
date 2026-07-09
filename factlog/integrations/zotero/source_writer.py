@@ -62,6 +62,7 @@ class SourceWriter(BaseSourceWriter):
     """Render parsed Zotero items into ``sources/`` markdown originals."""
 
     identity_key = "zotero_key"
+    source_name = "zotero"
     ignore_re = ANNOTATION_MARKER_RE
 
     def identity_of(self, parsed: dict) -> str:

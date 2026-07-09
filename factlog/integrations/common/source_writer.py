@@ -18,10 +18,10 @@ Four invariants hold for every integration:
   leaves the filesystem unchanged.
 * **Global-unique slugs (spec §12).** When a base slug is already claimed by a
   *different* record, a ``-2``/``-3`` suffix is appended.
-* **Cross-source duplicate detection (spec §7.1).** DOI and PMID are read from
-  *every* source file, whatever imported it, so the same paper arriving from a
-  second database is reported rather than written twice. Detection only —
-  merging several sources into one file (§7.3) is not done here.
+* **Cross-source duplicate detection (spec §7.1).** DOI, PMID and a normalized
+  arXiv id are read from *every* source file, whatever imported it, so the same
+  paper arriving from a second database is reported rather than written twice.
+  Detection only — merging several sources into one file (§7.3) is not done here.
 
 ``imported_at`` is injected by the caller rather than read from a clock here, so
 writers stay pure and unit-testable and the CLI controls the (single, batch)
@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from factlog.common import slugify
+from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
 from factlog.integrations.common._textio import atomic_write_text
 from factlog.integrations.common.front_matter import read_scalars
 
@@ -46,9 +47,17 @@ TITLE_SLUG_MAX_BYTES = 80
 STEM_MAX_BYTES = 190
 
 # Identifiers that identify the same *paper* across databases, in §7.1's
-# priority order: DOI is the most trustworthy, PMID next. Mapped to the label
-# used when reporting a duplicate.
-CROSS_SOURCE_IDS = (("doi", "DOI"), ("pmid", "PMID"))
+# priority order: DOI is the most trustworthy, PMID next, then the normalized
+# arXiv base id (the only exact join key for preprints, since a preprint rarely
+# carries a DOI). Mapped to the label used when reporting a duplicate.
+CROSS_SOURCE_IDS = (("doi", "DOI"), ("pmid", "PMID"), ("arxiv_id", "arXiv id"))
+
+# Front-matter field recording which integration wrote a source file. Read
+# alongside the identity/cross-id keys so identity registration can be scoped by
+# provenance (see :meth:`BaseSourceWriter._index`).
+IMPORTED_FROM_KEY = "imported_from"
+
+_CROSS_SOURCE_KINDS = frozenset(kind for kind, _ in CROSS_SOURCE_IDS)
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,9 @@ class _DirIndex:
     """One scan of a ``sources/`` directory, kept current as names are reserved."""
 
     claimed: set[str] = field(default_factory=set)
+    # Identity is scoped to this writer's own provenance (see _index); a foreign
+    # file that carries this writer's identity key only as a cross-source id does
+    # not register here.
     by_identity: dict[str, Path] = field(default_factory=dict)
     # ("doi", "10.1234/x") -> path. Populated from every source file regardless
     # of which integration wrote it, which is what makes §7.1 detection work.
@@ -112,9 +124,34 @@ def normalize_cross_id(kind: str, value: str) -> str:
 
     DOIs are case-insensitive, so a Zotero record's ``10.1378/CHEST...`` must
     match OpenAlex's lowercased form; otherwise the same paper imports twice.
+
+    An ``arxiv_id`` is canonicalised the way :func:`normalize_arxiv_id` does —
+    version stripped, subject class dropped, archive lowercased — so
+    ``2311.09277v2`` and ``2311.09277``, or ``math.GT/0309136`` and
+    ``math/0309136``, collide as the same paper. That normalizer is reused rather
+    than reimplemented as a regex, which would miss old-style ids and URL forms;
+    it imports only stdlib and arXiv config, so ``common`` depending on it is no
+    cycle.
+
+    **Tolerant of junk on purpose.** ``normalize_cross_id`` runs over
+    hand-editable source files (via :meth:`BaseSourceWriter._index`), where one
+    malformed ``arxiv_id:`` would otherwise abort *every* import in the KB.
+    ``normalize_arxiv_id`` *raises* ``ArxivIdError`` on a bad value; here we catch
+    it and fall back to ``value.strip()`` so the bad file simply does not match
+    anything (arXiv ids are case-significant, so this is deliberately not
+    lowercased). The CLI stays strict — a mistyped ``--arxiv-id`` is validated at
+    input — but junk already sitting in a file is tolerated, mirroring the
+    parser's optional-field handling.
     """
     normalized = value.strip()
-    return normalized.lower() if kind == "doi" else normalized
+    if kind == "doi":
+        return normalized.lower()
+    if kind == "arxiv_id":
+        try:
+            return normalize_arxiv_id(normalized).base
+        except ArxivIdError:
+            return normalized
+    return normalized
 
 
 class BaseSourceWriter:
@@ -127,6 +164,11 @@ class BaseSourceWriter:
 
     #: Front-matter field carrying the record's identity (e.g. ``zotero_key``).
     identity_key: str = ""
+    #: The value this writer emits as ``imported_from``. Identity registration in
+    #: :meth:`_index` is scoped to files bearing this provenance (or none), so a
+    #: foreign file that merely *carries* this writer's identity key as a
+    #: cross-source id is not mistaken for a prior import by this writer.
+    source_name: str = ""
     #: Front-matter pattern marking a companion file to exclude from the index.
     ignore_re: re.Pattern[str] | None = None
 
@@ -153,6 +195,23 @@ class BaseSourceWriter:
         """Cross-database identifiers (``doi``, ``pmid``) this record carries."""
         return {}
 
+    def _cross_id_values(self, parsed) -> dict[str, str]:
+        """Cross-source ids for the incoming record, in :data:`CROSS_SOURCE_IDS` form.
+
+        A writer whose ``identity_key`` is *itself* a cross-source id (the arXiv
+        writer, whose ``arxiv_id`` is both its identity and a §7.1 join key)
+        contributes that identity as the cross-id automatically. This is why the
+        arXiv writer needs no ``cross_ids()`` override: the same paper reached
+        through another database is detected without every such writer having to
+        re-declare its identity key.
+        """
+        values = dict(self.cross_ids(parsed))
+        if self.identity_key in _CROSS_SOURCE_KINDS:
+            identity = self.identity_of(parsed)
+            if identity:
+                values.setdefault(self.identity_key, identity)
+        return values
+
     def render(self, parsed, imported_at: str = "") -> str:
         """The full markdown text (front matter + body)."""
         raise NotImplementedError
@@ -162,7 +221,7 @@ class BaseSourceWriter:
         return build_slug(*self.slug_fields(parsed))
 
     def _scan_keys(self) -> tuple[str, ...]:
-        return (self.identity_key, *(kind for kind, _ in CROSS_SOURCE_IDS))
+        return (self.identity_key, IMPORTED_FROM_KEY, *(kind for kind, _ in CROSS_SOURCE_IDS))
 
     def _index(self, sources_dir: Path, mode: str) -> _DirIndex:
         key = (str(sources_dir.resolve()), mode)
@@ -174,7 +233,17 @@ class BaseSourceWriter:
                     cached.claimed.add(path.name)
                     scalars = read_scalars(path, self._scan_keys(), self.ignore_re)
                     identity = scalars.get(self.identity_key, "")
-                    if identity:
+                    # Scope identity registration by provenance. ``arxiv_id`` is
+                    # both the arXiv writer's identity key and a cross-source id,
+                    # so an OpenAlex file that merely carries ``arxiv_id:`` would
+                    # otherwise land in the arXiv writer's identity index and make
+                    # a re-import report "already imported" instead of "duplicate
+                    # arXiv id ..." — the distinction Step 4c needs to tell "same
+                    # record re-imported" from "same paper from another database".
+                    # A file with no ``imported_from`` (legacy or hand-written) is
+                    # still registered, preserving P3 idempotence.
+                    imported_from = scalars.get(IMPORTED_FROM_KEY, "")
+                    if identity and imported_from in ("", self.source_name):
                         cached.by_identity.setdefault(identity, path)
                     for kind, _ in CROSS_SOURCE_IDS:
                         value = scalars.get(kind, "")
@@ -206,8 +275,9 @@ class BaseSourceWriter:
         if existing is not None:
             return WriteResult(existing, "skipped", f"already imported ({self.identity_key} match)")
 
+        cross_ids = self._cross_id_values(parsed)
         for kind, label in CROSS_SOURCE_IDS:
-            value = self.cross_ids(parsed).get(kind, "")
+            value = cross_ids.get(kind, "")
             if not value:
                 continue
             existing = index.by_cross_id.get((kind, normalize_cross_id(kind, value)))
@@ -222,8 +292,9 @@ class BaseSourceWriter:
         path = self._unique_path(sources_dir, self.generate_slug(parsed), index.claimed)
         index.claimed.add(path.name)
         index.by_identity.setdefault(self.identity_of(parsed), path)
+        cross_ids = self._cross_id_values(parsed)
         for kind, _ in CROSS_SOURCE_IDS:
-            value = self.cross_ids(parsed).get(kind, "")
+            value = cross_ids.get(kind, "")
             if value:
                 index.by_cross_id.setdefault((kind, normalize_cross_id(kind, value)), path)
         return WriteResult(path, "imported")

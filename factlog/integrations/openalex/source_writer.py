@@ -58,6 +58,7 @@ class OpenAlexSourceWriter(BaseSourceWriter):
     """Render parsed OpenAlex works into ``sources/`` markdown originals."""
 
     identity_key = "openalex_id"
+    source_name = "openalex"
 
     def identity_of(self, parsed: ParsedWork) -> str:
         return parsed.openalex_id
@@ -68,8 +69,14 @@ class OpenAlexSourceWriter(BaseSourceWriter):
         return (first_author, year, parsed.title or "")
 
     def cross_ids(self, parsed: ParsedWork) -> dict[str, str]:
-        """DOI and PMID let §7.1 spot this paper arriving from another database."""
-        return {key: value for key, value in (("doi", parsed.doi), ("pmid", parsed.pmid)) if value}
+        """DOI, PMID and a normalized arXiv id let §7.1 spot this paper arriving
+        from another database. The arXiv id is the only exact join key for a
+        preprint, which rarely carries a DOI."""
+        return {
+            key: value
+            for key, value in (("doi", parsed.doi), ("pmid", parsed.pmid), ("arxiv_id", parsed.arxiv_id))
+            if value
+        }
 
     def render(self, parsed: ParsedWork, imported_at: str = "") -> str:
         return self._front_matter(parsed, imported_at) + self._body(parsed)
@@ -89,6 +96,12 @@ class OpenAlexSourceWriter(BaseSourceWriter):
             lines.append(f"doi: {_yaml_str(parsed.doi)}")
         if parsed.pmid:
             lines.append(f"pmid: {_yaml_str(parsed.pmid)}")
+        # Bare `arxiv_id`, not `openalex_arxiv_id`: the cross-source index scans
+        # the literal key across every source file, and the arXiv writer emits it
+        # as its identity key. The canonical, version-free base is written so it
+        # matches an arXiv record of the same paper (§7.1).
+        if parsed.arxiv_id:
+            lines.append(f"arxiv_id: {_yaml_str(parsed.arxiv_id)}")
         if parsed.tags:
             lines.append(f"tags: {_yaml_list(parsed.tags)}")
         # Descriptors only, with no major/minor distinction: OpenAlex's
