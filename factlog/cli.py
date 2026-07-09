@@ -2957,8 +2957,14 @@ def _openalex_prepare(args, command: str):
         return None
 
 
-def _openalex_select(works, *, interactive: bool) -> list:
+def _select_search_results(works, *, interactive: bool, command: str) -> list:
     """Ask which of the search results to import (spec §5.3).
+
+    Shared by ``openalex-search`` and ``arxiv-search`` so the prompt, the
+    ``none``/``all``/number parsing and the no-TTY rule cannot drift between the
+    two — the drift that let ``source_name`` and ``imported_from`` disagree
+    (#64). The only source-specific thing is the command name in the "ignoring"
+    diagnostic, passed in as ``command``.
 
     Without a terminal — a pipe, a script, ``--porcelain``, ``--dry-run`` — no
     prompt is issued and nothing is selected: a command that cannot ask must not
@@ -2981,7 +2987,7 @@ def _openalex_select(works, *, interactive: bool) -> list:
     for token in answer.split(","):
         token = token.strip()
         if not token.isdigit() or not 1 <= int(token) <= len(works):
-            print(f"factlog openalex-search: ignoring '{token}'", file=sys.stderr)
+            print(f"factlog {command}: ignoring '{token}'", file=sys.stderr)
             continue
         candidate = works[int(token) - 1]
         if candidate not in chosen:
@@ -3084,7 +3090,7 @@ def cmd_openalex_search(args: argparse.Namespace) -> int:
         chosen = works
     else:
         interactive = not porcelain and not dry_run and sys.stdin.isatty()
-        chosen = _openalex_select(works, interactive=interactive)
+        chosen = _select_search_results(works, interactive=interactive, command="openalex-search")
         if not chosen and not porcelain:
             hint = " Re-run with --all to import every result." if works and not dry_run else ""
             print(f"\nNothing selected; no files written.{hint}")
@@ -3366,15 +3372,28 @@ def _arxiv_search_withdrawal_warnings(works) -> list[str]:
 
 
 def cmd_arxiv_search(args: argparse.Namespace) -> int:
-    """Search arXiv and print the results. Non-interactive; imports nothing (#80).
+    """Search arXiv, list the results, then import the ones chosen (#80, #81).
 
     Free (no credits, no key). Every filter arXiv would silently ignore —
     an unknown category, an unknown query field, a bare/reversed/out-of-range
     --year — is rejected before a request is spent, because arXiv answers all of
     them with 200 and zero results, which reads as "no such literature exists"
     (#57). Zero results is nonetheless a legitimate answer for a search, so an
-    empty hit prints "0 results" and exits 0. Import is a separate command (#81).
+    empty hit prints "0 results" and exits 0.
+
+    Selection mirrors ``openalex-search`` exactly (the selector is shared): an
+    interactive prompt on a TTY, or ``--all`` to take the whole set. Anything
+    that cannot ask — ``--porcelain``, a pipe, no TTY — selects nothing rather
+    than guessing. Chosen works go through the *same* ``import_works`` the
+    single-id path uses, so a paper already in the KB via OpenAlex merges (#65)
+    instead of writing a second file, duplicates and per-id errors are handled
+    (#64), the withdrawal front matter is written (#60) and merge candidates are
+    surfaced (#75). ``--dry-run`` keeps its #80 meaning: it previews the query
+    that would be sent and imports nothing.
     """
+    from datetime import datetime, timezone
+
+    from factlog.integrations.arxiv.importer import import_works
     from factlog.integrations.arxiv.client import (
         ArxivConnectionError,
         ArxivError,
@@ -3395,6 +3414,7 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     target, config = prepared
 
     porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
     categories = tuple(args.category or ())
 
     # --limit is factlog policy (max 200), not an API constraint; reject an
@@ -3440,7 +3460,13 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     # what a real run sends — and it makes arXiv's own reading of the query
     # visible, which matters because a bare multi-word phrase is not searched as a
     # phrase (#89).
-    if args.dry_run:
+    # --show-query spends no request; it prints the exact `search_query` that would
+    # be sent. It used to be `--dry-run`, back when this command imported nothing
+    # (#80). Now that it does, `--dry-run` must mean what it means everywhere else
+    # in factlog and in `openalex-search`: do the work, write nothing. Two sibling
+    # commands whose identical `--dry-run` help hid different behaviour is the trap
+    # this splits (#81).
+    if args.show_query:
         composed = compose_search_query(args.query, categories, args.year)
         if porcelain:
             print(f"query\t{composed}")
@@ -3468,12 +3494,42 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
         return 1
 
     _arxiv_show_results(works, total, porcelain=porcelain)
-    # In --porcelain the withdrawn flag is a stdout field but its agent is prose,
-    # so the naming goes to stderr; in human mode the listing already named it.
+    # Flag every withdrawn result *before* the user selects it. In --porcelain the
+    # withdrawn flag is a stdout field but its agent is prose, so the naming goes
+    # to stderr; in human mode the listing already named it inline.
     if porcelain:
         for warning in _arxiv_search_withdrawal_warnings(works):
             print(warning, file=sys.stderr)
-    return 0
+
+    # Selection, then import through the single-id path's importer. --all takes the
+    # whole set (the explicit opt-in a non-interactive run needs); otherwise the
+    # shared selector prompts on a TTY and selects nothing when it cannot ask.
+    if args.all:
+        chosen = works
+    else:
+        interactive = not porcelain and not dry_run and sys.stdin.isatty()
+        chosen = _select_search_results(
+            works, interactive=interactive, command="arxiv-search"
+        )
+    if not chosen:
+        if not porcelain:
+            hint = " Re-run with --all to import every result." if works else ""
+            print(f"\nNothing selected; no files written.{hint}")
+        return 0
+
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report = import_works(
+        chosen, target=target, config=config, imported_at=imported_at, dry_run=dry_run
+    )
+    # Warn on stderr for each *imported* withdrawn paper, naming the agent — the
+    # same contract arxiv-import honours. The pre-selection listing above already
+    # flagged all withdrawn results; this fires only for the ones actually taken.
+    warnings = _arxiv_withdrawal_warnings(report, works)
+    return _arxiv_finish(
+        report, target, dry_run=dry_run, porcelain=porcelain, warnings=warnings
+    )
+
+
 def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     """Is any arXiv record in the KB behind arXiv's latest? (#78/#79, §11 Step 6).
     Reads the provenance ledgers and a KB-level check-log, queries arXiv, and
@@ -4058,8 +4114,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     ax_search = _arxiv_common(sub.add_parser(
         "arxiv-search",
-        help="search arXiv and print results (free; non-interactive, imports nothing)",
+        help="search arXiv and import chosen works into sources/ (free; --all or a TTY prompt)",
     ))
+    ax_search.add_argument(
+        "--show-query", action="store_true",
+        help="print the exact search_query that would be sent and exit, without "
+             "spending a request. `--dry-run` searches and reports what it would "
+             "import, like openalex-search.",
+    )
     ax_search.add_argument(
         "--query", required=True,
         help='search text (required). A bare multi-word query is searched as a '
@@ -4082,6 +4144,10 @@ def build_parser() -> argparse.ArgumentParser:
     ax_search.add_argument(
         "--sort", choices=("submitted", "updated", "relevance"), default=None,
         help="sort order: submitted (newest first), updated, or relevance",
+    )
+    ax_search.add_argument(
+        "--all", action="store_true",
+        help="import every result without prompting (needed when stdin is not a terminal)",
     )
     ax_search.set_defaults(func=cmd_arxiv_search)
     ax_check = sub.add_parser(

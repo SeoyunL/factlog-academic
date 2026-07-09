@@ -287,6 +287,37 @@ class TestSearch:
         assert run(["openalex-search", "--query", "q", "--target", str(_kb(tmp_path))]) == 2
 
 
+# -- the shared selector ---------------------------------------------------
+class TestSharedSelector:
+    """`_select_search_results` is shared with arxiv-search (#81). These pins fail
+    if the prompt text or the openalex-search "ignoring" prefix ever drift — the
+    exact drift that let two literals disagree in #64.
+    """
+
+    _PROMPT = "\nImport which? (comma-separated numbers, or 'all', or 'none')\n> "
+
+    def test_prompt_text_is_exact(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr("builtins.input", lambda prompt="": seen.setdefault("p", prompt) or "none")
+        cli._select_search_results(["a", "b"], interactive=True, command="openalex-search")
+        assert seen["p"] == self._PROMPT
+
+    def test_openalex_ignoring_prefix_is_exact(self, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", lambda *_: "9")
+        cli._select_search_results(["a"], interactive=True, command="openalex-search")
+        assert "factlog openalex-search: ignoring '9'" in capsys.readouterr().err
+
+    def test_command_name_selects_the_prefix(self, monkeypatch, capsys):
+        # The same selector, a different command, names that command instead.
+        monkeypatch.setattr("builtins.input", lambda *_: "9")
+        cli._select_search_results(["a"], interactive=True, command="arxiv-search")
+        assert "factlog arxiv-search: ignoring '9'" in capsys.readouterr().err
+
+    def test_non_interactive_never_prompts(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("must not prompt"))
+        assert cli._select_search_results(["a"], interactive=False, command="openalex-search") == []
+
+
 # -- openalex-cite ---------------------------------------------------------
 class TestCite:
     def _seeded(self, tmp_path, fake):
