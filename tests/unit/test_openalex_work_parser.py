@@ -11,7 +11,12 @@ import dataclasses
 import pytest
 
 from factlog.integrations.openalex.api_client import OpenAlexError
-from factlog.integrations.openalex.work_parser import ParsedWork, parse_work
+from factlog.integrations.openalex.work_parser import (
+    Concept,
+    ParsedWork,
+    PrimaryTopic,
+    parse_work,
+)
 
 # A real work, trimmed. Note every identifier is a URL.
 WORK = {
@@ -34,9 +39,18 @@ WORK = {
         {"author_position": "last", "author": {"display_name": "Luís C. Lamb"}},
     ],
     "concepts": [
-        {"display_name": "Interpretability", "score": 0.91},
-        {"display_name": "Symbolic artificial intelligence", "score": 0.49},
+        {"display_name": "Interpretability", "score": 0.91, "level": 3},
+        {"display_name": "Symbolic artificial intelligence", "score": 0.49, "level": 2},
+        # Real shape from #54: the unrelated root concept scores exactly 0.00.
+        {"display_name": "Paleontology", "score": 0.0, "level": 1},
     ],
+    "primary_topic": {
+        "display_name": "Neural Networks and Applications",
+        "score": 0.9944,
+        "subfield": {"display_name": "Artificial Intelligence"},
+        "field": {"display_name": "Computer Science"},
+        "domain": {"display_name": "Physical Sciences"},
+    },
     "abstract_inverted_index": {"Current": [0], "advances": [1], "in": [2], "AI": [3]},
     "mesh": [
         {"descriptor_ui": "D000375", "descriptor_name": "Aging", "is_major_topic": False},
@@ -55,11 +69,23 @@ class TestHappyPath:
             journal="Artificial Intelligence Review",
             doi="10.1007/s10462-023-10448-w",
             pmid="32738937",
-            concepts=("Interpretability", "Symbolic artificial intelligence"),
+            concepts=(
+                Concept("Interpretability", 0.91, 3),
+                Concept("Symbolic artificial intelligence", 0.49, 2),
+                Concept("Paleontology", 0.0, 1),
+            ),
+            primary_topic=PrimaryTopic(
+                display_name="Neural Networks and Applications",
+                score=0.9944,
+                subfield="Artificial Intelligence",
+                field="Computer Science",
+                domain="Physical Sciences",
+            ),
             cited_by_count=321,
             work_type="article",
             openalex_is_retracted=False,
             abstract="Current advances in AI",
+            abstract_complete=True,
             mesh_terms=("Aging",),
         )
 
@@ -155,6 +181,121 @@ class TestDegradation:
     @pytest.mark.parametrize("concepts", [None, [], "junk", [{"score": 1}], [7]])
     def test_missing_concepts_becomes_empty_tuple(self, concepts):
         assert parse_work({**WORK, "concepts": concepts}).concepts == ()
+
+    @pytest.mark.parametrize("topic", [None, {}, "junk", {"score": 1},
+                                       {"display_name": "  "}])
+    def test_missing_primary_topic_becomes_none(self, topic):
+        assert parse_work({**WORK, "primary_topic": topic}).primary_topic is None
+
+    def test_primary_topic_without_hierarchy_keeps_the_name(self):
+        parsed = parse_work({**WORK, "primary_topic": {"display_name": "T"}})
+        assert parsed.primary_topic == PrimaryTopic("T")
+
+    @pytest.mark.parametrize("bad", [{"subfield": "flat"}, {"subfield": {"x": 1}}])
+    def test_malformed_hierarchy_nodes_become_none(self, bad):
+        parsed = parse_work({**WORK, "primary_topic": {"display_name": "T", **bad}})
+        assert parsed.primary_topic.subfield is None
+
+    def test_primary_topic_score_can_be_near_zero_and_is_kept(self):
+        # #54: primary_topic is just the top entry of topics[], and that can be 0.06.
+        parsed = parse_work({**WORK, "primary_topic": {"display_name": "T", "score": 0.06}})
+        assert parsed.primary_topic.score == 0.06
+
+
+class TestConceptScores:
+    def test_scores_and_levels_are_preserved(self):
+        assert parse_work(WORK).concepts[0] == Concept("Interpretability", 0.91, 3)
+
+    @pytest.mark.parametrize("score", [None, "0.9", True, [1]])
+    def test_malformed_score_becomes_none(self, score):
+        work = {**WORK, "concepts": [{"display_name": "X", "score": score}]}
+        assert parse_work(work).concepts[0].score is None
+
+    def test_integer_score_is_coerced_to_float(self):
+        work = {**WORK, "concepts": [{"display_name": "X", "score": 1}]}
+        assert parse_work(work).concepts[0].score == 1.0
+
+    @pytest.mark.parametrize("level", [None, "3", -1, True])
+    def test_malformed_level_becomes_none(self, level):
+        work = {**WORK, "concepts": [{"display_name": "X", "level": level}]}
+        assert parse_work(work).concepts[0].level is None
+
+    def test_level_zero_is_kept_not_dropped(self):
+        work = {**WORK, "concepts": [{"display_name": "X", "level": 0}]}
+        assert parse_work(work).concepts[0].level == 0
+
+    def test_unnamed_concept_is_dropped(self):
+        work = {**WORK, "concepts": [{"score": 0.9}, {"display_name": "X", "score": 0.1}]}
+        assert [c.name for c in parse_work(work).concepts] == ["X"]
+
+
+class TestTagsFilter:
+    """#54 Mapping B: tags are the concepts scoring above zero, most confident first."""
+
+    def test_zero_scored_concepts_are_dropped(self):
+        # 12 of 13 clearly-unrelated concepts in the #54 sample scored exactly 0.00.
+        assert parse_work(WORK).tags == ("Interpretability", "Symbolic artificial intelligence")
+
+    def test_tags_are_ordered_by_descending_score(self):
+        work = {**WORK, "concepts": [
+            {"display_name": "Low", "score": 0.1},
+            {"display_name": "High", "score": 0.9},
+            {"display_name": "Mid", "score": 0.5},
+        ]}
+        assert parse_work(work).tags == ("High", "Mid", "Low")
+
+    def test_ties_keep_the_api_order(self):
+        work = {**WORK, "concepts": [
+            {"display_name": "First", "score": 0.5},
+            {"display_name": "Second", "score": 0.5},
+        ]}
+        assert parse_work(work).tags == ("First", "Second")
+
+    def test_a_barely_positive_score_survives(self):
+        work = {**WORK, "concepts": [{"display_name": "X", "score": 0.0001}]}
+        assert parse_work(work).tags == ("X",)
+
+    def test_unscored_concepts_are_excluded_from_tags_but_kept_in_concepts(self):
+        # Precision over recall: an unknown-confidence term is not worth a wrong
+        # canonical alias. Empty tags is a visible failure; noisy tags is a silent one.
+        work = {**WORK, "concepts": [{"display_name": "X"}]}
+        parsed = parse_work(work)
+        assert parsed.tags == ()
+        assert parsed.concepts == (Concept("X"),)
+
+    def test_wrong_sense_entities_survive_the_filter_as_documented(self):
+        # No threshold removes these; the P1 human gate is what catches them.
+        work = {**WORK, "concepts": [
+            {"display_name": "Object detection", "score": 0.62},
+            {"display_name": "Object (grammar)", "score": 0.57},
+        ]}
+        assert "Object (grammar)" in parse_work(work).tags
+
+    def test_no_concepts_yields_no_tags(self):
+        assert parse_work({**WORK, "concepts": []}).tags == ()
+
+
+class TestAbstractComplete:
+    def test_true_for_a_contiguous_index(self):
+        assert parse_work(WORK).abstract_complete is True
+
+    def test_false_when_a_position_is_missing(self):
+        # W2913668833 is missing positions 479, 482, 491: a token was dropped.
+        work = {**WORK, "abstract_inverted_index": {"a": [0], "b": [1], "d": [3]}}
+        parsed = parse_work(work)
+        assert parsed.abstract == "a b d"
+        assert parsed.abstract_complete is False
+
+    def test_false_when_positions_repeat(self):
+        work = {**WORK, "abstract_inverted_index": {"first": [0], "second": [0]}}
+        assert parse_work(work).abstract_complete is False
+
+    @pytest.mark.parametrize("index", [None, {}, "junk"])
+    def test_none_when_there_is_no_abstract(self, index):
+        # Absent, not False: there is nothing to be complete about.
+        parsed = parse_work({**WORK, "abstract_inverted_index": index})
+        assert parsed.abstract == ""
+        assert parsed.abstract_complete is None
 
     @pytest.mark.parametrize("mesh", [None, [], "junk", [{"descriptor_ui": "D1"}]])
     def test_missing_mesh_becomes_empty_tuple(self, mesh):

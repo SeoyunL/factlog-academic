@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import pytest
 
+from factlog.bibtex import parse_front_matter
 from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
-from factlog.integrations.openalex.work_parser import ParsedWork
+from factlog.integrations.openalex.work_parser import Concept, ParsedWork, PrimaryTopic
 from factlog.integrations.zotero.source_writer import SourceWriter as ZoteroWriter
+
+
+CONCEPTS = (
+    Concept("Interpretability", 0.91, 3),
+    Concept("Symbolic artificial intelligence", 0.49, 2),
+    Concept("Paleontology", 0.0, 1),  # #54: unrelated roots score exactly 0.00
+)
+TOPIC = PrimaryTopic("Neural Networks and Applications", 0.9944,
+                     "Artificial Intelligence", "Computer Science", "Physical Sciences")
 
 
 def _work(**over) -> ParsedWork:
@@ -19,11 +29,13 @@ def _work(**over) -> ParsedWork:
         journal="Artificial Intelligence Review",
         doi="10.1007/s10462-023-10448-w",
         pmid=None,
-        concepts=("Interpretability", "Symbolic artificial intelligence"),
+        concepts=CONCEPTS,
+        primary_topic=TOPIC,
         cited_by_count=321,
         work_type="article",
         openalex_is_retracted=False,
         abstract="Current advances in AI.",
+        abstract_complete=True,
     )
     return ParsedWork(**{**base, **over})
 
@@ -42,7 +54,7 @@ class TestRender:
         assert "year: 2023" in fm
         assert 'journal: "Artificial Intelligence Review"' in fm
         assert 'doi: "10.1007/s10462-023-10448-w"' in fm
-        assert 'concepts: ["Interpretability", "Symbolic artificial intelligence"]' in fm
+        assert 'tags: ["Interpretability", "Symbolic artificial intelligence"]' in fm
         assert "cited_by_count: 321" in fm
         assert 'type: "article"' in fm
         assert "imported_from: openalex" in fm
@@ -65,10 +77,12 @@ class TestRender:
 
     def test_optional_fields_are_omitted_when_absent(self):
         fm = _front_matter(OpenAlexSourceWriter().render(
-            _work(journal=None, doi=None, pmid=None, concepts=(), cited_by_count=None,
-                  work_type=None, year=None)))
-        for absent in ("journal:", "doi:", "pmid:", "concepts:", "cited_by_count:",
-                       "type:", "year:"):
+            _work(journal=None, doi=None, pmid=None, concepts=(), primary_topic=None,
+                  cited_by_count=None, work_type=None, year=None, abstract="",
+                  abstract_complete=None)))
+        for absent in ("journal:", "doi:", "pmid:", "tags:", "cited_by_count:",
+                       "type:", "year:", "openalex_concepts:", "primary_topic:",
+                       "abstract_complete:"):
             assert absent not in fm
         assert 'openalex_id: "W3113149630"' in fm
 
@@ -87,6 +101,112 @@ class TestRender:
 
     def test_no_title_renders_untitled(self):
         assert "# Untitled" in OpenAlexSourceWriter().render(_work(title=None))
+
+
+class TestTagsMapping:
+    """#54 Mapping B: `tags` is concepts scoring above zero, most confident first."""
+
+    def test_zero_scored_concepts_never_reach_tags(self):
+        fm = _front_matter(OpenAlexSourceWriter().render(_work()))
+        assert 'tags: ["Interpretability", "Symbolic artificial intelligence"]' in fm
+        assert "Paleontology" not in fm.split("openalex_concepts:")[0]
+
+    def test_the_dropped_concepts_survive_in_provenance(self):
+        # §4.3: the tags filter is lossy by design; nothing measured is discarded.
+        fm = _front_matter(OpenAlexSourceWriter().render(_work()))
+        assert 'openalex_concepts: [{name: "Interpretability", score: 0.9100, level: 3}, ' \
+               '{name: "Symbolic artificial intelligence", score: 0.4900, level: 2}, ' \
+               '{name: "Paleontology", score: 0.0000, level: 1}]' in fm
+
+    def test_concepts_key_is_gone(self):
+        # Renamed to `tags`, which is the field it actually feeds.
+        assert "\nconcepts:" not in _front_matter(OpenAlexSourceWriter().render(_work()))
+
+    def test_a_work_whose_concepts_all_score_zero_gets_no_tags(self):
+        work = _work(concepts=(Concept("Art", 0.0, 0),))
+        fm = _front_matter(OpenAlexSourceWriter().render(work))
+        assert "tags:" not in fm
+        assert "openalex_concepts:" in fm
+
+    def test_unscored_concept_is_recorded_without_a_score(self):
+        fm = _front_matter(OpenAlexSourceWriter().render(_work(concepts=(Concept("X"),))))
+        assert 'openalex_concepts: [{name: "X"}]' in fm
+
+    def test_wrong_sense_entity_is_written_as_documented(self):
+        # Irreducible by any threshold; the P1 gate catches it, not the writer.
+        work = _work(concepts=(Concept("Object (grammar)", 0.57, 2),))
+        assert 'tags: ["Object (grammar)"]' in _front_matter(OpenAlexSourceWriter().render(work))
+
+
+class TestPrimaryTopic:
+    def test_hierarchy_is_written_as_flat_keys(self):
+        fm = _front_matter(OpenAlexSourceWriter().render(_work()))
+        assert 'primary_topic: "Neural Networks and Applications"' in fm
+        assert "primary_topic_score: 0.9944" in fm
+        assert 'primary_topic_subfield: "Artificial Intelligence"' in fm
+        assert 'primary_topic_field: "Computer Science"' in fm
+        assert 'primary_topic_domain: "Physical Sciences"' in fm
+
+    def test_a_low_score_is_recorded_not_hidden(self):
+        # #54: primary_topic can be the top of three topics all scoring ~0.06.
+        work = _work(primary_topic=PrimaryTopic("Libraries and Information Services", 0.0621))
+        assert "primary_topic_score: 0.0621" in _front_matter(
+            OpenAlexSourceWriter().render(work))
+
+    def test_absent_hierarchy_levels_are_omitted(self):
+        fm = _front_matter(OpenAlexSourceWriter().render(_work(primary_topic=PrimaryTopic("T"))))
+        assert 'primary_topic: "T"' in fm
+        for absent in ("primary_topic_score:", "primary_topic_subfield:",
+                       "primary_topic_field:", "primary_topic_domain:"):
+            assert absent not in fm
+
+
+class TestAbstractComplete:
+    def test_true_is_recorded(self):
+        assert "abstract_complete: true" in _front_matter(OpenAlexSourceWriter().render(_work()))
+
+    def test_false_is_recorded(self):
+        assert "abstract_complete: false" in _front_matter(
+            OpenAlexSourceWriter().render(_work(abstract_complete=False)))
+
+    def test_absent_when_there_is_no_abstract(self):
+        fm = _front_matter(OpenAlexSourceWriter().render(
+            _work(abstract="", abstract_complete=None)))
+        assert "abstract_complete:" not in fm
+
+
+class TestFrontMatterStaysParseable:
+    """`bibtex.parse_front_matter` strips each line before matching `key: value`.
+
+    An indented `score:` or `field:` inside a nested mapping would therefore be
+    read as a *top-level* key and corrupt `factlog export`. Every key this writer
+    adds must stay on one line.
+    """
+
+    def test_export_parser_sees_only_intended_top_level_keys(self):
+        fm = parse_front_matter(OpenAlexSourceWriter().render(_work()))
+        assert fm["title"] == "Neurosymbolic AI: the 3rd wave"
+        assert fm["doi"] == "10.1007/s10462-023-10448-w"
+        assert fm["primary_topic"] == "Neural Networks and Applications"
+        # The nested field names must NOT have leaked into the top level.
+        for leaked in ("score", "name", "level", "subfield", "field", "domain"):
+            assert leaked not in fm
+
+    def test_scored_concepts_do_not_shadow_the_title(self):
+        # A concept literally named "title" must not overwrite fm["title"].
+        work = _work(concepts=(Concept("title", 0.9, 1),))
+        fm = parse_front_matter(OpenAlexSourceWriter().render(work))
+        assert fm["title"] == "Neurosymbolic AI: the 3rd wave"
+
+    def test_every_front_matter_line_is_unindented(self):
+        for line in _front_matter(OpenAlexSourceWriter().render(_work())).splitlines():
+            assert line == line.lstrip(), f"indented front-matter line: {line!r}"
+
+    def test_bibtex_export_still_finds_the_bibliographic_fields(self):
+        fm = parse_front_matter(OpenAlexSourceWriter().render(_work()))
+        assert fm["year"] == "2023"
+        assert fm["journal"] == "Artificial Intelligence Review"
+        assert fm["authors"] == ["Artur d’Avila Garcez", "Luís C. Lamb"]
 
 
 class TestRetractionIsSourceScoped:
