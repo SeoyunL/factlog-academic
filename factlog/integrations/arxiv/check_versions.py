@@ -229,12 +229,14 @@ def collect_ledger_entries(
     # ledgers would answer "no arXiv records in <kb>" and exit 0 for most of an
     # existing user's library — the command would be silently wrong about all of
     # its input, which is the failure this whole track exists to eliminate. The
-    # front matter carries `arxiv_id` and `arxiv_version` (#60), which is exactly
-    # what a check needs, and reading it writes nothing, so report-only holds.
-    # A ledger, when present, is authoritative: it is what a refresh updates.
+    # front matter carries `arxiv_id`, `arxiv_version` (#60) and `arxiv_withdrawn_by`
+    # (the arXiv writer emits it whenever it emits `arxiv_withdrawn: true`,
+    # `source_writer.py:165-167`), which is exactly what a check needs, and reading it
+    # writes nothing, so report-only holds. A ledger, when present, is authoritative:
+    # it is what a refresh updates.
     sources_dir = root / "sources"
     for path in sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else ():
-        scalars = read_scalars(path, ("arxiv_id", "arxiv_version"))
+        scalars = read_scalars(path, ("arxiv_id", "arxiv_version", "arxiv_withdrawn_by"))
         arxiv_id = scalars.get("arxiv_id", "")
         # A ledger, when one exists, is authoritative — it is what a refresh
         # updates, and its `sources` name the ledgers a reader should open. Front
@@ -245,9 +247,18 @@ def collect_ledger_entries(
             version = int(scalars.get("arxiv_version", ""))
         except ValueError:
             version = None
+        # A paper imported while already withdrawn recorded the agent in its front
+        # matter; reading it back is what keeps `_diff` from re-reporting that
+        # withdrawal as new on every run (#98). `read_scalars` strips and omits an
+        # empty value, so `or None` makes both absent and `arxiv_withdrawn_by: ""`
+        # read as None rather than "" — line 320 tests `is None`, and "" would
+        # silently suppress a genuinely new withdrawal. An unrecognised hand-typed
+        # value (not "author"/"admin") is kept verbatim: like the ledger path above
+        # (`withdrawn_by`), any non-empty string means "a withdrawal was recorded",
+        # which is all the presence test needs; the batch never crashes over it.
         slots[arxiv_id] = {
             "version": version,
-            "withdrawn_by": None,
+            "withdrawn_by": scalars.get("arxiv_withdrawn_by") or None,
             "sources": {_relative(path, root)},
         }
 
