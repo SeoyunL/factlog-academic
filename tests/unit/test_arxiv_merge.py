@@ -199,24 +199,31 @@ class TestDryRun:
     def test_dry_run_predicts_merged_and_writes_nothing(self, tmp_path):
         kb, existing = _kb_with_openalex(tmp_path)
         sidecar = sidecar_path(existing)
+        # The OpenAlex-primary import wrote its OWN one-record ledger (#73), so the
+        # sidecar already exists. The dry run must leave it byte-identical and add
+        # no arXiv record — a plan predicts, it never writes.
+        before = sidecar.read_bytes()
 
         result = ArxivSourceWriter().plan(_arxiv(), kb)
         assert result.status == "merged"
         assert result.path == existing
-        # Neither the sidecar nor any new .md was written.
-        assert not sidecar.exists()
-        assert not (kb / "source-provenance").exists()
+        assert sidecar.read_bytes() == before
+        assert not any(r.type == "arxiv" for r in _records(sidecar))
         assert len(list((kb / "sources").glob("*.md"))) == 1
 
     def test_importer_dry_run_reports_merged_writes_no_sidecar(self, tmp_path):
         from factlog.integrations.arxiv.importer import import_works
 
         kb, existing = _kb_with_openalex(tmp_path)
+        sidecar = sidecar_path(existing)
+        before = sidecar.read_bytes()  # OpenAlex's own ledger, from the seed import
         report = import_works([_arxiv()], target=kb, imported_at="t", dry_run=True)
         assert report.merged == 1
         assert report.outcomes[0].status == "merged"
         assert report.outcomes[0].path == existing
-        assert not sidecar_path(existing).exists()
+        # No arXiv record folded in; the ledger is untouched by the dry run.
+        assert sidecar.read_bytes() == before
+        assert not any(r.type == "arxiv" for r in _records(sidecar))
 
 
 class TestRecordFields:
@@ -278,26 +285,29 @@ class TestRecordFields:
 
 
 class TestOptOut:
-    """merges_cross_source gates the whole mechanism; Zotero/OpenAlex never merge."""
+    """merges_cross_source gates the whole mechanism. Zotero opts out; arXiv and
+    OpenAlex opt in and each folds its view into the other's ledger (#73)."""
 
-    def test_openalex_writer_never_merges_and_writes_no_sidecar(self, tmp_path):
-        # An arXiv-primary file already exists; OpenAlex sees the same paper.
+    def test_openalex_writer_merges_into_an_arxiv_primary_sidecar(self, tmp_path):
+        # An arXiv-primary file already exists; OpenAlex sees the same paper via
+        # the shared arXiv id. As of #73 OpenAlex merges: it folds its own record
+        # into the arXiv original's ledger and PRESERVES the arXiv record.
         ax = ArxivSourceWriter().write(
             _arxiv(arxiv_id="2311.09277"), tmp_path, imported_at="t")
         assert ax.status == "imported"
-        # The arXiv import wrote its own ledger (#72); OpenAlex must neither merge
-        # into it nor record anything of its own.
         sidecar = sidecar_path(ax.path)
-        before = sidecar.read_bytes()
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W7", arxiv_id="2311.09277"), tmp_path, imported_at="t")
-        assert result.status == "skipped"
-        assert sidecar.read_bytes() == before  # the ledger is arXiv's alone, untouched
-        assert not any(r.type == "openalex" for r in _records(sidecar))
+        assert result.status == "merged"
+        assert result.path == ax.path  # the existing arXiv original, never rewritten
+        types = sorted(r.type for r in _records(sidecar))
+        assert types == ["arxiv", "openalex"]  # arXiv record read-modify-write preserved
+        oa = next(r for r in _records(sidecar) if r.type == "openalex")
+        assert oa.id == "W7"
 
-    def test_zotero_writer_does_not_expose_merge(self):
+    def test_only_zotero_opts_out_of_merging(self):
         assert ArxivSourceWriter.merges_cross_source is True
-        assert OpenAlexSourceWriter.merges_cross_source is False
+        assert OpenAlexSourceWriter.merges_cross_source is True
         assert ZoteroWriter.merges_cross_source is False
 
     def test_base_merge_hook_is_a_noop(self, tmp_path):

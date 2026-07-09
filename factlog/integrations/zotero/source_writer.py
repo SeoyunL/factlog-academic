@@ -64,6 +64,14 @@ class SourceWriter(BaseSourceWriter):
     identity_key = "zotero_key"
     source_name = "zotero"
     ignore_re = ANNOTATION_MARKER_RE
+    # Zotero stays OUT of §7.3 merging, unlike arXiv and OpenAlex. A Zotero item is
+    # the same paper as seen by THE USER, not by a DATABASE; §7.3 merges the views
+    # different DATABASES hold of one work, and a personal library entry is
+    # curation, not upstream bibliographic authority. Folding a Zotero item into a
+    # source's provenance ledger would assert that the user's own record is a
+    # database that observed the paper. So Zotero writes its own original and never
+    # a sidecar. Do not flip this for symmetry.
+    merges_cross_source = False
 
     def identity_of(self, parsed: dict) -> str:
         return parsed.get("zotero_key", "")

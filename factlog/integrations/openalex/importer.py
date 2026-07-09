@@ -27,9 +27,17 @@ from factlog.integrations.openalex.work_parser import ParsedWork, parse_work
 
 @dataclass(frozen=True)
 class WorkOutcome:
-    """What happened to one work."""
+    """What happened to one work.
 
-    status: str  # "imported" | "skipped" | "error"
+    ``status`` is ``"imported"`` | ``"skipped"`` | ``"error"`` | ``"merged"``.
+    ``"merged"`` means the paper was already in the KB via another database (an
+    arXiv deposit of the same preprint, a Zotero item of the same work) and this
+    OpenAlex view was folded into that original's provenance sidecar (§7.3, #73)
+    rather than written as a second file; ``path`` names that existing original. A
+    merge is a success — it does not affect the exit code.
+    """
+
+    status: str  # "imported" | "skipped" | "error" | "merged"
     key: str
     title: str
     path: Path | None = None
@@ -50,6 +58,10 @@ class ImportReport:
     @property
     def skipped(self) -> int:
         return self._count("skipped")
+
+    @property
+    def merged(self) -> int:
+        return self._count("merged")
 
     @property
     def errors(self) -> int:
