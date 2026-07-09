@@ -3320,6 +3320,7 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     from factlog.integrations.arxiv.config import (
         ArxivValidationError,
         build_submitted_date,
+        compose_search_query,
         validate_category,
         validate_search_query,
         validate_sort,
@@ -3354,6 +3355,23 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     except ArxivValidationError as exc:
         print(f"factlog arxiv-search: {exc}", file=sys.stderr)
         return 1
+
+    # --dry-run shows the query that WOULD be sent and spends no request. The
+    # string comes from the same composer the client uses, so it cannot drift from
+    # what a real run sends — and it makes arXiv's own reading of the query
+    # visible, which matters because a bare multi-word phrase is not searched as a
+    # phrase (#89).
+    if args.dry_run:
+        composed = compose_search_query(args.query, categories, args.year)
+        if porcelain:
+            print(f"query\t{composed}")
+        else:
+            print("Would search arXiv (no request sent):")
+            print(f"  search_query: {composed}")
+            print(f"  max_results:  {args.limit or config.default_limit}")
+            if args.sort:
+                print(f"  sortBy:       {validate_sort(args.sort)}")
+        return 0
 
     client = _make_arxiv_client(config)
     if not porcelain:

@@ -532,3 +532,50 @@ class TestSearchPorcelain:
         fake(FakeSearchClient())
         run(["arxiv-search", "--query", "q", "--target", str(kb), "--porcelain"])
         assert "Searching arXiv" not in capsys.readouterr().out
+
+
+class TestSearchDryRun:
+    """`--dry-run` was registered on every arXiv subcommand and read by none of
+    them for search: it spent a real request and printed results. It now shows the
+    query that would be sent, and sends nothing.
+
+    The string comes from the same composer the client uses, so what an operator
+    is shown cannot drift from what a real run sends."""
+
+    def test_dry_run_sends_no_request(self, tmp_path, fake, capsys):
+        client = fake(FakeClient())
+        assert run(["arxiv-search", "--query", "transformers", "--target", str(_kb(tmp_path)),
+                    "--dry-run"]) == 0
+        assert client.calls == [], "--dry-run reached the API"
+
+    def test_dry_run_shows_the_query_that_would_be_sent(self, tmp_path, fake, capsys):
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers", "--category", "cs.CL",
+             "--year", "2023", "--target", str(_kb(tmp_path)), "--dry-run"])
+        out = capsys.readouterr().out
+        assert "cat:cs.CL" in out
+        assert "submittedDate:[202301010000 TO 202312312359]" in out
+
+    def test_the_shown_query_is_the_composer_the_client_uses(self, tmp_path, fake, capsys):
+        from factlog.integrations.arxiv.config import compose_search_query
+
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers", "--category", "cs.CL",
+             "--target", str(_kb(tmp_path)), "--dry-run", "--porcelain"])
+        shown = capsys.readouterr().out.strip().split("\t", 1)[1]
+        assert shown == compose_search_query("transformers", ["cs.CL"], None)
+
+    def test_dry_run_still_refuses_a_typo_before_composing(self, tmp_path, fake, capsys):
+        client = fake(FakeClient())
+        assert run(["arxiv-search", "--query", "x", "--category", "cs.NOPE",
+                    "--target", str(_kb(tmp_path)), "--dry-run"]) == 1
+        assert client.calls == []
+        assert "unknown arXiv category" in capsys.readouterr().err
+
+    def test_dry_run_porcelain_is_one_tab_separated_line(self, tmp_path, fake, capsys):
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers", "--target", str(_kb(tmp_path)),
+             "--dry-run", "--porcelain"])
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("query\t")

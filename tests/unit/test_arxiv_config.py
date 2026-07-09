@@ -24,6 +24,7 @@ from factlog.integrations.arxiv.config import (
     build_submitted_date,
     from_mapping,
     load_config,
+    compose_search_query,
     validate_category,
     validate_search_query,
     validate_sort,
@@ -246,3 +247,66 @@ def test_invalid_toml_is_an_error(tmp_path):
     bad.write_text("this is not = = toml")
     with pytest.raises(ArxivConfigError, match="invalid TOML"):
         load_config(bad)
+
+
+class TestComposeSearchQuery:
+    """The composer is shared by `ArxivClient.search` and `arxiv-search --dry-run`,
+    so the query an operator is shown is the query that would be sent."""
+
+    def test_a_bare_query_passes_through(self):
+        assert compose_search_query("transformers") == "transformers"
+
+    def test_categories_and_year_are_conjoined(self):
+        from datetime import date
+
+        composed = compose_search_query(
+            "transformers", ["cs.CL", "stat.ML"], "2023", today=date(2026, 1, 1))
+        assert composed == (
+            "transformers AND cat:cs.CL AND cat:stat.ML "
+            "AND submittedDate:[202301010000 TO 202312312359]"
+        )
+
+    def test_a_typo_is_refused_before_anything_is_composed(self):
+        with pytest.raises(ArxivValidationError, match="unknown arXiv category"):
+            compose_search_query("x", ["cs.NOPE"])
+
+    def test_an_unknown_field_prefix_is_refused(self):
+        with pytest.raises(ArxivValidationError, match="unknown arXiv search field"):
+            compose_search_query("bogusfield:x")
+
+
+class TestYearBoundsAreEmittedInFullForm:
+    """A bare year is *not* silently reinterpreted — measured live, `[2020 TO 2021]`
+    and `[202001010000 TO 202112312359]` return an identical count. An earlier
+    docstring claimed otherwise, having compared a two-year bare span against a
+    one-year full one. The full form is sent because it states the intended bounds
+    without depending on how arXiv widens a bare year, not because a bare year is
+    wrong."""
+
+    def test_bounds_carry_a_time_component(self):
+        from datetime import date
+
+        clause = build_submitted_date("2020", today=date(2026, 1, 1))
+        assert clause == "submittedDate:[202001010000 TO 202012312359]"
+        assert "[2020 TO" not in clause
+
+    def test_a_range_covers_all_of_the_final_year(self):
+        from datetime import date
+
+        assert build_submitted_date("2020-2021", today=date(2026, 1, 1)).endswith(
+            "202112312359]")
+
+    def test_a_reversed_span_is_refused(self):
+        from datetime import date
+
+        # Live: a reversed span answers 200 with zero results, never an error.
+        with pytest.raises(ArxivValidationError):
+            build_submitted_date("2021-2020", today=date(2026, 1, 1))
+
+    def test_an_out_of_range_year_is_refused(self):
+        from datetime import date
+
+        # Live: 2099 answers 200 with zero results, which reads as "no such
+        # literature exists".
+        with pytest.raises(ArxivValidationError, match="outside arXiv's range"):
+            build_submitted_date("2099", today=date(2026, 1, 1))
