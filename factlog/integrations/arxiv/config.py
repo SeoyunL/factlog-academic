@@ -30,6 +30,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 # factlog policy, not an API constraint: the API serves max_results=5000 (a
@@ -122,6 +123,14 @@ _FIELD_TOKEN_RE = re.compile(r'(?:^|[\s(])([A-Za-z_]+):("[^"]*"|\S+)')
 SORT_FIELDS = {"submitted": "submittedDate", "updated": "lastUpdatedDate",
                "relevance": "relevance"}
 
+# arXiv's first submission was August 1991; nothing predates it. A --year below
+# this, or above next year, is a typo, not a query — and a typo must not read as
+# "no such literature exists".
+ARXIV_EPOCH_YEAR = 1991
+
+# --year is `YYYY` or `YYYY-YYYY`. Anything else is rejected before a request.
+_YEAR_RE = re.compile(r"^\s*([0-9]{4})(?:\s*-\s*([0-9]{4}))?\s*$")
+
 
 class ArxivConfigError(Exception):
     """An arXiv settings file was named but could not be read/parsed/validated."""
@@ -196,6 +205,81 @@ def validate_sort(value: str) -> str:
         known = ", ".join(sorted(SORT_FIELDS))
         raise ArxivValidationError(f"invalid sort {value!r}; expected one of: {known}")
     return SORT_FIELDS[value.strip()]
+
+
+def compose_search_query(
+    query: str, categories=(), year: str | None = None, *, today: date | None = None
+) -> str:
+    """The exact ``search_query`` a search will send. Pure: it spends no request.
+
+    Shared by :meth:`ArxivClient.search` and ``arxiv-search --dry-run`` so the
+    string an operator is shown is the string that would be sent — not a
+    reconstruction of it that can drift.
+    """
+    clauses = [validate_search_query(query)]
+    for category in categories:
+        clauses.append(f"cat:{validate_category(category)}")
+    if year:
+        clauses.append(build_submitted_date(year, today=today))
+    return " AND ".join(clauses)
+
+
+def build_submitted_date(year_spec: str, *, today: date | None = None) -> str:
+    """Turn ``--year`` (``YYYY`` or ``YYYY-YYYY``) into a ``submittedDate:`` clause.
+
+    Measured against the live API (#80), two silent traps make this a
+    validate-and-expand step rather than a passthrough:
+
+    * **A reversed or out-of-range span answers 200 with zero results**, not an
+      error — ``[...2359 TO ...0000]`` and a year like 2099 both read as "no such
+      literature exists". So the start must not exceed the end, and each year
+      must fall within arXiv's lifetime (``1991`` .. next year).
+    * **Only syntactic garbage 500s** (``[abc TO def]``), which is too late and
+      too coarse to guide the operator. Everything catchable is caught here,
+      before a request is spent.
+
+    The bounds are emitted in arXiv's documented ``YYYYMMDDTTTT`` form rather than
+    as bare years. Note that a bare year is *not* reinterpreted: measured on the
+    same span, ``[2020 TO 2021]`` and ``[202001010000 TO 202112312359]`` return an
+    identical count (15208), as do the one-year forms (7125). An earlier draft
+    claimed otherwise, having compared a two-year bare span against a one-year full
+    span. The full form is still what we send — it is the documented one, and it
+    states the intended bounds without relying on how arXiv widens a bare year —
+    but it buys correctness of *expression*, not of *result*.
+
+    ``today`` may be injected, and the tests do. It is *not* the injected-clock
+    rule ``BaseSourceWriter`` and ``provenance`` follow: that rule exists because
+    those values are written into a user's KB and must be reproducible. This one
+    only bounds a search filter, is never persisted, and defaults to the clock so a
+    library caller need not supply a date to search by year.
+
+    Returns e.g. ``submittedDate:[202001010000 TO 202012312359]``.
+    """
+    if not isinstance(year_spec, str) or not year_spec.strip():
+        raise ArxivValidationError("--year must be a year or range, e.g. 2023 or 2020-2025.")
+    match = _YEAR_RE.match(year_spec)
+    if match is None:
+        raise ArxivValidationError(
+            f"invalid --year {year_spec!r}; expected a year or range, e.g. 2023 or 2020-2025."
+        )
+
+    start_year = int(match.group(1))
+    end_year = int(match.group(2)) if match.group(2) else start_year
+
+    ceiling = (today or date.today()).year + 1
+    for year in (start_year, end_year):
+        if not ARXIV_EPOCH_YEAR <= year <= ceiling:
+            raise ArxivValidationError(
+                f"year {year} is outside arXiv's range ({ARXIV_EPOCH_YEAR}-{ceiling}); "
+                "arXiv answers an out-of-range year with zero results rather than an error."
+            )
+    if start_year > end_year:
+        raise ArxivValidationError(
+            f"--year range {start_year}-{end_year} runs backwards; arXiv answers a "
+            "reversed range with zero results rather than an error."
+        )
+
+    return f"submittedDate:[{start_year}01010000 TO {end_year}12312359]"
 
 
 def xdg_config_path() -> Path:

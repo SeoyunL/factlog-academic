@@ -132,6 +132,26 @@ def test_search_builds_a_conjunctive_query_from_valid_categories():
     assert calls[0]["sortBy"] == "submittedDate"
 
 
+def test_search_appends_a_submitted_date_clause_for_year():
+    # --year expands to the full YYYYMMDDTTTT span, not a bare year: the API
+    # silently reinterprets a bare four-digit year to a larger result set (#80).
+    api, calls = client([ok(feed(entry("2311.09277", 1)))])
+    api.search("chain of thought", categories=["cs.CL"], year="2023")
+    assert calls[0]["search_query"] == (
+        "chain of thought AND cat:cs.CL AND "
+        "submittedDate:[202301010000 TO 202312312359]"
+    )
+
+
+def test_search_rejects_a_reversed_year_range_before_a_request():
+    from factlog.integrations.arxiv.config import ArxivValidationError
+
+    api, calls = client([])
+    with pytest.raises(ArxivValidationError, match="runs backwards"):
+        api.search("chain of thought", year="2025-2020")
+    assert calls == []
+
+
 # -- the silent-miss traps -------------------------------------------------
 def test_nonexistent_id_returns_zero_entries_and_becomes_an_error():
     # `9999.99999` answers HTTP 200 with an empty feed. Without this the caller

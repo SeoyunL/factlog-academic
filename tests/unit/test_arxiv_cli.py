@@ -61,6 +61,25 @@ class FakeClient:
         return BatchResult(list(self._works), list(self._missing))
 
 
+class FakeSearchClient:
+    """Replays canned search results; records the search() call it received."""
+
+    def __init__(self, works=None, total=None, raise_exc=None):
+        self._works = works if works is not None else [_work()]
+        self._total = total if total is not None else len(self._works)
+        self._raise = raise_exc
+        self.calls: list[dict] = []
+
+    def search(self, query, *, categories=(), year=None, limit=None, sort=None, start=0):
+        self.calls.append({
+            "query": query, "categories": tuple(categories), "year": year,
+            "limit": limit, "sort": sort, "start": start,
+        })
+        if self._raise is not None:
+            raise self._raise
+        return list(self._works), self._total
+
+
 @pytest.fixture
 def fake(monkeypatch):
     def install(client):
@@ -336,3 +355,227 @@ class TestPorcelain:
             line.split("\t", 1) for line in capsys.readouterr().out.strip().splitlines()
         )
         assert rows["errors"] == "1"
+
+
+class TestSearch:
+    def test_query_is_required(self):
+        with pytest.raises(SystemExit):
+            run(["arxiv-search", "--target", "x"])
+
+    def test_results_are_listed(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(
+            works=[_work("1706.03762", title="First"),
+                   _work("1810.04805", title="Second")],
+            total=42))
+        assert run(["arxiv-search", "--query", "attention", "--target", str(kb)]) == 0
+        out = capsys.readouterr().out
+        assert "Found 42 results, showing top 2:" in out
+        assert '1. 1706.03762v5 "First"' in out
+        assert '2. 1810.04805v5 "Second"' in out
+
+    def test_nothing_is_imported(self, tmp_path, fake):
+        # arxiv-search is non-interactive and writes no files (#80). Import is #81.
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient())
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb)]) == 0
+        assert sources(kb) == []
+
+    def test_filters_are_forwarded(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        client = fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "q", "--category", "cs.CL",
+             "--category", "cs.LG", "--year", "2020-2025", "--limit", "5",
+             "--sort", "submitted", "--target", str(kb)])
+        assert client.calls == [{
+            "query": "q", "categories": ("cs.CL", "cs.LG"), "year": "2020-2025",
+            "limit": 5, "sort": "submitted", "start": 0,
+        }]
+
+    def test_zero_results_is_not_an_error(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[], total=0))
+        assert run(["arxiv-search", "--query", "nomatchesatall", "--target", str(kb)]) == 0
+        assert "Found 0 results." in capsys.readouterr().out
+
+    def test_zero_results_porcelain_reports_found_zero(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[], total=0))
+        assert run(["arxiv-search", "--query", "nomatch", "--target", str(kb),
+                    "--porcelain"]) == 0
+        assert "found\t0" in capsys.readouterr().out
+
+    def test_typo_category_is_rejected_before_any_request(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        monkeypatch.setattr(
+            cli, "_make_arxiv_client",
+            lambda config: pytest.fail("must not build a client for a bad category"),
+        )
+        assert run(["arxiv-search", "--query", "q", "--category", "cs.NOTAREAL",
+                    "--target", str(kb)]) == 1
+        assert "unknown arXiv category" in capsys.readouterr().err
+
+    def test_unknown_query_field_is_rejected_before_any_request(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        monkeypatch.setattr(
+            cli, "_make_arxiv_client",
+            lambda config: pytest.fail("must not build a client for a bad query field"),
+        )
+        assert run(["arxiv-search", "--query", "bogusfield:x", "--target", str(kb)]) == 1
+        assert "unknown arXiv search field" in capsys.readouterr().err
+
+    def test_limit_over_200_is_refused(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        monkeypatch.setattr(
+            cli, "_make_arxiv_client",
+            lambda config: pytest.fail("must not build a client for an out-of-range limit"),
+        )
+        assert run(["arxiv-search", "--query", "q", "--limit", "201",
+                    "--target", str(kb)]) == 1
+        assert "--limit must be between 1 and 200" in capsys.readouterr().err
+
+    def test_limit_200_is_accepted(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        client = fake(FakeSearchClient())
+        assert run(["arxiv-search", "--query", "q", "--limit", "200",
+                    "--target", str(kb)]) == 0
+        assert client.calls[0]["limit"] == 200
+
+    def test_reversed_year_range_is_rejected_before_any_request(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        monkeypatch.setattr(
+            cli, "_make_arxiv_client",
+            lambda config: pytest.fail("must not build a client for a reversed year range"),
+        )
+        assert run(["arxiv-search", "--query", "q", "--year", "2025-2020",
+                    "--target", str(kb)]) == 1
+        assert "runs backwards" in capsys.readouterr().err
+
+    def test_out_of_range_year_is_rejected(self, tmp_path, monkeypatch, capsys):
+        kb = _kb(tmp_path)
+        monkeypatch.setattr(
+            cli, "_make_arxiv_client",
+            lambda config: pytest.fail("must not build a client for an out-of-range year"),
+        )
+        assert run(["arxiv-search", "--query", "q", "--year", "2099",
+                    "--target", str(kb)]) == 1
+        assert "outside arXiv's range" in capsys.readouterr().err
+
+    def test_bogus_sort_is_rejected(self):
+        # argparse constrains --sort to the three known values.
+        with pytest.raises(SystemExit):
+            run(["arxiv-search", "--query", "q", "--sort", "citations", "--target", "x"])
+
+    def test_connection_failure_exits_two(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient(raise_exc=ArxivConnectionError("cannot reach arXiv")))
+        assert run(["arxiv-search", "--query", "q",
+                    "--target", str(_kb(tmp_path))]) == 2
+        assert "cannot reach arXiv" in capsys.readouterr().err
+
+    def test_response_failure_exits_one(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient(raise_exc=ArxivResponseError("truncated feed")))
+        assert run(["arxiv-search", "--query", "q",
+                    "--target", str(_kb(tmp_path))]) == 1
+        assert "truncated feed" in capsys.readouterr().err
+
+
+class TestSearchWithdrawal:
+    def test_withdrawn_result_is_flagged_in_the_listing_naming_the_agent(
+            self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1904.09773", withdrawn_by="admin")]))
+        run(["arxiv-search", "--query", "q", "--target", str(kb)])
+        captured = capsys.readouterr()
+        assert "WITHDRAWN (by arXiv administrators)" in captured.out
+        # arXiv has no retraction process; the word "retracted" must never appear
+        # ("retraction" does, only to say the two are not the same).
+        assert "retracted" not in captured.out.lower()
+
+    def test_author_withdrawal_names_the_author(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1301.4231", withdrawn_by="author")]))
+        run(["arxiv-search", "--query", "q", "--target", str(kb)])
+        assert "WITHDRAWN (by the author)" in capsys.readouterr().out
+
+    def test_live_result_is_not_flagged(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1706.03762")]))
+        run(["arxiv-search", "--query", "q", "--target", str(kb)])
+        assert "withdrawn" not in capsys.readouterr().out.lower()
+
+    def test_porcelain_flag_is_on_stdout_and_agent_naming_on_stderr(
+            self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1904.09773", withdrawn_by="admin")]))
+        run(["arxiv-search", "--query", "q", "--target", str(kb), "--porcelain"])
+        captured = capsys.readouterr()
+        assert "result\t1\t1904.09773v5\twithdrawn\t" in captured.out
+        # The prose warning naming the agent stays off the machine contract.
+        assert "withdrawn (by" not in captured.out
+        assert "withdrawn (by arXiv administrators)" in captured.err
+        assert "retracted" not in captured.err.lower()
+
+
+class TestSearchPorcelain:
+    def test_porcelain_line_shape_matches_openalex_search(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(
+            works=[_work("1706.03762", version=5, title="A paper")], total=9))
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb),
+                    "--porcelain"]) == 0
+        out = capsys.readouterr().out
+        assert "result\t1\t1706.03762v5\t-\tA paper" in out
+        assert "found\t9" in out
+
+    def test_searching_banner_is_suppressed_in_porcelain(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "q", "--target", str(kb), "--porcelain"])
+        assert "Searching arXiv" not in capsys.readouterr().out
+
+
+class TestSearchDryRun:
+    """`--dry-run` was registered on every arXiv subcommand and read by none of
+    them for search: it spent a real request and printed results. It now shows the
+    query that would be sent, and sends nothing.
+
+    The string comes from the same composer the client uses, so what an operator
+    is shown cannot drift from what a real run sends."""
+
+    def test_dry_run_sends_no_request(self, tmp_path, fake, capsys):
+        client = fake(FakeClient())
+        assert run(["arxiv-search", "--query", "transformers", "--target", str(_kb(tmp_path)),
+                    "--dry-run"]) == 0
+        assert client.calls == [], "--dry-run reached the API"
+
+    def test_dry_run_shows_the_query_that_would_be_sent(self, tmp_path, fake, capsys):
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers", "--category", "cs.CL",
+             "--year", "2023", "--target", str(_kb(tmp_path)), "--dry-run"])
+        out = capsys.readouterr().out
+        assert "cat:cs.CL" in out
+        assert "submittedDate:[202301010000 TO 202312312359]" in out
+
+    def test_the_shown_query_is_the_composer_the_client_uses(self, tmp_path, fake, capsys):
+        from factlog.integrations.arxiv.config import compose_search_query
+
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers", "--category", "cs.CL",
+             "--target", str(_kb(tmp_path)), "--dry-run", "--porcelain"])
+        shown = capsys.readouterr().out.strip().split("\t", 1)[1]
+        assert shown == compose_search_query("transformers", ["cs.CL"], None)
+
+    def test_dry_run_still_refuses_a_typo_before_composing(self, tmp_path, fake, capsys):
+        client = fake(FakeClient())
+        assert run(["arxiv-search", "--query", "x", "--category", "cs.NOPE",
+                    "--target", str(_kb(tmp_path)), "--dry-run"]) == 1
+        assert client.calls == []
+        assert "unknown arXiv category" in capsys.readouterr().err
+
+    def test_dry_run_porcelain_is_one_tab_separated_line(self, tmp_path, fake, capsys):
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers", "--target", str(_kb(tmp_path)),
+             "--dry-run", "--porcelain"])
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("query\t")

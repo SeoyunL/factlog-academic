@@ -3243,6 +3243,158 @@ def cmd_arxiv_import(args: argparse.Namespace) -> int:
     )
 
 
+def _arxiv_show_results(works, total: int, *, porcelain: bool) -> None:
+    """Render arxiv-search results. Mirrors :func:`_openalex_show_results`.
+
+    The ``--porcelain`` line shape is identical to openalex-search's:
+    ``result\t<index>\t<id>\t<flag>\t<title>`` then ``found\t<total>``. The id is
+    the versioned arXiv id, and the flag is ``withdrawn`` or ``-`` — never
+    ``retracted`` (arXiv has no retraction process; #57). Zero results is a
+    legitimate answer for a search, so it prints a plain "0 results" rather than
+    an error (contrast an id_list miss).
+    """
+    from factlog.integrations.arxiv.source_writer import withdrawal_agent
+
+    if porcelain:
+        # The agent that withdrew a paper is a prose warning, so it goes to
+        # stderr, keeping the machine contract on stdout clean (see below).
+        for index, work in enumerate(works, 1):
+            flag = "withdrawn" if work.withdrawn else "-"
+            print(f"result\t{index}\t{work.versioned_id}\t{flag}\t{work.title or ''}")
+        print(f"found\t{total}")
+        return
+
+    if total == 0:
+        print("Found 0 results.")
+        return
+
+    print(f"Found {total} results, showing top {len(works)}:\n")
+    for index, work in enumerate(works, 1):
+        authors = work.authors[0] if work.authors else "anonymous"
+        year = work.year or "n.d."
+        category = work.primary_category or "?"
+        print(f"  {index}. {work.versioned_id} \"{work.title or '(untitled)'}\" "
+              f"({authors} {year}, {category})")
+        if work.withdrawn:
+            agent = withdrawal_agent(work.withdrawn_by)
+            # Flagged in the listing, agent named; withdrawal is not retraction.
+            print(f"      ⚠ arXiv reports this as WITHDRAWN (by {agent}); withdrawal "
+                  "is not retraction, and this signal is unverified — confirm before "
+                  "trusting any claim from it.")
+
+
+def _arxiv_search_withdrawal_warnings(works) -> list[str]:
+    """One stderr line per withdrawn result, naming the agent (never "retracted").
+
+    In ``--porcelain`` mode the flag field alone cannot name the agent, so the
+    naming lives here on stderr — warnings never pollute the machine contract.
+    """
+    from factlog.integrations.arxiv.source_writer import withdrawal_agent
+
+    lines = []
+    for work in works:
+        if work.withdrawn:
+            agent = withdrawal_agent(work.withdrawn_by)
+            lines.append(
+                f"⚠ arXiv reports {work.versioned_id} as withdrawn (by {agent}). "
+                "Withdrawal is not retraction; this unverified signal flags the paper "
+                "for human review before any claim from it is trusted."
+            )
+    return lines
+
+
+def cmd_arxiv_search(args: argparse.Namespace) -> int:
+    """Search arXiv and print the results. Non-interactive; imports nothing (#80).
+
+    Free (no credits, no key). Every filter arXiv would silently ignore —
+    an unknown category, an unknown query field, a bare/reversed/out-of-range
+    --year — is rejected before a request is spent, because arXiv answers all of
+    them with 200 and zero results, which reads as "no such literature exists"
+    (#57). Zero results is nonetheless a legitimate answer for a search, so an
+    empty hit prints "0 results" and exits 0. Import is a separate command (#81).
+    """
+    from factlog.integrations.arxiv.client import (
+        ArxivConnectionError,
+        ArxivError,
+    )
+    from factlog.integrations.arxiv.config import (
+        ArxivValidationError,
+        build_submitted_date,
+        compose_search_query,
+        validate_category,
+        validate_search_query,
+        validate_sort,
+    )
+
+    prepared = _arxiv_prepare(args, "arxiv-search")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    porcelain = getattr(args, "porcelain", False)
+    categories = tuple(args.category or ())
+
+    # --limit is factlog policy (max 200), not an API constraint; reject an
+    # out-of-range value at the boundary, before the client is even built.
+    if args.limit is not None and (args.limit < 1 or args.limit > config.max_limit):
+        print(f"factlog arxiv-search: --limit must be between 1 and {config.max_limit}, "
+              f"got {args.limit}", file=sys.stderr)
+        return 1
+
+    # Validate every filter up front so a typo never reaches the transport. The
+    # client re-validates as defence in depth, but doing it here keeps the check
+    # network-free and gives one consistent error surface.
+    try:
+        validate_search_query(args.query)
+        for category in categories:
+            validate_category(category)
+        if args.sort:
+            validate_sort(args.sort)
+        if args.year:
+            build_submitted_date(args.year)
+    except ArxivValidationError as exc:
+        print(f"factlog arxiv-search: {exc}", file=sys.stderr)
+        return 1
+
+    # --dry-run shows the query that WOULD be sent and spends no request. The
+    # string comes from the same composer the client uses, so it cannot drift from
+    # what a real run sends — and it makes arXiv's own reading of the query
+    # visible, which matters because a bare multi-word phrase is not searched as a
+    # phrase (#89).
+    if args.dry_run:
+        composed = compose_search_query(args.query, categories, args.year)
+        if porcelain:
+            print(f"query\t{composed}")
+        else:
+            print("Would search arXiv (no request sent):")
+            print(f"  search_query: {composed}")
+            print(f"  max_results:  {args.limit or config.default_limit}")
+            if args.sort:
+                print(f"  sortBy:       {validate_sort(args.sort)}")
+        return 0
+
+    client = _make_arxiv_client(config)
+    if not porcelain:
+        print(f'Searching arXiv: "{args.query}"...')
+    try:
+        works, total = client.search(
+            args.query, categories=categories, year=args.year,
+            limit=args.limit, sort=args.sort,
+        )
+    except ArxivConnectionError as exc:
+        print(f"factlog arxiv-search: {exc}", file=sys.stderr)
+        return 2
+    except (ArxivError, ArxivValidationError) as exc:
+        print(f"factlog arxiv-search: {exc}", file=sys.stderr)
+        return 1
+
+    _arxiv_show_results(works, total, porcelain=porcelain)
+    # In --porcelain the withdrawn flag is a stdout field but its agent is prose,
+    # so the naming goes to stderr; in human mode the listing already named it.
+    if porcelain:
+        for warning in _arxiv_search_withdrawal_warnings(works):
+            print(warning, file=sys.stderr)
+    return 0
 def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     """Report-only: is any arXiv record in the KB behind arXiv's latest? (#78, §11
     Step 6). Reads the provenance ledgers and a KB-level check-log, queries arXiv,
@@ -3801,6 +3953,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ax_import.set_defaults(func=cmd_arxiv_import)
 
+    ax_search = _arxiv_common(sub.add_parser(
+        "arxiv-search",
+        help="search arXiv and print results (free; non-interactive, imports nothing)",
+    ))
+    ax_search.add_argument("--query", required=True, help="search text (required)")
+    ax_search.add_argument(
+        "--category", action="append", dest="category",
+        help="restrict to an arXiv category, repeatable, e.g. cs.CL (AND-combined)",
+    )
+    ax_search.add_argument(
+        "--year", help="submission year or range, e.g. 2023 or 2020-2025",
+    )
+    ax_search.add_argument(
+        "--limit", type=int, default=None,
+        help="number of results (default: 25, max: 200)",
+    )
+    ax_search.add_argument(
+        "--sort", choices=("submitted", "updated", "relevance"), default=None,
+        help="sort order: submitted (newest first), updated, or relevance",
+    )
+    ax_search.set_defaults(func=cmd_arxiv_search)
     ax_check = sub.add_parser(
         "arxiv-check-versions",
         help="report arXiv records whose version is behind arXiv's latest "
