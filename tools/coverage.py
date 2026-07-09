@@ -59,11 +59,6 @@ from common import (  # noqa: E402
 )
 
 
-def _hidden(path: Path, base: Path) -> bool:
-    """True if any path component below *base* is dot-prefixed (e.g. .git/, .DS_Store)."""
-    return any(part.startswith(".") for part in path.relative_to(base).parts)
-
-
 def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[str, object]], list[str]]:
     """Return (per-source rows, orphan citations).
 
@@ -89,8 +84,8 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
     rows: list[dict[str, object]] = []
     on_disk: set[str] = set()
     for path in source_files(root):
-        if _hidden(path, root):
-            continue
+        # source_files() already drops hidden paths (any dot-prefixed component
+        # under the source root), so every enumerator shares one rule (#67).
         ref = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
         on_disk.add(ref)
         rows.append({

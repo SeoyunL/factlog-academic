@@ -705,6 +705,7 @@ def cmd_sources(args: argparse.Namespace) -> int:
 
     from factlog.common import (
         conversion_body_is_empty,
+        is_hidden_source,
         is_sync_ignored,
         paired_conversion,
         source_rel_key,
@@ -736,14 +737,17 @@ def cmd_sources(args: argparse.Namespace) -> int:
     runs_dir = target / "runs" / "sources"
     if runs_dir.is_dir():
         for p in sorted(runs_dir.rglob("*")):
-            if p.is_file() and not p.name.startswith("."):
+            # hidden = any dot-prefixed component under the root (#67), matching
+            # source_files()/coverage so counts agree — not just p.name.
+            if p.is_file() and not is_hidden_source(p, runs_dir):
                 ref = nfc(p.relative_to(target).as_posix())
                 conv.setdefault(source_rel_key(ref), ref)
 
     entries: list[tuple[int, str, str]] = []  # (facts, original-ref, conversion-ref or "")
     listed: set[str] = set()
-    for p in sorted((target / "sources").rglob("*")):
-        if not p.is_file() or p.name.startswith("."):
+    sources_dir = target / "sources"
+    for p in sorted(sources_dir.rglob("*")):
+        if not p.is_file() or is_hidden_source(p, sources_dir):
             continue
         orig_ref = nfc(p.relative_to(target).as_posix())
         # Match on the full-name key (#213), with a provenance-verified legacy
@@ -1598,8 +1602,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     refs: dict = {}
     n_ignored = 0
     for p in common.source_files(target):
-        if any(part.startswith(".") for part in p.relative_to(target).parts):
-            continue  # hidden (.DS_Store, .git, ...)
+        # source_files() already drops hidden paths (any dot-prefixed component
+        # under the source root — .DS_Store, .git/, .obsidian/, .provenance/),
+        # so every enumerator shares one definition and the counts agree (#67).
         ref = unicodedata.normalize('NFC', p.relative_to(target).as_posix())
         if common.is_sync_ignored(ref, patterns):
             n_ignored += 1  # excluded from sync on purpose — not a gap
@@ -1914,7 +1919,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
     from pathlib import Path
 
-    from factlog.common import is_sync_ignored, sync_ignore_patterns
+    from factlog.common import is_hidden_source, is_sync_ignored, sync_ignore_patterns
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
@@ -1948,8 +1953,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     if args.scan:
         patterns = sync_ignore_patterns(target)
         ignored = 0
-        for path in sorted(p for p in (target / "sources").rglob("*") if p.is_file()):
-            if path.name.startswith("."):
+        scan_root = target / "sources"
+        for path in sorted(p for p in scan_root.rglob("*") if p.is_file()):
+            # hidden = any dot-prefixed component under sources/ (#67), so a file
+            # in sources/.git/ or sources/.obsidian/ is skipped like sync is.
+            if is_hidden_source(path, scan_root):
                 continue
             ref = unicodedata.normalize("NFC", path.relative_to(target).as_posix())
             if not _looks_binary(path):
@@ -2388,7 +2396,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import FACT_HEADER
+    from factlog.common import FACT_HEADER, is_hidden_source
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -2420,7 +2428,9 @@ def cmd_eject(args: argparse.Namespace) -> int:
         d = target / base
         if d.is_dir():
             for p in sorted(d.rglob("*")):
-                if p.is_file() and not p.name.startswith("."):
+                # hidden = any dot-prefixed component under the root (#67), so a
+                # file in sources/.git/ isn't treated as an ejectable source.
+                if p.is_file() and not is_hidden_source(p, d):
                     disk_refs[nfc(p.relative_to(target).as_posix())] = p
 
     all_refs = set(disk_refs) | cited_refs
