@@ -27,6 +27,7 @@ except arXiv is worse, because OpenAlex at least answers ``400`` for an unknown
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,6 +113,11 @@ CATEGORIES = frozenset({
 # builds must only ever use these.
 SEARCH_FIELDS = frozenset({"ti", "au", "abs", "co", "jr", "cat", "rn", "id", "all"})
 
+# A `field:value` token in a Lucene-style query. The value stops at whitespace
+# unless it is quoted, so `ti:"chain of thought"` is one token. A bare colon
+# inside a quoted phrase (`ti:"a: b"`) is not treated as a field.
+_FIELD_TOKEN_RE = re.compile(r'(?:^|[\s(])([A-Za-z_]+):("[^"]*"|\S+)')
+
 # `sortBy` values. Unlike the above, a bogus one *is* rejected (HTTP 400).
 SORT_FIELDS = {"submitted": "submittedDate", "updated": "lastUpdatedDate",
                "relevance": "relevance"}
@@ -159,6 +165,29 @@ def validate_category(value: str) -> str:
             f"for the {len(CATEGORIES)} valid categories (e.g. 'cs.CL', 'stat.ML')."
         )
     return candidate
+
+
+def validate_search_query(query: str) -> str:
+    """Return the query unchanged, or raise on a field prefix arXiv will ignore.
+
+    ``bogusfield:anything`` answers ``200`` with zero results — arXiv validates
+    neither the field name nor, for ``cat:``, the value (#57). Both silences read
+    as "no such literature exists", so both are caught here. Any ``cat:`` value
+    found in the query is checked against :func:`validate_category`.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ArxivValidationError("search query must be a non-empty string.")
+
+    for field, value in _FIELD_TOKEN_RE.findall(query):
+        if field.lower() not in SEARCH_FIELDS:
+            known = ", ".join(sorted(SEARCH_FIELDS))
+            raise ArxivValidationError(
+                f"unknown arXiv search field {field!r}; expected one of: {known}. "
+                "arXiv answers an unknown field with zero results rather than an error."
+            )
+        if field.lower() == "cat" and value:
+            validate_category(value.strip('"'))
+    return query.strip()
 
 
 def validate_sort(value: str) -> str:

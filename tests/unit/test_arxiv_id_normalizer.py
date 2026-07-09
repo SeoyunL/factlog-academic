@@ -41,6 +41,13 @@ from factlog.integrations.arxiv.id_normalizer import (
         # -- arXiv's own DataCite DOI form (the API answers this one with 400)
         ("10.48550/arXiv.1706.03762", "1706.03762", None),
         ("10.48550/arxiv.1706.03762v3", "1706.03762", 3),
+        # -- an abs URL as the browser leaves it, with the context query string
+        ("https://arxiv.org/abs/2311.09277?context=cs.CL", "2311.09277", None),
+        ("https://arxiv.org/abs/2311.09277v2?context=cs", "2311.09277", 2),
+        ("https://arxiv.org/abs/2311.09277#comments", "2311.09277", None),
+        # -- an uppercase version suffix
+        ("1706.03762V7", "1706.03762", 7),
+        ("arXiv:1706.03762V7", "1706.03762", 7),
         # -- whitespace
         ("  2311.09277  ", "2311.09277", None),
     ],
@@ -99,6 +106,17 @@ def test_old_style_forms_drop_the_subject_class(raw, base, version):
 def test_malformed_ids_raise_rather_than_being_sent(raw):
     with pytest.raises(ArxivIdError):
         normalize_arxiv_id(raw)
+
+
+def test_prefix_and_old_style_combine():
+    assert normalize_arxiv_id("arXiv:math.GT/0309136v2") == ArxivId("math/0309136", 2)
+
+
+def test_url_marker_is_located_without_lowercasing_the_original():
+    # `str.lower()` is not length-preserving for every character, so finding
+    # `/abs/` in a lowercased copy and slicing the original by that index can
+    # cut in the wrong place. 'İ'.lower() is two characters.
+    assert normalize_arxiv_id("https://İ.example/abs/1706.03762v7") == ArxivId("1706.03762", 7)
 
 
 def test_non_string_input_raises():

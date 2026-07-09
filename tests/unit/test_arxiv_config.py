@@ -21,6 +21,7 @@ from factlog.integrations.arxiv.config import (
     from_mapping,
     load_config,
     validate_category,
+    validate_search_query,
     validate_sort,
 )
 
@@ -73,6 +74,38 @@ def test_old_style_archives_never_contain_a_dot():
     # The normalizer splits on the first '.' to drop the subject class; an
     # archive containing one would break that.
     assert not any("." in archive for archive in OLD_STYLE_ARCHIVES)
+
+
+@pytest.mark.parametrize(
+    "query",
+    ['ti:"chain of thought"', "au:LeCun", "abs:transformers", "all:x",
+     "cat:cs.CL", "cat:cs.CL AND ti:bert", 'ti:"a: colon inside quotes"',
+     "chain of thought"],  # a bare phrase carries no field prefix at all
+)
+def test_valid_search_queries_pass(query):
+    assert validate_search_query(query) == query.strip()
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["bogusfield:anything", "title:transformers", "author:LeCun",
+     "ti:bert AND bogus:1"],
+)
+def test_unknown_search_fields_are_rejected(query):
+    # arXiv answers an unknown field with 200 and zero results, never an error.
+    with pytest.raises(ArxivValidationError, match="unknown arXiv search field"):
+        validate_search_query(query)
+
+
+def test_search_query_validates_embedded_category_values():
+    with pytest.raises(ArxivValidationError, match="unknown arXiv category"):
+        validate_search_query("cat:cs.NOTAREALCAT")
+    assert validate_search_query('cat:"cs.CL"') == 'cat:"cs.CL"'
+
+
+def test_empty_search_query_is_rejected():
+    with pytest.raises(ArxivValidationError, match="non-empty"):
+        validate_search_query("  ")
 
 
 @pytest.mark.parametrize(

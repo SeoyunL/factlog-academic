@@ -51,6 +51,7 @@ from factlog.integrations.arxiv.config import (
     API_DEFAULT_MAX_RESULTS,
     ArxivConfig,
     validate_category,
+    validate_search_query,
     validate_sort,
 )
 from factlog.integrations.arxiv.id_normalizer import ArxivId, normalize_arxiv_id
@@ -64,8 +65,11 @@ API_PATH = "/api/query"
 # arXiv's id_list ceiling per request (spec §2.2).
 MAX_ID_LIST = 100
 
-# Retries for 429/503/5xx, with exponential backoff (spec §8.3).
-MAX_RETRIES = 3
+# Total attempts (one try plus two retries) for arXiv's push-back statuses, with
+# exponential backoff (spec §8.3). Only 429 and 503 are retried: a 500 here is
+# deterministic — it is what `start` past the end of the result set returns — so
+# retrying it would just spend the delay three times over.
+MAX_ATTEMPTS = 3
 BACKOFF_BASE_SECONDS = 2.0
 
 
@@ -238,20 +242,19 @@ class ArxivClient:
         )
 
     def _request(self, params: dict) -> Feed:
-        last_error: ArxivError | None = None
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(MAX_ATTEMPTS):
+            # Re-armed on every attempt, so a retry still honours the interval.
             self._limiter.wait()
             response = self.transport(params)
             try:
                 self._classify(response)
-            except ArxivServiceError as exc:
-                last_error = exc
-                if attempt == MAX_RETRIES - 1:
+            except ArxivServiceError:
+                if attempt == MAX_ATTEMPTS - 1:
                     raise
                 self._sleep(BACKOFF_BASE_SECONDS * (2 ** attempt))
                 continue
             return self._parse_feed(response.text)
-        raise last_error or ArxivError("arXiv request failed.")  # pragma: no cover
+        raise ArxivError("arXiv request failed.")  # pragma: no cover
 
     # -- queries -----------------------------------------------------------
     def fetch_works(self, ids) -> BatchResult:
@@ -259,12 +262,27 @@ class ArxivClient:
 
         A well-formed id that does not exist — and a pinned version that does not
         exist — come back as *absence*, not as an error. So the requested ids are
-        diffed against the returned ones, and the diff keys on the normalized
-        base id because **the response is not in request order**.
+        diffed against the returned ones, and the diff cannot key on position:
+        **the response is not in request order.**
+
+        Nor can it key on the base id alone. ``1706.03762v1,1706.03762v3`` is a
+        legitimate request — it is what a version comparison looks like — and
+        both entries come back sharing one base. Matching is therefore
+        version-aware: a pinned request wants that exact version, and a bare
+        request takes whichever version arXiv calls latest.
+
+        Always returns a :class:`BatchResult`, even when every id is missing, so
+        the importer can emit a per-id outcome for each rather than losing the
+        list to an exception. Duplicate ids collapse to one request and one work.
         """
         from factlog.integrations.arxiv.work_parser import parse_entry
 
-        wanted = [normalize_arxiv_id(value) for value in ids]
+        wanted, seen = [], set()
+        for value in ids:
+            identifier = normalize_arxiv_id(value)
+            if str(identifier) not in seen:
+                seen.add(str(identifier))
+                wanted.append(identifier)
         if not wanted:
             raise ArxivError("fetch_works requires at least one id.")
         if len(wanted) > MAX_ID_LIST:
@@ -286,24 +304,26 @@ class ArxivClient:
             )
 
         works = [parse_entry(entry) for entry in feed.entries]
-        by_base = {work.arxiv_id: work for work in works}
+        # One base id can map to several returned versions, so index every
+        # version and keep the highest for bare requests.
+        by_version: dict[tuple[str, int], object] = {}
+        latest: dict[str, object] = {}
+        for work in works:
+            by_version[(work.arxiv_id, work.version)] = work
+            known = latest.get(work.arxiv_id)
+            if known is None or work.version > known.version:
+                latest[work.arxiv_id] = work
 
         found, missing = [], []
         for identifier in wanted:
-            work = by_base.get(identifier.base)
-            # A pinned version must come back as that version; arXiv answers an
-            # unknown version with absence, and a bare id with the latest.
-            if work is None or (identifier.version is not None
-                                and work.version != identifier.version):
+            if identifier.version is None:
+                work = latest.get(identifier.base)
+            else:
+                work = by_version.get((identifier.base, identifier.version))
+            if work is None:
                 missing.append(identifier)
             else:
                 found.append(work)
-
-        if not found:
-            raise ArxivNotFoundError(
-                "arXiv returned no entries for: "
-                + ", ".join(str(identifier) for identifier in missing)
-            )
         return BatchResult(found, missing)
 
     def fetch_work(self, value: str):
@@ -330,12 +350,10 @@ class ArxivClient:
         """
         from factlog.integrations.arxiv.work_parser import parse_entry
 
-        if not isinstance(query, str) or not query.strip():
-            raise ArxivError("search query must be a non-empty string.")
-
-        # Validated before the request: an unknown category answers 200 with zero
-        # results, which reads as "no such literature exists".
-        clauses = [query.strip()]
+        # Validated before the request: an unknown category *or an unknown field
+        # prefix* answers 200 with zero results, which reads as "no such
+        # literature exists".
+        clauses = [validate_search_query(query)]
         for category in categories:
             clauses.append(f"cat:{validate_category(category)}")
 
@@ -346,9 +364,22 @@ class ArxivClient:
         }
         if sort:
             params["sortBy"] = validate_sort(sort)
+            # arXiv orders relevance ascending-by-default too, so the flag is
+            # sent for every sort; for `relevance` descending means best-first.
             params["sortOrder"] = "descending"
 
-        feed = self._request(params)
+        try:
+            feed = self._request(params)
+        except ArxivError as exc:
+            # `start` past the end of the result set answers HTTP 500, not an
+            # empty page. Reported as-is it reads as an arXiv outage.
+            if start > 0 and "HTTP 500" in str(exc):
+                raise ArxivError(
+                    f"start={start} is beyond the end of arXiv's result set; the API "
+                    "answers HTTP 500 rather than an empty page. Stop paging once "
+                    "start >= the total reported by the first page."
+                ) from exc
+            raise
         return [parse_entry(entry) for entry in feed.entries], feed.total
 
     def _limit(self, limit: int | None) -> int:

@@ -180,6 +180,45 @@ def test_batch_sets_max_results_so_the_api_does_not_drop_ids():
     assert calls[0]["max_results"] == 15
 
 
+def test_two_versions_of_one_paper_both_resolve():
+    # `1706.03762v1,1706.03762v3` is exactly what a version comparison requests.
+    # Both entries share a base id, so a base-keyed index loses one of them and
+    # reports a version arXiv *did* return as missing.
+    api, _ = client([ok(feed(entry("1706.03762", 1), entry("1706.03762", 3)))])
+    result = api.fetch_works(["1706.03762v1", "1706.03762v3"])
+    assert [w.version for w in result.works] == [1, 3]
+    assert result.missing == []
+
+
+def test_bare_id_takes_the_latest_when_several_versions_return():
+    api, _ = client([ok(feed(entry("1706.03762", 1), entry("1706.03762", 3)))])
+    result = api.fetch_works(["1706.03762"])
+    assert [w.version for w in result.works] == [3]
+
+
+def test_duplicate_ids_collapse_to_one_request_and_one_work():
+    api, calls = client([ok(feed(entry("1706.03762", 7)))])
+    result = api.fetch_works(["1706.03762", "arXiv:1706.03762", "1706.03762"])
+    assert [w.versioned_id for w in result.works] == ["1706.03762v7"]
+    assert calls[0]["id_list"] == "1706.03762"
+
+
+def test_a_pinned_and_a_bare_request_for_one_paper_are_distinct_ids():
+    api, calls = client([ok(feed(entry("1706.03762", 7)))])
+    result = api.fetch_works(["1706.03762", "1706.03762v7"])
+    assert calls[0]["id_list"] == "1706.03762,1706.03762v7"
+    assert [w.versioned_id for w in result.works] == ["1706.03762v7"] * 2
+
+
+def test_all_missing_batch_still_returns_a_result_not_an_exception():
+    # The importer emits a per-id outcome for each miss. An exception here would
+    # lose the list, and it would be inconsistent with the partial-miss path.
+    api, _ = client([ok(feed(total=0))])
+    result = api.fetch_works(["9999.99999", "9999.99998"])
+    assert result.works == []
+    assert [str(i) for i in result.missing] == ["9999.99999", "9999.99998"]
+
+
 def test_results_are_matched_by_id_not_by_position():
     # The response is not in id_list order. Positional pairing would attach each
     # paper's provenance to the wrong record — correct title, wrong id.
@@ -215,11 +254,47 @@ def test_http_400_error_entry_is_never_read_as_a_result():
         api.fetch_works(["1706.03762"])
 
 
-def test_http_500_is_an_error_not_an_empty_page():
+def test_paging_past_the_end_explains_itself_rather_than_reading_as_an_outage():
     # `start` past the end of the result set answers 500, not an empty page.
     api, _ = client([_Response(500, {}, "")])
-    with pytest.raises(ArxivError, match="HTTP 500"):
+    with pytest.raises(ArxivError, match="beyond the end of arXiv's result set"):
         api.search("cat:cs.CL", start=99999999)
+
+
+def test_http_500_on_the_first_page_is_reported_as_a_server_error():
+    api, _ = client([_Response(500, {}, "")])
+    with pytest.raises(ArxivError, match="HTTP 500"):
+        api.search("cat:cs.CL")
+
+
+def test_unknown_search_field_is_rejected_before_a_request():
+    from factlog.integrations.arxiv.config import ArxivValidationError
+
+    # arXiv answers `bogusfield:x` with 200 and zero results, exactly as it does
+    # a bogus category. It does not even validate the field name.
+    api, calls = client([])
+    with pytest.raises(ArxivValidationError, match="unknown arXiv search field"):
+        api.search("bogusfield:anything")
+    assert calls == []
+
+
+def test_bogus_category_inside_the_query_string_is_rejected_too():
+    from factlog.integrations.arxiv.config import ArxivValidationError
+
+    api, calls = client([])
+    with pytest.raises(ArxivValidationError, match="unknown arXiv category"):
+        api.search("cat:cs.NOTAREALCAT AND ti:transformers")
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    ['ti:"chain of thought"', "au:LeCun AND cat:cs.LG", "all:transformers",
+     'abs:"in-context learning" ANDNOT cat:stat.ML'],
+)
+def test_valid_field_prefixes_pass_through(query):
+    api, _ = client([ok(feed(total=0))])
+    api.search(query)
 
 
 def test_redirects_are_surfaced_not_absorbed():

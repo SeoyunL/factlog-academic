@@ -128,6 +128,33 @@ def test_comment_is_stored_verbatim_never_interpreted():
             "administrators due to inflammatory content and unprofessional language",
             WITHDRAWN_BY_ADMIN,
         ),
+        # -- tenses and voices beyond the perfect aspect. Keying on "has been
+        # withdrawn" alone missed 38% of live withdrawn papers.
+        ("2009.14324", "This paper is withdrawn since we found a flaw in the proof "
+                       "of Theorem 4.", WITHDRAWN_BY_AUTHOR),
+        ("1805.07837", "The paper is withdrawn. The proof has an error.", WITHDRAWN_BY_AUTHOR),
+        ("1509.01709", "The paper has been withdrawn effective November 18, 2015.",
+         WITHDRAWN_BY_AUTHOR),
+        ("1206.4466", "This paper is withdrawn by the authors. We theoretically examine "
+                      "graphene plasmon polaritons.", WITHDRAWN_BY_AUTHOR),
+        # No determiner at all, singular.
+        ("1311.4375", "Paper is withdrawn due to further studies.", WITHDRAWN_BY_AUTHOR),
+        # Bare leading "Withdrawn".
+        ("bare-1", "Withdrawn. Work never submitted.", WITHDRAWN_BY_AUTHOR),
+        ("bare-2", "Withdrawn by authors", WITHDRAWN_BY_AUTHOR),
+        ("bare-3", "Withdrawn for revision", WITHDRAWN_BY_AUTHOR),
+        # Past tense.
+        ("past-1", "This paper was withdrawn by the authors.", WITHDRAWN_BY_AUTHOR),
+        ("past-2", "This paper is hereby withdrawn.", WITHDRAWN_BY_AUTHOR),
+        # Verbless participle, and the same typeset as a dashed aside.
+        ("1301.4231", "Paper withdrawn by the author", WITHDRAWN_BY_AUTHOR),
+        ("1607.07694", "- Paper withdrawn by the author - CMOS Monolithic Active Pixel "
+                       "Sensors for charged particle detection", WITHDRAWN_BY_AUTHOR),
+        # An admin withdrawal with no lead-in, naming the agent in the sentence.
+        # Note arXiv's own typo: "This submissions".
+        ("1707.09421", "This submissions has been withdrawn by arXiv administrators "
+                       "because the submitter did not have the right to post it.",
+         WITHDRAWN_BY_ADMIN),
     ],
 )
 def test_detect_withdrawal_finds_the_marker_and_names_the_agent(paper, summary, expected):
@@ -152,12 +179,32 @@ def test_admin_withdrawal_is_not_reported_as_the_authors_action():
         "We show that when a submission has been withdrawn, reviewers update priors.",
         # An admin note that is not a withdrawal: they also announce text overlap.
         "arXiv admin note: substantial text overlap with arXiv:1234.5678",
+        # A paper whose subject *is* withdrawal. Live: 1712.04310.
+        "We consider the withdrawal of a ball from a fluid reservoir to understand "
+        "the longevity of the coating.",
+        # Generic plural prose about withdrawal, not a notice. Without a
+        # determiner the detector requires a singular noun for exactly this.
+        "Papers are withdrawn from journals for many reasons, which we survey here.",
+        # Live abstracts that mention withdrawal without announcing one.
+        "When a player withdraws mid-tournament from a round-robin chess event, "
+        "organizers must decide what to do with the results.",
+        "Many drugs have been withdrawn from the market worldwide, at a cost of billions.",
+        "Selective withdrawal extracts only a single phase from a stratified fluid.",
+        "The dip-coating geometry, where a solid plate is withdrawn from a bath, is classic.",
         "",
         "   ",
     ],
 )
 def test_detect_withdrawal_ignores_unanchored_and_non_withdrawal_text(summary):
     assert detect_withdrawal(summary) is None
+
+
+def test_a_later_mention_of_arxiv_does_not_reassign_an_author_withdrawal():
+    # The agent is read from the notice sentence only; abstracts routinely cite
+    # other arXiv papers further down.
+    summary = ("This paper has been withdrawn by the authors. "
+               "A corrected version was posted by arXiv collaborators elsewhere.")
+    assert detect_withdrawal(summary) == WITHDRAWN_BY_AUTHOR
 
 
 def test_detect_withdrawal_tolerates_line_wrapping():

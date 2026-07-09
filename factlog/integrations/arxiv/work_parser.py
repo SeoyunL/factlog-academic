@@ -45,19 +45,50 @@ __all__ = [
 WITHDRAWN_BY_AUTHOR = "author"
 WITHDRAWN_BY_ADMIN = "admin"
 
-# An administrator withdrawal opens with this lead-in, sometimes inside the
-# bracket. Consumed before the marker is matched so both agents share one regex.
+# An administrator withdrawal usually opens with this lead-in, sometimes inside
+# the bracket. Consumed before the marker is matched so both agents share one
+# regex. It is not sufficient on its own: admin notes also announce text overlap
+# and duplicate submissions.
 _ADMIN_NOTE_RE = re.compile(r"^\[?\s*arxiv admin note:\s*", re.IGNORECASE)
 
-# Anchored at the first meaningful character of the summary. The `[^.]{0,80}?`
+# Some admin withdrawals carry no lead-in and name the agent in the sentence
+# itself ("This submissions has been withdrawn by arXiv administrators").
+_BY_ARXIV_RE = re.compile(r"\bby\s+arxiv\b", re.IGNORECASE)
+
+_NOUN = r"(?:paper|submission|manuscript|article|work|version|preprint|draft)s?"
+_DETERMINER = r"(?:this|that|the|these|our)\s+(?:following\s+)?"
+# Withdrawal notices use every tense and voice: "has been withdrawn", "is
+# withdrawn", "was withdrawn", "is hereby withdrawn". Keying on the perfect
+# aspect alone missed 38% of live withdrawn papers.
+_ANY_VERB = r"(?:(?:has|have)\s+been|is\s+hereby|is|are|was|were)\s+withdrawn"
+# Without a determiner the phrase must be singular. "Paper is withdrawn" is a
+# notice; "Papers are withdrawn from journals when ..." is a sentence about
+# withdrawal, and a false positive there marks a live paper as dead.
+_SINGULAR_NOUN = r"(?:paper|submission|manuscript|article|work|version|preprint|draft)"
+_SINGULAR_VERB = r"(?:has\s+been|is\s+hereby|is|was)\s+withdrawn"
+
+# Anchored at the first meaningful character of the summary. Each `[^.]{0,80}?`
 # spans qualifiers like "from consideration for publication" without crossing a
-# sentence boundary, which is what keeps a paper *about* withdrawal from matching.
+# sentence boundary, which is what keeps a paper *about* withdrawal from
+# matching ("We consider the withdrawal of a ball from a fluid reservoir").
 _WITHDRAWN_RE = re.compile(
-    r"^(?:this|the following)\s+"
-    r"(?:paper|submission|manuscript|article|work|version|preprint)\b"
-    r"[^.]{0,80}?\bhas been withdrawn\b",
+    r"^(?:"
+    # "Withdrawn." / "Withdrawn by authors" / "Withdrawn for revision"
+    r"withdrawn\b"
+    # "This paper has been withdrawn", "The paper is withdrawn",
+    # "This submissions has been withdrawn"
+    rf"|{_DETERMINER}{_NOUN}\b[^.]{{0,80}}?\b{_ANY_VERB}\b"
+    # "Paper is withdrawn due to further studies."
+    rf"|{_SINGULAR_NOUN}\b[^.]{{0,80}}?\b{_SINGULAR_VERB}\b"
+    # Verbless participle: "Paper withdrawn by the author", "This paper withdrawn".
+    rf"|(?:{_DETERMINER})?{_SINGULAR_NOUN}\s+withdrawn\b"
+    r")",
     re.IGNORECASE,
 )
+
+# Withdrawal notices are often typeset as a bulleted or dashed aside:
+# "- Paper withdrawn by the author - CMOS Monolithic Active Pixel Sensors ..."
+_LEADING_PUNCT_RE = re.compile(r"^[\s\[\-–—*•]+")
 
 
 @dataclass(frozen=True)
@@ -112,15 +143,22 @@ def detect_withdrawal(summary: str) -> str | None:
     # arXiv wraps abstracts across lines; the marker spans them.
     text = " ".join(summary.split()).lstrip()
 
-    admin = _ADMIN_NOTE_RE.match(text)
-    if admin is not None:
-        remainder = text[admin.end():].lstrip()
+    admin_note = _ADMIN_NOTE_RE.match(text)
+    if admin_note is not None:
+        remainder = text[admin_note.end():].lstrip()
         # The lead-in alone is not a withdrawal: admin notes also announce
         # text overlap, duplicate submissions, and other housekeeping.
         return WITHDRAWN_BY_ADMIN if _WITHDRAWN_RE.match(remainder) else None
 
-    # A leading '[' wraps some author notices: "[This paper has been withdrawn...]"
-    return WITHDRAWN_BY_AUTHOR if _WITHDRAWN_RE.match(text.lstrip("[").lstrip()) else None
+    # Some notices are bracketed or bulleted: "[This paper has been withdrawn...]",
+    # "- Paper withdrawn by the author - ...".
+    if _WITHDRAWN_RE.match(_LEADING_PUNCT_RE.sub("", text)) is None:
+        return None
+    # "This submission has been withdrawn by arXiv administrators" carries no
+    # lead-in but is still not the author's action. Look only within the notice
+    # sentence, so a later mention of arXiv in the abstract cannot reassign it.
+    sentence = text.split(".", 1)[0]
+    return WITHDRAWN_BY_ADMIN if _BY_ARXIV_RE.search(sentence) else WITHDRAWN_BY_AUTHOR
 
 
 def _clean(value: object) -> str | None:

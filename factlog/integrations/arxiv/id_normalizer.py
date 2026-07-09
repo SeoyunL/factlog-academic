@@ -43,16 +43,25 @@ from factlog.integrations.arxiv.config import OLD_STYLE_ARCHIVES
 __all__ = ["ArxivId", "ArxivIdError", "normalize_arxiv_id"]
 
 # `YYMM.NNNN` (2007-04..2014) or `YYMM.NNNNN` (2015-01..), optional `vN`.
-_NEW_STYLE_RE = re.compile(r"^(?P<base>[0-9]{4}\.[0-9]{4,5})(?:v(?P<version>[0-9]+))?$")
+_NEW_STYLE_RE = re.compile(
+    r"^(?P<base>[0-9]{4}\.[0-9]{4,5})(?:v(?P<version>[0-9]+))?$", re.IGNORECASE
+)
 
 # The right-hand side of an old-style id: exactly seven digits, optional `vN`.
-_OLD_STYLE_TAIL_RE = re.compile(r"^(?P<seq>[0-9]{7})(?:v(?P<version>[0-9]+))?$")
+_OLD_STYLE_TAIL_RE = re.compile(
+    r"^(?P<seq>[0-9]{7})(?:v(?P<version>[0-9]+))?$", re.IGNORECASE
+)
+
+# The `/abs/` or `/pdf/` path segment of an arxiv.org URL. Matched case-
+# insensitively on the *original* string: locating it in a lowercased copy and
+# slicing the original by that index is unsafe, because `str.lower()` is not
+# length-preserving for every character.
+_URL_MARKER_RE = re.compile(r"/(?:abs|pdf)/", re.IGNORECASE)
 
 # Prefixes and wrappers users paste. Order matters: the DOI form is checked
 # before the bare `arxiv:` prefix, since it contains one.
 _DOI_PREFIX = "10.48550/arxiv."
-_ABS_MARKER = "/abs/"
-_PDF_MARKER = "/pdf/"
+_ARXIV_PREFIX = "arxiv:"
 
 
 class ArxivIdError(Exception):
@@ -88,25 +97,26 @@ def _strip_wrappers(raw: str) -> str:
     """Reduce a URL/DOI/prefixed citation to the bare identifier text."""
     candidate = raw.strip()
 
-    # https://arxiv.org/abs/2311.09277v2  ->  2311.09277v2
+    # https://arxiv.org/abs/2311.09277v2       -> 2311.09277v2
     # https://arxiv.org/pdf/math/0309136v1.pdf -> math/0309136v1
-    lowered = candidate.lower()
-    for marker in (_ABS_MARKER, _PDF_MARKER):
-        position = lowered.find(marker)
-        if position != -1:
-            candidate = candidate[position + len(marker):]
-            break
+    # https://arxiv.org/abs/2311.09277?context=cs.CL -> 2311.09277
+    marker = _URL_MARKER_RE.search(candidate)
+    if marker is not None:
+        candidate = candidate[marker.end():]
+        # An abs URL commonly carries `?context=cs.CL`; a fragment is rarer.
+        for separator in ("?", "#"):
+            candidate = candidate.split(separator, 1)[0]
     candidate = candidate.strip("/")
     if candidate.lower().endswith(".pdf"):
         candidate = candidate[:-4]
 
     # 10.48550/arXiv.1706.03762 -> 1706.03762   (arXiv's own DataCite DOI form)
     if candidate.lower().startswith(_DOI_PREFIX):
-        return candidate[len(_DOI_PREFIX):]
+        return candidate[len(_DOI_PREFIX):].strip()
 
     # arXiv:1706.03762 -> 1706.03762
-    if candidate.lower().startswith("arxiv:"):
-        candidate = candidate[len("arxiv:"):]
+    if candidate.lower().startswith(_ARXIV_PREFIX):
+        candidate = candidate[len(_ARXIV_PREFIX):]
 
     return candidate.strip()
 
