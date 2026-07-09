@@ -475,3 +475,254 @@ class TestAFrontMatterOnlyPaperIsNotCalledALedger:
         fake(FakeClient([_work("1706.03762", version=7)]))
         run(["arxiv-check-versions", "--target", str(tmp_path)])
         assert "ledger records v5" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# --auto-update (#79): version-tracking fields only, the ledger, never the .md
+# --------------------------------------------------------------------------- #
+def _full_work(arxiv_id="1706.03762", version=7, *, last_updated=date(2021, 3, 3),
+               comment="the v7 comment", withdrawn_by=None) -> ParsedArxivWork:
+    """A work carrying the two other version-tracking values --auto-update writes."""
+    return ParsedArxivWork(
+        arxiv_id=arxiv_id, version=version, title="A paper", authors=("Ann Author",),
+        abstract="An abstract.", primary_category="cs.CL", categories=("cs.CL",),
+        submitted=date(2017, 6, 12), last_updated=last_updated, comment=comment,
+        withdrawn_by=withdrawn_by,
+        abs_url=f"https://arxiv.org/abs/{arxiv_id}v{version}",
+        pdf_url=f"https://arxiv.org/pdf/{arxiv_id}v{version}",
+    )
+
+
+def _seed_full(kb, arxiv_id="1706.03762", version=5, *, name="paper",
+               comment="the v5 comment", last_updated="2019-05-05",
+               withdrawn_by=None, extra_records=()):
+    """Seed a source .md and a *fully populated* arXiv ledger record, so a version
+    bump can be shown to move exactly three fields and leave the rest verbatim."""
+    (kb / "sources").mkdir(exist_ok=True)
+    md = kb / "sources" / f"{name}.md"
+    md.write_text(f"---\narxiv_id: {arxiv_id}\narxiv_version: {version}\n---\n# {name}\n")
+    fields = {
+        "version": version,
+        "submitted": "2017-06-12",
+        "last_updated": last_updated,
+        "comment": comment,
+        "primary_category": "cs.CL",
+    }
+    if withdrawn_by is not None:
+        fields["withdrawn_by"] = withdrawn_by
+    records = [
+        SourceRecord(type="arxiv", id=arxiv_id, imported_at="2026-01-01T00:00:00+00:00",
+                     fields=fields),
+        *extra_records,
+    ]
+    write_provenance(sidecar_path(md), Provenance(records=records))
+    return md
+
+
+def _ledger_dict(md):
+    """The on-disk provenance records for a source, as flat dicts keyed by (type, id)."""
+    from factlog.integrations.common.provenance import read_provenance
+    prov = read_provenance(sidecar_path(md))
+    return {(r.type, r.id): r.to_dict() for r in prov.records}
+
+
+def _md_stat(md):
+    st = md.stat()
+    return (md.read_bytes(), st.st_mtime_ns)
+
+
+def _run_check(kb, works):
+    """collect -> check, returning the VersionCheck results the CLI would compute."""
+    entries, _ = cv.collect_ledger_entries(kb)
+    return cv.check_entries(entries, FakeClient(works))
+
+
+class TestApplyAutoUpdate:
+    """The pure ledger-writer, exercised directly so the clock (check-log) never
+    confounds the byte/mtime assertions."""
+
+    def test_writes_exactly_version_last_updated_comment_and_nothing_else(self, tmp_path):
+        md = _seed_full(
+            tmp_path, "1706.03762", 5, comment="the v5 comment", last_updated="2019-05-05",
+            extra_records=[SourceRecord(type="openalex", id="W1",
+                                        imported_at="2026-01-01T00:00:00+00:00",
+                                        fields={"is_retracted": False})],
+        )
+        md_before = _md_stat(md)
+        results = _run_check(tmp_path, [_full_work(version=7, last_updated=date(2021, 3, 3),
+                                                   comment="the v7 comment")])
+        (update,) = cv.apply_auto_update(results, tmp_path)
+        assert update.status == cv.UPDATE_WRITTEN
+
+        ledger = _ledger_dict(md)
+        # The arXiv record: exactly the three fields moved; everything else verbatim.
+        assert ledger[("arxiv", "1706.03762")] == {
+            "type": "arxiv", "id": "1706.03762",
+            "imported_at": "2026-01-01T00:00:00+00:00",
+            "version": 7, "submitted": "2017-06-12",
+            "last_updated": "2021-03-03", "comment": "the v7 comment",
+            "primary_category": "cs.CL",
+        }
+        # The co-resident OpenAlex record is untouched (full-dict compare).
+        assert ledger[("openalex", "W1")] == {
+            "type": "openalex", "id": "W1",
+            "imported_at": "2026-01-01T00:00:00+00:00", "is_retracted": False,
+        }
+        # The original .md is byte- AND mtime_ns-identical: it was never opened.
+        assert _md_stat(md) == md_before
+
+    def test_no_upstream_change_is_a_byte_identical_noop(self, tmp_path):
+        # Ledger already holds exactly what arXiv serves: no write, no mtime move.
+        md = _seed_full(tmp_path, "1706.03762", 7, comment="same", last_updated="2021-03-03")
+        ledger_path = sidecar_path(md)
+        before = (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns)
+        results = _run_check(tmp_path, [_full_work(version=7, last_updated=date(2021, 3, 3),
+                                                   comment="same")])
+        (update,) = cv.apply_auto_update(results, tmp_path)
+        assert update.status == cv.UPDATE_UNCHANGED
+        assert (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns) == before
+
+    def test_a_dropped_comment_is_reflected_not_frozen(self, tmp_path):
+        md = _seed_full(tmp_path, "1706.03762", 5, comment="the v5 comment")
+        results = _run_check(tmp_path, [_full_work(version=7, comment=None)])
+        (update,) = cv.apply_auto_update(results, tmp_path)
+        assert update.status == cv.UPDATE_WRITTEN
+        # comment gone upstream -> dropped from the ledger, not kept stale.
+        assert "comment" not in _ledger_dict(md)[("arxiv", "1706.03762")]
+
+    def test_withdrawal_is_surfaced_but_never_written(self, tmp_path):
+        # arXiv now withdraws a paper the ledger did not record as withdrawn, at the
+        # same version. Recording withdrawn_by would flip newly_withdrawn False next
+        # run and silence it; --auto-update must not.
+        md = _seed_full(tmp_path, "1904.09773", 3, comment="c", last_updated="2019-01-01",
+                        name="withdrawn")
+        results = _run_check(tmp_path, [_full_work(
+            "1904.09773", version=3, last_updated=date(2019, 1, 1), comment="c",
+            withdrawn_by="admin")])
+        (result,) = results
+        assert result.newly_withdrawn is True  # still surfaced by the report
+        cv.apply_auto_update(results, tmp_path)
+        assert "withdrawn_by" not in _ledger_dict(md)[("arxiv", "1904.09773")]
+
+    def test_a_front_matter_only_paper_gets_no_ledger(self, tmp_path):
+        (tmp_path / "sources").mkdir(parents=True)
+        (tmp_path / "sources" / "old.md").write_text(
+            '---\narxiv_id: "1706.03762"\narxiv_version: 5\n---\n', encoding="utf-8")
+        results = _run_check(tmp_path, [_full_work(version=7)])
+        (update,) = cv.apply_auto_update(results, tmp_path)
+        assert update.status == cv.UPDATE_NO_LEDGER
+        # No ledger was fabricated: an import's write is not smuggled into a refresh.
+        assert not (tmp_path / "source-provenance").exists()
+
+    def test_a_corrupt_ledger_is_a_per_id_error(self, tmp_path):
+        # A result pointing at a ledger that will not parse yields a per-id error,
+        # never a traceback.
+        (tmp_path / "source-provenance").mkdir(parents=True)
+        (tmp_path / "source-provenance" / "bad.json").write_text("{ broken")
+        result = cv.VersionCheck(
+            arxiv_id="1706.03762", status=cv.STATUS_CHANGED, recorded_version=5,
+            current_version=7, current_last_updated="2021-03-03", current_comment="c",
+            sources=("source-provenance/bad.json",))
+        (update,) = cv.apply_auto_update([result], tmp_path)
+        assert update.status == cv.UPDATE_ERROR
+        assert "bad.json" in update.reason
+
+
+class TestAutoUpdateCli:
+    def test_bump_updates_ledger_and_leaves_md_byte_and_mtime_identical(
+        self, tmp_path, fake, capsys
+    ):
+        md = _seed_full(tmp_path, "1706.03762", 5, comment="the v5 comment")
+        md_before = _md_stat(md)
+        fake(FakeClient([_full_work(version=7, comment="the v7 comment")]))
+        code = run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
+        assert code == 0
+        arxiv = _ledger_dict(md)[("arxiv", "1706.03762")]
+        assert (arxiv["version"], arxiv["last_updated"], arxiv["comment"]) == (
+            7, "2021-03-03", "the v7 comment")
+        assert arxiv["submitted"] == "2017-06-12"  # untouched
+        assert _md_stat(md) == md_before  # P4: the .md never moved
+        assert "Ledger updated" in capsys.readouterr().out
+
+    def test_without_the_flag_ledger_is_byte_identical_only_checklog_advances(
+        self, tmp_path, fake
+    ):
+        md = _seed_full(tmp_path, "1706.03762", 5)
+        ledger_path = sidecar_path(md)
+        before = (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns)
+        fake(FakeClient([_full_work(version=7)]))
+        run(["arxiv-check-versions", "--target", str(tmp_path)])  # no --auto-update
+        assert (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns) == before
+        # Only the check-log moved.
+        log = read_check_log(check_log_path(tmp_path))
+        assert log.entries["1706.03762"].version == 7
+
+    def test_rerun_is_byte_identical_noop_on_ledger_and_checklog(self, tmp_path, fake):
+        md = _seed_full(tmp_path, "1706.03762", 5)
+        fake(FakeClient([_full_work(version=7)]))
+        run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
+        ledger_path = sidecar_path(md)
+        log_path = check_log_path(tmp_path)
+        after_first = {
+            "ledger": (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns),
+            "log": (log_path.read_bytes(), log_path.stat().st_mtime_ns),
+        }
+        # A re-run inside the freshness window skips the paper: no API call, and
+        # neither the ledger nor the check-log moves — byte- and mtime_ns-identical.
+        client = fake(FakeClient([], raise_exc=AssertionError("must not hit the API")))
+        run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
+        assert client.calls == []
+        assert (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns) == after_first["ledger"]
+        assert (log_path.read_bytes(), log_path.stat().st_mtime_ns) == after_first["log"]
+
+    def test_withdrawal_is_surfaced_and_not_recorded_under_auto_update(
+        self, tmp_path, fake, capsys
+    ):
+        md = _seed_full(tmp_path, "1904.09773", 3, comment="c", last_updated="2019-01-01",
+                        name="w")
+        fake(FakeClient([_full_work("1904.09773", version=3, last_updated=date(2019, 1, 1),
+                                    comment="c", withdrawn_by="author")]))
+        run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
+        out = capsys.readouterr().out
+        assert "WITHDRAWN by the author" in out
+        assert "retracted" not in out.lower()
+        assert "withdrawn_by" not in _ledger_dict(md)[("arxiv", "1904.09773")]
+
+    def test_corrupt_ledger_is_per_id_error_healthy_paper_still_updates(
+        self, tmp_path, fake, capsys
+    ):
+        md = _seed_full(tmp_path, "1706.03762", 5, name="good")
+        (tmp_path / "source-provenance" / "bad.json").write_text("{ broken")
+        fake(FakeClient([_full_work(version=7)]))
+        code = run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
+        assert code == 1  # the corrupt ledger is an error
+        assert "corrupt provenance ledger" in capsys.readouterr().out
+        # The healthy paper was still updated.
+        assert _ledger_dict(md)[("arxiv", "1706.03762")]["version"] == 7
+
+    def test_front_matter_only_is_reported_not_fabricated(self, tmp_path, fake, capsys):
+        (tmp_path / "sources").mkdir(parents=True)
+        (tmp_path / "sources" / "old.md").write_text(
+            '---\narxiv_id: "1706.03762"\narxiv_version: 5\n---\n', encoding="utf-8")
+        fake(FakeClient([_full_work(version=7)]))
+        code = run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
+        assert code == 0
+        assert "no ledger" in capsys.readouterr().out.lower()
+        assert not (tmp_path / "source-provenance").exists()
+
+    def test_porcelain_emits_update_rows(self, tmp_path, fake, capsys):
+        _seed_full(tmp_path, "1706.03762", 5)
+        fake(FakeClient([_full_work(version=7)]))
+        run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update",
+             "--porcelain"])
+        rows = {}
+        updates = {}
+        for line in capsys.readouterr().out.strip().splitlines():
+            f = line.split("\t")
+            if f[0] == "update":
+                updates[f[1]] = f
+            else:
+                rows[f[0]] = f[1] if len(f) > 1 else ""
+        assert rows["updated"] == "1"
+        assert updates["1706.03762"][2] == "updated"
+        assert updates["1706.03762"][4] == "7"
