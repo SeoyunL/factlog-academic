@@ -61,7 +61,7 @@ class FakeBackend:
     """Minimal pyzotero stand-in. Records calls; raises/pages on demand."""
 
     def __init__(self, collections=None, items=None, raise_os=False, exc=None, extra_pages=None,
-                 children=None, files=None):
+                 children=None, files=None, annotations=None):
         self._collections = collections or []
         self._items = items or []
         self._raise_os = raise_os
@@ -69,6 +69,7 @@ class FakeBackend:
         self._extra_pages = extra_pages or []
         self._children = children or []
         self._files = files or {}
+        self._annotations = annotations or []
         self.calls: list[tuple] = []
 
     def _maybe_raise(self):
@@ -97,6 +98,8 @@ class FakeBackend:
     def items(self, **kwargs):
         self.calls.append(("items", kwargs))
         self._maybe_raise()
+        if kwargs.get("itemType") == "annotation":
+            return list(self._annotations)
         return list(self._items)
 
     def children(self, parent_key):
@@ -328,10 +331,10 @@ def _note(key, parent="KH78JUPE"):
                                  "note": "<p>Comment: under review</p>"}}
 
 
-def _annotation(key, atype="highlight", text="passage", comment="", page="3"):
+def _annotation(key, atype="highlight", text="passage", comment="", page="3", parent="A"):
     return {"key": key, "data": {"key": key, "itemType": "annotation", "annotationType": atype,
                                  "annotationText": text, "annotationComment": comment,
-                                 "annotationPageLabel": page}}
+                                 "annotationPageLabel": page, "parentItem": parent}}
 
 
 class TestNotes:
@@ -358,44 +361,61 @@ class TestNotes:
 
 
 class TestAnnotations:
-    def test_filters_to_text_annotations(self):
-        backend = FakeBackend(children=[
-            _annotation("H", "highlight"),
-            _annotation("U", "underline"),
-            _annotation("N", "note"),
-            _annotation("IMG", "image"),   # excluded
-            _annotation("INK", "ink"),     # excluded
-            _note("NOTE1"),                # not an annotation
+    # Annotations are fetched via items(itemType="annotation") and matched by
+    # parentItem — the Local API does NOT return them via an attachment's children.
+    def test_filters_to_text_annotations_of_parent(self):
+        backend = FakeBackend(annotations=[
+            _annotation("H", "highlight", parent="A"),
+            _annotation("U", "underline", parent="A"),
+            _annotation("N", "note", parent="A"),
+            _annotation("IMG", "image", parent="A"),   # excluded (no text type)
+            _annotation("INK", "ink", parent="A"),      # excluded
+            _annotation("OTHER", "highlight", parent="B"),  # different attachment
         ])
         c = ZoteroClient(ZoteroConfig(), backend=backend)
-        out = c.get_annotations("ATTKEY")
+        out = c.get_annotations("A")
         assert [a["key"] for a in out] == ["H", "U", "N"]
-        assert ("children", "ATTKEY") in backend.calls
+        assert ("items", {"itemType": "annotation"}) in backend.calls
+
+    def test_uses_items_not_children(self):
+        backend = FakeBackend(annotations=[_annotation("H", parent="ATTKEY")])
+        ZoteroClient(ZoteroConfig(), backend=backend).get_annotations("ATTKEY")
+        # Local API doesn't serve annotations via /children, so we must not call it.
+        assert not any(call[0] == "children" for call in backend.calls)
 
     def test_no_annotations_returns_empty(self):
-        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[_note("N1")]))
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(annotations=[]))
         assert c.get_annotations("A") == []
 
     def test_order_and_pagination(self):
-        backend = FakeBackend(children=[_annotation("A1")], extra_pages=[[_annotation("A2")]])
+        backend = FakeBackend(annotations=[_annotation("A1", parent="A")],
+                              extra_pages=[[_annotation("A2", parent="A")]])
         c = ZoteroClient(ZoteroConfig(), backend=backend)
         assert [a["key"] for a in c.get_annotations("A")] == ["A1", "A2"]
 
+    def test_fetched_once_and_reused_across_attachments(self):
+        backend = FakeBackend(annotations=[_annotation("H1", parent="A"), _annotation("H2", parent="B")])
+        c = ZoteroClient(ZoteroConfig(), backend=backend)
+        assert [a["key"] for a in c.get_annotations("A")] == ["H1"]
+        assert [a["key"] for a in c.get_annotations("B")] == ["H2"]
+        # Only one library-wide annotation fetch, reused for both attachments.
+        assert sum(1 for call in backend.calls if call == ("items", {"itemType": "annotation"})) == 1
+
     def test_case_variant_image_ink_excluded(self):
-        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(annotations=[
             _annotation("H", "highlight"), _annotation("IMG", "Image"), _annotation("INK", "INK")]))
         assert [a["key"] for a in c.get_annotations("A")] == ["H"]
 
     def test_missing_type_is_kept_fail_open(self):
         typeless = {"key": "T", "data": {"key": "T", "itemType": "annotation",
-                                         "annotationText": "x"}}  # no annotationType
-        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[typeless]))
+                                         "parentItem": "A", "annotationText": "x"}}
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(annotations=[typeless]))
         assert [a["key"] for a in c.get_annotations("A")] == ["T"]
 
     def test_empty_text_annotation_kept_at_client_level(self):
         # Pruning empty-text annotations is the writer's job (#M), not the client's.
         empty = _annotation("E", "highlight", text="", comment="")
-        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(children=[empty]))
+        c = ZoteroClient(ZoteroConfig(), backend=FakeBackend(annotations=[empty]))
         assert [a["key"] for a in c.get_annotations("A")] == ["E"]
 
     def test_connection_failure_wrapped(self):
