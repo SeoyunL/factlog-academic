@@ -78,6 +78,9 @@ class ZoteroClient:
     def __init__(self, config: ZoteroConfig | None = None, backend: object | None = None):
         self._config = config or ZoteroConfig()
         self._backend = backend
+        # All library annotations, fetched once (annotations aren't served via an
+        # attachment's /children on the Local API), reused across attachments.
+        self._annotations: list[dict] | None = None
 
     # -- connection --------------------------------------------------------
     @property
@@ -249,19 +252,26 @@ class ZoteroClient:
         return [c for c in children if _data(c).get("itemType") == "note"]
 
     def get_annotations(self, attachment_key: str) -> list[dict]:
-        """Annotation children of a PDF attachment, in order (read-only).
+        """Text-bearing annotations of a PDF attachment, in order (read-only).
 
-        A denylist keeps everything except image/ink annotations (the only types
-        that inherently carry no text), matched case-insensitively — an annotation
-        with a missing/unknown type is kept. Whether a kept annotation actually
-        has usable text (both annotationText and annotationComment empty) is not
-        decided here: empty-text pruning is the annotation writer's job (#M), so
-        this stays a thin type filter.
+        The Zotero **Local API does not return annotations via an attachment's
+        ``/children``** (unlike notes, which are children of the parent item), so
+        annotations are fetched with ``items(itemType="annotation")`` and matched
+        by ``parentItem``. This also works on the Web API. The full annotation set
+        is fetched once per client instance and reused across attachments.
+
+        A denylist keeps everything except image/ink types (matched
+        case-insensitively; a missing/unknown type is kept). Empty-text pruning is
+        the annotation writer's job (#M), so this stays a thin filter.
         """
-        children = self._fetch(lambda: self._all(self.backend.children(attachment_key)))
+        if self._annotations is None:
+            self._annotations = self._fetch(
+                lambda: self._all(self.backend.items(itemType="annotation"))
+            )
         return [
-            c
-            for c in children
-            if _data(c).get("itemType") == "annotation"
-            and str(_data(c).get("annotationType", "")).lower() not in _NON_TEXT_ANNOTATION_TYPES
+            a
+            for a in self._annotations
+            if _data(a).get("parentItem") == attachment_key
+            and _data(a).get("itemType") == "annotation"
+            and str(_data(a).get("annotationType", "")).lower() not in _NON_TEXT_ANNOTATION_TYPES
         ]
