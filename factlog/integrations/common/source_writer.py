@@ -105,7 +105,13 @@ class _DirIndex:
     by_identity: dict[str, tuple[Path, str]] = field(default_factory=dict)
     # ("doi", "10.1234/x") -> path. Populated from every source file regardless
     # of which integration wrote it, which is what makes §7.1 detection work.
-    by_cross_id: dict[tuple[str, str], Path] = field(default_factory=dict)
+    # ("doi", "10.1234/x") -> (path, that file's `imported_from`). Populated from
+    # every source file regardless of which integration wrote it, which is what
+    # makes §7.1 detection work. Provenance rides along so a duplicate found
+    # inside this writer's OWN database is not mistaken for another database's
+    # view of the paper: two arXiv deposits that share a DOI are a plain
+    # duplicate, not a cross-source merge.
+    by_cross_id: dict[tuple[str, str], tuple[Path, str]] = field(default_factory=dict)
 
 
 def byte_trunc(slug: str, max_bytes: int) -> str:
@@ -281,7 +287,9 @@ class BaseSourceWriter:
                     for kind, _ in CROSS_SOURCE_IDS:
                         value = scalars.get(kind, "")
                         if value:
-                            cached.by_cross_id.setdefault((kind, normalize_cross_id(kind, value)), path)
+                            cached.by_cross_id.setdefault(
+                                (kind, normalize_cross_id(kind, value)),
+                                (path, scalars.get(IMPORTED_FROM_KEY, "")))
             self._dir_index[key] = cached
         return cached
 
@@ -328,10 +336,17 @@ class BaseSourceWriter:
             value = cross_ids.get(kind, "")
             if not value:
                 continue
-            existing = index.by_cross_id.get((kind, normalize_cross_id(kind, value)))
-            if existing is not None:
-                return self._cross_source(
-                    existing, f"duplicate {label} {value} (already in {existing.name})")
+            found = index.by_cross_id.get((kind, normalize_cross_id(kind, value)))
+            if found is not None:
+                existing, imported_from = found
+                reason = f"duplicate {label} {value} (already in {existing.name})"
+                # A shared identifier inside this writer's OWN database is a plain
+                # duplicate, not another database's view of the paper: two arXiv
+                # deposits sharing a DOI must not fold one into the other's ledger.
+                # Merging describes a record this writer did not write.
+                if _same_source(imported_from, self.source_name):
+                    return WriteResult(existing, "skipped", reason)
+                return self._cross_source(existing, reason)
         return None
 
     def _cross_source(self, existing: Path, reason: str) -> WriteResult:
@@ -355,7 +370,8 @@ class BaseSourceWriter:
         for kind, _ in CROSS_SOURCE_IDS:
             value = cross_ids.get(kind, "")
             if value:
-                index.by_cross_id.setdefault((kind, normalize_cross_id(kind, value)), path)
+                index.by_cross_id.setdefault(
+                    (kind, normalize_cross_id(kind, value)), (path, self.source_name))
         return WriteResult(path, "imported")
 
     def _resolve(self, parsed, target: Path | str, mode: str) -> WriteResult:

@@ -172,20 +172,34 @@ class TestMissingAndInvalid:
 
 
 class TestCrossSourceDuplicate:
-    def test_shared_doi_is_merged_and_reported(self, tmp_path):
-        # Two records sharing a DOI: the first is written, the second is the same
-        # paper via the DOI join key. As of Step 4c the arXiv writer merges it into
-        # the first original's sidecar (§7.3) rather than reporting a bare skip.
+    def test_two_arxiv_deposits_sharing_a_doi_are_skipped_not_merged(self, tmp_path):
+        # Both records are arXiv's own. A shared DOI makes the second a plain
+        # duplicate, not another *database's* view of the paper, so it must not be
+        # folded into the first arXiv record's ledger. Merging is for a record this
+        # writer did not write.
         kb = _kb(tmp_path)
         report = import_works(
             [_work("1706.03762", doi="10.1/x"),
              _work("1810.04805", title="dup", doi="10.1/x")],
             target=kb,
         )
-        assert report.imported == 1 and report.merged == 1
-        assert report.skipped == 0
-        merged = [o for o in report.outcomes if o.status == "merged"][0]
-        assert "duplicate DOI" in merged.reason
+        assert report.imported == 1 and report.skipped == 1
+        assert report.merged == 0
+        skipped = [o for o in report.outcomes if o.status == "skipped"][0]
+        assert "duplicate DOI" in skipped.reason
+        assert not (tmp_path / "source-provenance").exists()
+
+    def test_a_doi_shared_with_another_database_is_merged(self, tmp_path):
+        # The same join key, but the existing file was written by OpenAlex. Now it
+        # is another database's view of the paper, and the deposit is recorded.
+        kb = _kb(tmp_path)
+        (kb / "sources" / "openalex.md").write_text(
+            '---\nopenalex_id: "W1"\ndoi: "10.1/x"\nimported_from: openalex\n---\n',
+            encoding="utf-8",
+        )
+        report = import_works([_work("1706.03762", doi="10.1/x")], target=kb)
+        assert report.merged == 1 and report.imported == 0
+        assert (kb / "source-provenance" / "openalex.json").is_file()
 
 
 class TestReport:

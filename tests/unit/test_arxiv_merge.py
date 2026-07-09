@@ -315,3 +315,94 @@ class TestSameRecordReimportStillSkips:
         assert second.reason == "already imported (arxiv_id match)"
         # A same-source re-import writes no sidecar.
         assert not (tmp_path / "source-provenance").exists()
+
+
+class TestACorruptLedgerIsOnePapersProblem:
+    """A merge reads a sidecar that a human or a crashed process may have left
+    malformed. The failure must be scoped to that paper: the imports queued behind
+    it are unrelated, and a KB should never become unimportable because one ledger
+    is broken."""
+
+    def _corrupt(self, original, text="{ corrupt"):
+        sidecar = sidecar_path(original)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(text, encoding="utf-8")
+        return sidecar
+
+    def test_a_corrupt_sidecar_is_a_per_id_error_not_a_batch_crash(self, tmp_path):
+        from factlog.integrations.arxiv.importer import import_works
+
+        kb, original = _kb_with_openalex(tmp_path)
+        self._corrupt(original)
+        report = import_works(
+            [_arxiv("2311.09277"), _arxiv("1706.03762", version=7),
+             _arxiv("1810.04805", version=1)],
+            target=kb, imported_at="t",
+        )
+        assert report.errors == 1
+        # The two unrelated papers behind it still landed.
+        assert report.imported == 2
+        failed = next(o for o in report.outcomes if o.status == "error")
+        assert "unreadable" in failed.reason
+
+    @pytest.mark.parametrize(
+        "text",
+        ['{ corrupt', '{"schema_version": 99, "records": []}',
+         '{"schema_version": 1}', '[]'],
+    )
+    def test_every_unreadable_shape_is_an_error_not_an_exception(self, tmp_path, text):
+        kb, original = _kb_with_openalex(tmp_path)
+        self._corrupt(original, text)
+        result = ArxivSourceWriter().write(_arxiv("2311.09277"), kb, imported_at="t")
+        assert result.status == "error"
+        # The broken ledger is left exactly as found; nothing is overwritten.
+        assert sidecar_path(original).read_text(encoding="utf-8") == text
+
+
+class TestOnlyIdentifyingFieldsDiverge:
+    """arXiv edits `comment` and `primary_category` without cutting a new version:
+    a moderator recategorizes, an author appends "Accepted at ICML 2024". If that
+    were a divergence, a routine re-import would error forever — and the suggested
+    remedy, `arxiv-check-versions`, compares *versions* and could never clear it."""
+
+    def _merge(self, kb, work):
+        return ArxivSourceWriter().write(work, kb, imported_at="t")
+
+    def test_a_changed_comment_at_the_same_version_is_absorbed(self, tmp_path):
+        kb, original = _kb_with_openalex(tmp_path)
+        self._merge(kb, _arxiv(version=2, comment="5 pages"))
+        result = self._merge(kb, _arxiv(version=2, comment="Accepted at ICML 2024"))
+        assert result.status == "merged"
+
+    def test_a_recategorized_primary_category_is_absorbed(self, tmp_path):
+        kb, original = _kb_with_openalex(tmp_path)
+        self._merge(kb, _arxiv(version=2, primary_category="cs.CL"))
+        result = self._merge(kb, _arxiv(version=2, primary_category="cs.LG"))
+        assert result.status == "merged"
+
+    def test_absorbed_drift_leaves_the_first_record_intact(self, tmp_path):
+        # The ledger goes stale rather than lying: only a refresh may revise it.
+        kb, original = _kb_with_openalex(tmp_path)
+        self._merge(kb, _arxiv(version=2, comment="5 pages"))
+        before = sidecar_path(original).read_bytes()
+        self._merge(kb, _arxiv(version=2, comment="Accepted at ICML 2024"))
+        assert sidecar_path(original).read_bytes() == before
+
+    def test_a_version_bump_still_errors_and_names_both_versions(self, tmp_path):
+        kb, original = _kb_with_openalex(tmp_path)
+        self._merge(kb, _arxiv(version=2))
+        result = self._merge(kb, _arxiv(version=3))
+        assert result.status == "error"
+        assert "v2" in result.reason and "v3" in result.reason
+
+    def test_a_withdrawal_at_the_same_version_errors_without_claiming_a_new_version(
+        self, tmp_path
+    ):
+        kb, original = _kb_with_openalex(tmp_path)
+        self._merge(kb, _arxiv(version=2))
+        result = self._merge(kb, _arxiv(version=2, withdrawn_by="admin"))
+        assert result.status == "error"
+        assert "withdrawn" in result.reason
+        # Pointing at "record the new version" would send the user nowhere:
+        # arxiv-check-versions compares versions, and this one did not change.
+        assert "record the new version" not in result.reason

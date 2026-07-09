@@ -49,6 +49,7 @@ from factlog.integrations.common._textio import yaml_list as _yaml_list
 from factlog.integrations.common._textio import yaml_scalar as _yaml_str
 from factlog.integrations.common.provenance import (
     ProvenanceConflict,
+    ProvenanceError,
     SourceRecord,
     add_source,
     read_provenance,
@@ -68,16 +69,51 @@ _WITHDRAWAL_AGENTS = {
 }
 
 
-def _substantive(record: SourceRecord) -> dict:
-    """A record's fields that describe the *deposit*, excluding ``imported_at``.
+# The fields whose change an *import* has no authority to absorb. A version bump
+# means the deposit itself moved; a withdrawal is a signal the human gate must
+# see. Everything else — `comment`, `primary_category`, `last_updated` — is
+# upstream metadata that arXiv edits without cutting a new version (a moderator
+# recategorizes, an author appends "Accepted at ICML 2024" to the comment). If a
+# drift there were a divergence, a routine re-import of such a paper would error
+# forever, and the suggested remedy — `arxiv-check-versions`, which compares
+# versions — could never clear it. Those fields go stale in the ledger until a
+# refresh updates them, which is exactly the import/refresh boundary #58 drew.
+_IDENTIFYING_FIELDS = ("version", "withdrawn_by")
 
-    ``imported_at`` is when factlog first recorded the provenance, not a fact
-    about the paper, so two imports of the same deposit at different clock times
-    are the same provenance and must merge idempotently (P3). Everything else —
-    ``type``, ``id``, ``version`` and the arXiv fields — genuinely describes the
-    deposit, and a change in any of them is a divergence an import may not revise.
+
+def _identity_fields(record: SourceRecord) -> dict:
+    """The subset of a record that an import may not revise. See :data:`_IDENTIFYING_FIELDS`.
+
+    ``imported_at`` is deliberately absent: it records when factlog first saw the
+    provenance, not a fact about the paper, and the CLI stamps a fresh one every
+    run. Comparing it would make a plain re-import look like a conflict.
     """
-    return {k: v for k, v in record.to_dict().items() if k != "imported_at"}
+    return {name: record.fields.get(name) for name in _IDENTIFYING_FIELDS}
+
+
+def _divergence(existing: SourceRecord, incoming: SourceRecord) -> str:
+    """Why an import refuses to revise the ledger, naming the field that moved.
+
+    The message must not invent a version bump: a withdrawal can appear without
+    one, and pointing a user at ``arxiv-check-versions`` for a change that command
+    does not look at would leave them with no way forward.
+    """
+    was, now = existing.fields.get("version"), incoming.fields.get("version")
+    if was != now:
+        return (
+            f"ledger records v{was}, arXiv now serves v{now}; run "
+            "arxiv-check-versions to record the new version"
+        )
+    withdrawn = incoming.fields.get("withdrawn_by")
+    if withdrawn:
+        return (
+            f"arXiv now reports v{now} as withdrawn by {withdrawal_agent(withdrawn)}; "
+            "run arxiv-check-versions and review before relying on this source"
+        )
+    return (
+        f"ledger no longer records v{now} as withdrawn; run arxiv-check-versions "
+        "to refresh the entry"
+    )
 
 
 def withdrawal_agent(withdrawn_by: str | None) -> str:
@@ -231,43 +267,50 @@ class ArxivSourceWriter(BaseSourceWriter):
         stays byte- and mtime-immutable (P4). The disk ledger is re-read every
         call (never cached), so a prior merge is respected.
 
-        Idempotence (P3) is defined by the deposit's **substantive** fields, never
-        the import clock. The CLI stamps a fresh ``imported_at`` on every run, so
-        comparing whole records (as :func:`add_source` does) would flag a plain
-        re-import as a conflict. Instead: if an arXiv record for this base id is
-        already present and its substantive fields match, this is a no-op that
-        keeps the *first* import's timestamp — the ledger stays byte-identical.
+        Idempotence (P3) is judged on the deposit's identity, never the import
+        clock. The CLI stamps a fresh ``imported_at`` on every run, so comparing
+        whole records (as :func:`add_source` does) would flag a plain re-import as
+        a conflict. An arXiv record already present with the same
+        :data:`_IDENTIFYING_FIELDS` is a no-op that keeps the *first* import's
+        timestamp, and the ledger stays byte-identical.
 
-        A record whose substantive fields **differ** (a new version, or upstream
-        metadata that moved) is a divergence an *import* has no authority to
-        revise (H2): it becomes a per-id ``error`` — never a batch crash — that
-        points at the refresh path (``arxiv-check-versions``), which alone may
-        rewrite the entry via :func:`update_source`. Only a genuinely new
-        ``(type, id)`` is appended, via :func:`add_source`.
+        A **version bump or a withdrawal** is a divergence an *import* has no
+        authority to revise (H2): it becomes a per-id ``error`` pointing at the
+        refresh path (``arxiv-check-versions``), which alone may rewrite the entry
+        via :func:`update_source`. Drift in the other fields is absorbed silently
+        — see :data:`_IDENTIFYING_FIELDS` for why.
+
+        Every failure is a per-id ``error``, never a batch crash. A corrupt or
+        unreadable sidecar is one paper's problem; the imports queued behind it
+        are not.
         """
         sidecar = sidecar_path(decision.path)
         record = self._provenance_record(parsed, imported_at)
-        provenance = read_provenance(sidecar)
+        try:
+            provenance = read_provenance(sidecar)
+        except ProvenanceError as exc:
+            return WriteResult(
+                decision.path, "error",
+                f"provenance sidecar is unreadable ({exc}); repair or delete "
+                f"{sidecar.name} and re-import",
+            )
+
         existing = next((r for r in provenance.records if r.key == record.key), None)
         if existing is not None:
-            if _substantive(existing) == _substantive(record):
+            if _identity_fields(existing) == _identity_fields(record):
                 return decision  # already recorded; keep the first timestamp
-            recorded = existing.fields.get("version")
-            version = f"v{recorded}" if recorded is not None else "a different version"
-            return WriteResult(
-                decision.path,
-                "error",
-                f"ledger records {version}; run arxiv-check-versions to record "
-                "the new version",
-            )
-        # A new (type, id): add_source cannot conflict here, but its idempotency
-        # guarantee is kept as the single writer of the append.
+            return WriteResult(decision.path, "error", _divergence(existing, record))
+
         try:
             add_source(provenance, record)
+            write_provenance(sidecar, provenance)
         except ProvenanceConflict:  # pragma: no cover - guarded by the check above
             return WriteResult(
                 decision.path, "error",
                 "provenance ledger diverged; run arxiv-check-versions",
             )
-        write_provenance(sidecar, provenance)
+        except (ProvenanceError, OSError) as exc:
+            return WriteResult(
+                decision.path, "error", f"cannot write {sidecar.name}: {exc}",
+            )
         return decision
