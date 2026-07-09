@@ -44,14 +44,14 @@ deterministic and network-free.
 from __future__ import annotations
 
 import time
+from datetime import date
 from dataclasses import dataclass, field
 
 from factlog import __version__
 from factlog.integrations.arxiv.config import (
     API_DEFAULT_MAX_RESULTS,
     ArxivConfig,
-    validate_category,
-    validate_search_query,
+    compose_search_query,
     validate_sort,
 )
 from factlog.integrations.arxiv.id_normalizer import ArxivId, normalize_arxiv_id
@@ -338,6 +338,8 @@ class ArxivClient:
         query: str,
         *,
         categories=(),
+        year: str | None = None,
+        today: date | None = None,
         limit: int | None = None,
         sort: str | None = None,
         start: int = 0,
@@ -350,15 +352,13 @@ class ArxivClient:
         """
         from factlog.integrations.arxiv.work_parser import parse_entry
 
-        # Validated before the request: an unknown category *or an unknown field
-        # prefix* answers 200 with zero results, which reads as "no such
-        # literature exists".
-        clauses = [validate_search_query(query)]
-        for category in categories:
-            clauses.append(f"cat:{validate_category(category)}")
-
+        # Validated before the request: an unknown category, an unknown field
+        # prefix, a reversed or out-of-range year — each answers 200 with zero
+        # results, which reads as "no such literature exists" (#57, #80).
+        # `compose_search_query` is shared with `--dry-run`, so what an operator
+        # is shown is what would be sent, not a reconstruction that can drift.
         params: dict = {
-            "search_query": " AND ".join(clauses),
+            "search_query": compose_search_query(query, categories, year, today=today),
             "start": max(0, start),
             "max_results": self._limit(limit),
         }
