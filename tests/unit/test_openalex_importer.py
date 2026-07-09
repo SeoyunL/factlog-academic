@@ -72,13 +72,42 @@ class TestImportWorks:
         assert report.skipped == 1
         assert "openalex_id match" in report.outcomes[0].reason
 
-    def test_cross_source_duplicate_is_skipped(self, tmp_path):
+    def test_same_source_duplicate_is_skipped(self, tmp_path):
+        # Two OpenAlex works sharing a DOI is a SAME-source duplicate (#71): it
+        # stays ``skipped``, never a §7.3 merge. (Renamed from the old
+        # ``test_cross_source_duplicate_is_skipped``: with OpenAlex now a merger,
+        # only a match against ANOTHER database's file merges — see below.)
         kb = _kb(tmp_path)
         report = import_works(
             [_work("W1", doi="10.1/x"), _work("W2", title="Preprint", doi="10.1/x")], target=kb
         )
         assert report.imported == 1 and report.skipped == 1
+        assert report.merged == 0
         assert "duplicate DOI" in report.outcomes[1].reason
+
+    def test_cross_source_match_against_an_arxiv_file_is_merged(self, tmp_path):
+        # The user-visible change of #73: an OpenAlex import that hits a paper
+        # already in the KB via ANOTHER database (an arXiv deposit, matched on the
+        # shared arXiv id) now reports ``merged`` — it used to report ``skipped``.
+        from datetime import date
+
+        from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
+        from factlog.integrations.arxiv.work_parser import ParsedArxivWork
+
+        kb = _kb(tmp_path)
+        ArxivSourceWriter().write(
+            ParsedArxivWork(
+                arxiv_id="2311.09277", version=1, title="A Paper", authors=("Ada Lovelace",),
+                abstract="x", primary_category="cs.CL", categories=("cs.CL",),
+                submitted=date(2023, 11, 15), last_updated=date(2023, 11, 15),
+                doi=None, journal_ref=None, comment=None, withdrawn_by=None,
+                abs_url="https://arxiv.org/abs/2311.09277v1",
+                pdf_url="https://arxiv.org/pdf/2311.09277v1"),
+            kb, imported_at="t")
+        report = import_works(
+            [_work("W1", doi=None, arxiv_id="2311.09277")], target=kb, imported_at="t2")
+        assert report.merged == 1 and report.imported == 0 and report.skipped == 0
+        assert "duplicate arXiv id" in report.outcomes[0].reason
 
     def test_missing_identity_is_an_error_outcome(self, tmp_path):
         kb = _kb(tmp_path)

@@ -260,8 +260,12 @@ class TestMerge:
         assert "?" not in captured.out
 
     def test_dry_run_porcelain_work_row_is_merged(self, tmp_path, fake, capsys):
+        from factlog.integrations.common.provenance import read_provenance, sidecar_path
+
         kb = _kb(tmp_path)
-        _seed_openalex(kb)
+        existing = _seed_openalex(kb)
+        # The OpenAlex seed wrote its own one-record ledger (#73); capture it.
+        before = sidecar_path(existing).read_bytes()
         fake(FakeClient(works=[_work("1706.03762", version=5)]))
         run(["arxiv-import", "--id", "1706.03762", "--target", str(kb),
              "--dry-run", "--porcelain"])
@@ -270,8 +274,9 @@ class TestMerge:
         fields = row.split("\t")
         assert fields[1] == "merged"
         assert fields[2] == "1706.03762v5"
-        # No sidecar was written by a dry run.
-        assert not (kb / "source-provenance").exists()
+        # A dry run folds in no arXiv record: the ledger is byte-identical.
+        assert sidecar_path(existing).read_bytes() == before
+        assert not any(r.type == "arxiv" for r in read_provenance(sidecar_path(existing)).records)
 
     def test_idempotent_merge_via_cli(self, tmp_path, fake, capsys):
         kb = _kb(tmp_path)

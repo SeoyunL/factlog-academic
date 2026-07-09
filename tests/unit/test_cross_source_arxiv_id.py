@@ -7,11 +7,11 @@ arXiv base id is the exact join key. These tests pin the four probe cases from
 the issue's architecture review, the provenance-scoped identity fix, and the
 tolerance policy for junk in hand-edited files.
 
-Detection classifies the match; as of Step 4c (#65) the arXiv writer *merges* a
-cross-source match into the existing original's sidecar (``merged``), while
-OpenAlex/Zotero still only report it (``skipped``). The classification itself —
-"same record re-imported" vs "same paper via another database" — is what these
-tests pin; the sidecar mechanics live in ``test_arxiv_merge.py``.
+Detection classifies the match; as of #65 the arXiv writer and, as of #73, the
+OpenAlex writer *merge* a cross-source match into the existing original's sidecar
+(``merged``). Only Zotero still reports a bare ``skipped``. The classification
+itself — "same record re-imported" vs "same paper via another database" — is what
+these tests pin; the sidecar mechanics live in ``test_arxiv_merge.py``.
 """
 from __future__ import annotations
 
@@ -159,9 +159,11 @@ class TestProbeCases:
         ax = ArxivSourceWriter().write(_arxiv(arxiv_id="2311.09277"), tmp_path,
                                        imported_at="2026-01-01T00:00:00Z")
         assert ax.status == "imported"
+        # As of #73 OpenAlex is a merger too, so the same paper reached through the
+        # shared arXiv id folds into the arXiv original's sidecar (§7.3).
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W7", arxiv_id="2311.09277"), tmp_path)
-        assert result.status == "skipped"
+        assert result.status == "merged"
         assert result.reason == f"duplicate arXiv id 2311.09277 (already in {ax.path.name})"
 
 
