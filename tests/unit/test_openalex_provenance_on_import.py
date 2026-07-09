@@ -284,3 +284,45 @@ class TestNoArxivCheckVersionsWordingLeaks:
         incoming = SourceRecord(type="openalex", id="W1", imported_at="b", fields={"x": 2})
         msg = OpenAlexSourceWriter()._divergence(existing, incoming)
         assert "arxiv-check-versions" not in msg
+
+
+class TestAStaleSidecarIsReplacedForOpenAlexToo:
+    """`_record` was lifted to the base class, so the replace-not-append rule that
+    #72 established for arXiv now governs OpenAlex as well. Pin it here: a shared
+    implementation is exactly where a fix silently stops applying to one caller."""
+
+    def test_a_deleted_papers_ledger_is_not_inherited_by_its_slug_successor(self, tmp_path):
+        (tmp_path / "sources").mkdir()
+        # Same author/year/title -> same base slug; different OpenAlex identity.
+        first = OpenAlexSourceWriter().write(
+            _openalex(openalex_id="W1", arxiv_id=None), tmp_path, imported_at="t1")
+        assert first.status == "imported"
+        sidecar = sidecar_path(first.path)
+        assert [r.id for r in read_provenance(sidecar).records] == ["W1"]
+
+        first.path.unlink()  # the user deletes the source; the ledger is left behind
+
+        second = OpenAlexSourceWriter().write(
+            _openalex(openalex_id="W2", arxiv_id=None), tmp_path, imported_at="t2")
+        assert second.status == "imported"
+        assert second.path.name == first.path.name  # the slug really is reused
+
+        ids = [r.id for r in read_provenance(sidecar_path(second.path)).records]
+        assert ids == ["W2"], (
+            "the new original's ledger claims it also came from the deleted paper"
+        )
+
+    def test_a_merge_still_preserves_the_foreign_record(self, tmp_path):
+        # The other half of the same shared machinery: `_merge` read-modify-writes.
+        (tmp_path / "sources").mkdir()
+        existing = ArxivSourceWriter().write(_arxiv(), tmp_path, imported_at="t1")
+        assert existing.status == "imported"
+
+        merged = OpenAlexSourceWriter().write(_openalex(), tmp_path, imported_at="t2")
+        assert merged.status == "merged"
+        assert merged.path == existing.path
+
+        records = read_provenance(sidecar_path(existing.path)).records
+        assert sorted((r.type, r.id) for r in records) == [
+            ("arxiv", "2311.09277"), ("openalex", "W1")
+        ]

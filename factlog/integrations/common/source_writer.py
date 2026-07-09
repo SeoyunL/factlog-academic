@@ -606,8 +606,9 @@ class BaseSourceWriter:
         # nothing is orphaned, and a retry re-runs cleanly. The reverse order would
         # leave an orphaned ``.md`` whose existence permanently suppresses the
         # ledger, since the original is never rewritten (P4) and the re-import skips
-        # (#72, risk 2). ``_record`` is a no-op unless a writer opts in, so a
-        # base/Zotero/OpenAlex import writes the ``.md`` exactly as before.
+        # (#72, risk 2). ``_record`` is a no-op unless a writer opts in via
+        # :attr:`merges_cross_source`, so a Zotero import writes the ``.md``
+        # exactly as before; arXiv and OpenAlex write their ledger first (#73).
         recorded = self._record(parsed, decision, imported_at)
         if recorded.status != "imported":
             return recorded
