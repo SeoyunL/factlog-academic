@@ -19,6 +19,10 @@ test = ["pytest>=7"]
 # Zotero integration (roadmap phase 1). Kept optional so the core install never
 # pulls a Zotero client; `pip install factlog[zotero]` enables `zotero-import`.
 zotero = ["pyzotero>=1.5"]
+# OpenAlex integration (roadmap phase 2). httpx only: the API surface factlog
+# needs is two GET endpoints, so `pyalex` (and its requests/urllib3 chain) is
+# not worth the dependency — see #51.
+openalex = ["httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/semantic-reasoning/factlog"
@@ -27,7 +31,12 @@ Homepage = "https://github.com/semantic-reasoning/factlog"
 factlog = "factlog.cli:main"
 
 [tool.setuptools]
-packages = ["factlog", "factlog.integrations", "factlog.integrations.zotero"]
+packages = [
+    "factlog",
+    "factlog.integrations",
+    "factlog.integrations.zotero",
+    "factlog.integrations.openalex",
+]
 
 [tool.pytest.ini_options]
 # Python unit tests for the pure helpers live under tests/unit/; the legacy
