@@ -48,6 +48,7 @@ from factlog.integrations.arxiv.work_parser import (
 from factlog.integrations.common._textio import yaml_list as _yaml_list
 from factlog.integrations.common._textio import yaml_scalar as _yaml_str
 from factlog.integrations.common.provenance import (
+    Provenance,
     ProvenanceConflict,
     ProvenanceError,
     SourceRecord,
@@ -356,8 +357,30 @@ class ArxivSourceWriter(BaseSourceWriter):
         suffix-resolved name, so a ``-2`` collision (risk 1) lands the sidecar
         beside the right ``.md`` because :func:`sidecar_path` derives from that
         name. Called from :meth:`write` before the ``.md`` is written, so a
-        sidecar failure aborts the import with no orphaned original (risk 2). All
-        the read-modify-write mechanics — including the stale/pre-existing sidecar
-        handling (risk 3) — live in :meth:`_upsert_sidecar`.
+        sidecar failure aborts the import with no orphaned original (risk 2).
+
+        **A sidecar already at that path is stale, and is replaced rather than
+        appended to** (risk 3). The path is derived from the ``.md`` name, and the
+        ``.md`` does not exist yet — that is precisely why this outcome is
+        ``imported`` and not ``skipped``. So no ledger for *this* original can
+        legitimately be there. What can be there is the ledger of a deleted source
+        whose slug this paper now reuses: delete
+        ``sources/vaswani-2017-attention.md`` and import a different paper with
+        the same author, year and title. Appending would make the new original's
+        ledger assert it also came from the deleted paper's arXiv id — provenance
+        that is not merely dangling but false, naming a source this record never
+        had. An audit ledger that lies is worse than no ledger.
+
+        Replacement is also what makes a retry after a failed ``.md`` write
+        byte-identical: the sidecar this call wrote a moment ago holds exactly the
+        record it is about to write again.
         """
-        return self._upsert_sidecar(parsed, decision, imported_at)
+        record = self._provenance_record(parsed, imported_at)
+        sidecar = sidecar_path(decision.path)
+        fresh = Provenance()
+        add_source(fresh, record)
+        try:
+            write_provenance(sidecar, fresh)
+        except (ProvenanceError, OSError) as exc:
+            return WriteResult(decision.path, "error", f"cannot write {sidecar.name}: {exc}")
+        return decision

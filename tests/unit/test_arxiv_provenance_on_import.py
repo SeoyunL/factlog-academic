@@ -170,16 +170,16 @@ class TestSidecarFailureOrphansNoMdRisk2:
     def _sidecar_for(self, writer, parsed, kb):
         return sidecar_path(kb / "sources" / writer.generate_slug(parsed))
 
-    def test_an_os_error_reading_the_sidecar_leaves_no_md(self, tmp_path):
+    def test_an_unusable_sidecar_directory_leaves_no_md(self, tmp_path):
         writer = ArxivSourceWriter()
         parsed = _arxiv()
-        # source-provenance occupied by a plain file: the sidecar cannot exist
-        # under it, so read_provenance raises an OSError (NotADirectoryError).
+        # source-provenance occupied by a plain file: the sidecar cannot be
+        # created under it (NotADirectoryError, an OSError).
         (tmp_path / "source-provenance").write_text("not a dir", encoding="utf-8")
 
         result = writer.write(parsed, tmp_path, imported_at="t")
         assert result.status == "error"
-        assert "unreadable" in result.reason
+        assert "cannot write" in result.reason
         # No orphan: the .md was never created.
         assert not list((tmp_path / "sources").glob("*.md"))
 
@@ -199,7 +199,10 @@ class TestSidecarFailureOrphansNoMdRisk2:
         assert "cannot write" in result.reason
         assert not list((tmp_path / "sources").glob("*.md"))
 
-    def test_an_unreadable_preexisting_sidecar_errors_before_the_md(self, tmp_path):
+    def test_a_corrupt_sidecar_at_a_new_paths_slot_is_replaced_not_a_blocker(self, tmp_path):
+        # It cannot be this original's ledger — the original does not exist yet.
+        # A corrupt ledger for a source that is gone must not make the slug
+        # permanently unimportable.
         writer = ArxivSourceWriter()
         parsed = _arxiv()
         sidecar = self._sidecar_for(writer, parsed, tmp_path)
@@ -207,20 +210,18 @@ class TestSidecarFailureOrphansNoMdRisk2:
         sidecar.write_text("{ corrupt", encoding="utf-8")
 
         result = writer.write(parsed, tmp_path, imported_at="t")
-        assert result.status == "error"
-        assert "unreadable" in result.reason
-        assert not list((tmp_path / "sources").glob("*.md"))
-        # The broken ledger is left exactly as found.
-        assert sidecar.read_text(encoding="utf-8") == "{ corrupt"
+        assert result.status == "imported"
+        assert [r.id for r in read_provenance(sidecar).records] == [parsed.arxiv_id]
 
 
 class TestPreexistingSidecarRisk3:
     """A sidecar can pre-exist at a NEW `.md`'s path only via a stale ledger left
     by a deleted source whose slug is reused, or a prior run that wrote the sidecar
-    then failed before the `.md`. Neither is clobbered: the ledger is an
-    append-only audit, so a foreign record is kept and our own is added idempotently."""
+    then failed before the `.md`. Either way it is not this original's ledger —
+    the original does not exist yet — so it is replaced. Appending would make the
+    new record's provenance name a source it never had."""
 
-    def test_a_stale_sidecar_from_a_deleted_source_is_appended_to_not_clobbered(self, tmp_path):
+    def test_a_stale_sidecar_from_a_deleted_source_is_replaced(self, tmp_path):
         writer = ArxivSourceWriter()
         # Import a paper, then delete its .md, orphaning the sidecar.
         first = writer.write(_arxiv(arxiv_id="1111.11111"), tmp_path, imported_at="t")
@@ -233,7 +234,9 @@ class TestPreexistingSidecarRisk3:
         assert second.status == "imported"
         assert sidecar_path(second.path) == stale  # same path, reused
         ids = sorted(r.id for r in _arxiv_records(stale))
-        assert ids == ["1111.11111", "2222.22222"]  # foreign record kept, ours added
+        # Only the new paper. Keeping 1111.11111 would make this original's ledger
+        # assert it came from a paper it has nothing to do with.
+        assert ids == ["2222.22222"]
 
     def test_a_sidecar_already_holding_our_record_self_heals_and_writes_the_md(self, tmp_path):
         # Models a prior run that wrote the sidecar then failed before the .md.
@@ -295,12 +298,12 @@ class TestMixedBatch:
         ArxivSourceWriter().write(_arxiv(arxiv_id="1706.03762", version=5), tmp_path, imported_at="t")
 
         # Sabotage one brand-new paper's sidecar so its record write fails, without
-        # affecting any other paper.
+        # affecting any other paper: occupy its path with a directory, which
+        # `os.replace` cannot overwrite with a file.
         writer = ArxivSourceWriter()
         boom = _arxiv(arxiv_id="9000.00001", version=1, title="Boom")
         bad = sidecar_path(tmp_path / "sources" / writer.generate_slug(boom))
-        bad.parent.mkdir(parents=True, exist_ok=True)
-        bad.write_text("{ corrupt", encoding="utf-8")
+        bad.mkdir(parents=True, exist_ok=True)
 
         report = import_works(
             [
@@ -320,3 +323,48 @@ class TestMixedBatch:
         assert report.skipped == 1 and report.errors == 1
         # The failing paper left no orphaned .md.
         assert not any(p.name.startswith("ada-lovelace-2023-boom") for p in (tmp_path / "sources").glob("*.md"))
+
+
+class TestAStaleSidecarNeverAttachesToANewPaper:
+    """`_record` runs only for a file that does not exist yet, so any sidecar at
+    its path belongs to something else — a deleted source whose slug this paper
+    now reuses. Appending would make the new original's ledger name a source it
+    never had."""
+
+    def _work(self, arxiv_id, title="Attention Is All You Need",
+              author="Ashish Vaswani", year=2017):
+        return _arxiv(arxiv_id=arxiv_id, version=1, title=title,
+                      authors=(author,), submitted=date(year, 1, 1),
+                      last_updated=date(year, 1, 1))
+
+    def test_a_deleted_papers_ledger_is_not_inherited_by_its_slug_successor(self, tmp_path):
+        (tmp_path / "sources").mkdir()
+        first = ArxivSourceWriter().write(self._work("1706.03762"), tmp_path, imported_at="t1")
+        sidecar = sidecar_path(first.path)
+        assert sidecar.is_file()
+
+        first.path.unlink()  # the user deletes the source; the ledger is left behind
+
+        # A different paper whose author, year and title produce the same slug.
+        second = ArxivSourceWriter().write(self._work("2401.09999"), tmp_path, imported_at="t2")
+        assert second.status == "imported"
+        assert second.path.name == first.path.name  # the slug really is reused
+
+        ids = [r.id for r in read_provenance(sidecar_path(second.path)).records]
+        assert ids == ["2401.09999"], (
+            "the new original's ledger claims it also came from the deleted paper"
+        )
+
+    def test_a_retry_after_a_failed_md_write_is_byte_identical(self, tmp_path):
+        # The sidecar is written before the `.md`. A crash between the two leaves
+        # a sidecar with exactly the record the retry will write.
+        (tmp_path / "sources").mkdir()
+        work = self._work("1706.03762")
+        writer = ArxivSourceWriter()
+        decision = writer._resolve(work, tmp_path, "write")
+        writer._record(work, decision, "t1")
+        before = sidecar_path(decision.path).read_bytes()
+
+        result = ArxivSourceWriter().write(work, tmp_path, imported_at="t1")
+        assert result.status == "imported"
+        assert sidecar_path(result.path).read_bytes() == before
