@@ -2799,8 +2799,26 @@ def _openalex_report_lines(report, dry_run: bool) -> list[str]:
     return lines
 
 
+def _openalex_placeholder_warnings(report) -> list[str]:
+    """Warn about works OpenAlex titled ``"null"`` — imported, but suspect.
+
+    The record is real and is not dropped (a paper could legitimately be titled
+    "Null"), but its source file is slugged from that string, so the operator
+    should look at it.
+    """
+    from factlog.integrations.openalex.work_parser import is_placeholder_title
+
+    return [
+        f'⚠ {o.key} has the literal title "null"; OpenAlex records no real title '
+        f"for it. Check {o.path.name if o.path else 'the source'}."
+        for o in report.outcomes
+        if o.status == "imported" and is_placeholder_title(o.title)
+    ]
+
+
 def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning: str) -> int:
     """Emit the shared summary for an openalex import and return the exit code."""
+    notes = _openalex_placeholder_warnings(report)
     if porcelain:
         # Stable machine contract, tab-separated, LF-terminated. Order-independent
         # (parse by first field):
@@ -2817,6 +2835,9 @@ def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning:
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
         print(f"target\t{target / 'sources'}")
+        # Warnings go to stderr so they never pollute the machine contract.
+        for note in notes:
+            print(note, file=sys.stderr)
         if warning:
             print(warning, file=sys.stderr)
         return 1 if report.errors else 0
@@ -2828,6 +2849,8 @@ def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning:
     print(f"  {'Would import' if dry_run else 'Imported'}: {report.imported}")
     print(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
     print(f"  Errors:   {report.errors}")
+    for note in notes:
+        print(f"\n{note}", file=sys.stderr)
     if warning:
         print(f"\n{warning}", file=sys.stderr)
     if report.imported and not dry_run:
@@ -2949,6 +2972,16 @@ def cmd_openalex_search(args: argparse.Namespace) -> int:
     dry_run = getattr(args, "dry_run", False)
     if not _openalex_check_limit(args, config, "openalex-search"):
         return 1
+    # A bogus --type would be answered with 200 and zero results, after the search
+    # was charged 10 credits. Reject it at the boundary, before anything is spent.
+    if args.type is not None:
+        from factlog.integrations.openalex.api_client import validate_work_type
+
+        try:
+            validate_work_type(args.type)
+        except OpenAlexError as exc:
+            print(f"factlog openalex-search: {exc}", file=sys.stderr)
+            return 1
 
     client = _make_openalex_client(config)
     if not porcelain:

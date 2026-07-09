@@ -91,6 +91,11 @@ class OpenAlexSourceWriter(BaseSourceWriter):
             lines.append(f"pmid: {_yaml_str(parsed.pmid)}")
         if parsed.tags:
             lines.append(f"tags: {_yaml_list(parsed.tags)}")
+        # Descriptors only, with no major/minor distinction: OpenAlex's
+        # `is_major_topic` is unreliable before ~2022 (#53). Users who need
+        # majorness run the PubMed commands.
+        if parsed.mesh_terms:
+            lines.append(f"mesh_terms: {_yaml_list(parsed.mesh_terms)}")
         if parsed.cited_by_count is not None:
             lines.append(f"cited_by_count: {parsed.cited_by_count}")
         if parsed.abstract_complete is not None:

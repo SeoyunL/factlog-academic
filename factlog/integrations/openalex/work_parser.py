@@ -258,6 +258,35 @@ def _named(items: object, key: str) -> tuple[str, ...]:
     return tuple(name for name in names if name)
 
 
+def _mesh_terms(work: dict) -> tuple[str, ...]:
+    """Distinct MeSH descriptor names, in the order OpenAlex first lists them.
+
+    Deduplicated because OpenAlex repeats rows: one work returned 108 ``mesh``
+    entries naming 26 distinct descriptors — ``Aging`` four times over (#53). The
+    rows differ only by qualifier, and factlog records descriptors, not
+    qualifiers, so the repeats carry no information.
+
+    Descriptors only, never ``is_major_topic``: OpenAlex mirrors PubMed's
+    descriptor-level flag and drops qualifier-level majorness, which NLM used for
+    most of PubMed's history. Major-topic Jaccard against PubMed is 0.10 on
+    2001-2009 records (#53).
+    """
+    seen: dict[str, None] = {}
+    for name in _named(work.get("mesh"), "descriptor_name"):
+        seen.setdefault(name, None)
+    return tuple(seen)
+
+
+def is_placeholder_title(title: object) -> bool:
+    """True when a title is the literal string ``"null"`` (not JSON ``null``).
+
+    W2567289819 records exactly that, which would slug as ``…-2016-null.md``.
+    The record is *not* rejected — a paper legitimately titled "Null" is possible
+    — so callers warn instead of dropping it.
+    """
+    return isinstance(title, str) and title.strip().lower() == "null"
+
+
 def parse_work(work: object) -> ParsedWork:
     """Reduce one ``/works`` payload to :class:`ParsedWork`.
 
@@ -293,8 +322,5 @@ def parse_work(work: object) -> ParsedWork:
         abstract=abstract,
         # Only meaningful when there *is* an abstract; None says "nothing to judge".
         abstract_complete=index_is_complete(index) if abstract else None,
-        # A flat descriptor list. OpenAlex's `is_major_topic` is deliberately not
-        # read: it mirrors PubMed's descriptor-level flag and drops qualifier-level
-        # majorness, which NLM used for most of PubMed's history (#53).
-        mesh_terms=_named(work.get("mesh"), "descriptor_name"),
+        mesh_terms=_mesh_terms(work),
     )

@@ -13,6 +13,7 @@ import pytest
 
 from factlog.integrations.openalex.api_client import (
     CREDITS_SEARCH,
+    WORK_TYPES,
     OpenAlexClient,
     OpenAlexConnectionError,
     OpenAlexError,
@@ -22,6 +23,7 @@ from factlog.integrations.openalex.api_client import (
     normalize_doi,
     normalize_pmid,
     normalize_work_id,
+    validate_work_type,
     year_filter,
 )
 from factlog.integrations.openalex.config import OpenAlexConfig
@@ -166,6 +168,25 @@ class TestNormalizePmid:
         assert normalize_pmid(WORK["ids"]["pmid"]) == "32738937"
 
 
+class TestValidateWorkType:
+    @pytest.mark.parametrize("raw,expected", [("article", "article"), ("Article", "article"),
+                                              ("  review  ", "review"), ("book-chapter", "book-chapter")])
+    def test_accepts_known_types(self, raw, expected):
+        assert validate_work_type(raw) == expected
+
+    @pytest.mark.parametrize("bad", ["artikle", "journal-article", "articles", "", "   ", None, 7])
+    def test_rejects_unknown_types(self, bad):
+        with pytest.raises(OpenAlexError, match="unknown work type|non-empty string"):
+            validate_work_type(bad)
+
+    def test_error_lists_the_valid_types(self):
+        with pytest.raises(OpenAlexError, match="preprint"):
+            validate_work_type("artikle")
+
+    def test_every_documented_type_validates(self):
+        assert all(validate_work_type(t) == t for t in WORK_TYPES)
+
+
 class TestYearFilter:
     @pytest.mark.parametrize("raw", ["2023", "2020-2025", " 2020-2025 "])
     def test_accepts_year_and_range(self, raw):
@@ -202,6 +223,19 @@ class TestRequestConstruction:
         assert params["search"] == "neurosymbolic AI"
         assert params["per_page"] == 10
         assert params["filter"] == "publication_year:2020-2025,type:article"
+
+    def test_unknown_type_never_reaches_the_transport(self):
+        # A bogus filter *value* answers 200 with zero results, having charged the
+        # full 10-credit search. Reject it before spending anything.
+        cl, transport = client()
+        with pytest.raises(OpenAlexError, match="unknown work type 'artikle'"):
+            cl.search_works("copd", work_type="artikle")
+        assert transport.calls == []
+
+    def test_type_is_lowercased_into_the_filter(self):
+        cl, transport = client(page([]))
+        cl.search_works("copd", work_type="Article")
+        assert transport.last_params["filter"] == "type:article"
 
     def test_search_omits_filter_when_unfiltered(self):
         cl, transport = client(page([]))
