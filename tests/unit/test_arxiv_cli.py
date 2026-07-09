@@ -579,3 +579,48 @@ class TestSearchDryRun:
         lines = capsys.readouterr().out.strip().splitlines()
         assert len(lines) == 1
         assert lines[0].startswith("query\t")
+
+
+class TestThePhraseRewriteIsAnnounced:
+    """We quote a bare multi-word query so arXiv searches it as a phrase (#89).
+    Silently rewriting what the operator typed is the same disservice as silently
+    mis-searching it, so the rewrite is announced — on stderr, so `--porcelain`
+    stdout stays parseable."""
+
+    def test_the_rewrite_is_announced_on_stderr(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "chain of thought", "--target", str(_kb(tmp_path))])
+        captured = capsys.readouterr()
+        assert 'all:"chain of thought"' in captured.err
+        assert "not searched as a phrase" in captured.err
+
+    def test_porcelain_stdout_is_not_polluted(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "chain of thought",
+             "--target", str(_kb(tmp_path)), "--porcelain"])
+        captured = capsys.readouterr()
+        assert "not searched as a phrase" in captured.err
+        for line in captured.out.strip().splitlines():
+            assert line.startswith(("result\t", "found\t")), line
+
+    def test_no_announcement_when_nothing_was_rewritten(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient())
+        run(["arxiv-search", "--query", 'ti:"chain of thought"',
+             "--target", str(_kb(tmp_path))])
+        assert "not searched as a phrase" not in capsys.readouterr().err
+
+    def test_the_client_receives_the_raw_query_and_composes_the_phrase(self, tmp_path, fake):
+        from factlog.integrations.arxiv.config import compose_search_query
+
+        client = fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "chain of thought", "--target", str(_kb(tmp_path))])
+        # The CLI hands the raw query to the client; `compose_search_query` — the
+        # one place that builds `search_query` — is what applies the phrase form.
+        assert client.calls[0]["query"] == "chain of thought"
+        assert compose_search_query("chain of thought") == 'all:"chain of thought"' 
+
+    def test_dry_run_shows_the_quoted_form(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "chain of thought",
+             "--target", str(_kb(tmp_path)), "--dry-run", "--porcelain"])
+        assert 'all:"chain of thought"' in capsys.readouterr().out

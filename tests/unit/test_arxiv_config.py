@@ -24,6 +24,7 @@ from factlog.integrations.arxiv.config import (
     build_submitted_date,
     from_mapping,
     load_config,
+    as_phrase,
     compose_search_query,
     validate_category,
     validate_search_query,
@@ -310,3 +311,42 @@ class TestYearBoundsAreEmittedInFullForm:
         # literature exists".
         with pytest.raises(ArxivValidationError, match="outside arXiv's range"):
             build_submitted_date("2099", today=date(2026, 1, 1))
+
+
+class TestABareMultiWordQueryIsSearchedAsAPhrase:
+    """`--query "chain of thought"` loses its quotes to the shell, and arXiv reads
+    the bare words loosely. Measured live: 87,029 results unquoted vs 5,669 quoted,
+    and `chain` alone matches 71,394. Nothing errors — the operator simply never
+    learns their phrase was not searched as one (#89)."""
+
+    def test_a_bare_phrase_is_quoted(self):
+        assert as_phrase("chain of thought") == 'all:"chain of thought"'
+
+    def test_a_single_word_is_left_alone(self):
+        # Live: `transformer` and `all:"transformer"` both match 172,792.
+        assert as_phrase("transformer") == "transformer"
+
+    @pytest.mark.parametrize(
+        "query",
+        ['ti:"chain of thought"', "au:LeCun AND cat:cs.LG", "cat:cs.CL", "all:x"],
+    )
+    def test_a_field_prefix_means_the_user_speaks_arxiv(self, query):
+        assert as_phrase(query) == query
+
+    @pytest.mark.parametrize("query", ["chain AND thought", "a OR b", "x ANDNOT y"])
+    def test_a_boolean_query_is_never_wrapped(self, query):
+        # Wrapping would silently change the meaning: live, `chain AND thought`
+        # matches 6,015 while `all:"chain AND thought"` matches 5,669.
+        assert as_phrase(query) == query
+
+    def test_an_already_quoted_query_is_left_alone(self):
+        assert as_phrase('"deliberately quoted"') == '"deliberately quoted"'
+
+    def test_the_word_and_inside_a_phrase_is_not_a_boolean(self):
+        # `AND` is an operator; `and` is a word.
+        assert as_phrase("cats and dogs") == 'all:"cats and dogs"'
+
+    def test_composition_uses_the_phrase_form(self):
+        assert compose_search_query("chain of thought", ["cs.CL"]) == (
+            'all:"chain of thought" AND cat:cs.CL'
+        )

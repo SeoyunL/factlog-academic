@@ -3319,6 +3319,7 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     )
     from factlog.integrations.arxiv.config import (
         ArxivValidationError,
+        as_phrase,
         build_submitted_date,
         compose_search_query,
         validate_category,
@@ -3374,6 +3375,17 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
         return 0
 
     client = _make_arxiv_client(config)
+    # We quoted a bare multi-word query so arXiv searches it as a phrase (#89).
+    # Say so: silently rewriting what the operator typed is the same disservice as
+    # silently mis-searching it. stderr, so --porcelain stdout stays parseable.
+    phrased = as_phrase(args.query)
+    if phrased != args.query.strip():
+        print(
+            f"factlog arxiv-search: searching the phrase {phrased} "
+            "(a bare multi-word query is not searched as a phrase by arXiv; "
+            "supply your own field prefix or quotes to override)",
+            file=sys.stderr,
+        )
     if not porcelain:
         print(f'Searching arXiv: "{args.query}"...')
     try:
