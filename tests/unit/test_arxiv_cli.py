@@ -208,6 +208,84 @@ class TestWithdrawalWarning:
         assert "withdrawn" not in capsys.readouterr().err.lower()
 
 
+def _seed_openalex(kb, *, arxiv_id="1706.03762"):
+    """Put an OpenAlex-primary original of the paper in the KB, return its path."""
+    from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
+    from factlog.integrations.openalex.work_parser import ParsedWork
+
+    result = OpenAlexSourceWriter().write(
+        ParsedWork(openalex_id="W1", title="A paper", authors=("Ann Author",),
+                   year=2017, journal="J", arxiv_id=arxiv_id),
+        kb, imported_at="2026-01-01T00:00:00Z")
+    assert result.status == "imported"
+    return result.path
+
+
+class TestMerge:
+    def test_merge_is_labelled_merged_in_human_output_not_error(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        existing = _seed_openalex(kb)
+        before = existing.stat().st_mtime_ns
+        fake(FakeClient(works=[_work("1706.03762")]))
+        code = run(["arxiv-import", "--id", "1706.03762", "--target", str(kb)])
+        assert code == 0  # a merge is a success
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "⇄" in out and "merged" in out
+        assert "Merged:   1" in out
+        # Never mislabelled: the per-work line is not "- error", and no glyph is
+        # the unknown-status '?'. (The "Errors:   0" summary line is expected.)
+        assert "?" not in out
+        assert "- error" not in out
+        assert "Errors:   0" in out
+        # stderr carries no spurious error either.
+        assert "error" not in captured.err.lower()
+        # The original .md was not rewritten.
+        assert existing.stat().st_mtime_ns == before
+        assert len(sources(kb)) == 1
+
+    def test_merge_porcelain_reports_merged_line(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _seed_openalex(kb)
+        fake(FakeClient(works=[_work("1706.03762")]))
+        code = run(["arxiv-import", "--id", "1706.03762", "--target", str(kb),
+                    "--porcelain"])
+        assert code == 0
+        captured = capsys.readouterr()
+        rows = dict(line.split("\t", 1)
+                    for line in captured.out.strip().splitlines())
+        assert rows["merged"] == "1"
+        assert rows["imported"] == "0"
+        assert rows["errors"] == "0"
+        assert "?" not in captured.out
+
+    def test_dry_run_porcelain_work_row_is_merged(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _seed_openalex(kb)
+        fake(FakeClient(works=[_work("1706.03762", version=5)]))
+        run(["arxiv-import", "--id", "1706.03762", "--target", str(kb),
+             "--dry-run", "--porcelain"])
+        out = capsys.readouterr().out
+        row = [line for line in out.splitlines() if line.startswith("work\t")][0]
+        fields = row.split("\t")
+        assert fields[1] == "merged"
+        assert fields[2] == "1706.03762v5"
+        # No sidecar was written by a dry run.
+        assert not (kb / "source-provenance").exists()
+
+    def test_idempotent_merge_via_cli(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        existing = _seed_openalex(kb)
+        fake(FakeClient(works=[_work("1706.03762")]))
+        run(["arxiv-import", "--id", "1706.03762", "--target", str(kb)])
+        sidecar = kb / "source-provenance" / (existing.stem + ".json")
+        first = sidecar.read_bytes()
+        capsys.readouterr()
+        code = run(["arxiv-import", "--id", "1706.03762", "--target", str(kb)])
+        assert code == 0
+        assert sidecar.read_bytes() == first  # byte-identical no-op
+
+
 class TestPorcelain:
     def test_porcelain_contract(self, tmp_path, fake, capsys):
         kb = _kb(tmp_path)

@@ -31,8 +31,12 @@ fresh file on every version bump, breaking idempotent re-import (P3).
 file regardless of which integration wrote it, and that is what makes §7.1
 cross-source duplicate detection work. ``preprint: true`` is emitted
 unconditionally — this record *is* an arXiv deposit, and remains a preprint even
-when ``journal``/``doi`` show a published version exists (§5.2's ``preprint:
-false`` fires only at merge time, which is a later step).
+when ``journal``/``doi`` show a published version exists. The front-matter ``preprint`` flag is
+**never flipped**, at merge time or ever: an arXiv record describes an arXiv
+deposit, which stays a preprint whatever else exists (#60), and the original is
+byte-immutable (P4) so there is no file to flip. Whether a peer-reviewed version
+exists is derived from the provenance ledger — a non-preprint record beside this
+one — not from a boolean anyone must keep in sync (§5.3, #65 H1).
 """
 from __future__ import annotations
 
@@ -43,6 +47,15 @@ from factlog.integrations.arxiv.work_parser import (
 )
 from factlog.integrations.common._textio import yaml_list as _yaml_list
 from factlog.integrations.common._textio import yaml_scalar as _yaml_str
+from factlog.integrations.common.provenance import (
+    ProvenanceConflict,
+    ProvenanceError,
+    SourceRecord,
+    add_source,
+    read_provenance,
+    sidecar_path,
+    write_provenance,
+)
 from factlog.integrations.common.source_writer import BaseSourceWriter, WriteResult
 
 __all__ = ["ArxivSourceWriter", "WriteResult", "withdrawal_agent", "withdrawal_warning"]
@@ -54,6 +67,53 @@ _WITHDRAWAL_AGENTS = {
     WITHDRAWN_BY_AUTHOR: "the author",
     WITHDRAWN_BY_ADMIN: "arXiv administrators",
 }
+
+
+# The fields whose change an *import* has no authority to absorb. A version bump
+# means the deposit itself moved; a withdrawal is a signal the human gate must
+# see. Everything else — `comment`, `primary_category`, `last_updated` — is
+# upstream metadata that arXiv edits without cutting a new version (a moderator
+# recategorizes, an author appends "Accepted at ICML 2024" to the comment). If a
+# drift there were a divergence, a routine re-import of such a paper would error
+# forever, and the suggested remedy — `arxiv-check-versions`, which compares
+# versions — could never clear it. Those fields go stale in the ledger until a
+# refresh updates them, which is exactly the import/refresh boundary #58 drew.
+_IDENTIFYING_FIELDS = ("version", "withdrawn_by")
+
+
+def _identity_fields(record: SourceRecord) -> dict:
+    """The subset of a record that an import may not revise. See :data:`_IDENTIFYING_FIELDS`.
+
+    ``imported_at`` is deliberately absent: it records when factlog first saw the
+    provenance, not a fact about the paper, and the CLI stamps a fresh one every
+    run. Comparing it would make a plain re-import look like a conflict.
+    """
+    return {name: record.fields.get(name) for name in _IDENTIFYING_FIELDS}
+
+
+def _divergence(existing: SourceRecord, incoming: SourceRecord) -> str:
+    """Why an import refuses to revise the ledger, naming the field that moved.
+
+    The message must not invent a version bump: a withdrawal can appear without
+    one, and pointing a user at ``arxiv-check-versions`` for a change that command
+    does not look at would leave them with no way forward.
+    """
+    was, now = existing.fields.get("version"), incoming.fields.get("version")
+    if was != now:
+        return (
+            f"ledger records v{was}, arXiv now serves v{now}; run "
+            "arxiv-check-versions to record the new version"
+        )
+    withdrawn = incoming.fields.get("withdrawn_by")
+    if withdrawn:
+        return (
+            f"arXiv now reports v{now} as withdrawn by {withdrawal_agent(withdrawn)}; "
+            "run arxiv-check-versions and review before relying on this source"
+        )
+    return (
+        f"ledger no longer records v{now} as withdrawn; run arxiv-check-versions "
+        "to refresh the entry"
+    )
 
 
 def withdrawal_agent(withdrawn_by: str | None) -> str:
@@ -81,6 +141,12 @@ class ArxivSourceWriter(BaseSourceWriter):
 
     identity_key = "arxiv_id"
     source_name = "arxiv"
+    # arXiv is the one integration that merges (§7.3): when a paper is already in
+    # the KB via another database (an OpenAlex record of its published version,
+    # matched on the shared arXiv id or DOI), the arXiv deposit is folded into
+    # that original's provenance sidecar instead of writing a second file. Zotero
+    # and OpenAlex leave this False and never touch a sidecar.
+    merges_cross_source = True
 
     def identity_of(self, parsed: ParsedArxivWork) -> str:
         # The BASE id, never versioned_id: P3 idempotence keys on it, so a later
@@ -125,8 +191,10 @@ class ArxivSourceWriter(BaseSourceWriter):
             lines.append(f"doi: {_yaml_str(parsed.doi)}")
         if parsed.journal_ref:
             lines.append(f"journal: {_yaml_str(parsed.journal_ref)}")
-        # Always true: this record is the arXiv deposit. `journal`/`doi` carry the
-        # published-ness factually; flipping this would front-run merge logic.
+        # Always true: this record is the arXiv deposit, a preprint whatever else
+        # exists (#60). `journal`/`doi` carry published-ness factually; this is
+        # never flipped, at merge time or ever (#65 H1) — the published version's
+        # existence is a ledger fact, not a boolean to keep in sync.
         lines.append("preprint: true")
         lines.append("imported_from: arxiv")
         if imported_at:
@@ -152,3 +220,97 @@ class ArxivSourceWriter(BaseSourceWriter):
         if parsed.doi:
             parts.append(f"\n- DOI: {parsed.doi}")
         return "".join(parts) + "\n"
+
+    # -- §7.3 merge into an existing original's provenance sidecar ----------
+    def _provenance_record(self, parsed: ParsedArxivWork, imported_at: str) -> SourceRecord:
+        """The arXiv contribution to a source's provenance ledger.
+
+        Identity is the BASE, version-free id — the join key and the ledger's
+        idempotency key both use it, so a re-import of the same version is a
+        no-op. Fields carry what is arXiv-specific and stable per version:
+        ``version``, ``submitted``, ``last_updated``, ``comment``,
+        ``primary_category``, and ``withdrawn_by`` when the paper is withdrawn.
+
+        Deliberately excluded: ``abs_url``/``pdf_url`` (derivable from the id, so
+        storing them duplicates a thing that can go stale) and ``doi``/
+        ``journal_ref`` (the merge target is an OpenAlex-primary record that
+        already holds these authoritatively, and the DOI is the join key — a
+        second copy invites disagreement about which is right).
+
+        ``submitted``/``last_updated`` are ``datetime.date``. ``SourceRecord``
+        serializes through ``json.dumps``, which raises ``TypeError`` on a
+        ``date``, and ``provenance`` is source-agnostic and correctly refuses to
+        guess types — so the conversion to an ISO string is this builder's job. A
+        ``None`` field is dropped by :meth:`SourceRecord.to_dict`, so optional
+        values pass straight through.
+        """
+        fields: dict[str, object | None] = {
+            "version": parsed.version,
+            "submitted": parsed.submitted.isoformat() if parsed.submitted else None,
+            "last_updated": parsed.last_updated.isoformat() if parsed.last_updated else None,
+            "comment": parsed.comment,
+            "primary_category": parsed.primary_category or None,
+        }
+        if parsed.withdrawn_by is not None:
+            fields["withdrawn_by"] = parsed.withdrawn_by
+        return SourceRecord(
+            type="arxiv", id=parsed.arxiv_id, imported_at=imported_at, fields=fields
+        )
+
+    def _merge(
+        self, parsed: ParsedArxivWork, decision: WriteResult, imported_at: str
+    ) -> WriteResult:
+        """Append this arXiv deposit to the existing original's sidecar (§7.3).
+
+        The original ``.md`` is never opened — only its sidecar at
+        ``sidecar_path(decision.path)`` is read-modify-written, so the original
+        stays byte- and mtime-immutable (P4). The disk ledger is re-read every
+        call (never cached), so a prior merge is respected.
+
+        Idempotence (P3) is judged on the deposit's identity, never the import
+        clock. The CLI stamps a fresh ``imported_at`` on every run, so comparing
+        whole records (as :func:`add_source` does) would flag a plain re-import as
+        a conflict. An arXiv record already present with the same
+        :data:`_IDENTIFYING_FIELDS` is a no-op that keeps the *first* import's
+        timestamp, and the ledger stays byte-identical.
+
+        A **version bump or a withdrawal** is a divergence an *import* has no
+        authority to revise (H2): it becomes a per-id ``error`` pointing at the
+        refresh path (``arxiv-check-versions``), which alone may rewrite the entry
+        via :func:`update_source`. Drift in the other fields is absorbed silently
+        — see :data:`_IDENTIFYING_FIELDS` for why.
+
+        Every failure is a per-id ``error``, never a batch crash. A corrupt or
+        unreadable sidecar is one paper's problem; the imports queued behind it
+        are not.
+        """
+        sidecar = sidecar_path(decision.path)
+        record = self._provenance_record(parsed, imported_at)
+        try:
+            provenance = read_provenance(sidecar)
+        except ProvenanceError as exc:
+            return WriteResult(
+                decision.path, "error",
+                f"provenance sidecar is unreadable ({exc}); repair or delete "
+                f"{sidecar.name} and re-import",
+            )
+
+        existing = next((r for r in provenance.records if r.key == record.key), None)
+        if existing is not None:
+            if _identity_fields(existing) == _identity_fields(record):
+                return decision  # already recorded; keep the first timestamp
+            return WriteResult(decision.path, "error", _divergence(existing, record))
+
+        try:
+            add_source(provenance, record)
+            write_provenance(sidecar, provenance)
+        except ProvenanceConflict:  # pragma: no cover - guarded by the check above
+            return WriteResult(
+                decision.path, "error",
+                "provenance ledger diverged; run arxiv-check-versions",
+            )
+        except (ProvenanceError, OSError) as exc:
+            return WriteResult(
+                decision.path, "error", f"cannot write {sidecar.name}: {exc}",
+            )
+        return decision

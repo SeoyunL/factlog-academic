@@ -236,9 +236,11 @@ class TestWrite:
 
 
 class TestCrossSourceDuplicates:
-    def test_a_doi_already_from_openalex_is_skipped(self, tmp_path):
+    def test_a_doi_already_from_openalex_is_merged(self, tmp_path):
         # The journal version arrived from OpenAlex; the arXiv preprint shares its
-        # DOI and must be detected as a duplicate (§7.1), not written twice.
+        # DOI and must be detected as the same paper (§7.1). As of Step 4c the
+        # arXiv writer *merges* it into that original's sidecar (§7.3) rather than
+        # writing twice or reporting a bare skip.
         OpenAlexSourceWriter().write(
             ParsedWork(openalex_id="W1", title="Attention Is All You Need",
                        authors=("Ashish Vaswani",), year=2017,
@@ -246,14 +248,14 @@ class TestCrossSourceDuplicates:
             tmp_path,
         )
         result = ArxivSourceWriter().write(_work(doi="10.1145/3550547"), tmp_path)
-        assert result.status == "skipped"
+        assert result.status == "merged"
         assert "duplicate DOI" in result.reason
 
     def test_doi_match_is_case_insensitive(self, tmp_path):
         OpenAlexSourceWriter().write(
             ParsedWork(openalex_id="W1", title="X", doi="10.1145/3550547"), tmp_path)
         result = ArxivSourceWriter().write(_work(doi="10.1145/3550547".upper()), tmp_path)
-        assert result.status == "skipped"
+        assert result.status == "merged"
 
     def test_papers_without_a_doi_are_not_deduplicated(self, tmp_path):
         w = ArxivSourceWriter()

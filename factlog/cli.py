@@ -2722,11 +2722,14 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         _human("Dry run: no files will be created.")
     _human(f"Found {label}: {len(report.outcomes)} item(s)")
     _human(f"{'Would import to' if dry_run else 'Importing to'} KB: {target}\n")
-    marks = {"imported": "✓", "skipped": "↷", "error": "⚠"}
+    marks = {"imported": "✓", "skipped": "↷", "merged": "⇄", "error": "⚠"}
     for outcome in report.outcomes:
         name = outcome.path.name if outcome.path is not None else "-"
-        status = ("would import" if dry_run else "imported") if outcome.status == "imported" else (
-            ("would skip" if dry_run else "skipped") if outcome.status == "skipped" else "error"
+        status = (
+            ("would import" if dry_run else "imported") if outcome.status == "imported"
+            else ("would skip" if dry_run else "skipped") if outcome.status == "skipped"
+            else ("would merge" if dry_run else "merged") if outcome.status == "merged"
+            else "error"
         )
         detail = f" ({outcome.reason})" if outcome.reason else ""
         ident = f" ({outcome.key})" if outcome.key else ""
@@ -2782,12 +2785,20 @@ def _openalex_budget_warning(client) -> str:
 
 
 def _openalex_report_lines(report, dry_run: bool) -> list[str]:
-    """The per-work narration shared by the openalex-* commands."""
-    marks = {"imported": "✓", "skipped": "↷", "error": "⚠"}
+    """The per-work narration shared by the openalex-* and arXiv commands.
+
+    ``merged`` (an arXiv deposit folded into an existing original's sidecar, §7.3)
+    needs its own glyph and label: without them the status ternary's ``else``
+    branch mislabels it as ``error`` and ``marks.get`` yields ``?``.
+    """
+    marks = {"imported": "✓", "skipped": "↷", "merged": "⇄", "error": "⚠"}
     lines = []
     for outcome in report.outcomes:
-        status = ("would import" if dry_run else "imported") if outcome.status == "imported" else (
-            ("would skip" if dry_run else "skipped") if outcome.status == "skipped" else "error"
+        status = (
+            ("would import" if dry_run else "imported") if outcome.status == "imported"
+            else ("would skip" if dry_run else "skipped") if outcome.status == "skipped"
+            else ("would merge" if dry_run else "merged") if outcome.status == "merged"
+            else "error"
         )
         detail = f" ({outcome.reason})" if outcome.reason else ""
         name = outcome.path.name if outcome.path is not None else "-"
@@ -3125,16 +3136,17 @@ def _arxiv_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -
     if porcelain:
         # Stable machine contract, tab-separated, LF-terminated. Order-independent
         # (parse by first field):
-        #   imported\t<n> / skipped\t<n> / errors\t<n> / dry_run\t<0|1>
-        #   target\t<abs sources dir>
+        #   imported\t<n> / skipped\t<n> / merged\t<n> / errors\t<n>
+        #   dry_run\t<0|1> / target\t<abs sources dir>
         # In --dry-run only, a per-work row precedes them:
-        #   work\t<status>\t<versioned arxiv id>\t<would-be filename>
+        #   work\t<status>\t<versioned arxiv id>\t<would-be or existing filename>
         if dry_run:
             for outcome in report.outcomes:
                 name = outcome.path.name if outcome.path is not None else ""
                 print(f"work\t{outcome.status}\t{outcome.key}\t{name}")
         print(f"imported\t{report.imported}")
         print(f"skipped\t{report.skipped}")
+        print(f"merged\t{report.merged}")
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
         print(f"target\t{target / 'sources'}")
@@ -3149,6 +3161,9 @@ def _arxiv_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -
     print("\nSummary:")
     print(f"  {'Would import' if dry_run else 'Imported'}: {report.imported}")
     print(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
+    # A merge is a success (an arXiv deposit recorded against an existing
+    # original), so it is reported on its own line, never folded into errors.
+    print(f"  {'Would merge' if dry_run else 'Merged'}:   {report.merged}")
     print(f"  Errors:   {report.errors}")
     for warning in warnings:
         print(f"\n{warning}", file=sys.stderr)

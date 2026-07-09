@@ -4,8 +4,11 @@
 
 Sits between :mod:`~factlog.integrations.arxiv.client` and the CLI, mirroring
 :mod:`factlog.integrations.openalex.importer`: parse, write, and report per-work
-outcomes. Cross-source merging, the provenance sidecar, search, and version
-checking are later steps and are not done here.
+outcomes. A paper already in the KB via another database is *merged* into that
+original's provenance sidecar (§7.3, ``merged`` outcome) rather than written
+twice; the classification and sidecar write both live in
+:class:`~factlog.integrations.arxiv.source_writer.ArxivSourceWriter`. Search and
+version checking are later steps and are not done here.
 
 Imported works are ordinary sources. They still pass the usual
 sync -> review -> accept gate before becoming facts (P1/P2), and arXiv is never
@@ -38,9 +41,16 @@ __all__ = ["WorkOutcome", "ImportReport", "import_works"]
 
 @dataclass(frozen=True)
 class WorkOutcome:
-    """What happened to one requested arXiv record."""
+    """What happened to one requested arXiv record.
 
-    status: str  # "imported" | "skipped" | "error"
+    ``status`` is ``"imported"`` | ``"skipped"`` | ``"error"`` | ``"merged"``.
+    ``"merged"`` means the paper was already in the KB via another database and
+    this arXiv deposit was folded into that original's provenance sidecar (§7.3)
+    rather than written as a second file; ``path`` names that existing original.
+    A merge is a success — it does not affect the exit code.
+    """
+
+    status: str  # "imported" | "skipped" | "error" | "merged"
     key: str
     title: str
     path: Path | None = None
@@ -61,6 +71,10 @@ class ImportReport:
     @property
     def skipped(self) -> int:
         return self._count("skipped")
+
+    @property
+    def merged(self) -> int:
+        return self._count("merged")
 
     @property
     def errors(self) -> int:

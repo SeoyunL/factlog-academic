@@ -21,7 +21,11 @@ Four invariants hold for every integration:
 * **Cross-source duplicate detection (spec §7.1).** DOI, PMID and a normalized
   arXiv id are read from *every* source file, whatever imported it, so the same
   paper arriving from a second database is reported rather than written twice.
-  Detection only — merging several sources into one file (§7.3) is not done here.
+  Detection lives here; the *merge* itself (§7.3) is a side effect deferred to
+  :meth:`BaseSourceWriter._merge`, a no-op unless a writer opts in via
+  :attr:`BaseSourceWriter.merges_cross_source` (only ``ArxivSourceWriter`` does).
+  So classification stays pure and ``plan``/``write`` agree, while the sidecar
+  write happens only in ``write``.
 
 ``imported_at`` is injected by the caller rather than read from a clock here, so
 writers stay pure and unit-testable and the CLI controls the (single, batch)
@@ -73,10 +77,18 @@ _CROSS_SOURCE_KINDS = frozenset(kind for kind, _ in CROSS_SOURCE_IDS)
 
 @dataclass(frozen=True)
 class WriteResult:
-    """Outcome of a single :meth:`BaseSourceWriter.write` call."""
+    """Outcome of a single :meth:`BaseSourceWriter.write` call.
+
+    ``status`` is ``"imported"`` | ``"skipped"`` | ``"error"`` | ``"merged"``.
+    ``"merged"`` is produced only by a writer that opts in via
+    :attr:`BaseSourceWriter.merges_cross_source`: the incoming record is a *second
+    database's* view of a paper already in ``sources/``, so instead of writing a
+    new original it is appended to the existing file's provenance sidecar (§7.3).
+    ``path`` then points at the **existing** original, which is never rewritten.
+    """
 
     path: Path | None
-    status: str  # "imported" | "skipped" | "error"
+    status: str  # "imported" | "skipped" | "error" | "merged"
     reason: str = ""
 
 
@@ -93,7 +105,13 @@ class _DirIndex:
     by_identity: dict[str, tuple[Path, str]] = field(default_factory=dict)
     # ("doi", "10.1234/x") -> path. Populated from every source file regardless
     # of which integration wrote it, which is what makes §7.1 detection work.
-    by_cross_id: dict[tuple[str, str], Path] = field(default_factory=dict)
+    # ("doi", "10.1234/x") -> (path, that file's `imported_from`). Populated from
+    # every source file regardless of which integration wrote it, which is what
+    # makes §7.1 detection work. Provenance rides along so a duplicate found
+    # inside this writer's OWN database is not mistaken for another database's
+    # view of the paper: two arXiv deposits that share a DOI are a plain
+    # duplicate, not a cross-source merge.
+    by_cross_id: dict[tuple[str, str], tuple[Path, str]] = field(default_factory=dict)
 
 
 def byte_trunc(slug: str, max_bytes: int) -> str:
@@ -184,6 +202,13 @@ class BaseSourceWriter:
     source_name: str = ""
     #: Front-matter pattern marking a companion file to exclude from the index.
     ignore_re: re.Pattern[str] | None = None
+    #: Opt-in: does this writer merge a cross-source duplicate into the existing
+    #: file's provenance sidecar (§7.3) instead of reporting a bare ``skipped``?
+    #: **False by default**, which is what keeps Zotero and OpenAlex from ever
+    #: touching a sidecar. Only :class:`ArxivSourceWriter` sets it, and only it
+    #: overrides :meth:`_merge`. When False, a cross-source duplicate stays
+    #: ``skipped`` exactly as before, so those integrations are unchanged.
+    merges_cross_source: bool = False
 
     def __init__(self, skip_duplicates: bool = True, include_abstract: bool = True):
         self.skip_duplicates = skip_duplicates
@@ -262,7 +287,9 @@ class BaseSourceWriter:
                     for kind, _ in CROSS_SOURCE_IDS:
                         value = scalars.get(kind, "")
                         if value:
-                            cached.by_cross_id.setdefault((kind, normalize_cross_id(kind, value)), path)
+                            cached.by_cross_id.setdefault(
+                                (kind, normalize_cross_id(kind, value)),
+                                (path, scalars.get(IMPORTED_FROM_KEY, "")))
             self._dir_index[key] = cached
         return cached
 
@@ -283,36 +310,56 @@ class BaseSourceWriter:
         cross-database identifiers in §7.1's priority order (the same *paper*
         reached through another database, or another record of the same paper —
         a preprint and its journal version share a DOI).
+
+        Two outcomes are distinguished. A file this writer produced (or a legacy
+        one with no ``imported_from``) is the **same record re-imported** and is
+        always ``skipped`` — P3 never depends on a provenance string. A file
+        written by *another* database, or matched only through a shared
+        cross-source id, is the **same paper via another database**: for a writer
+        that opts in (:attr:`merges_cross_source`) that is a ``merged``, otherwise
+        it stays ``skipped``. The classification is pure — no file is touched here
+        — so :meth:`plan` and :meth:`write` agree and ``--dry-run`` writes nothing.
         """
         identity = self.identity_of(parsed)
         found = index.by_identity.get(identity)
         if found is not None:
             existing, imported_from = found
-            # Whoever wrote the file, the record is already here: it is skipped
-            # either way, so P3 never depends on a provenance string. Provenance
-            # only chooses how to say it. A file this writer produced (or a legacy
-            # one with no ``imported_from``) is the same record re-imported;
-            # anything else is the same *paper* reached through another database,
-            # which is what Step 4c will merge rather than re-report.
             if _same_source(imported_from, self.source_name):
                 return WriteResult(existing, "skipped",
                                    f"already imported ({self.identity_key} match)")
             label = dict(CROSS_SOURCE_IDS).get(self.identity_key, self.identity_key)
-            return WriteResult(existing, "skipped",
-                               f"duplicate {label} {identity} (already in {existing.name})")
+            return self._cross_source(
+                existing, f"duplicate {label} {identity} (already in {existing.name})")
 
         cross_ids = self._cross_id_values(parsed)
         for kind, label in CROSS_SOURCE_IDS:
             value = cross_ids.get(kind, "")
             if not value:
                 continue
-            existing = index.by_cross_id.get((kind, normalize_cross_id(kind, value)))
-            if existing is not None:
-                return WriteResult(
-                    existing, "skipped",
-                    f"duplicate {label} {value} (already in {existing.name})",
-                )
+            found = index.by_cross_id.get((kind, normalize_cross_id(kind, value)))
+            if found is not None:
+                existing, imported_from = found
+                reason = f"duplicate {label} {value} (already in {existing.name})"
+                # A shared identifier inside this writer's OWN database is a plain
+                # duplicate, not another database's view of the paper: two arXiv
+                # deposits sharing a DOI must not fold one into the other's ledger.
+                # Merging describes a record this writer did not write.
+                if _same_source(imported_from, self.source_name):
+                    return WriteResult(existing, "skipped", reason)
+                return self._cross_source(existing, reason)
         return None
+
+    def _cross_source(self, existing: Path, reason: str) -> WriteResult:
+        """Outcome for the same paper reached through another database.
+
+        ``merged`` when this writer opts into §7.3 merging, else ``skipped`` — the
+        historic behaviour, and what leaves Zotero/OpenAlex untouched. This is the
+        only decision point; the sidecar write itself is deferred to
+        :meth:`write` via :meth:`_merge`, so classifying (in ``plan`` too) has no
+        side effect.
+        """
+        status = "merged" if self.merges_cross_source else "skipped"
+        return WriteResult(existing, status, reason)
 
     def _reserve(self, parsed, sources_dir: Path, index: _DirIndex) -> WriteResult:
         path = self._unique_path(sources_dir, self.generate_slug(parsed), index.claimed)
@@ -323,7 +370,8 @@ class BaseSourceWriter:
         for kind, _ in CROSS_SOURCE_IDS:
             value = cross_ids.get(kind, "")
             if value:
-                index.by_cross_id.setdefault((kind, normalize_cross_id(kind, value)), path)
+                index.by_cross_id.setdefault(
+                    (kind, normalize_cross_id(kind, value)), (path, self.source_name))
         return WriteResult(path, "imported")
 
     def _resolve(self, parsed, target: Path | str, mode: str) -> WriteResult:
@@ -358,9 +406,29 @@ class BaseSourceWriter:
         """
         return self._resolve(parsed, target, "plan")
 
+    def _merge(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
+        """Fold *parsed* into the existing original's provenance sidecar.
+
+        The one place a merge's side effect lives, so it is reached only from
+        :meth:`write` and never from :meth:`plan` — that is what keeps
+        ``--dry-run`` from touching the filesystem. **No-op on the base class**:
+        it returns the ``merged`` decision unchanged without writing anything. A
+        base writer never even reaches here (it cannot produce ``merged`` while
+        :attr:`merges_cross_source` is False); the no-op exists so the hook is
+        safe by construction and only a writer that opts in overrides it. The
+        override owns building a source-specific record and read-modify-writing
+        the sidecar at ``sidecar_path(decision.path)`` — ``decision.path`` is the
+        **existing** original, never a would-be new file.
+        """
+        return decision
+
     def write(self, parsed, target: Path | str, imported_at: str = "") -> WriteResult:
         """Write one source file under ``<target>/sources/`` and report the outcome."""
         decision = self._resolve(parsed, target, "write")
+        if decision.status == "merged":
+            # The existing original stays byte- and mtime-immutable (P4); the only
+            # write is to its sidecar, and only writers that opt in do it.
+            return self._merge(parsed, decision, imported_at)
         if decision.status != "imported":
             return decision
         sources_dir = Path(target) / "sources"

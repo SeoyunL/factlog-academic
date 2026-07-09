@@ -7,8 +7,11 @@ arXiv base id is the exact join key. These tests pin the four probe cases from
 the issue's architecture review, the provenance-scoped identity fix, and the
 tolerance policy for junk in hand-edited files.
 
-Detection only — a match is skipped and reported, exactly as a DOI match is. No
-merging.
+Detection classifies the match; as of Step 4c (#65) the arXiv writer *merges* a
+cross-source match into the existing original's sidecar (``merged``), while
+OpenAlex/Zotero still only report it (``skipped``). The classification itself —
+"same record re-imported" vs "same paper via another database" — is what these
+tests pin; the sidecar mechanics live in ``test_arxiv_merge.py``.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common.source_writer import (
     CROSS_SOURCE_IDS,
+    _same_source,
     normalize_cross_id,
 )
 from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
@@ -126,10 +130,10 @@ class TestProbeCases:
             imported_at="2026-01-01T00:00:00Z")
         assert oa.status == "imported"
         # Now the same paper is arXiv-imported. It is NOT "already imported" —
-        # it is a different record of the same paper, which Step 4c must be able
-        # to tell apart. So it reports the cross-source arXiv-id match.
+        # it is a different record of the same paper, which Step 4c tells apart
+        # and merges into the OpenAlex original's sidecar (§7.3).
         result = ArxivSourceWriter().write(_arxiv(arxiv_id="2311.09277"), tmp_path)
-        assert result.status == "skipped"
+        assert result.status == "merged"
         assert result.reason == f"duplicate arXiv id 2311.09277 (already in {oa.path.name})"
 
     def test_C_versioned_existing_id_collides_with_bare_import(self, tmp_path):
@@ -138,7 +142,7 @@ class TestProbeCases:
                            {"openalex_id": "W9", "arxiv_id": "2311.09277v2",
                             "imported_from": "openalex", "title": "A Paper"})
         result = ArxivSourceWriter().write(_arxiv(arxiv_id="2311.09277", version=3), tmp_path)
-        assert result.status == "skipped"
+        assert result.status == "merged"
         assert "duplicate arXiv id" in result.reason
         assert "already in existing.md" in result.reason
 
@@ -148,7 +152,7 @@ class TestProbeCases:
                             "imported_from": "openalex", "title": "A Paper"})
         result = ArxivSourceWriter().write(
             _arxiv(arxiv_id="math/0309136", version=1), tmp_path)
-        assert result.status == "skipped"
+        assert result.status == "merged"
         assert "duplicate arXiv id" in result.reason
 
     def test_reverse_openalex_import_of_a_paper_in_an_arxiv_file(self, tmp_path):
@@ -272,12 +276,23 @@ class TestProvenanceNeverGatesTheIdentityLookup:
         )
 
     @pytest.mark.parametrize("imported_from", ["arxiv", "ArXiv", None, "typo"])
-    def test_arxiv_reimport_always_skips_whatever_provenance_says(
+    def test_arxiv_reimport_never_writes_a_second_file_whatever_provenance_says(
         self, tmp_path, imported_from
     ):
+        # The existing file is always *found* (P3), so a re-import never writes a
+        # second .md. Provenance decides how the match is *reported*: an own/legacy
+        # file is a same-source ``skipped``; a foreign provenance string classifies
+        # it as another database's record, which the arXiv writer ``merged``s. Both
+        # are non-writing outcomes; the invariant is that neither imports.
         line = f"imported_from: {imported_from}\n" if imported_from else ""
         kb = self._kb(tmp_path, f'---\narxiv_id: "2311.09277"\n{line}---\n')
-        assert ArxivSourceWriter().plan(_arxiv(), kb).status == "skipped"
+        result = ArxivSourceWriter().plan(_arxiv(), kb)
+        assert result.status != "imported"
+        assert result.path.name == "existing.md"
+        if _same_source(imported_from or "", "arxiv"):
+            assert result.status == "skipped"
+        else:
+            assert result.status == "merged"
 
     @pytest.mark.parametrize("imported_from", ["openalex", "OpenAlex", None])
     def test_provenance_case_does_not_change_the_reported_reason(
