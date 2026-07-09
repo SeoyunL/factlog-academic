@@ -361,6 +361,56 @@ class TestCite:
 
 
 # -- credit budget ---------------------------------------------------------
+class TestPlaceholderTitleWarning:
+    """#54: W2567289819's title is the literal string "null". Warn, never drop."""
+
+    def test_null_titled_work_is_imported_and_warned_about(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeClient(results=[_raw("W1", title="null")]))
+        assert run(["openalex-import", "--work-id", "W1", "--target", str(kb)]) == 0
+        assert len(sources(kb)) == 1  # imported, not rejected
+        assert 'has the literal title "null"' in capsys.readouterr().err
+
+    def test_a_real_title_produces_no_warning(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeClient(results=[_raw("W1", title="On Null Hypotheses")]))
+        run(["openalex-import", "--work-id", "W1", "--target", str(kb)])
+        assert "literal title" not in capsys.readouterr().err
+
+    def test_warning_never_pollutes_the_porcelain_contract(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeClient(results=[_raw("W1", title="null")]))
+        run(["openalex-import", "--work-id", "W1", "--target", str(kb), "--porcelain"])
+        captured = capsys.readouterr()
+        assert "literal title" in captured.err
+        assert "literal title" not in captured.out
+
+    def test_skipped_work_is_not_warned_about(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeClient(results=[_raw("W1", title="null")]))
+        run(["openalex-import", "--work-id", "W1", "--target", str(kb)])
+        capsys.readouterr()
+        run(["openalex-import", "--work-id", "W1", "--target", str(kb)])
+        assert "literal title" not in capsys.readouterr().err
+
+
+class TestUnknownWorkType:
+    def test_bogus_type_is_rejected_before_the_search_is_charged(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        client = fake(FakeClient())
+        assert run(["openalex-search", "--query", "q", "--type", "artikle",
+                    "--target", str(kb)]) == 1
+        assert client.calls == []
+        assert "unknown work type" in capsys.readouterr().err
+
+    def test_known_type_is_forwarded(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        client = fake(FakeClient())
+        run(["openalex-search", "--query", "q", "--type", "review",
+             "--target", str(kb), "--dry-run"])
+        assert client.calls == [("search", "q", None, "review", None)]
+
+
 class TestBudgetWarning:
     def test_low_budget_warns_on_stderr_without_failing(self, tmp_path, fake, capsys):
         kb = _kb(tmp_path)

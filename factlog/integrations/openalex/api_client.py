@@ -46,6 +46,22 @@ _PMID_URL_PREFIX = "https://pubmed.ncbi.nlm.nih.gov/"
 # A "YYYY" year, or an inclusive "YYYY-YYYY" range (OpenAlex filter syntax).
 _YEAR_RE = re.compile(r"^(?P<from>[12][0-9]{3})(?:-(?P<to>[12][0-9]{3}))?$")
 
+# Every work type OpenAlex recognises, from `GET /works?group_by=type`.
+#
+# Validated client-side because a *value* typo is silent: `filter=type:artikle`
+# answers HTTP 200 with `meta.count == 0`, having charged the full 10-credit
+# search. (A *field* typo — `filter=bogus:1` — correctly returns 400.) Without
+# this check the operator sees "Found 0 results" and concludes the literature is
+# empty. Regenerate with: GET /works?group_by=type
+WORK_TYPES = frozenset({
+    "article", "book", "book-chapter", "book-review", "book-section",
+    "conference-abstract", "conference-paper", "data-paper", "database",
+    "dataset", "dissertation", "editorial", "erratum", "grant", "letter",
+    "libguides", "other", "paratext", "peer-review", "preprint",
+    "reference-entry", "report", "report-component", "retraction", "review",
+    "software", "standard", "supplementary-materials",
+})
+
 # Credits charged per request class, measured against the live API. Used to
 # estimate a command's cost before it runs.
 CREDITS_SEARCH = 10
@@ -161,6 +177,22 @@ def normalize_pmid(value: str) -> str:
     candidate = candidate.strip("/")
     if not candidate.isdigit() or candidate.lstrip("0") != candidate:
         raise OpenAlexError(f"invalid PMID {value!r}; expected a positive integer.")
+    return candidate
+
+
+def validate_work_type(value: str) -> str:
+    """Return a known OpenAlex work type, or raise before a request is spent.
+
+    An unknown type is rejected here rather than sent, because the API answers a
+    bogus filter *value* with ``200`` and zero results — a silent lie that costs
+    10 credits and reads as "no such literature exists".
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise OpenAlexError("type must be a non-empty string.")
+    candidate = value.strip().lower()
+    if candidate not in WORK_TYPES:
+        known = ", ".join(sorted(WORK_TYPES))
+        raise OpenAlexError(f"unknown work type {value!r}; expected one of: {known}")
     return candidate
 
 
@@ -355,9 +387,7 @@ class OpenAlexClient:
         if year is not None:
             filters.append(f"publication_year:{year_filter(year)}")
         if work_type is not None:
-            if not isinstance(work_type, str) or not work_type.strip():
-                raise OpenAlexError("type must be a non-empty string.")
-            filters.append(f"type:{work_type.strip()}")
+            filters.append(f"type:{validate_work_type(work_type)}")
 
         params: dict = {"search": query.strip(), "per_page": self._limit(limit)}
         if filters:

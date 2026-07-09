@@ -15,6 +15,7 @@ from factlog.integrations.openalex.work_parser import (
     Concept,
     ParsedWork,
     PrimaryTopic,
+    is_placeholder_title,
     parse_work,
 )
 
@@ -345,6 +346,51 @@ class TestAuthors:
     def test_non_dict_author_is_dropped(self):
         work = {**WORK, "authorships": [{"author": "Ann"}, {"author": {"display_name": "Bob"}}]}
         assert parse_work(work).authors == ("Bob",)
+
+
+class TestMeshTerms:
+    """#53: OpenAlex repeats mesh rows — one work returned 108 rows, 26 distinct."""
+
+    def test_repeated_descriptors_are_deduplicated(self):
+        work = {**WORK, "mesh": [
+            {"descriptor_name": "Aging", "qualifier_name": "physiology"},
+            {"descriptor_name": "Aging", "qualifier_name": "genetics"},
+            {"descriptor_name": "Aging", "qualifier_name": None},
+            {"descriptor_name": "Animals"},
+        ]}
+        assert parse_work(work).mesh_terms == ("Aging", "Animals")
+
+    def test_first_seen_order_is_preserved(self):
+        work = {**WORK, "mesh": [{"descriptor_name": n} for n in ["Zebra", "Aging", "Zebra"]]}
+        assert parse_work(work).mesh_terms == ("Zebra", "Aging")
+
+    def test_major_topic_flag_is_never_read(self):
+        # Unreliable before ~2022 (#53); descriptors carry no major/minor mark.
+        work = {**WORK, "mesh": [
+            {"descriptor_name": "Aging", "is_major_topic": True},
+            {"descriptor_name": "Aging", "is_major_topic": False},
+        ]}
+        assert parse_work(work).mesh_terms == ("Aging",)
+
+    @pytest.mark.parametrize("mesh", [None, [], "junk", [{"descriptor_ui": "D1"}], [7]])
+    def test_missing_mesh_becomes_empty_tuple(self, mesh):
+        assert parse_work({**WORK, "mesh": mesh}).mesh_terms == ()
+
+
+class TestIsPlaceholderTitle:
+    @pytest.mark.parametrize("raw", ["null", "NULL", " Null "])
+    def test_detects_the_literal_null_string(self, raw):
+        assert is_placeholder_title(raw) is True
+
+    @pytest.mark.parametrize("raw", [None, "", "Nullity", "On Null Hypotheses", 7, "none"])
+    def test_leaves_everything_else_alone(self, raw):
+        assert is_placeholder_title(raw) is False
+
+    def test_such_a_work_is_still_parsed_not_rejected(self):
+        # A paper legitimately titled "Null" is possible; callers warn, not drop.
+        parsed = parse_work({**WORK, "title": "null", "display_name": "null"})
+        assert parsed.title == "null"
+        assert is_placeholder_title(parsed.title) is True
 
 
 class TestRetractionIsSourceScoped:

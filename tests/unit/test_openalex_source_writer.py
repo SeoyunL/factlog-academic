@@ -138,6 +138,20 @@ class TestTagsMapping:
         assert 'tags: ["Object (grammar)"]' in _front_matter(OpenAlexSourceWriter().render(work))
 
 
+class TestMeshTerms:
+    def test_mesh_terms_are_written(self):
+        # v2 §3.2: openalex-import populates mesh_terms as a flat descriptor list.
+        fm = _front_matter(OpenAlexSourceWriter().render(_work(mesh_terms=("Aging", "Animals"))))
+        assert 'mesh_terms: ["Aging", "Animals"]' in fm
+
+    def test_absent_when_the_work_has_no_mesh(self):
+        assert "mesh_terms:" not in _front_matter(OpenAlexSourceWriter().render(_work()))
+
+    def test_no_major_minor_distinction_is_recorded(self):
+        fm = _front_matter(OpenAlexSourceWriter().render(_work(mesh_terms=("Aging",))))
+        assert "major" not in fm.lower()
+
+
 class TestPrimaryTopic:
     def test_hierarchy_is_written_as_flat_keys(self):
         fm = _front_matter(OpenAlexSourceWriter().render(_work()))
