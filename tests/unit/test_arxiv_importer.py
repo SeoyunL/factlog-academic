@@ -187,7 +187,15 @@ class TestCrossSourceDuplicate:
         assert report.merged == 0
         skipped = [o for o in report.outcomes if o.status == "skipped"][0]
         assert "duplicate DOI" in skipped.reason
-        assert not (tmp_path / "source-provenance").exists()
+        # The imported deposit writes its OWN one-record ledger (#72); the skipped
+        # duplicate is not folded into it — merging is for a record this writer did
+        # not write. So exactly one sidecar exists, carrying only the first paper.
+        from factlog.integrations.common.provenance import read_provenance
+
+        sidecars = sorted((tmp_path / "source-provenance").glob("*.json"))
+        assert len(sidecars) == 1
+        ids = [r.id for r in read_provenance(sidecars[0]).records if r.type == "arxiv"]
+        assert ids == ["1706.03762"]
 
     def test_a_doi_shared_with_another_database_is_merged(self, tmp_path):
         # The same join key, but the existing file was written by OpenAlex. Now it

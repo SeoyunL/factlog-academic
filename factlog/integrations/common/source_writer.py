@@ -422,6 +422,30 @@ class BaseSourceWriter:
         """
         return decision
 
+    def _record(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
+        """Write the source's *own* provenance record for a new-file import.
+
+        The sibling of :meth:`_merge`. Where ``_merge`` folds a *second*
+        database's view into an existing original's sidecar, ``_record`` writes
+        the record for the file this writer is *itself* creating, so an ordinary
+        import — a new paper, no duplicate — still leaves a ledger. Without it the
+        sidecar would exist only where a collision happened, an artifact of import
+        order rather than a record of every source (#72).
+
+        Same opt-in posture as :meth:`_merge` and **no-op on the base class**: it
+        returns the ``imported`` decision unchanged without touching the
+        filesystem, so Zotero and OpenAlex — which never override it — stay
+        byte-identical. Only :class:`ArxivSourceWriter` overrides it, behind the
+        same ``merges_cross_source`` opt-in. Reached only from :meth:`write` and
+        only on an ``imported`` outcome, never from :meth:`plan`, so ``--dry-run``
+        writes nothing. The override read-modify-writes ``sidecar_path(decision.path)``
+        for the **new** original's final (suffix-resolved) name.
+
+        On success it returns the ``imported`` decision; on failure it returns an
+        ``error`` so :meth:`write` can refuse to create the ``.md`` (see there).
+        """
+        return decision
+
     def write(self, parsed, target: Path | str, imported_at: str = "") -> WriteResult:
         """Write one source file under ``<target>/sources/`` and report the outcome."""
         decision = self._resolve(parsed, target, "write")
@@ -431,6 +455,18 @@ class BaseSourceWriter:
             return self._merge(parsed, decision, imported_at)
         if decision.status != "imported":
             return decision
+        # Sidecar FIRST, original LAST. The ``.md`` is the P3 skip key: once it
+        # exists a re-import is ``skipped`` before any write (see :meth:`_duplicate`),
+        # so the file must not appear until its ledger already does. If the sidecar
+        # write fails, ``_record`` returns an ``error`` and we create no ``.md`` —
+        # nothing is orphaned, and a retry re-runs cleanly. The reverse order would
+        # leave an orphaned ``.md`` whose existence permanently suppresses the
+        # ledger, since the original is never rewritten (P4) and the re-import skips
+        # (#72, risk 2). ``_record`` is a no-op unless a writer opts in, so a
+        # base/Zotero/OpenAlex import writes the ``.md`` exactly as before.
+        recorded = self._record(parsed, decision, imported_at)
+        if recorded.status != "imported":
+            return recorded
         sources_dir = Path(target) / "sources"
         sources_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(decision.path, self.render(parsed, imported_at))

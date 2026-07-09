@@ -285,10 +285,15 @@ class TestOptOut:
         ax = ArxivSourceWriter().write(
             _arxiv(arxiv_id="2311.09277"), tmp_path, imported_at="t")
         assert ax.status == "imported"
+        # The arXiv import wrote its own ledger (#72); OpenAlex must neither merge
+        # into it nor record anything of its own.
+        sidecar = sidecar_path(ax.path)
+        before = sidecar.read_bytes()
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W7", arxiv_id="2311.09277"), tmp_path, imported_at="t")
         assert result.status == "skipped"
-        assert not (tmp_path / "source-provenance").exists()
+        assert sidecar.read_bytes() == before  # the ledger is arXiv's alone, untouched
+        assert not any(r.type == "openalex" for r in _records(sidecar))
 
     def test_zotero_writer_does_not_expose_merge(self):
         assert ArxivSourceWriter.merges_cross_source is True
@@ -310,11 +315,16 @@ class TestSameRecordReimportStillSkips:
         (tmp_path / "sources").mkdir()
         first = ArxivSourceWriter().write(_arxiv(), tmp_path, imported_at="t")
         assert first.status == "imported"
+        # The new import wrote its own one-record ledger (#72).
+        sidecar = sidecar_path(first.path)
+        before = sidecar.read_bytes()
         second = ArxivSourceWriter().write(_arxiv(version=3), tmp_path, imported_at="t")
         assert second.status == "skipped"
         assert second.reason == "already imported (arxiv_id match)"
-        # A same-source re-import writes no sidecar.
-        assert not (tmp_path / "source-provenance").exists()
+        # A same-source re-import is skipped before any write, so the first
+        # import's ledger is left byte-identical — never merged into.
+        assert sidecar.read_bytes() == before
+        assert sum(1 for r in _records(sidecar) if r.type == "arxiv") == 1
 
 
 class TestACorruptLedgerIsOnePapersProblem:

@@ -48,6 +48,7 @@ from factlog.integrations.arxiv.work_parser import (
 from factlog.integrations.common._textio import yaml_list as _yaml_list
 from factlog.integrations.common._textio import yaml_scalar as _yaml_str
 from factlog.integrations.common.provenance import (
+    Provenance,
     ProvenanceConflict,
     ProvenanceError,
     SourceRecord,
@@ -257,15 +258,19 @@ class ArxivSourceWriter(BaseSourceWriter):
             type="arxiv", id=parsed.arxiv_id, imported_at=imported_at, fields=fields
         )
 
-    def _merge(
+    def _upsert_sidecar(
         self, parsed: ParsedArxivWork, decision: WriteResult, imported_at: str
     ) -> WriteResult:
-        """Append this arXiv deposit to the existing original's sidecar (§7.3).
+        """Read-modify-write this deposit's record into ``sidecar_path(decision.path)``.
 
-        The original ``.md`` is never opened — only its sidecar at
-        ``sidecar_path(decision.path)`` is read-modify-written, so the original
-        stays byte- and mtime-immutable (P4). The disk ledger is re-read every
-        call (never cached), so a prior merge is respected.
+        The shared mechanism behind both :meth:`_merge` (fold into an *existing*
+        original's ledger) and :meth:`_record` (write a *new* original's own
+        ledger). Both derive the sidecar from ``decision.path`` and add the very
+        same :meth:`_provenance_record`, so the disk operation is identical; only
+        which file ``decision.path`` names differs, and that is the caller's
+        concern. The ``.md`` is never opened here — only its sidecar — so the
+        original stays byte- and mtime-immutable (P4). The disk ledger is re-read
+        every call (never cached), so a prior write is respected.
 
         Idempotence (P3) is judged on the deposit's identity, never the import
         clock. The CLI stamps a fresh ``imported_at`` on every run, so comparing
@@ -280,6 +285,17 @@ class ArxivSourceWriter(BaseSourceWriter):
         via :func:`update_source`. Drift in the other fields is absorbed silently
         — see :data:`_IDENTIFYING_FIELDS` for why.
 
+        A **pre-existing sidecar** is read, not overwritten. For a merge that is
+        the whole point; for a new import (#72, risk 3) it can only happen when a
+        stale ledger was orphaned by a deleted source whose slug this new ``.md``
+        reuses, or when a prior run wrote the sidecar and then failed before the
+        ``.md`` — a retry then finds its own record already present and no-ops,
+        which is exactly the self-healing that writing the ``.md`` last buys. The
+        stale-deleted-source case is rare and non-destructive: an append-only
+        audit ledger never silently drops another record, so a leftover foreign
+        record is kept rather than clobbered; only a genuine same-id divergence
+        surfaces as an error, which is the correct signal that something changed.
+
         Every failure is a per-id ``error``, never a batch crash. A corrupt or
         unreadable sidecar is one paper's problem; the imports queued behind it
         are not.
@@ -288,7 +304,11 @@ class ArxivSourceWriter(BaseSourceWriter):
         record = self._provenance_record(parsed, imported_at)
         try:
             provenance = read_provenance(sidecar)
-        except ProvenanceError as exc:
+        except (ProvenanceError, OSError) as exc:
+            # ProvenanceError: the ledger is malformed. OSError: the path cannot be
+            # read at all (a permission fault, or ``source-provenance`` occupied by
+            # a plain file so the sidecar cannot exist under it). Either way it is
+            # this one paper's problem — a per-id error, never a batch crash.
             return WriteResult(
                 decision.path, "error",
                 f"provenance sidecar is unreadable ({exc}); repair or delete "
@@ -313,4 +333,56 @@ class ArxivSourceWriter(BaseSourceWriter):
             return WriteResult(
                 decision.path, "error", f"cannot write {sidecar.name}: {exc}",
             )
+        return decision
+
+    def _merge(
+        self, parsed: ParsedArxivWork, decision: WriteResult, imported_at: str
+    ) -> WriteResult:
+        """Append this arXiv deposit to the **existing** original's sidecar (§7.3).
+
+        ``decision.path`` is the original another database already wrote; this
+        folds the arXiv view of the same paper into its ledger instead of writing
+        a second file. Mechanics — the idempotency rule, the version/withdrawal
+        divergence error, and per-id error isolation — live in
+        :meth:`_upsert_sidecar`.
+        """
+        return self._upsert_sidecar(parsed, decision, imported_at)
+
+    def _record(
+        self, parsed: ParsedArxivWork, decision: WriteResult, imported_at: str
+    ) -> WriteResult:
+        """Write this deposit's own record for a **new** original (#72).
+
+        ``decision.path`` is the file this writer is about to create — its final,
+        suffix-resolved name, so a ``-2`` collision (risk 1) lands the sidecar
+        beside the right ``.md`` because :func:`sidecar_path` derives from that
+        name. Called from :meth:`write` before the ``.md`` is written, so a
+        sidecar failure aborts the import with no orphaned original (risk 2).
+
+        **A sidecar already at that path is stale, and is replaced rather than
+        appended to** (risk 3). The path is derived from the ``.md`` name, and the
+        ``.md`` does not exist yet — that is precisely why this outcome is
+        ``imported`` and not ``skipped``. So no ledger for *this* original can
+        legitimately be there. What can be there is the ledger of a deleted source
+        whose slug this paper now reuses: delete
+        ``sources/vaswani-2017-attention.md`` and import a different paper with
+        the same author, year and title. Appending would make the new original's
+        ledger assert it also came from the deleted paper's arXiv id — provenance
+        that is not merely dangling but false, naming a source this record never
+        had. An audit ledger that lies is worse than no ledger.
+
+        Replacement also makes a retry after a failed ``.md`` write converge: the
+        sidecar this call wrote a moment ago holds exactly the record it writes
+        again, byte-for-byte when the retry carries the same batch
+        ``imported_at`` (a later run stamps a new one, and the record is rewritten
+        with it — the ledger records the import that produced the file on disk).
+        """
+        record = self._provenance_record(parsed, imported_at)
+        sidecar = sidecar_path(decision.path)
+        fresh = Provenance()
+        add_source(fresh, record)
+        try:
+            write_provenance(sidecar, fresh)
+        except (ProvenanceError, OSError) as exc:
+            return WriteResult(decision.path, "error", f"cannot write {sidecar.name}: {exc}")
         return decision
