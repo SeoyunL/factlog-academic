@@ -477,6 +477,149 @@ class TestAFrontMatterOnlyPaperIsNotCalledALedger:
         assert "ledger records v5" in capsys.readouterr().out
 
 
+class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
+    """A paper imported *while already withdrawn* has no ledger before #82, but its
+    front matter does carry the agent — the arXiv writer emits `arxiv_withdrawn_by`
+    whenever it emits `arxiv_withdrawn: true` (`source_writer.py:165-167`). The
+    front-matter fallback in `collect_ledger_entries` used to hardcode
+    `withdrawn_by=None`, so `_diff`'s presence test (`check_versions.py:320`,
+    `recorded_withdrawn_by is None`) reported the withdrawal as new on every run
+    forever, claiming "the ledger did not record" a withdrawal the import recorded
+    (#98). This mirrors OpenAlex's `openalex_is_retracted` fallback
+    (`openalex/refresh.py:253-255,265`).
+    """
+
+    def _front_matter_only(self, kb, lines, arxiv_id="0704.0001"):
+        (kb / "sources").mkdir(parents=True, exist_ok=True)
+        path = kb / "sources" / "old.md"
+        path.write_text(
+            "---\n" + "\n".join(lines) + "\n---\n# T\n", encoding="utf-8"
+        )
+        return path
+
+    # -- module-level: what collect_ledger_entries records ------------------- #
+    def test_a_recorded_agent_is_read_back_from_front_matter(self, tmp_path):
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: "author"'],
+        )
+        (entry,), errors = cv.collect_ledger_entries(tmp_path)
+        assert errors == []
+        assert entry.recorded_withdrawn_by == "author"
+
+    def test_an_admin_agent_is_read_back_too(self, tmp_path):
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: "admin"'],
+        )
+        (entry,), _ = cv.collect_ledger_entries(tmp_path)
+        assert entry.recorded_withdrawn_by == "admin"
+
+    def test_an_absent_agent_reads_as_None_not_empty_string(self, tmp_path):
+        # No withdrawal fields at all: a paper that was live at import. The fallback
+        # must read `None`, never "", because line 320 tests `is None` and "" would
+        # silently suppress a genuinely new withdrawal (it is falsy but not None).
+        self._front_matter_only(
+            tmp_path, ['arxiv_id: "0704.0001"', "arxiv_version: 3"]
+        )
+        (entry,), _ = cv.collect_ledger_entries(tmp_path)
+        assert entry.recorded_withdrawn_by is None
+        assert entry.recorded_withdrawn_by != ""
+
+    def test_an_empty_agent_reads_as_None_not_empty_string(self, tmp_path):
+        # `arxiv_withdrawn_by: ""` — the writer's shape when it has no agent — must
+        # collapse to None, or a real upstream withdrawal would never surface.
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: ""'],
+        )
+        (entry,), _ = cv.collect_ledger_entries(tmp_path)
+        assert entry.recorded_withdrawn_by is None
+        assert entry.recorded_withdrawn_by != ""
+
+    def test_an_unrecognised_agent_is_kept_as_a_recorded_withdrawal(self, tmp_path):
+        # A hand-typed value that is neither "author" nor "admin" still means a
+        # withdrawal *was* recorded at import; the presence test only needs
+        # non-None, and the batch must never crash over a stray string.
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: "editor"'],
+        )
+        (entry,), errors = cv.collect_ledger_entries(tmp_path)
+        assert errors == []
+        assert entry.recorded_withdrawn_by == "editor"
+
+    def test_a_ledger_wins_over_front_matter_for_the_agent(self, tmp_path):
+        # Both a ledger and front matter exist. The ledger — which recorded no agent
+        # here — is authoritative; the front matter's "author" must not override it,
+        # so a withdrawal arXiv now reports still surfaces as new.
+        _seed(tmp_path, "0704.0001", 3, name="a")  # ledger: no withdrawn_by
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: "author"'],
+        )
+        (entry,), _ = cv.collect_ledger_entries(tmp_path)
+        assert entry.recorded_withdrawn_by is None
+        assert entry.sources == ("source-provenance/a.json",)
+
+    # -- end-to-end: what the CLI reports ------------------------------------ #
+    def test_a_recorded_withdrawal_is_not_re_reported(self, tmp_path, fake, capsys):
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: "author"'],
+        )
+        fake(FakeClient([_work("0704.0001", version=3, withdrawn_by="author")]))
+        assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert "WITHDRAWN" not in out
+        assert "Newly withdrawn: 0" in out
+
+    def test_a_genuinely_new_withdrawal_still_surfaces(self, tmp_path, fake, capsys):
+        self._front_matter_only(
+            tmp_path, ['arxiv_id: "0704.0001"', "arxiv_version: 3"]
+        )
+        fake(FakeClient([_work("0704.0001", version=3, withdrawn_by="author")]))
+        assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert "WITHDRAWN by the author" in out
+        assert "Newly withdrawn: 1" in out
+
+    def test_an_empty_agent_does_not_suppress_a_new_withdrawal(self, tmp_path, fake, capsys):
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: ""'],
+        )
+        fake(FakeClient([_work("0704.0001", version=3, withdrawn_by="author")]))
+        assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert "WITHDRAWN by the author" in out
+        assert "Newly withdrawn: 1" in out
+
+    def test_a_ledger_takes_precedence_and_still_surfaces_the_withdrawal(
+        self, tmp_path, fake, capsys
+    ):
+        # The ledger recorded no agent; the front matter's "author" must not silence
+        # a withdrawal arXiv now reports. Front matter never overrides a ledger.
+        _seed(tmp_path, "0704.0001", 3, name="a")
+        self._front_matter_only(
+            tmp_path,
+            ['arxiv_id: "0704.0001"', "arxiv_version: 3",
+             "arxiv_withdrawn: true", 'arxiv_withdrawn_by: "author"'],
+        )
+        fake(FakeClient([_work("0704.0001", version=3, withdrawn_by="admin")]))
+        assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert "WITHDRAWN by arXiv administrators" in out
+        assert "Newly withdrawn: 1" in out
+
+
 # --------------------------------------------------------------------------- #
 # --auto-update (#79): version-tracking fields only, the ledger, never the .md
 # --------------------------------------------------------------------------- #
