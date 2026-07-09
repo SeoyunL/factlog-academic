@@ -3650,6 +3650,129 @@ def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     return 1 if summary.errors or update_errors else 0
 
 
+def cmd_openalex_refresh(args: argparse.Namespace) -> int:
+    """Has any OpenAlex record in the KB drifted from what OpenAlex now serves? (#83).
+    Reads the provenance ledgers and a KB-level check-log, re-fetches each work by id
+    (``GET /works/{id}``, 0 credits), and reports divergences in the fields the ledger
+    stores — doi, work_type, journal — plus a newly-set retraction and a superseded id.
+
+    Without ``--auto-update`` this is report-only: it never writes to sources/ or a
+    ledger; only the check-log's last-checked timestamps advance.
+
+    With ``--auto-update`` it records the three venue/identifier fields — doi,
+    work_type, journal — into each changed work's provenance ledger via the second
+    legitimate caller of ``provenance.update_source`` (alongside arxiv-check-versions).
+    It never opens the original ``.md`` (P4 holds byte- and mtime_ns-identical), never
+    rewrites any other ledger field, never writes ``is_retracted`` (H1), and never
+    rewrites the ledger key when an id is superseded (H3): a retraction and an identity
+    change are surfaced for human review under both modes.
+    """
+    from datetime import datetime, timezone
+
+    from factlog.integrations.openalex import refresh as rf
+    from factlog.integrations.openalex.api_client import (
+        OpenAlexConnectionError,
+        OpenAlexError,
+        OpenAlexRateLimitError,
+    )
+    from factlog.integrations.openalex.check_log import (
+        CheckLogError,
+        check_log_path,
+        read_check_log,
+        record_check,
+        write_check_log,
+    )
+
+    prepared = _openalex_prepare(args, "openalex-refresh")
+    if prepared is None:
+        return 1
+    target, config = prepared
+    porcelain = getattr(args, "porcelain", False)
+    older_than_days = args.older_than
+    auto_update = getattr(args, "auto_update", False)
+
+    # A corrupt check-log is one KB-level file; surface it as a clear failure rather
+    # than a traceback, and never as an empty log (which the next write would persist).
+    log_path = check_log_path(target)
+    try:
+        check_log = read_check_log(log_path)
+    except CheckLogError as exc:
+        print(f"factlog openalex-refresh: {exc}", file=sys.stderr)
+        return 1
+
+    # A corrupt *ledger* is one source's problem (a per-id error), never a crash.
+    entries, ledger_errors = rf.collect_ledger_entries(target)
+    if not entries and not ledger_errors:
+        if not porcelain:
+            print(f"factlog openalex-refresh: no OpenAlex records in {target}")
+        else:
+            for line in rf.porcelain_lines([], [], rf.summarize([], []), target=target):
+                print(line)
+        return 0
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    to_check, skipped = rf.partition_by_freshness(entries, check_log, older_than_days, now)
+
+    results: list = []
+    if to_check:
+        client = _make_openalex_client(config)
+        print(
+            f"Refreshing {len(to_check)} OpenAlex record(s) against the API "
+            "(0 credits each)...",
+            file=sys.stderr,
+        )
+
+        def _progress(done: int, total: int) -> None:
+            print(f"  checked {done}/{total}", file=sys.stderr)
+
+        try:
+            results = rf.check_entries(to_check, client, progress=_progress)
+        except (OpenAlexConnectionError, OpenAlexRateLimitError) as exc:
+            print(f"factlog openalex-refresh: {exc}", file=sys.stderr)
+            return 2
+        except OpenAlexError as exc:
+            # A service/transport failure cannot be trusted partial; the check-log is
+            # left untouched so a re-run starts clean.
+            print(f"factlog openalex-refresh: {exc}", file=sys.stderr)
+            return 1
+
+    # Record what was actually observed this run: every work the API answered gets a
+    # fresh timestamp. A NotFound (per-id error) is left as it was so it is retried.
+    # Nothing under sources/ is touched.
+    now_iso = now.isoformat()
+    recorded_any = False
+    for result in results:
+        if result.status != rf.STATUS_ERROR:
+            record_check(check_log, result.openalex_id, now_iso)
+            recorded_any = True
+    if recorded_any:
+        write_check_log(log_path, check_log)
+
+    # --auto-update writes only doi/work_type/journal into each changed work's ledger.
+    # It never opens a source .md; a work whose fields already match is a byte-identical
+    # no-op; a front-matter-only work has no ledger and is reported, not fabricated; a
+    # superseded id is reported, never followed; a corrupt ledger is a per-id error. A
+    # retraction is surfaced under both modes and is never written. Only `results`
+    # (works actually checked this run) are eligible.
+    updates = rf.apply_auto_update(results, target) if auto_update else []
+
+    all_results = results + ledger_errors
+    summary = rf.summarize(all_results, skipped)
+    if porcelain:
+        for line in rf.porcelain_lines(
+            all_results, skipped, summary, target=target, updates=updates
+        ):
+            print(line)
+    else:
+        for line in rf.report_lines(
+            all_results, skipped, summary, target=target,
+            older_than_days=older_than_days, updates=updates,
+        ):
+            print(line)
+    update_errors = any(u.status == rf.UPDATE_ERROR for u in updates)
+    return 1 if summary.errors or update_errors else 0
+
+
 def cmd_openalex_cite(args: argparse.Namespace) -> int:
     """Show the citation neighbourhood of a source already in the KB (spec §5.2).
 
@@ -4086,6 +4209,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-import", action="store_true", help="import the listed works (use with care)"
     )
     oa_cite.set_defaults(func=cmd_openalex_cite)
+
+    oa_refresh = sub.add_parser(
+        "openalex-refresh",
+        help="report OpenAlex records whose doi/work_type/journal or retraction has "
+             "drifted from OpenAlex's current metadata; with --auto-update record the "
+             "new venue/identifier fields in the ledger (never touches sources/*.md, "
+             "never writes retraction). Free: GET /works/{id} costs 0 credits.",
+    )
+    oa_refresh.add_argument(
+        "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+    )
+    oa_refresh.add_argument(
+        "--older-than", type=float, default=30.0, metavar="DAYS",
+        help="skip records checked within DAYS (read from the check-log, not the "
+             "source files); default 30. Use 0 to force a re-check of every record.",
+    )
+    oa_refresh.add_argument(
+        "--auto-update", action="store_true",
+        help="record the new doi, work_type and journal in each changed work's "
+             "provenance ledger. Never touches the original .md, never rewrites any "
+             "other ledger field, never writes retraction (surfaced for human review "
+             "under both modes), and never rewrites the ledger key for a superseded id. "
+             "Without this flag, nothing is written but the check-log timestamp.",
+    )
+    oa_refresh.add_argument(
+        "--porcelain", action="store_true",
+        help="machine-readable output (tab-separated rows) for scripts; progress stays "
+             "on stderr",
+    )
+    oa_refresh.set_defaults(func=cmd_openalex_refresh)
 
     def _arxiv_common(p):
         p.add_argument(
