@@ -67,6 +67,7 @@ from pathlib import Path
 from factlog.integrations.arxiv.client import MAX_ID_LIST
 from factlog.integrations.arxiv.check_log import CheckLog
 from factlog.integrations.arxiv.source_writer import withdrawal_agent
+from factlog.integrations.common.front_matter import read_scalars
 from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
@@ -166,13 +167,11 @@ def collect_ledger_entries(
     withdrawal agent is kept, and every referencing source path is retained.
     """
     root = Path(kb_root)
-    sidecar_root = root / SIDECAR_DIR
-    if not sidecar_root.is_dir():
-        return [], []
-
     slots: dict[str, dict] = {}
     errors: list[VersionCheck] = []
-    for path in sorted(sidecar_root.rglob("*.json")):
+
+    sidecar_root = root / SIDECAR_DIR
+    for path in sorted(sidecar_root.rglob("*.json")) if sidecar_root.is_dir() else ():
         if not path.is_file():
             continue
         try:
@@ -207,6 +206,32 @@ def collect_ledger_entries(
             if withdrawn_by and not slot["withdrawn_by"]:
                 slot["withdrawn_by"] = withdrawn_by
             slot["sources"].add(rel)
+
+    # A paper imported before #82 has front matter but no ledger. Reading only the
+    # ledgers would answer "no arXiv records in <kb>" and exit 0 for most of an
+    # existing user's library — the command would be silently wrong about all of
+    # its input, which is the failure this whole track exists to eliminate. The
+    # front matter carries `arxiv_id` and `arxiv_version` (#60), which is exactly
+    # what a check needs, and reading it writes nothing, so report-only holds.
+    # A ledger, when present, is authoritative: it is what a refresh updates.
+    sources_dir = root / "sources"
+    for path in sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else ():
+        scalars = read_scalars(path, ("arxiv_id", "arxiv_version"))
+        arxiv_id = scalars.get("arxiv_id", "")
+        # A ledger, when one exists, is authoritative — it is what a refresh
+        # updates, and its `sources` name the ledgers a reader should open. Front
+        # matter only speaks for a paper no ledger covers.
+        if not arxiv_id or arxiv_id in slots:
+            continue
+        try:
+            version = int(scalars.get("arxiv_version", ""))
+        except ValueError:
+            version = None
+        slots[arxiv_id] = {
+            "version": version,
+            "withdrawn_by": None,
+            "sources": {_relative(path, root)},
+        }
 
     entries = [
         LedgerEntry(
