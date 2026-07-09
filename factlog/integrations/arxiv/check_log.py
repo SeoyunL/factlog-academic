@@ -316,7 +316,7 @@ def read_check_log(path: Path | str) -> CheckLog:
         if arxiv_id in entries:
             raise CheckLogError(f"check-log has two records for arxiv_id {arxiv_id!r}: {p}")
         entries[arxiv_id] = CheckRecord(
-            last_checked_at=raw["last_checked_at"], version=raw["version"]
+            last_checked_at=raw["last_checked_at"], version=version
         )
 
     return CheckLog(schema_version=schema_version, entries=entries)
