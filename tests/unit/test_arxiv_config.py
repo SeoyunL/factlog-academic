@@ -24,6 +24,7 @@ from factlog.integrations.arxiv.config import (
     build_submitted_date,
     from_mapping,
     load_config,
+    as_phrase,
     compose_search_query,
     validate_category,
     validate_search_query,
@@ -310,3 +311,93 @@ class TestYearBoundsAreEmittedInFullForm:
         # literature exists".
         with pytest.raises(ArxivValidationError, match="outside arXiv's range"):
             build_submitted_date("2099", today=date(2026, 1, 1))
+
+
+class TestABareMultiWordQueryIsSearchedAsAPhrase:
+    """`--query "chain of thought"` loses its quotes to the shell, and arXiv reads
+    the bare words loosely. Measured live: 87,029 results unquoted vs 5,669 quoted,
+    and `chain` alone matches 71,394. Nothing errors — the operator simply never
+    learns their phrase was not searched as one (#89)."""
+
+    def test_a_bare_phrase_is_quoted(self):
+        assert as_phrase("chain of thought") == 'all:"chain of thought"'
+
+    def test_a_single_word_is_left_alone(self):
+        # Live: `transformer` and `all:"transformer"` both match 172,792.
+        assert as_phrase("transformer") == "transformer"
+
+    @pytest.mark.parametrize(
+        "query",
+        ['ti:"chain of thought"', "au:LeCun AND cat:cs.LG", "cat:cs.CL", "all:x"],
+    )
+    def test_a_field_prefix_means_the_user_speaks_arxiv(self, query):
+        assert as_phrase(query) == query
+
+    @pytest.mark.parametrize("query", ["chain AND thought", "a OR b", "x ANDNOT y"])
+    def test_a_boolean_query_is_never_wrapped(self, query):
+        # Wrapping would silently change the meaning: live, `chain AND thought`
+        # matches 6,015 while `all:"chain AND thought"` matches 5,669.
+        assert as_phrase(query) == query
+
+    def test_an_already_quoted_query_is_left_alone(self):
+        assert as_phrase('"deliberately quoted"') == '"deliberately quoted"'
+
+    def test_the_word_and_inside_a_phrase_is_not_a_boolean(self):
+        # `AND` is an operator; `and` is a word.
+        assert as_phrase("cats and dogs") == 'all:"cats and dogs"'
+
+    def test_composition_uses_the_phrase_form(self):
+        assert compose_search_query("chain of thought", ["cs.CL"]) == (
+            'all:"chain of thought" AND cat:cs.CL'
+        )
+
+
+class TestAQueryWeCannotQuoteSafelyIsRefused:
+    """The wrapping exists to stop a silent 15x over-match. A shape we cannot wrap
+    must not quietly fall back to the very behaviour we are preventing."""
+
+    def test_an_unbalanced_quote_is_refused(self):
+        # Live: arXiv ignores the stray quote and matches loosely — `"chain of
+        # thought` returns 87,029, the same as the unquoted form. Before this
+        # guard it passed through untouched, and no notice fired.
+        with pytest.raises(ArxivValidationError, match="unbalanced quote"):
+            as_phrase('"chain of thought')
+
+    def test_balanced_quotes_are_the_users_own_and_pass_through(self):
+        assert as_phrase('"chain of thought"') == '"chain of thought"'
+        assert as_phrase('"a b" c') == '"a b" c'
+
+    def test_a_backslash_is_refused(self):
+        # A trailing backslash escapes the closing quote we would add, and arXiv
+        # rejects the query. Escaping is possible but its rules are undocumented.
+        with pytest.raises(ArxivValidationError, match="backslash"):
+            as_phrase("chain of thought\\")
+
+    def test_the_refusals_name_the_override(self):
+        for bad in ('"chain of thought', "chain of thought\\"):
+            with pytest.raises(ArxivValidationError) as excinfo:
+                as_phrase(bad)
+            assert "field prefix" in str(excinfo.value) or "Quote the whole" in str(excinfo.value)
+
+
+class TestGroupingAndDanglingOperators:
+    def test_bare_parentheses_carry_no_meaning_and_are_wrapped(self):
+        # Live: `(neural networks)` matches 389,409 — exactly what `neural
+        # networks` matches, so arXiv ignores the parens. Wrapped, it matches
+        # 152,502, within one of the phrase `all:"neural networks"` (152,503):
+        # arXiv ignores them inside the quotes too. Excluding parens would hand
+        # back the loose match.
+        assert as_phrase("(neural networks)") == 'all:"(neural networks)"'
+
+    def test_parentheses_with_a_boolean_are_structure(self):
+        assert as_phrase("(chain of thought) OR bert") == "(chain of thought) OR bert"
+
+    @pytest.mark.parametrize("query", ["cats AND dogs", "a OR b", "x ANDNOT y"])
+    def test_a_boolean_between_operands_is_structure(self, query):
+        assert as_phrase(query) == query
+
+    @pytest.mark.parametrize("query", ["AND thought", "x AND"])
+    def test_a_dangling_operator_is_not_structure(self, query):
+        # It is a typo, not an expression. Wrapping it is harmless and keeps the
+        # rule "structure means two operands".
+        assert as_phrase(query) == f'all:"{query}"'

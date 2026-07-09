@@ -128,17 +128,19 @@ def test_search_validates_the_category_before_spending_a_request():
 def test_search_builds_a_conjunctive_query_from_valid_categories():
     api, calls = client([ok(feed(entry("2311.09277", 1)))])
     api.search("chain of thought", categories=["cs.CL"], sort="submitted")
-    assert calls[0]["search_query"] == "chain of thought AND cat:cs.CL"
+    # The bare phrase is quoted so arXiv searches it as one (#89).
+    assert calls[0]["search_query"] == 'all:"chain of thought" AND cat:cs.CL' 
     assert calls[0]["sortBy"] == "submittedDate"
 
 
 def test_search_appends_a_submitted_date_clause_for_year():
-    # --year expands to the full YYYYMMDDTTTT span, not a bare year: the API
-    # silently reinterprets a bare four-digit year to a larger result set (#80).
+    # --year expands to the full YYYYMMDDTTTT span. Not because a bare year is
+    # reinterpreted — measured, it is not — but because the full form states the
+    # intended bounds without depending on how arXiv widens a bare year (#80).
     api, calls = client([ok(feed(entry("2311.09277", 1)))])
     api.search("chain of thought", categories=["cs.CL"], year="2023")
     assert calls[0]["search_query"] == (
-        "chain of thought AND cat:cs.CL AND "
+        'all:"chain of thought" AND cat:cs.CL AND '
         "submittedDate:[202301010000 TO 202312312359]"
     )
 
@@ -414,3 +416,22 @@ def test_user_agent_identifies_factlog_and_carries_the_contact():
 
 def test_api_base_is_https_because_http_redirects():
     assert API_BASE.startswith("https://")
+
+
+def test_a_bare_multi_word_query_is_sent_as_a_phrase():
+    """The wire form, not the composer's return value. A bare `chain of thought`
+    reaches arXiv as loose tokens and matches 87,029 papers; the phrase matches
+    5,669 (#89). Nothing errors — only the count is wrong."""
+    api, calls = client([ok(feed(total=0))])
+    api.search("chain of thought")
+    assert calls[0]["search_query"] == 'all:"chain of thought"'
+
+
+def test_a_query_the_user_structured_is_sent_untouched():
+    api, calls = client([ok(feed(total=0))], )
+    api.search("chain AND thought")
+    assert calls[0]["search_query"] == "chain AND thought"
+
+    api, calls = client([ok(feed(total=0))])
+    api.search('ti:"chain of thought"', categories=["cs.CL"])
+    assert calls[0]["search_query"] == 'ti:"chain of thought" AND cat:cs.CL'

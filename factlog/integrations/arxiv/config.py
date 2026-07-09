@@ -119,6 +119,11 @@ SEARCH_FIELDS = frozenset({"ti", "au", "abs", "co", "jr", "cat", "rn", "id", "al
 # inside a quoted phrase (`ti:"a: b"`) is not treated as a field.
 _FIELD_TOKEN_RE = re.compile(r'(?:^|[\s(])([A-Za-z_]+):("[^"]*"|\S+)')
 
+# arXiv's Lucene-ish boolean operators. A query using one is expressing structure,
+# not a phrase, and must be passed through untouched.
+_BOOLEAN_RE = re.compile(r"\S\s+(?:AND|OR|ANDNOT)\s+\S")
+
+
 # `sortBy` values. Unlike the above, a bogus one *is* rejected (HTTP 400).
 SORT_FIELDS = {"submitted": "submittedDate", "updated": "lastUpdatedDate",
                "relevance": "relevance"}
@@ -207,6 +212,65 @@ def validate_sort(value: str) -> str:
     return SORT_FIELDS[value.strip()]
 
 
+def as_phrase(query: str) -> str:
+    """Quote a bare multi-word query so arXiv searches it as a phrase (#89).
+
+    ``--query "chain of thought"`` loses its quotes to the shell, and arXiv reads
+    the bare words loosely rather than as a phrase. Measured live:
+
+    ===========================  ============
+    ``search_query``             totalResults
+    ===========================  ============
+    ``chain of thought``               87,029
+    ``all:"chain of thought"``          5,669
+    ``chain``                          71,394
+    ===========================  ============
+
+    The unquoted form returns roughly what ``chain`` alone returns. Nothing errors;
+    the operator reads "87,029 papers on chain-of-thought" and never learns their
+    phrase was not searched as one. `openalex-search` has no such trap — OpenAlex's
+    ``search=`` takes free text and handles phrasing itself.
+
+    Only a query that expresses nothing else is wrapped. A **field prefix**
+    (``ti:``, ``au:``, ...) means the user is already speaking arXiv's language. A
+    **boolean operator** means they are expressing structure, and wrapping would
+    silently change it — measured: ``chain AND thought`` matches 6,015, while
+    ``all:"chain AND thought"`` matches 5,669. An existing **double quote** means
+    they quoted deliberately. Wrapping a single word is a no-op (``transformer``
+    and ``all:"transformer"`` both match 172,792), so it costs nothing to be
+    uniform.
+    """
+    stripped = query.strip()
+    if not stripped or " " not in stripped:
+        return stripped
+    if _FIELD_TOKEN_RE.search(stripped) or _BOOLEAN_RE.search(stripped):
+        return stripped
+    quotes = stripped.count('"')
+    if quotes:
+        # An even count is the user quoting deliberately: leave it alone. An odd one
+        # is a quote that went missing, and arXiv ignores the stray character and
+        # matches loosely — the exact 15x over-match this function exists to
+        # prevent, slipping past unannounced. Refuse it before a request is spent,
+        # as `validate_search_query` refuses an unknown field.
+        if quotes % 2:
+            raise ArxivValidationError(
+                f"unbalanced quote in query {query!r}. arXiv would ignore it and "
+                "match the words loosely rather than as a phrase. Quote the whole "
+                "phrase, or drop the quote and let factlog quote it for you."
+            )
+        return stripped
+
+    if "\\" in stripped:
+        # A trailing backslash escapes the closing quote we are about to add, and
+        # arXiv rejects the query. Escaping is possible but arXiv's rules for it are
+        # undocumented; refusing is honest and costs one keystroke.
+        raise ArxivValidationError(
+            f"backslash in query {query!r} cannot be quoted safely. Supply your own "
+            'field prefix, e.g. all:"...", to search it verbatim.'
+        )
+    return f'all:"{stripped}"'
+
+
 def compose_search_query(
     query: str, categories=(), year: str | None = None, *, today: date | None = None
 ) -> str:
@@ -214,9 +278,10 @@ def compose_search_query(
 
     Shared by :meth:`ArxivClient.search` and ``arxiv-search --dry-run`` so the
     string an operator is shown is the string that would be sent — not a
-    reconstruction of it that can drift.
+    reconstruction of it that can drift. A bare multi-word query is quoted first;
+    see :func:`as_phrase`.
     """
-    clauses = [validate_search_query(query)]
+    clauses = [as_phrase(validate_search_query(query))]
     for category in categories:
         clauses.append(f"cat:{validate_category(category)}")
     if year:

@@ -3319,6 +3319,7 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     )
     from factlog.integrations.arxiv.config import (
         ArxivValidationError,
+        as_phrase,
         build_submitted_date,
         compose_search_query,
         validate_category,
@@ -3346,6 +3347,9 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     # network-free and gives one consistent error surface.
     try:
         validate_search_query(args.query)
+        # Also settles whether the query can be quoted safely: an unbalanced quote
+        # or a backslash is refused here, not at the transport.
+        phrased = as_phrase(args.query)
         for category in categories:
             validate_category(category)
         if args.sort:
@@ -3355,6 +3359,19 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     except ArxivValidationError as exc:
         print(f"factlog arxiv-search: {exc}", file=sys.stderr)
         return 1
+
+    # We quoted a bare multi-word query so arXiv searches it as a phrase (#89).
+    # Say so: silently rewriting what the operator typed is the same disservice as
+    # silently mis-searching it. stderr, so --porcelain stdout stays parseable, and
+    # before --dry-run so the notice accompanies the query it explains.
+    if phrased != args.query.strip():
+        print(
+            f"factlog arxiv-search: searching the phrase {phrased} "
+            "(a bare multi-word query is not searched as a phrase by arXiv; "
+            "supply your own field prefix or quotes to override, and widen it that "
+            "way if the phrase returns fewer results than you expect)",
+            file=sys.stderr,
+        )
 
     # --dry-run shows the query that WOULD be sent and spends no request. The
     # string comes from the same composer the client uses, so it cannot drift from
@@ -3957,7 +3974,14 @@ def build_parser() -> argparse.ArgumentParser:
         "arxiv-search",
         help="search arXiv and print results (free; non-interactive, imports nothing)",
     ))
-    ax_search.add_argument("--query", required=True, help="search text (required)")
+    ax_search.add_argument(
+        "--query", required=True,
+        help='search text (required). A bare multi-word query is searched as a '
+             'phrase — factlog sends all:"your words" — because arXiv otherwise '
+             "matches the words loosely and returns many times more results. "
+             "Override with a field prefix (ti:, au:, abs:), your own quotes, or a "
+             "boolean (AND/OR/ANDNOT). See --dry-run for the exact query sent.",
+    )
     ax_search.add_argument(
         "--category", action="append", dest="category",
         help="restrict to an arXiv category, repeatable, e.g. cs.CL (AND-combined)",
