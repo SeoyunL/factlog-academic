@@ -34,6 +34,7 @@ factlog = "factlog.cli:main"
 packages = [
     "factlog",
     "factlog.integrations",
+    "factlog.integrations.common",
     "factlog.integrations.zotero",
     "factlog.integrations.openalex",
 ]

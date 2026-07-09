@@ -148,11 +148,22 @@ class TestIdempotency:
         assert first.path.exists() and second.path.exists()
 
 
+def _distinct(key: str, **over):
+    """A different paper that happens to share the slug base.
+
+    Its DOI/PMID must differ too: identical cross-source identifiers now mean
+    "the same paper" and are skipped (§7.1), which is a separate code path from
+    slug collision.
+    """
+    fields = {"doi": f"10.1378/chest.{key}", "pmid": f"1635485{len(key)}{key[-1]}"}
+    return _parsed(zotero_key=key, **{**fields, **over})
+
+
 class TestGlobalUnique:
     def test_different_items_same_slug_get_suffix(self, tmp_path):
         w = SourceWriter()
-        a = w.write(_parsed(zotero_key="KEYA"), tmp_path)
-        b = w.write(_parsed(zotero_key="KEYB"), tmp_path)  # same author/year/title
+        a = w.write(_distinct("KEYA"), tmp_path)
+        b = w.write(_distinct("KEYB"), tmp_path)  # same author/year/title
         assert a.path != b.path
         assert b.path.name.endswith("-2.md")
         assert read_zotero_key(a.path) == "KEYA"
@@ -160,9 +171,9 @@ class TestGlobalUnique:
 
     def test_third_collision_gets_dash_three(self, tmp_path):
         w = SourceWriter()
-        w.write(_parsed(zotero_key="K1"), tmp_path)
-        w.write(_parsed(zotero_key="K2"), tmp_path)
-        c = w.write(_parsed(zotero_key="K3"), tmp_path)
+        w.write(_distinct("K1"), tmp_path)
+        w.write(_distinct("K2"), tmp_path)
+        c = w.write(_distinct("K3"), tmp_path)
         assert c.path.name.endswith("-3.md")
 
     def test_does_not_overwrite_unrelated_existing_file(self, tmp_path):
@@ -191,8 +202,8 @@ class TestPlan:
 
     def test_plan_predicts_collision_suffix_within_batch(self, tmp_path):
         w = SourceWriter()
-        a = w.plan(_parsed(zotero_key="A"), tmp_path)
-        b = w.plan(_parsed(zotero_key="B"), tmp_path)  # same slug base
+        a = w.plan(_distinct("A"), tmp_path)
+        b = w.plan(_distinct("B"), tmp_path)  # same slug base
         assert a.path.name != b.path.name
         assert b.path.name.endswith("-2.md")
         assert not (tmp_path / "sources").exists() or not list((tmp_path / "sources").glob("*.md"))
@@ -216,9 +227,87 @@ class TestPlan:
     def test_repeated_plan_predicts_batch_collisions(self, tmp_path):
         # Consecutive plans of distinct items sharing a slug base still predict -2.
         w = SourceWriter()
-        a = w.plan(_parsed(zotero_key="A"), tmp_path)
-        b = w.plan(_parsed(zotero_key="B"), tmp_path)
+        a = w.plan(_distinct("A"), tmp_path)
+        b = w.plan(_distinct("B"), tmp_path)
         assert b.path.name.endswith("-2.md") and a.path.name != b.path.name
+
+
+class TestCrossSourceDuplicates:
+    """§7.1: the same paper reached twice is detected, not written twice."""
+
+    def test_same_doi_different_zotero_key_is_skipped(self, tmp_path):
+        w = SourceWriter()
+        first = w.write(_parsed(zotero_key="KEYA"), tmp_path)
+        second = w.write(_parsed(zotero_key="KEYB"), tmp_path)  # same DOI
+        assert second.status == "skipped"
+        assert second.path == first.path
+        assert "duplicate DOI" in second.reason
+
+    def test_doi_match_is_case_insensitive(self, tmp_path):
+        w = SourceWriter()
+        w.write(_parsed(zotero_key="KEYA", doi="10.1378/CHEST.128.6.3817"), tmp_path)
+        second = w.write(_parsed(zotero_key="KEYB", doi="10.1378/chest.128.6.3817"), tmp_path)
+        assert second.status == "skipped"
+
+    def test_same_pmid_without_doi_is_skipped(self, tmp_path):
+        w = SourceWriter()
+        w.write(_parsed(zotero_key="KEYA", doi=""), tmp_path)
+        second = w.write(_parsed(zotero_key="KEYB", doi=""), tmp_path)
+        assert second.status == "skipped"
+        assert "duplicate PMID" in second.reason
+
+    def test_doi_is_checked_before_pmid(self, tmp_path):
+        # §7.1 priority: DOI is the more trustworthy match.
+        w = SourceWriter()
+        w.write(_parsed(zotero_key="KEYA"), tmp_path)
+        second = w.write(_parsed(zotero_key="KEYB", pmid="99999999"), tmp_path)
+        assert "duplicate DOI" in second.reason
+
+    def test_records_without_cross_ids_are_not_deduplicated(self, tmp_path):
+        w = SourceWriter()
+        a = w.write(_distinct("KEYA", doi="", pmid=""), tmp_path)
+        b = w.write(_distinct("KEYB", doi="", pmid=""), tmp_path)
+        assert b.status == "imported"
+        assert a.path != b.path
+
+    def test_skip_duplicates_false_writes_both(self, tmp_path):
+        w = SourceWriter(skip_duplicates=False)
+        a = w.write(_parsed(zotero_key="KEYA"), tmp_path)
+        b = w.write(_parsed(zotero_key="KEYB"), tmp_path)
+        assert b.status == "imported" and a.path != b.path
+
+    def test_detection_sees_a_file_written_by_another_integration(self, tmp_path):
+        # An OpenAlex-imported source carries no zotero_key, but its DOI still
+        # makes a later Zotero import of the same paper a duplicate.
+        sources = tmp_path / "sources"
+        sources.mkdir()
+        (sources / "garcez-2023-neurosymbolic.md").write_text(
+            '---\nopenalex_id: "W3113149630"\n'
+            'doi: "10.1378/chest.128.6.3817"\n'
+            "imported_from: openalex\n---\n\n# x\n",
+            encoding="utf-8",
+        )
+        result = SourceWriter().write(_parsed(), tmp_path)
+        assert result.status == "skipped"
+        assert result.path.name == "garcez-2023-neurosymbolic.md"
+        assert "duplicate DOI" in result.reason
+
+    def test_plan_predicts_a_cross_source_skip(self, tmp_path):
+        SourceWriter().write(_parsed(zotero_key="KEYA"), tmp_path)
+        planned = SourceWriter().plan(_parsed(zotero_key="KEYB"), tmp_path)
+        assert planned.status == "skipped" and "duplicate DOI" in planned.reason
+
+    def test_annotation_companion_files_do_not_shadow_their_parent(self, tmp_path):
+        # <stem>-notes.md carries a zotero_key but no doi; it must not be the
+        # match for its own parent item on re-import.
+        sources = tmp_path / "sources"
+        sources.mkdir()
+        (sources / "x-notes.md").write_text(
+            '---\nzotero_key: "ABCD1234"\nsource_kind: annotations\n---\n\n# notes\n',
+            encoding="utf-8",
+        )
+        result = SourceWriter().write(_parsed(), tmp_path)
+        assert result.status == "imported"
 
 
 class TestReadZoteroKey:
