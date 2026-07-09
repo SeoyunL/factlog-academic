@@ -91,6 +91,11 @@ class ArxivSourceWriter(BaseSourceWriter):
     # or DOI), the arXiv deposit is folded into that original's provenance sidecar
     # instead of writing a second file. OpenAlex now merges too; Zotero does not.
     merges_cross_source = True
+    # A paper imported from arXiv that resembles an existing source but shares no
+    # DOI/arXiv id surfaces a title+author+year *candidate* for a human (#75). It
+    # never merges and never changes the ``imported`` outcome. OpenAlex opts in too;
+    # Zotero does not.
+    surfaces_candidates = True
     # The fields whose change an *import* has no authority to absorb. A version
     # bump means the deposit itself moved; a withdrawal is a signal the human gate
     # must see. Everything else — ``comment``, ``primary_category``,

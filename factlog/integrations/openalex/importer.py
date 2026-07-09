@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from factlog.integrations.common.front_matter import read_scalar
+from factlog.integrations.common.source_writer import CandidateMatch
 from factlog.integrations.openalex.api_client import OpenAlexClient, OpenAlexError
 from factlog.integrations.openalex.config import OpenAlexConfig
 from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
@@ -35,6 +36,11 @@ class WorkOutcome:
     OpenAlex view was folded into that original's provenance sidecar (§7.3, #73)
     rather than written as a second file; ``path`` names that existing original. A
     merge is a success — it does not affect the exit code.
+
+    ``candidate`` is a title+author+year match surfaced for a human (#75): the paper
+    still imported as a new file (``status`` stays ``"imported"``), but it resembles
+    an existing source that shares no exact identifier. It is a field, never a status
+    — the counters and exit code are untouched.
     """
 
     status: str  # "imported" | "skipped" | "error" | "merged"
@@ -42,11 +48,17 @@ class WorkOutcome:
     title: str
     path: Path | None = None
     reason: str = ""
+    candidate: CandidateMatch | None = None
 
 
 @dataclass
 class ImportReport:
     outcomes: list[WorkOutcome] = field(default_factory=list)
+    #: Why the merge-candidate ledger could not be consulted, if it could not.
+    #: The import still succeeded; the #75 fallback was disabled for this run, and
+    #: the CLI must say so — a silently disabled check is the failure that layer
+    #: exists to prevent.
+    candidate_ledger_error: str | None = None
 
     def _count(self, status: str) -> int:
         return sum(1 for o in self.outcomes if o.status == status)
@@ -66,6 +78,12 @@ class ImportReport:
     @property
     def errors(self) -> int:
         return self._count("error")
+
+    @property
+    def candidates(self) -> list[WorkOutcome]:
+        """Imported works that surfaced a title+author+year candidate (#75), in
+        report order — the CLI reports one line per entry."""
+        return [o for o in self.outcomes if o.candidate is not None]
 
 
 def parse_works(raw_works) -> list[ParsedWork]:
@@ -111,8 +129,10 @@ def import_works(
                 title=work.title or "(untitled)",
                 path=result.path,
                 reason=result.reason,
+                candidate=result.candidate,
             )
         )
+    report.candidate_ledger_error = writer.candidate_ledger_error
     return report
 
 
