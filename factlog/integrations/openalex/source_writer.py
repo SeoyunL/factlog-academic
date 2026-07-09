@@ -70,6 +70,11 @@ class OpenAlexSourceWriter(BaseSourceWriter):
     # BOTH jobs on purpose — see :meth:`BaseSourceWriter._record` for why splitting
     # them would make the ledger order-dependent.
     merges_cross_source = True
+    # A paper imported from OpenAlex that resembles an existing source but shares no
+    # DOI/PMID/arXiv id surfaces a title+author+year *candidate* for a human (#75).
+    # It never merges and never changes the ``imported`` outcome. arXiv opts in too;
+    # Zotero does not (a Zotero item is the user's own view, not a database's).
+    surfaces_candidates = True
     # EMPTY, and that is the whole design (#73). Any identifying field would raise
     # a per-id ``error`` on drift, and OpenAlex has NO refresh command — nothing
     # calls ``update_source`` for it — so that error would be permanently
