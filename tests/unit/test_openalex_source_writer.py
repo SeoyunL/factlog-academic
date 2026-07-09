@@ -80,7 +80,7 @@ class TestRender:
             _work(journal=None, doi=None, pmid=None, concepts=(), primary_topic=None,
                   cited_by_count=None, work_type=None, year=None, abstract="",
                   abstract_complete=None)))
-        for absent in ("journal:", "doi:", "pmid:", "tags:", "cited_by_count:",
+        for absent in ("journal:", "doi:", "pmid:", "arxiv_id:", "tags:", "cited_by_count:",
                        "type:", "year:", "openalex_concepts:", "primary_topic:",
                        "abstract_complete:"):
             assert absent not in fm
@@ -94,6 +94,16 @@ class TestRender:
         text = OpenAlexSourceWriter().render(_work(pmid="32738937"))
         assert 'pmid: "32738937"' in _front_matter(text)
         assert "- PMID: 32738937" in text
+
+    def test_arxiv_id_is_emitted_when_present(self):
+        # The canonical base id, as a bare `arxiv_id:` key the cross-source index
+        # and the arXiv writer both read (#64).
+        fm = _front_matter(OpenAlexSourceWriter().render(_work(arxiv_id="2005.13421")))
+        assert 'arxiv_id: "2005.13421"' in fm
+
+    def test_arxiv_id_is_omitted_when_absent(self):
+        fm = _front_matter(OpenAlexSourceWriter().render(_work()))
+        assert "arxiv_id:" not in fm
 
     def test_control_characters_cannot_break_the_front_matter(self):
         fm = _front_matter(OpenAlexSourceWriter().render(_work(title='a\nb: "c"')))

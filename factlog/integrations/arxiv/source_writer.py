@@ -80,6 +80,7 @@ class ArxivSourceWriter(BaseSourceWriter):
     """Render parsed arXiv works into ``sources/`` markdown originals."""
 
     identity_key = "arxiv_id"
+    source_name = "arxiv"
 
     def identity_of(self, parsed: ParsedArxivWork) -> str:
         # The BASE id, never versioned_id: P3 idempotence keys on it, so a later

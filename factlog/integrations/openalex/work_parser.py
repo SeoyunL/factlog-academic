@@ -25,7 +25,9 @@ usable work id is the one hard error, since nothing downstream can address it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
+from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
 from factlog.integrations.openalex.abstract_util import index_is_complete, restore_abstract
 from factlog.integrations.openalex.api_client import (
     OpenAlexError,
@@ -85,6 +87,7 @@ class ParsedWork:
     journal: str | None = None
     doi: str | None = None
     pmid: str | None = None
+    arxiv_id: str | None = None
     concepts: tuple[Concept, ...] = ()
     primary_topic: PrimaryTopic | None = None
     cited_by_count: int | None = None
@@ -203,6 +206,49 @@ def _pmid(work: dict) -> str | None:
     return _optional(normalize_pmid, ids.get("pmid"))
 
 
+def _is_arxiv_host(url: str) -> bool:
+    """True when ``url``'s host is arxiv.org or a subdomain (e.g. export.arxiv.org).
+
+    The host filter is what lets us feed a URL to :func:`normalize_arxiv_id`
+    safely: it admits ``export.arxiv.org`` while excluding non-arXiv preprint
+    servers (bioRxiv, SSRN) and — critically — the ``https://doi.org/10.48550/
+    arxiv...`` shape that appears in real ``locations[]`` and that the normalizer
+    would raise on. ``endswith(".arxiv.org")`` (not ``endswith("arxiv.org")``)
+    avoids admitting a look-alike host such as ``notarxiv.org``.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    return host == "arxiv.org" or host.endswith(".arxiv.org")
+
+
+def _arxiv_id(work: dict) -> str | None:
+    """The canonical arXiv base id for this work, from ``locations[]``, or None.
+
+    The id lives in ``locations[]``, never in ``ids`` (measured: 0/5 in #57).
+    ``best_oa_location`` is not read — for a published paper it points at the
+    journal, not arXiv. Iterate locations in order; per location try
+    ``landing_page_url`` then ``pdf_url``; keep only arXiv-hosted URLs; run each
+    through the shared :func:`normalize_arxiv_id` (skipping anything it rejects);
+    take the first that parses. Every version of a paper collapses to the same
+    base, so "first" is deterministic and version-independent. The canonical base
+    is emitted so the file matches the read-side normalization.
+    """
+    locations = work.get("locations")
+    if not isinstance(locations, list):
+        return None
+    for location in locations:
+        if not isinstance(location, dict):
+            continue
+        for field_name in ("landing_page_url", "pdf_url"):
+            url = location.get(field_name)
+            if not isinstance(url, str) or not url.strip() or not _is_arxiv_host(url):
+                continue
+            try:
+                return normalize_arxiv_id(url).base
+            except ArxivIdError:
+                continue
+    return None
+
+
 def _score(value: object) -> float | None:
     """A concept/topic score as a float, or None when absent or non-numeric."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -314,6 +360,7 @@ def parse_work(work: object) -> ParsedWork:
         journal=_journal(work),
         doi=_optional(normalize_doi, work.get("doi")),
         pmid=_pmid(work),
+        arxiv_id=_arxiv_id(work),
         concepts=_concepts(work),
         primary_topic=_primary_topic(work),
         cited_by_count=_count(work.get("cited_by_count")),
