@@ -653,3 +653,164 @@ class TestAnUnquotableQueryFailsBeforeTheTransport:
         out = capsys.readouterr().out
         assert "phrase" in out
         assert 'all:"' in out
+
+
+class TestSearchImport:
+    """arxiv-search now imports the chosen results through the single-id
+    importer, sharing openalex-search's selector (#81)."""
+
+    def test_all_imports_every_result(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1706.03762"), _work("1810.04805")]))
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb), "--all"]) == 0
+        assert len(sources(kb)) == 2
+        assert "Imported: 2" in capsys.readouterr().out
+
+    def test_interactive_selection_imports_chosen_numbers(self, tmp_path, fake, monkeypatch):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[
+            _work("1706.03762"), _work("1810.04805"), _work("2005.14165")]))
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda *_: "1,3")
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb)]) == 0
+        assert len(sources(kb)) == 2
+
+    def test_interactive_none_writes_nothing(self, tmp_path, fake, monkeypatch):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient())
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda *_: "none")
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb)]) == 0
+        assert sources(kb) == []
+
+    def test_interactive_all_imports_everything(self, tmp_path, fake, monkeypatch):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1706.03762"), _work("1810.04805")]))
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda *_: "all")
+        run(["arxiv-search", "--query", "q", "--target", str(kb)])
+        assert len(sources(kb)) == 2
+
+    def test_duplicate_selection_imports_once(self, tmp_path, fake, monkeypatch):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1706.03762")]))
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda *_: "1,1")
+        run(["arxiv-search", "--query", "q", "--target", str(kb)])
+        assert len(sources(kb)) == 1
+
+    def test_without_a_tty_nothing_is_imported_and_never_prompts(
+            self, tmp_path, fake, monkeypatch, capsys):
+        # A command that cannot ask must not guess (#81). No prompt, nothing written.
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient())
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(
+            "builtins.input", lambda *_: pytest.fail("must not prompt without a tty"))
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb)]) == 0
+        assert sources(kb) == []
+        assert "Nothing selected" in capsys.readouterr().out
+
+    def test_porcelain_never_prompts_and_selects_nothing(
+            self, tmp_path, fake, monkeypatch):
+        # --porcelain is non-interactive even on a TTY: input() is never called.
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient())
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(
+            "builtins.input", lambda *_: pytest.fail("must not prompt in porcelain"))
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb), "--porcelain"]) == 0
+        assert sources(kb) == []
+
+    def test_out_of_range_token_is_ignored_naming_arxiv_search(
+            self, tmp_path, fake, monkeypatch, capsys):
+        # The shared selector names *this* command in the "ignoring" message; the
+        # rest of the selection still imports.
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1706.03762")]))
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda *_: "1,9,abc")
+        run(["arxiv-search", "--query", "q", "--target", str(kb)])
+        assert len(sources(kb)) == 1
+        err = capsys.readouterr().err
+        assert "factlog arxiv-search: ignoring '9'" in err
+        assert "factlog arxiv-search: ignoring 'abc'" in err
+
+    def test_dry_run_after_selection_writes_nothing(self, tmp_path, fake, monkeypatch):
+        # --dry-run keeps its #80 meaning (preview the query, import nothing): even
+        # on a TTY it must not prompt, and no .md, ledger or candidate is written.
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1706.03762")]))
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(
+            "builtins.input", lambda *_: pytest.fail("--dry-run must not prompt"))
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb), "--dry-run"]) == 0
+        assert sources(kb) == []
+        assert not (kb / "source-provenance").exists()
+        assert not (kb / "merge-candidates").exists()
+
+
+class TestSearchImportWithdrawal:
+    def test_good_and_withdrawn_both_import_and_the_withdrawal_warns_on_stderr(
+            self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[
+            _work("1706.03762", title="Live"),
+            _work("1904.09773", withdrawn_by="admin", title="Gone")]))
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb), "--all"]) == 0
+        assert len(sources(kb)) == 2  # both import
+        captured = capsys.readouterr()
+        assert "1904.09773v5 as withdrawn (by arXiv administrators)" in captured.err
+        assert "retracted" not in captured.err.lower()
+
+    def test_a_withdrawn_result_is_flagged_before_selection_naming_the_agent(
+            self, tmp_path, fake, monkeypatch, capsys):
+        # The flag appears in the listing, agent named, before input() is called.
+        kb = _kb(tmp_path)
+        fake(FakeSearchClient(works=[_work("1904.09773", withdrawn_by="admin")]))
+        order = []
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+
+        def _input(*_):
+            order.append("prompt")
+            return "none"
+
+        monkeypatch.setattr("builtins.input", _input)
+        run(["arxiv-search", "--query", "q", "--target", str(kb)])
+        out = capsys.readouterr().out
+        listed = out.index("WITHDRAWN (by arXiv administrators)")
+        # The listing (stdout) named the agent; the prompt fired afterwards.
+        assert listed >= 0 and order == ["prompt"]
+        assert "retracted" not in out.lower()
+
+
+class TestSearchImportMerge:
+    """Search-then-import is where a duplicate is likely: a query returns a paper
+    the KB already has via OpenAlex. It must merge (#65), not write a second file."""
+
+    def test_selecting_a_paper_already_present_via_openalex_reports_merged(
+            self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        existing = _seed_openalex(kb)
+        before = existing.stat().st_mtime_ns
+        fake(FakeSearchClient(works=[_work("1706.03762")]))
+        code = run(["arxiv-search", "--query", "q", "--target", str(kb), "--all"])
+        assert code == 0  # a merge is a success, not an error
+        out = capsys.readouterr().out
+        assert "Merged:   1" in out
+        assert "Errors:   0" in out
+        # No second .md, and the original was not rewritten.
+        assert len(sources(kb)) == 1
+        assert existing.stat().st_mtime_ns == before
+
+    def test_merge_porcelain_reports_merged_line(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _seed_openalex(kb)
+        fake(FakeSearchClient(works=[_work("1706.03762")]))
+        assert run(["arxiv-search", "--query", "q", "--target", str(kb),
+                    "--all", "--porcelain"]) == 0
+        rows = dict(line.split("\t", 1)
+                    for line in capsys.readouterr().out.strip().splitlines()
+                    if "\t" in line and not line.startswith(("result", "found")))
+        assert rows["merged"] == "1"
+        assert rows["imported"] == "0"
