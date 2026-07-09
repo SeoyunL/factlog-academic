@@ -28,17 +28,24 @@ The sidecar is a sibling *directory* of ``sources/``, never a file inside it::
     <kb>/source-provenance/foo.json  <- mutable provenance ledger
 
 Placing it outside ``sources/`` is what makes it invisible to source
-enumeration: every walker in the repo is rooted at
-``common.SOURCE_ROOTS = ("sources", "runs/sources")``, so a file under
-``source-provenance/`` cannot be picked up as a source by ``factlog sources``,
-``factlog status`` (coverage), ``factlog export`` or any future enumerator —
-structurally, not by a promise each call site must keep. It is deliberately not
-named ``provenance/``: ``factlog provenance <TERM>`` already answers "which
-source did this fact come from", and a directory of source-record ledgers under
-the same word would collide.
+enumeration. Every walker either resolves ``common.SOURCE_ROOTS`` (``source_files()``,
+used by ``factlog status``/coverage and ``tools/coverage.py``) or hardcodes the
+same two names (``factlog sources`` at ``cli.py:745``, the stale-ref audit at
+``cli.py:2422``). Either way none of them descends into a sibling directory, so a
+sidecar cannot be picked up as a source document — structurally, rather than by a
+promise each call site must keep. A sidecar placed *inside* ``sources/`` is
+counted as a source and the user is told to run ``sync`` on it; that was measured,
+and it is why this directory exists.
+
+It is deliberately not named ``provenance/``: ``factlog provenance <TERM>``
+already answers "which source did this fact come from", and a directory of
+source-record ledgers under the same word would collide.
 
 ``sidecar_path`` owns the naming rule; it is the only place that knows a sidecar
-lives under ``source-provenance/``.
+lives under ``source-provenance/``. It preserves any subdirectory a source sits
+in, because the enumerators above use ``rglob`` and ``ingest`` mirrors an
+original's subtree — a stem-only mapping would silently merge the ledgers of
+``sources/a/x.md`` and ``sources/b/x.md``.
 
 ## Determinism contract
 
@@ -103,7 +110,7 @@ def is_sidecar(path: Path | str) -> bool:
     filter a listing without a stat.
     """
     p = Path(path)
-    return p.suffix == SIDECAR_SUFFIX and p.parent.name == SIDECAR_DIR
+    return p.suffix == SIDECAR_SUFFIX and SIDECAR_DIR in p.parts[:-1]
 
 
 def sidecar_path(source_path: Path | str) -> Path:
@@ -121,8 +128,24 @@ def sidecar_path(source_path: Path | str) -> Path:
         sources/report.pdf          -> source-provenance/report.json
     """
     src = Path(source_path)
-    kb_root = src.parent.parent  # parent of sources/ == KB root
-    return kb_root / SIDECAR_DIR / (src.stem + SIDECAR_SUFFIX)
+    parts = src.parts
+    # Anchor on the innermost `sources/` component rather than assuming the file
+    # sits directly inside it. `src.parent.parent` would place the sidecar for
+    # `sources/a/x.md` at `sources/source-provenance/x.json` — *inside* the very
+    # directory the sidecar must stay out of — and would collide with
+    # `sources/b/x.md`, silently merging two papers' ledgers into one file.
+    for index in range(len(parts) - 2, -1, -1):
+        if parts[index] == "sources":
+            break
+    else:
+        raise ValueError(
+            f"{src} is not under a 'sources/' directory; there is no KB root to "
+            "anchor a provenance sidecar to."
+        )
+    kb_root = Path(*parts[:index]) if index else Path()
+    # The path *below* sources/ is preserved, so nested sources cannot collide.
+    relative = Path(*parts[index + 1:]).with_suffix(SIDECAR_SUFFIX)
+    return kb_root / SIDECAR_DIR / relative
 
 
 @dataclass(frozen=True)
@@ -163,6 +186,16 @@ class SourceRecord:
             type_, id_, imported_at = data["type"], data["id"], data["imported_at"]
         except (KeyError, TypeError) as exc:
             raise ProvenanceError(f"record missing a required field: {data!r}") from exc
+        # Types are enforced at the read boundary. A non-string `id` survives a
+        # round-trip through json, then makes `_serialize`'s sort compare an int
+        # against a str and die with a bare TypeError at *write* time — far from
+        # the corrupt file that caused it.
+        for name, value in (("type", type_), ("id", id_), ("imported_at", imported_at)):
+            if not isinstance(value, str):
+                raise ProvenanceError(
+                    f"record field {name!r} must be a string, got "
+                    f"{type(value).__name__}: {data!r}"
+                )
         extras = {k: v for k, v in data.items() if k not in _RESERVED_KEYS}
         return cls(type=type_, id=id_, imported_at=imported_at, fields=extras)
 
@@ -208,9 +241,40 @@ def add_source(provenance: Provenance, record: SourceRecord) -> Provenance:
             if existing.to_dict() != incoming:
                 raise ProvenanceConflict(
                     f"provenance already has a different {record.type} record "
-                    f"for id {record.id!r}; refusing to overwrite an audit entry"
+                    f"for id {record.id!r}; refusing to overwrite an audit entry. "
+                    "Use update_source() if the upstream record legitimately changed."
                 )
             return provenance  # identical -> idempotent no-op
+    provenance.records.append(record)
+    return provenance
+
+
+def update_source(provenance: Provenance, record: SourceRecord) -> Provenance:
+    """Replace the record with *record*'s ``(type, id)``, or append it if absent.
+    Mutates and returns *provenance*.
+
+    The deliberate counterpart to :func:`add_source`. An arXiv paper's version,
+    ``last_updated`` and ``comment`` change upstream over time, and recording
+    that change is the entire purpose of ``arxiv-check-versions --auto-update``
+    (#58). That command must not have to catch :class:`ProvenanceConflict` to do
+    its normal job, and it must not be tempted to delete-then-add.
+
+    The split is the point. :func:`add_source` is what an *import* calls: it has
+    no authority to revise an existing entry, so divergence is an error. This is
+    what a *refresh* calls: it has explicitly gone to the upstream API to learn
+    the new value, so replacement is the correct outcome. Which function the
+    caller reaches for records what kind of write it believes it is making.
+
+    Replacing is safe for the audit story because the ledger records *where a
+    source came from*, not a history of the tool's observations of it. A version
+    bump does not invalidate the earlier import (#57 §6.1) — it means the source
+    evolved, and the ledger should describe the source as it is now. Whether the
+    KB entry should change remains a human decision (P1).
+    """
+    for index, existing in enumerate(provenance.records):
+        if existing.key == record.key:
+            provenance.records[index] = record
+            return provenance
     provenance.records.append(record)
     return provenance
 
@@ -238,14 +302,43 @@ def read_provenance(path: Path | str) -> Provenance:
         raise ProvenanceError(f"sidecar is not valid JSON: {p}") from exc
     if not isinstance(data, Mapping):
         raise ProvenanceError(f"sidecar is not a JSON object: {p}")
-    raw_records = data.get("records", [])
+
+    # A file this module wrote always carries both keys. Their absence means the
+    # file is not provenance, and reading it as an empty ledger would let the
+    # next write erase whatever it really was.
+    for required in ("schema_version", "records"):
+        if required not in data:
+            raise ProvenanceError(f"sidecar has no {required!r} key: {p}")
+
+    schema_version = data["schema_version"]
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        raise ProvenanceError(f"sidecar 'schema_version' is not an integer: {p}")
+    # A newer factlog may lay records out incompatibly. Reading such a file as if
+    # it were v1 would misparse it, and the next write would overwrite it with
+    # the misparse. Refusing is the only safe move.
+    if schema_version > SCHEMA_VERSION:
+        raise ProvenanceError(
+            f"sidecar schema_version {schema_version} is newer than this factlog "
+            f"understands (max {SCHEMA_VERSION}): {p}"
+        )
+
+    raw_records = data["records"]
     if not isinstance(raw_records, list):
         raise ProvenanceError(f"sidecar 'records' is not a list: {p}")
-    schema_version = data.get("schema_version", SCHEMA_VERSION)
-    return Provenance(
-        schema_version=schema_version,
-        records=[SourceRecord.from_dict(r) for r in raw_records],
-    )
+
+    records = [SourceRecord.from_dict(r) for r in raw_records]
+    # `add_source` guarantees one record per (type, id). A file that violates it
+    # was not written by this module, and a read-modify-write of it would pick an
+    # arbitrary one of the duplicates to compare against.
+    seen: set[tuple[str, str]] = set()
+    for record in records:
+        if record.key in seen:
+            raise ProvenanceError(
+                f"sidecar has two {record.type} records for id {record.id!r}: {p}"
+            )
+        seen.add(record.key)
+
+    return Provenance(schema_version=schema_version, records=records)
 
 
 def write_provenance(path: Path | str, provenance: Provenance) -> None:
