@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from factlog.integrations.openalex.abstract_util import restore_abstract
+from factlog.integrations.openalex.abstract_util import index_is_complete, restore_abstract
 from factlog.integrations.openalex.api_client import (
     OpenAlexError,
     normalize_doi,
@@ -42,12 +42,40 @@ _AUTHOR_POSITION_ORDER = {"first": 0, "middle": 1, "last": 2}
 
 
 @dataclass(frozen=True)
+class Concept:
+    """One OpenAlex concept, with the score that decides whether it becomes a tag."""
+
+    name: str
+    score: float | None = None
+    level: int | None = None
+
+
+@dataclass(frozen=True)
+class PrimaryTopic:
+    """The work's top-scored topic and its four-level hierarchy.
+
+    ``score`` is carried because ``primary_topic`` is simply the highest-scoring
+    entry of ``topics[]`` — and that score can be 0.06. Recording the name alone
+    would state a confident classification for a work that has none.
+    """
+
+    display_name: str
+    score: float | None = None
+    subfield: str | None = None
+    field: str | None = None
+    domain: str | None = None
+
+
+@dataclass(frozen=True)
 class ParsedWork:
     """An OpenAlex work reduced to the fields a factlog source file records.
 
     ``openalex_is_retracted`` is named for its source rather than as a bare
     ``retracted`` on purpose: it is one source's opinion, and a contradicted one
     (see module docstring). §7.3's per-source provenance is where it belongs.
+
+    ``concepts`` is the full scored list. The subset that becomes the source's
+    ``tags`` is :attr:`tags` — see its docstring for why the cut is at zero.
     """
 
     openalex_id: str
@@ -57,11 +85,13 @@ class ParsedWork:
     journal: str | None = None
     doi: str | None = None
     pmid: str | None = None
-    concepts: tuple[str, ...] = ()
+    concepts: tuple[Concept, ...] = ()
+    primary_topic: PrimaryTopic | None = None
     cited_by_count: int | None = None
     work_type: str | None = None
     openalex_is_retracted: bool = False
     abstract: str = ""
+    abstract_complete: bool | None = None
     mesh_terms: tuple[str, ...] = ()
 
     @property
@@ -72,6 +102,28 @@ class ParsedWork:
     @property
     def has_abstract(self) -> bool:
         return bool(self.abstract)
+
+    @property
+    def tags(self) -> tuple[str, ...]:
+        """Concept names with a positive score, most confident first (#54).
+
+        Across 8 sampled papers, 12 of the 13 concepts that were clearly unrelated
+        to the paper's subject scored exactly ``0.00`` (``Paleontology`` on a
+        PDE-solver paper, ``Visual arts`` on an object detector). Cutting at zero
+        drops 92% of that noise while keeping ~11 concepts per paper; every higher
+        threshold removed true parents without removing more noise.
+
+        A concept whose score is *missing* is excluded rather than assumed good:
+        tags seed canonical aliases, so an unknown-confidence term is not worth a
+        wrong alias. If OpenAlex ever stopped emitting scores this yields empty
+        tags — a visible failure, not a silent flood of noise.
+
+        The filter cannot remove wrong-sense entities (``Object (grammar)`` on an
+        object-detection paper) — they score like good tags. The P1 human gate is
+        what catches those.
+        """
+        scored = [c for c in self.concepts if isinstance(c.score, float) and c.score > 0]
+        return tuple(c.name for c in sorted(scored, key=lambda c: -c.score))
 
 
 def _text(value: object) -> str | None:
@@ -151,6 +203,54 @@ def _pmid(work: dict) -> str | None:
     return _optional(normalize_pmid, ids.get("pmid"))
 
 
+def _score(value: object) -> float | None:
+    """A concept/topic score as a float, or None when absent or non-numeric."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _level(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _concepts(work: dict) -> tuple[Concept, ...]:
+    items = work.get("concepts")
+    if not isinstance(items, list):
+        return ()
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = _text(item.get("display_name"))
+        if name:
+            out.append(Concept(name, _score(item.get("score")), _level(item.get("level"))))
+    return tuple(out)
+
+
+def _primary_topic(work: dict) -> PrimaryTopic | None:
+    topic = work.get("primary_topic")
+    if not isinstance(topic, dict):
+        return None
+    name = _text(topic.get("display_name"))
+    if not name:
+        return None
+
+    def nested(key: str) -> str | None:
+        node = topic.get(key)
+        return _text(node.get("display_name")) if isinstance(node, dict) else None
+
+    return PrimaryTopic(
+        display_name=name,
+        score=_score(topic.get("score")),
+        subfield=nested("subfield"),
+        field=nested("field"),
+        domain=nested("domain"),
+    )
+
+
 def _named(items: object, key: str) -> tuple[str, ...]:
     if not isinstance(items, list):
         return ()
@@ -172,6 +272,9 @@ def parse_work(work: object) -> ParsedWork:
         raise OpenAlexError("OpenAlex work payload has no 'id'.")
     openalex_id = normalize_work_id(raw_id)
 
+    index = work.get("abstract_inverted_index")
+    abstract = restore_abstract(index)
+
     return ParsedWork(
         openalex_id=openalex_id,
         # `title` is the spec's field; `display_name` carries the same string and
@@ -182,10 +285,16 @@ def parse_work(work: object) -> ParsedWork:
         journal=_journal(work),
         doi=_optional(normalize_doi, work.get("doi")),
         pmid=_pmid(work),
-        concepts=_named(work.get("concepts"), "display_name"),
+        concepts=_concepts(work),
+        primary_topic=_primary_topic(work),
         cited_by_count=_count(work.get("cited_by_count")),
         work_type=_text(work.get("type")),
         openalex_is_retracted=work.get("is_retracted") is True,
-        abstract=restore_abstract(work.get("abstract_inverted_index")),
+        abstract=abstract,
+        # Only meaningful when there *is* an abstract; None says "nothing to judge".
+        abstract_complete=index_is_complete(index) if abstract else None,
+        # A flat descriptor list. OpenAlex's `is_major_topic` is deliberately not
+        # read: it mirrors PubMed's descriptor-level flag and drops qualifier-level
+        # majorness, which NLM used for most of PubMed's history (#53).
         mesh_terms=_named(work.get("mesh"), "descriptor_name"),
     )

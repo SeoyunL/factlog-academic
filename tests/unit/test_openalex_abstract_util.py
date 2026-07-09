@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from factlog.integrations.openalex.abstract_util import has_abstract, restore_abstract
+from factlog.integrations.openalex.abstract_util import (
+    has_abstract,
+    index_is_complete,
+    restore_abstract,
+)
 
 
 class TestRestoreAbstract:
@@ -60,6 +64,39 @@ class TestRestoreAbstract:
     def test_restoration_is_stable_across_calls(self):
         index = {"b": [1], "a": [0], "c": [2, 4], "d": [3]}
         assert restore_abstract(index) == restore_abstract(index) == "a b c d c"
+
+
+class TestIndexIsComplete:
+    """Feeds the `abstract_complete` front-matter flag."""
+
+    def test_true_for_a_contiguous_index(self):
+        assert index_is_complete({"a": [0], "b": [1], "c": [2]}) is True
+
+    def test_true_when_a_word_repeats_at_distinct_positions(self):
+        assert index_is_complete({"the": [0, 2], "cat": [1], "hat": [3]}) is True
+
+    def test_false_for_a_gap(self):
+        assert index_is_complete({"a": [0], "b": [1], "d": [3]}) is False
+
+    def test_false_when_the_index_does_not_start_at_zero(self):
+        assert index_is_complete({"b": [1], "c": [2]}) is False
+
+    def test_false_for_a_duplicate_position(self):
+        # Two words claiming one slot means restore_abstract dropped one.
+        assert index_is_complete({"first": [0], "second": [0]}) is False
+
+    @pytest.mark.parametrize("empty", [None, {}, "", [], 0])
+    def test_false_for_a_missing_or_malformed_index(self, empty):
+        assert index_is_complete(empty) is False
+
+    def test_false_when_every_entry_is_junk(self):
+        assert index_is_complete({"bad": ["x"], "worse": None}) is False
+
+    def test_junk_entries_do_not_make_a_complete_index_look_gapped(self):
+        # The junk position is skipped by both functions, so they agree.
+        index = {"a": [0], "b": [1], "junk": ["x"]}
+        assert restore_abstract(index) == "a b"
+        assert index_is_complete(index) is True
 
 
 class TestHasAbstract:

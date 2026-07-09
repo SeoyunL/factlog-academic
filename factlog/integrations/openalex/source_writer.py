@@ -28,6 +28,26 @@ from factlog.integrations.openalex.work_parser import ParsedWork
 
 __all__ = ["OpenAlexSourceWriter", "WriteResult"]
 
+def _scored_concepts(concepts) -> str:
+    """Every concept with its score and level, as a one-line YAML flow sequence.
+
+    Kept in full because the ``tags`` filter is lossy by design (#54 §4.3: nothing
+    measured is discarded). Written on a single line for the same reason
+    :meth:`OpenAlexSourceWriter._primary_topic_lines` is flat — an indented
+    ``score:`` would be misread as a top-level front-matter key by
+    :func:`factlog.bibtex.parse_front_matter`.
+    """
+    parts = []
+    for concept in concepts:
+        fields = [f"name: {_yaml_str(concept.name)}"]
+        if concept.score is not None:
+            fields.append(f"score: {concept.score:.4f}")
+        if concept.level is not None:
+            fields.append(f"level: {concept.level}")
+        parts.append("{" + ", ".join(fields) + "}")
+    return "[" + ", ".join(parts) + "]"
+
+
 _RETRACTION_WARNING = (
     "> ⚠ **OpenAlex flags this work as retracted.** This flag is unverified: "
     "OpenAlex has false positives. Confirm against PubMed before relying on it."
@@ -69,18 +89,46 @@ class OpenAlexSourceWriter(BaseSourceWriter):
             lines.append(f"doi: {_yaml_str(parsed.doi)}")
         if parsed.pmid:
             lines.append(f"pmid: {_yaml_str(parsed.pmid)}")
-        if parsed.concepts:
-            lines.append(f"concepts: {_yaml_list(parsed.concepts)}")
+        if parsed.tags:
+            lines.append(f"tags: {_yaml_list(parsed.tags)}")
         if parsed.cited_by_count is not None:
             lines.append(f"cited_by_count: {parsed.cited_by_count}")
+        if parsed.abstract_complete is not None:
+            lines.append(f"abstract_complete: {'true' if parsed.abstract_complete else 'false'}")
+        lines.extend(self._primary_topic_lines(parsed))
         lines.append("imported_from: openalex")
         if imported_at:
             lines.append(f"imported_at: {_yaml_str(imported_at)}")
         # Source-scoped on purpose; see the module docstring.
         if parsed.openalex_is_retracted:
             lines.append("openalex_is_retracted: true")
+        if parsed.concepts:
+            lines.append(f"openalex_concepts: {_scored_concepts(parsed.concepts)}")
         lines.append("---")
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _primary_topic_lines(parsed: ParsedWork) -> list[str]:
+        """`primary_topic` and its hierarchy, one flat key per level.
+
+        Flat rather than a nested mapping: :func:`factlog.bibtex.parse_front_matter`
+        strips each line before matching ``key: value``, so an indented ``score:``
+        or ``field:`` would be read as a *top-level* key and pollute the export.
+        """
+        topic = parsed.primary_topic
+        if topic is None:
+            return []
+        lines = [f"primary_topic: {_yaml_str(topic.display_name)}"]
+        # The score is not decoration: primary_topic is just the top entry of
+        # topics[], and that can score 0.06 (#54). A reader must see how confident
+        # the classification is.
+        if topic.score is not None:
+            lines.append(f"primary_topic_score: {topic.score:.4f}")
+        for key, value in (("subfield", topic.subfield), ("field", topic.field),
+                           ("domain", topic.domain)):
+            if value:
+                lines.append(f"primary_topic_{key}: {_yaml_str(value)}")
+        return lines
 
     def _body(self, parsed: ParsedWork) -> str:
         parts = [f"\n# {parsed.title or 'Untitled'}\n"]

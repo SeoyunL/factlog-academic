@@ -44,6 +44,34 @@ def restore_abstract(inverted_index: object) -> str:
     return " ".join(positions[index] for index in sorted(positions))
 
 
+def index_is_complete(inverted_index: object) -> bool:
+    """True when every position from 0 to the highest is claimed exactly once.
+
+    A sparse index means :func:`restore_abstract` dropped a token, and a repeated
+    position means it dropped a word. Callers record the answer as
+    ``abstract_complete`` so downstream logic can tell a faithful abstract from a
+    lossy one without re-fetching the work.
+
+    An empty or malformed index has nothing to be complete about; the caller is
+    expected to check for an abstract first.
+    """
+    if not isinstance(inverted_index, dict) or not inverted_index:
+        return False
+
+    positions: list[int] = []
+    for word, position_list in inverted_index.items():
+        if not isinstance(word, str) or not isinstance(position_list, (list, tuple)):
+            continue
+        for position in position_list:
+            if not isinstance(position, int) or isinstance(position, bool) or position < 0:
+                continue
+            positions.append(position)
+
+    if not positions:
+        return False
+    return sorted(positions) == list(range(max(positions) + 1))
+
+
 def has_abstract(work: object) -> bool:
     """True when the work carries a non-empty inverted index."""
     if not isinstance(work, dict):
