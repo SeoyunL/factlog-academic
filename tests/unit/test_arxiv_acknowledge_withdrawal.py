@@ -566,14 +566,16 @@ class TestRefusesBeforeQuery:
         assert not (tmp_path / "source-provenance").exists()  # no ledger fabricated
         assert _kb_snapshot(tmp_path) == before  # .md byte- and mtime_ns-identical
 
-    def test_version_less_front_matter_paper_points_at_135_not_the_backfill(
+    def test_version_less_front_matter_paper_names_the_human_step_not_a_command(
         self, tmp_path, fake, capsys
     ):
         # A front-matter-only paper whose front matter carries the withdrawal but NO
         # `arxiv_version`. `arxiv-backfill-provenance` genuinely refuses such a paper
         # (#113), so no command can build the ledger this decision would live in — the
-        # message must say so and point at #135, never prescribe the backfill (#114 cannot
-        # help here) and never the closed #105 (#132).
+        # message must say so and then name the one thing that works: a human adding
+        # `arxiv_version` by hand (read from the arXiv page; factlog does not fetch it),
+        # after which the backfill can run. It must not point at an issue as though a
+        # command were coming, nor resurrect the closed #105 (#132).
         (tmp_path / "sources").mkdir()
         (tmp_path / "sources" / "p.md").write_text(
             "---\narxiv_id: 0704.0001\narxiv_withdrawn: true\n"
@@ -589,11 +591,17 @@ class TestRefusesBeforeQuery:
         assert code == 1
         err = capsys.readouterr().err
         assert "no arxiv_version" in err
-        assert "#135" in err
-        assert "cannot be acknowledged here" in err
-        # The backfill cannot repair a version-less paper, so it must not be prescribed as
-        # an imperative, and #105 stays closed.
-        assert "Run `factlog arxiv-backfill-provenance`" not in err
+        assert "no command can build a ledger for it" in err
+        # Names the human step — the file, the field, and where the value is read — and is
+        # honest that factlog does not fetch it. The backfill is named only as the step
+        # AFTER the human adds the field, never as a command that fixes the paper as it
+        # stands. No user-facing issue pointer, and #105 stays closed.
+        assert "A human must" in err
+        assert "add `arxiv_version: <N>` to this paper's `sources/*.md` front matter" in err
+        assert "https://arxiv.org/abs/0704.0001" in err
+        assert "factlog does not fetch it" in err
+        assert "then run `factlog arxiv-backfill-provenance` to build the ledger" in err
+        assert "#135" not in err
         assert "#105" not in err
         assert client.calls == []  # refused before the fetch: ZERO API requests
         assert not (tmp_path / "source-provenance").exists()
@@ -603,8 +611,8 @@ class TestRefusesBeforeQuery:
         self, tmp_path, fake, capsys
     ):
         # A sidecar EXISTS (another integration wrote it and echoed `arxiv_id`) but holds no
-        # arXiv record. This paper HAS a ledger, so #135 (which is about a paper that can
-        # never obtain one) is a lie here; `arxiv-import` merges an arXiv record into the
+        # arXiv record. This paper HAS a ledger, so the version-less answer (about a paper
+        # no command can give a ledger, #135) is a lie here; `arxiv-import` merges into the
         # existing ledger — measured below. The refusal must name that working command.
         arxiv_id = "2311.09277"
         # A genuine OpenAlex-primary source: its sidecar carries only an `openalex` record

@@ -772,9 +772,10 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
     never recorded is real news) but stop being unactionable wallpaper (#93): it names the
     missing ledger and the working next step. That step depends on whether the front matter
     can supply the ledger — `arxiv-backfill-provenance` when it carries `arxiv_version`
-    (#114, measured in test_arxiv_backfill_provenance), and #135 when it does not, because
-    backfill refuses a version-less paper (#113). #132: the note used to deny the backfill
-    (#105) even for the paper it can repair.
+    (#114, measured in test_arxiv_backfill_provenance), and no command when it does not,
+    because backfill refuses a version-less paper (#113); the note names the human step
+    that unblocks it — adding `arxiv_version` by hand (#135). #132: the note used to deny
+    the backfill (#105) even for the paper it can repair.
     """
 
     def _front_matter_only(self, kb, lines):
@@ -827,10 +828,12 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
         assert "#105" not in note
         assert "retracted" not in note.lower()
 
-    def test_a_version_less_paper_is_told_no_command_can_and_points_at_135(self):
+    def test_a_version_less_paper_is_told_the_human_step_names_no_command(self):
         # No sidecar and no `arxiv_version`: backfill refuses it (#113), so no command can
-        # build the ledger. The note must say so and point at #135 — never a command, never
-        # #105.
+        # build the ledger. The note must say so and then name the one thing that works —
+        # a human adding `arxiv_version` by hand, read from the arXiv page (factlog does
+        # not fetch it). It must NOT point at #135 as though a command were coming, nor
+        # resurrect the closed #105.
         note = cv.withdrawal_note(
             cv.VersionCheck(
                 arxiv_id="0704.0001",
@@ -849,10 +852,13 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
         assert "cannot be acknowledged" in note
         assert "no arxiv_version" in note
         assert "#113" in note
-        assert "#135" in note
-        # The command cannot repair this paper, so it must not be prescribed, nor may the
-        # closed #105 reappear.
-        assert "run `factlog arxiv-backfill-provenance`" not in note
+        # Names the human step, the file, the field, and where to read the value — and is
+        # honest that factlog does not fetch it. No user-facing issue-number pointer.
+        assert "a human must" in note
+        assert "add `arxiv_version: <N>` to this paper's `sources/*.md` front matter" in note
+        assert "https://arxiv.org/abs/0704.0001" in note
+        assert "factlog does not fetch it" in note
+        assert "#135" not in note
         assert "#105" not in note
 
     def test_a_readable_sidecar_with_no_arxiv_record_is_sent_to_arxiv_import(self):
@@ -938,7 +944,8 @@ class TestUnWithdrawalNoteNamesTheWorkingNextStep:
     step that actually gives the paper a ledger, and that step is the same four-way split
     `ledger_fix` makes — not `arxiv_version` alone: a readable sidecar with no arXiv record
     is repaired by `arxiv-import`, an absent one by the backfill only with a version (#114),
-    an unreadable one by a hand repair, a version-less absent one by nothing (#135)."""
+    an unreadable one by a hand repair, a version-less absent one by no command — a human
+    adds `arxiv_version` by hand first (#135)."""
 
     def _fm(self, recorded_version, sidecar_state=cv.SIDECAR_ABSENT):
         return cv.VersionCheck(
@@ -962,14 +969,20 @@ class TestUnWithdrawalNoteNamesTheWorkingNextStep:
         assert "arxiv-acknowledge-withdrawal --id" not in note
         assert "#105" not in note
 
-    def test_version_less_absent_sidecar_points_at_135_and_names_no_command(self):
+    def test_version_less_absent_sidecar_names_the_human_step_no_command(self):
         note = cv.un_withdrawal_note(self._fm(None))
         assert "the front-matter note is simply stale" in note
         assert "no arxiv_version" in note
         assert "#113" in note
-        assert "#135" in note
-        # No command repairs this paper, so none is prescribed, and #105 stays closed.
-        assert "run `factlog arxiv-backfill-provenance`" not in note.lower()
+        assert "no command can give it a ledger" in note
+        # No command repairs this paper; the note names the human step instead — the file,
+        # the field, and where the value is read — and stays honest that factlog does not
+        # fetch it. No user-facing issue pointer, and #105 stays closed.
+        assert "A human must" in note
+        assert "add `arxiv_version: <N>` to this paper's `sources/*.md` front matter" in note
+        assert "https://arxiv.org/abs/0704.0001" in note
+        assert "factlog does not fetch it" in note
+        assert "#135" not in note
         assert "#105" not in note
 
     def test_readable_sidecar_with_no_arxiv_record_prescribes_arxiv_import(self):
@@ -1035,6 +1048,27 @@ class TestLedgerFixIsTheOneClassifier:
         )
         assert "arxiv-import --id 0704.0001" in imp
 
+    def test_no_ledger_remedy_version_less_names_the_human_step_no_command(self):
+        # The --auto-update remedy for a version-less absent-sidecar paper. This branch had
+        # no test, which is how its three siblings rotted through #114, #121 and #130. It
+        # must say no command fixes it (#113), then name the human step — the file, the
+        # field, and where the value is read — without pretending factlog fetches it and
+        # without a user-facing #135 pointer.
+        remedy = cv.no_ledger_remedy(
+            "0704.0001", sidecar_state=cv.SIDECAR_ABSENT, has_recorded_version=False
+        )
+        assert "no arxiv_version (#113)" in remedy
+        assert "No command fixes this" in remedy
+        assert "a human must" in remedy
+        assert "add `arxiv_version: <N>` to this paper's `sources/*.md` front matter" in remedy
+        assert "https://arxiv.org/abs/0704.0001" in remedy
+        assert "factlog does not fetch it" in remedy
+        # The backfill is named only as the step AFTER the human adds the field, never as a
+        # command that fixes the paper as it stands.
+        assert "then run `factlog arxiv-backfill-provenance` to build the ledger" in remedy
+        assert "#135" not in remedy
+        assert "#105" not in remedy
+
 
 class TestFrontMatterAcknowledgeRefusal:
     """The acknowledge command's refusal reason for a front-matter paper reads the same
@@ -1057,17 +1091,25 @@ class TestFrontMatterAcknowledgeRefusal:
         assert "run `factlog arxiv-backfill-provenance`" in reason.lower()
         assert "#135" not in reason
 
-    def test_absent_without_version_points_at_135_and_names_no_command(self):
+    def test_absent_without_version_names_the_human_step_no_command(self):
         reason = cv.front_matter_acknowledge_refusal(
             "0704.0001", sidecar_state=cv.SIDECAR_ABSENT, has_recorded_version=False
         )
         assert "no arxiv_version" in reason
-        assert "#113" in reason and "#135" in reason
-        assert "run `factlog arxiv-backfill-provenance`" not in reason.lower()
+        assert "#113" in reason
+        assert "no command can" in reason
+        # Names the human step (file, field, where the value is read, not fetched) rather
+        # than pointing at an issue as though a command were coming.
+        assert "A human must" in reason
+        assert "add `arxiv_version: <N>` to this paper's `sources/*.md` front matter" in reason
+        assert "https://arxiv.org/abs/0704.0001" in reason
+        assert "factlog does not fetch it" in reason
+        assert "#135" not in reason
 
     def test_unreadable_sidecar_names_a_hand_repair_no_command(self):
         # Unreachable through the CLI (the ledger_errors guard intercepts it), but the one
-        # classifier must still answer honestly rather than fall through to the #135 lie.
+        # classifier must still answer honestly rather than fall through to the
+        # version-less answer meant for a paper with no arxiv_version.
         reason = cv.front_matter_acknowledge_refusal(
             "0704.0001", sidecar_state=cv.SIDECAR_UNREADABLE, has_recorded_version=True
         )
