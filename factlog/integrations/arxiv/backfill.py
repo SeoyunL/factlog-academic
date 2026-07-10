@@ -58,6 +58,12 @@ def backfill_schema() -> BackfillSchema:
     ← ``recorded_withdrawn_by``), so a ledger field can only ever be populated from a value
     the front matter actually held. ``required`` is exactly ``("version",)`` — see the
     module docstring for why a version-less record must be refused (#121).
+
+    ``sources_of`` hands the shared writer the entry's ``per_source`` views — one per
+    ``.md`` carrying the id — so the ledger is built from, and written beside, the file
+    whose front matter actually holds the values (#117). Each view is a
+    :class:`~factlog.integrations.arxiv.check_versions.LedgerEntry` too, so ``id_of``,
+    ``fields`` and ``required`` above read it without knowing the difference.
     """
     return BackfillSchema(
         type="arxiv",
@@ -69,4 +75,5 @@ def backfill_schema() -> BackfillSchema:
             "withdrawn_by": lambda entry: entry.recorded_withdrawn_by,
         },
         required=("version",),
+        sources_of=lambda entry: entry.per_source,
     )

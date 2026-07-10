@@ -128,6 +128,11 @@ BACKFILL_REFUSED = "refused"
 BACKFILL_ERROR = "error"
 
 
+def _entry_itself(entry: Any) -> Sequence[Any]:
+    """The default :attr:`BackfillSchema.sources_of`: the entry speaks for its own sources."""
+    return (entry,)
+
+
 @dataclass(frozen=True)
 class BackfillSchema:
     """What is integration-specific about a backfill.
@@ -166,6 +171,16 @@ class BackfillSchema:
     while arXiv's other identifying field is optional in front matter and its absence is a
     real, recordable state, so it is *not* required. For OpenAlex, whose writer declares no
     identifying fields and whose id key is emitted only by its own writer, it is ``()``.
+
+    ``sources_of`` splits one collected entry into the per-``.md`` views a backfill writes
+    from (#117). A sidecar is written **per ``.md``**, from that ``.md``'s own front matter,
+    so an entry that *aggregated* several ``.md`` cannot be the thing a record is built
+    from: the aggregate carries whichever file won the sort, and the sidecar it named was
+    that same file — making both the values and the coverage depend on a filename. Each
+    view is entry-shaped (``id_of``, ``fields`` and ``required`` read it unchanged) and its
+    ``sources`` name exactly the one ``.md`` it speaks for. The default returns the entry
+    itself, which is the pre-#117 behaviour for an integration whose collector aggregates
+    nothing.
     """
 
     type: str
@@ -174,6 +189,7 @@ class BackfillSchema:
     id_of: Callable[[Any], str]
     fields: Mapping[str, Callable[[Any], Any]]
     required: tuple[str, ...] = ()
+    sources_of: Callable[[Any], Sequence[Any]] = _entry_itself
 
 
 @dataclass(frozen=True)
@@ -211,6 +227,11 @@ def _record_fields(entry: Any, schema: BackfillSchema) -> dict[str, Any]:
         if value is not None:
             out[name] = value
     return out
+
+
+def _missing_required(entry: Any, schema: BackfillSchema) -> tuple[str, ...]:
+    """The identifying fields *entry*'s front matter cannot supply, in schema order."""
+    return tuple(name for name in schema.required if schema.fields[name](entry) is None)
 
 
 def _backfill_source(
@@ -359,6 +380,19 @@ def backfill(
     and write are guarded per id, so one paper's failure never aborts the rest. Results are
     returned in ``entry_id`` order for reproducibility.
 
+    **Which ``.md`` gets the ledger is decided by what its front matter can supply, never
+    by its name** (#117). A sidecar is per ``.md``, and two ``.md`` may carry one id — an
+    arXiv deposit and an OpenAlex import echoing ``arxiv_id`` as a cross-reference. The
+    collector deduplicates them for the *check* (a paper is checked once), which is right,
+    and hands the per-source detail to ``schema.sources_of``, which is what a backfill
+    needs: measured, ``a_arxiv.md`` + ``z_openalex.md`` backfilled while
+    ``a_openalex.md`` + ``z_arxiv.md`` — the same paper, the same data, different filenames
+    — was refused, because the file that *had* the version lost the sort and was never
+    read. Now every source is offered its required fields; the ones that can supply them
+    are written, from their own front matter, into their own sidecar. A paper **no** source
+    can supply is still refused per source, reported, and given no sidecar — the refusal
+    was always right, only its reason was a filename.
+
     ``dry_run`` previews without writing: every paper is classified exactly as a real run
     would classify it (refusals, no-ops and per-id read errors are all reported the same),
     but a writable paper is reported as :data:`BACKFILL_WRITTEN` without its sidecar being
@@ -402,22 +436,31 @@ def backfill(
         sources = getattr(entry, "sources", ()) or ()
         if schema.provenance_of(sources) != "front-matter":
             continue
-        entry_id = schema.id_of(entry)
-        fields = _record_fields(entry, schema)
-        # An identifying field whose reader returns None is unreadable from this front
-        # matter (e.g. an OpenAlex-authored .md echoing arxiv_id but carrying no
-        # arxiv_version). Refuse rather than write a record with an absent identifying
-        # field, which a later import would call a divergence and error on (#73/#84).
-        missing_required = tuple(
-            name for name in schema.required if schema.fields[name](entry) is None
-        )
-        for source_rel in sources:
-            results.append(
-                _backfill_source(
-                    root, entry_id, source_rel, fields, missing_required, schema,
-                    dry_run=dry_run,
+        # One view per `.md` the paper's id appears in. Each is written from its own front
+        # matter, into its own sidecar.
+        views = schema.sources_of(entry)
+        # A `.md` that can supply every identifying field is a *supplier*: the ledger it
+        # would receive is truthful and complete. When any source can supply, only the
+        # suppliers are written — the others are the neighbouring integration's `.md`,
+        # which echo the id and never claimed to carry this integration's identity, and
+        # whose own remedy (a merging re-import) is not this command's. When *none* can,
+        # every source is refused and reported, so the paper is loudly left alone.
+        suppliers = [v for v in views if not _missing_required(v, schema)]
+        for view in suppliers or views:
+            entry_id = schema.id_of(view)
+            fields = _record_fields(view, schema)
+            # An identifying field whose reader returns None is unreadable from *this*
+            # front matter (e.g. an OpenAlex-authored .md echoing arxiv_id but carrying no
+            # arxiv_version). Refuse rather than write a record with an absent identifying
+            # field, which a later import would call a divergence and error on (#73/#84).
+            missing_required = _missing_required(view, schema)
+            for source_rel in getattr(view, "sources", ()) or ():
+                results.append(
+                    _backfill_source(
+                        root, entry_id, source_rel, fields, missing_required, schema,
+                        dry_run=dry_run,
+                    )
                 )
-            )
 
     results.sort(key=lambda r: (r.entry_id, r.ledger))
     return results
