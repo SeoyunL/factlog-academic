@@ -476,11 +476,12 @@ class TestVersionlessLedgerRecord:
     measured, not reasoned: ``arxiv-check-versions --auto-update`` DOES record the
     missing version (``apply_auto_update`` is not gated on ``changed``; it writes
     ``version = current_version`` for any result with a live version), and the merge
-    then succeeds. But ``check_versions._diff`` computes
-    ``changed = recorded is not None and current != recorded``, so the *plain* check
-    reports a version-less record ``unchanged`` and the report never tells the operator
-    to act. The message names the flag that works and warns of that trap; #113 (no
-    importer writes a version-less record) is context, not the remedy.
+    then succeeds. Since #121 the *plain* check surfaces the paper too, as
+    ``check_versions.STATUS_NO_VERSION`` — its own state, neither ``changed`` (which
+    would print ``vNone`` again) nor ``unchanged`` (which said nothing while
+    ``--auto-update`` rewrote the record). The message names the flag that works and
+    says where the plain report shows the paper; #113 (no importer writes a
+    version-less record) is context, not the remedy.
     """
 
     def test_no_version_message_never_prints_the_python_none(self, tmp_path):
@@ -497,7 +498,7 @@ class TestVersionlessLedgerRecord:
         assert "no version" in result.reason
         assert "v7" in result.reason
 
-    def test_no_version_message_names_the_command_that_works_and_warns_of_the_report(
+    def test_no_version_message_names_the_command_that_works_and_where_it_is_listed(
         self, tmp_path
     ):
         kb, original = _kb_with_openalex(tmp_path)
@@ -508,8 +509,10 @@ class TestVersionlessLedgerRecord:
         assert result.status == "error"
         # Name the command that MEASURABLY repairs it (see the end-to-end test below).
         assert "arxiv-check-versions --auto-update" in result.reason
-        # Warn that the plain check reports the paper unchanged, so its report is silent.
-        assert "unchanged" in result.reason
+        # Since #121 the plain check does list the paper; point at that section.
+        assert "No version recorded" in result.reason
+        # And it must not keep claiming the plain check calls the paper unchanged.
+        assert "unchanged" not in result.reason
         # Keep #113 provenance as context, not as the remedy.
         assert "#113" in result.reason
 
@@ -550,10 +553,10 @@ class TestVersionlessLedgerRecord:
         healed = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
         assert healed.status == "merged"
 
-    def test_plain_check_reports_the_version_less_record_unchanged(self, tmp_path):
-        # The surprising half: without --auto-update the report says nothing changed,
-        # so an operator reading only the report would never know to act. This pins
-        # _diff's classification (changed requires `recorded is not None`).
+    def test_plain_check_reports_the_version_less_record_as_its_own_state(self, tmp_path):
+        # The half #121 fixed: the plain check no longer calls this paper `unchanged`
+        # (which silenced it while --auto-update rewrote the record), and it does not
+        # call it `changed` either (which would print vNone). It is `no-version`.
         from factlog.integrations.arxiv import check_versions as cv
 
         kb, original = _kb_with_openalex(tmp_path)
@@ -562,7 +565,7 @@ class TestVersionlessLedgerRecord:
         work = _arxiv(version=7)
         entries, _unreadable = cv.collect_ledger_entries(kb)
         checks = [cv._diff(e, work) for e in entries if e.arxiv_id == "2311.09277"]
-        assert checks and all(c.status == cv.STATUS_UNCHANGED for c in checks)
+        assert checks and all(c.status == cv.STATUS_NO_VERSION for c in checks)
 
     def test_a_recorded_version_that_drifts_still_names_both_and_prints_no_none(
         self, tmp_path

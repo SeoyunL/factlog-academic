@@ -10,13 +10,21 @@ One is not. `check_versions._diff` computes
 
     changed = recorded is not None and current != recorded
 
-so a record whose `version` is **absent** is never `changed`, `--auto-update` never
-writes it, and a cross-source merge that compares identifying fields errors forever.
-A record whose `version` is merely *wrong* (`0`, `-1`) is `changed`, gets rewritten by
-the first `--auto-update`, and the merge then succeeds.
+so a record whose `version` is **absent** is never `changed`. The original justification
+for `required` said such a record was *unhealable*; #121 measured that and found it
+false — `--auto-update` was writing the version all along, silently, because
+`apply_auto_update` is not gated on `changed`. The correct justification is what #121
+names: an absent `version` cannot be compared against anything, so the paper was
+silently excluded from the one signal `arxiv-check-versions` exists to produce (it now
+reports as its own `no-version` state, and needs a second, human-initiated
+`--auto-update` pass before its version means anything). A record whose `version` is
+merely *wrong* (`0`, `-1`) is `changed`, is reported by the plain check, and the first
+`--auto-update` rewrites it.
 
-`required` refuses precisely the unhealable case. These tests pin that boundary: they
-fail if `version` leaves `required`, and they fail if `withdrawn_by` joins it.
+A backfill has no version to write, so writing the record would manufacture that repair
+debt for a paper that had none. `required` refuses precisely that. These tests pin the
+boundary: they fail if `version` leaves `required`, and they fail if `withdrawn_by`
+joins it.
 """
 from __future__ import annotations
 
@@ -56,7 +64,7 @@ def _backfill(front_matter: str) -> tuple[list, dict | None]:
 
 
 class TestTheUnhealableCaseIsRefused:
-    def test_an_absent_version_makes_changed_false_forever(self):
+    def test_an_absent_version_is_never_the_changed_signal(self):
         # The reason `version` is required. Not a style choice — this line is why.
         recorded, current = None, 7
         assert (recorded is not None and current != recorded) is False
