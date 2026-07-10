@@ -329,6 +329,18 @@ def _fold_recorded(
       the one recorded value (the sidecar loop's ``max`` over a single distinct value) or
       ``None`` when nothing recorded one.
 
+    So the two loops answer the *version-less-beside-versioned* shape differently, on purpose.
+    A version-*less* arXiv **ledger** slot carries no ``single`` key, so a versioned
+    front-matter-only ``.md`` that joins its fold (see the sidecar-less-``.md`` branch of
+    :func:`collect_ledger_entries`) leaves ``recorded`` with that one present version and no
+    ``single`` override — the :data:`_DERIVE_SINGLE` branch returns it, and the paper reads
+    ``unchanged``/``changed`` against it, not :data:`STATUS_NO_VERSION`. Two pure front
+    matters take the ``single`` branch and a version-less first source holds them at
+    ``no-version`` instead. This is #117, not an accident: a ledger already covered that id,
+    so folding to its neighbour's present version reads the same before a backfill materializes
+    more sidecars and after, whereas matching it to the version-less-``.md`` ``no-version``
+    would flip the paper's meaning as ledgers come and go.
+
     The conflict test is identical for both loops; only the non-conflict answer differs, so
     a genuine disagreement is reported the same whether it lives in sidecars or front matter,
     while every non-conflicting KB folds exactly as it did before."""

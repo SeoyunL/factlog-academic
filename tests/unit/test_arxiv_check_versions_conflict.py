@@ -281,6 +281,85 @@ class TestOneOfEach:
         assert code == 1
 
 
+def _seed_versionless_sidecar(kb, *, name, arxiv_id=ID):
+    """A ``.md`` whose arXiv provenance sidecar carries **no** ``version`` (a hand-edited or
+    externally produced ledger — since #113 no importer writes a version-less one). The
+    front matter carries no version either."""
+    (kb / "sources").mkdir(exist_ok=True)
+    md = kb / "sources" / f"{name}.md"
+    md.write_text(f"---\narxiv_id: {arxiv_id}\n---\n# {name}\n", encoding="utf-8")
+    write_provenance(sidecar_path(md, kb), Provenance(records=[
+        SourceRecord(type="arxiv", id=arxiv_id, imported_at="2026-01-01T00:00:00+00:00",
+                     fields={"submitted": "2017-06-12"})]))
+    return md
+
+
+class TestAVersionlessLedgerBesideAVersionedFrontMatterIsNotAConflict:
+    """A version-*less* source does not disagree with a versioned one — it is claiming no
+    version at all — so this is not #137's conflict. But which single state results differs
+    by path, and that difference is *intended*, so it is pinned here rather than left to be
+    mistaken for a bug (#134's lesson) or silently reverted.
+
+    A version-less arXiv **ledger** sidecar beside a versioned front-matter-only ``.md``
+    folds to that one present version: `_fold_recorded` derives the sole recorded value
+    (`_DERIVE_SINGLE`) because a sidecar slot carries no first-source `single`. The pure
+    front-matter path keeps its first-source-wins answer instead, so a version-less ``.md``
+    sorting first holds the fold at `no-version`. The two are deliberately not the same:
+    tracking the ledger case across a backfill, `unchanged` is the answer both before the
+    ledger existed (the id was covered by the sidecar all along) and after, so #117's
+    "reads the same before and after" holds only for the ledger-derived value — matching the
+    version-less ledger to the version-less-`.md`'s `no-version` would reintroduce exactly
+    the meaning-flip #117 forbids. (On `main` this case reported `no-version`; these tests
+    pin the change and its reason.)
+    """
+
+    def test_a_versionless_ledger_beside_a_versioned_front_matter_folds_to_that_version(
+        self, tmp_path, fake, capsys
+    ):
+        # a.json holds an arXiv record with NO version; b.md is front-matter-only v7; arXiv
+        # serves v7. The one present version stands: `unchanged`, not a conflict, not
+        # `no-version`.
+        _seed_versionless_sidecar(tmp_path, name="a")
+        _seed_front_matter(tmp_path, 7, name="b")
+
+        (entry,), _ = cv.collect_ledger_entries(tmp_path)
+        assert entry.recorded_version == 7
+        assert entry.version_disagreement == ()
+
+        fake(FakeClient([_work(version=7)]))
+        code = run(_plain(tmp_path))
+        out = capsys.readouterr().out
+        assert "Up to date:          1" in out
+        assert "No version recorded: 0" in out
+        assert "Version conflict" not in out
+        assert code == 0
+
+    def test_the_symmetric_pure_front_matter_path_keeps_no_version(
+        self, tmp_path, fake, capsys
+    ):
+        # The same logical shape — a version-less source beside a v7 one — but both are pure
+        # front matter and the version-less `.md` sorts first. First-source-wins holds it at
+        # `no-version` (recorded_version=None), the pre-#137 behaviour, untouched. This is
+        # what makes the ledger case above a deliberate divergence, not an accident.
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / "a.md").write_text(  # no version, sorts first
+            f"---\narxiv_id: {ID}\n---\n# a\n", encoding="utf-8")
+        _seed_front_matter(tmp_path, 7, name="b")
+
+        (entry,), _ = cv.collect_ledger_entries(tmp_path)
+        assert entry.recorded_version is None
+        assert entry.version_disagreement == ()
+        # It is a front-matter paper (no ledger), so the first source wins its version.
+        assert cv.provenance_of(entry.sources) == "front-matter"
+
+        fake(FakeClient([_work(version=7)]))
+        run(_plain(tmp_path))
+        out = capsys.readouterr().out
+        assert "No version recorded: 1" in out
+        assert "Up to date:          0" in out
+        assert "Version conflict" not in out
+
+
 # --------------------------------------------------------------------------- #
 # No command resolves it
 # --------------------------------------------------------------------------- #
