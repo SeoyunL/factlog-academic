@@ -90,6 +90,148 @@ factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 ```
 
+### Importing Zotero bibliography (`factlog zotero-import`)
+
+If you already manage your literature in Zotero, you can migrate collections,
+tags, or individual items into factlog's `sources/` in one pass. factlog does not
+replace Zotero — it is a verification layer on top of it: keep using Zotero, and
+let factlog handle fact extraction, provenance tracing, and logic checking.
+Migrated items are still **candidates** and pass the `sync → review → accept`
+gate. The Zotero originals are never modified (read-only).
+
+This needs Zotero 7's **Local API** (enable it under Settings → Advanced; it
+listens on port 23119) and `pip install 'factlog[zotero]'`.
+
+```bash
+factlog zotero-import --collection "Systematic Review"   # migrate a collection
+factlog zotero-import --collection "Systematic Review" --dry-run   # preview the plan only
+factlog zotero-import --tag "to-review"                  # by tag
+factlog zotero-import --items "KH78JUPE,64DA4TQJ"        # individual items
+```
+
+Without `--target` the migration goes to the active KB, and `--porcelain` emits
+machine-readable output for scripts. `--pdf` also fetches each item's PDF
+attachments and converts their full text with the existing `ingest` path (the
+original PDF is stored in `sources/`, so `.gitignore` your `*.pdf` if you
+version-control the KB). `--annotations` migrates highlights and notes into
+`sources/<stem>-notes.md` (still just sources — the candidates go through `sync`
+plus a human gate). After migrating, run `/factlog sync` to extract candidate
+facts.
+
+```bash
+factlog zotero-import --collection "Systematic Review" --pdf            # bibliography + PDF full text
+factlog zotero-import --collection "Systematic Review" --annotations    # + highlights & notes
+```
+
+### Importing OpenAlex bibliography (`factlog openalex-*`)
+
+You can search and import literature from the open bibliographic database
+[OpenAlex](https://openalex.org), widen the citation graph by one hop, and
+re-check the metadata of records you already imported. Imported items, like
+Zotero's, are still **candidates** and pass the `sync → review → accept` gate.
+This needs `pip install 'factlog[openalex]'`, and OpenAlex is **unauthenticated**
+— no API key or account.
+
+```bash
+factlog openalex-search --query "neurosymbolic AI" --year 2020-2025 --limit 50
+factlog openalex-import --doi 10.1007/s10462-023-10448-w   # or --work-id W2741809807
+factlog openalex-cite --for smith-2023-neurosymbolic --direction citing
+factlog openalex-refresh                                    # reports only; never writes the ledger
+factlog openalex-acknowledge-retraction --id W2741809807
+```
+
+A search costs **10 credits** (out of roughly 1,000 a day), and it costs the same
+no matter how many results you take back — being frugal with `--limit` saves
+nothing, so ask for a generous count up front. A single-record fetch costs 0
+credits, so `openalex-import` and `openalex-refresh` are effectively free.
+
+**Determinism boundary** — miss this and you will misread what `--auto-update`
+changed.
+
+1. Import has no permission to rewrite the ledger.
+2. `openalex-refresh --auto-update` writes only `doi` / `work_type` / `journal`
+   to the ledger. It never touches `sources/*.md`.
+3. **A retraction (the ledger's `is_retracted`) is not absorbed automatically in
+   either mode.** It is reported to a human and closed only with `factlog
+   openalex-acknowledge-retraction --id <id>`. This value is **OpenAlex's opinion**,
+   not a fact factlog asserts — OpenAlex flags some works as retracted that PubMed
+   does not. That is why the source's front-matter key is `openalex_is_retracted`,
+   not a bare `retracted:`.
+4. Imported items are still candidates; they become facts only after passing a
+   human `accept` gate.
+
+Settings resolve in the order `<KB>/policy/openalex-config.toml` >
+`~/.config/factlog/openalex.toml` > built-in defaults. Unlike Zotero, there is
+**no secrets boundary**: `email` is not authentication but an identification
+courtesy, so it is safe in a committed KB policy file (Zotero's `web_api_key` is
+read only from a user-level file).
+
+### Importing arXiv preprints (`factlog arxiv-*`)
+
+You can import papers from the preprint repository [arXiv](https://arxiv.org) by
+id, or search and import them, and check whether a record you imported is still
+the latest version. Imported items are still **candidates** and pass the
+`sync → review → accept` gate. This needs `pip install 'factlog[arxiv]'`, and the
+arXiv API is **unauthenticated** — no API key or account. There is no credit
+budget either — instead factlog keeps to arXiv's recommended 3-second delay
+between requests on its own (a courtesy that is not enforced).
+
+```bash
+factlog arxiv-import --id 2311.09277v2        # version is pinned inline in the id; there is no --version flag
+factlog arxiv-search --query "chain of thought" --category cs.CL --year 2020-2025
+factlog arxiv-check-versions                  # reports only; --auto-update records to the ledger
+factlog arxiv-acknowledge-withdrawal --id 2311.09277
+factlog arxiv-backfill-provenance             # gives a ledger to papers that have only front matter
+```
+
+`--id` is repeatable, up to 100 per run.
+
+**Where a search query lies quietly.** If you pass several words as-is, arXiv does
+not read them as a phrase but matches them loosely — measured live, the unwrapped
+query returns close to what its first word alone matches, many times more than the
+phrase. So factlog wraps them for you and sends `all:"your words"`, and tells you
+it wrapped. If you want loose matching, use a field prefix (`ti:`, `au:`, `abs:`)
+or a boolean (`AND`/`OR`/`ANDNOT`) yourself. Your own double quotes also turn
+wrapping off, but that is still a phrase search, not loose matching. A single-word
+query is never wrapped. `--show-query` prints the exact query that would be sent,
+without spending a request (`--dry-run` does search, but writes no files). arXiv
+answers a nonexistent category, field, or year with `200 OK` and "0 results" —
+which an operator reads as "no such literature exists" — so factlog validates the
+values before sending the request.
+
+**Determinism boundary** — miss this and you will misread what `--auto-update`
+changed.
+
+1. Import has no permission to rewrite the ledger.
+2. `arxiv-check-versions --auto-update` writes only `version` / `last_updated` /
+   `comment` to the ledger. It never opens `sources/*.md`.
+3. **A withdrawal (`withdrawn_by`) is not absorbed automatically in either mode.**
+   It is reported to a human and closed only with `factlog
+   arxiv-acknowledge-withdrawal --id <id>`. `--yes` can *record* a withdrawal but
+   never *clear* one — arXiv no longer reporting a withdrawal may mean "the
+   withdrawal was reversed" or "the withdrawal sentence could not be read", and the
+   code cannot tell the two apart. Clearing has to be confirmed by a human reading
+   the note at the prompt. A paper with no ledger can be closed only if its front
+   matter carries `arxiv_version`, in which case `arxiv-backfill-provenance` builds
+   a ledger first; without it the backfill refuses, so there is currently no way to
+   close it (#135).
+4. A paper whose version cannot be compared is reported not as `unchanged` but as
+   its own state, **`no-version`**. Nothing was compared, so it cannot be called
+   "unchanged". The command that fixes it depends on the cause, and in some cases
+   there is no command that fixes it at all.
+5. Imported items are still candidates; they become facts only after passing a
+   human `accept` gate.
+
+> arXiv's **withdrawal** is not the same as a journal's **retraction** (OpenAlex's
+> `is_retracted`). The former is an act by the author or an arXiv administrator on
+> a preprint; the latter is a journal revoking a published paper. The recorded
+> agent is either `author` or `admin`.
+
+Settings resolve in the order `<KB>/policy/arxiv-config.toml` >
+`~/.config/factlog/arxiv.toml` > built-in defaults. Like OpenAlex, there is **no
+secrets boundary**: `email` is not authentication but an identification courtesy
+carried in the User-Agent.
+
 ### Discovering the vocabulary (`factlog vocab`)
 
 `ask` and `provenance` need exact entity/relation names. `factlog vocab` lists
