@@ -145,7 +145,7 @@ by `merge_candidates.py`. Always include the `sources/` or `runs/sources/` prefi
 **Purpose:** Collapse the post-`/plugin install` steps (dependency install,
 environment check, KB init) into a single command. Run this **before** any of
 the four operating commands below — it is the first thing to do after
-`/plugin install factlog@semantic-reasoning`.
+`/plugin install factlog@seoyunl`.
 
 **How it runs:** in-session, by Claude executing the bundled CLI — NOT in a
 separate terminal:

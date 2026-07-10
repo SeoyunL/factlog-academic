@@ -14,7 +14,7 @@ base: [Zotero](#importing-zotero-bibliography-factlog-zotero-import),
 
 ## What it is
 
-factlog is a [Claude Code](https://code.claude.com) **skill** for keeping a markdown knowledge base honest. It follows one rule:
+factlog-academic is a [Claude Code](https://code.claude.com) **skill** for keeping a markdown knowledge base honest. It follows one rule:
 
 > The agent does not draw conclusions. The agent produces files and calls a CLI. The CLI returns a verifiable report.
 
@@ -467,14 +467,18 @@ warns so the silent non-ingestion is visible.
 
 ## Install
 
-factlog is a **Claude Code plugin**. Install it from this repo's marketplace in a Claude Code session:
+factlog-academic is a **Claude Code plugin**. Install it from this repo's marketplace in a Claude Code session:
 
 ```
-/plugin marketplace add https://github.com/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add https://github.com/SeoyunL/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup                     # one-shot: deps + doctor + init, in-session
 ```
+
+> Install from **this** repo, not from upstream `semantic-reasoning/factlog`. The
+> upstream plugin ships none of the bibliography commands — `factlog zotero-import`,
+> `factlog openalex-*`, and `factlog arxiv-*` exist only here.
 
 Run these commands **one line at a time**. If you paste multiple plugin commands
 at once, Claude Code may try to process the marketplace registration and install
@@ -491,8 +495,8 @@ the current session yet. Run `/reload-plugins` after `/plugin install`, then run
 To develop against a local clone, register the working tree as the marketplace instead:
 
 ```
-/plugin marketplace add ~/git/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add ~/git/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup
 ```
@@ -502,7 +506,7 @@ To develop against a local clone, register the working tree as the marketplace i
 `setup` collapses the previously-separate post-install steps into a single command. Equivalently, by hand:
 
 ```bash
-pip install -r ~/git/semantic-reasoning/factlog/requirements.txt   # pyrewire>=1.0.1,<2.0
+pip install -r ~/git/factlog-academic/requirements.txt   # pyrewire>=1.0.1,<2.0
 python3 -m factlog doctor          # checks Python 3.11+ and pyrewire
 python3 -m factlog init --target ~/wiki   # scaffold the KB layout
 ```
