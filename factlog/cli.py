@@ -4010,6 +4010,255 @@ def cmd_openalex_refresh(args: argparse.Namespace) -> int:
     return 1 if summary.errors or update_errors else 0
 
 
+def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
+    """Record a human's decision about one OpenAlex record's retraction signal (#101).
+
+    The mirror of ``arxiv-acknowledge-withdrawal`` on the shared acknowledge primitive,
+    in OpenAlex's vocabulary only. ``openalex-refresh`` surfaces a retraction on every run
+    until a human records it; this is the verb that records it — the same human gate (P1)
+    as ``accept`` / ``reject``: one explicit ``--id``, never a sweep. Running it *is* the
+    decision. ``is_retracted`` is **OpenAlex's opinion**, not a fact — OpenAlex flags the
+    Lancet Commission dementia report as retracted while PubMed records no retraction (#51)
+    — so the front-matter key is ``openalex_is_retracted`` and the word "withdrawn" never
+    appears here.
+
+    A **live** ``GET /works/{id}`` (0 credits) is mandatory: a retraction recorded from a
+    stale cache is a lie, since OpenAlex may already have reversed it. On a
+    connection/rate-limit failure or a missing/merged-away record: non-zero exit, nothing
+    written. ``get_work`` follows redirects, so a request for ``W_a`` can answer under a
+    merged ``W_b``; acknowledging under the old key would be wrong, so an identity change
+    is refused and reported (re-import to follow it).
+
+    It writes OpenAlex's **live** flag into the ledger's ``is_retracted`` via the shared
+    primitive: ``True`` to record a retraction, or ``None`` — which *removes* the key — to
+    clear one OpenAlex has reversed (a literal ``False`` would change the JSON bytes and
+    diverge from what an import writes, where retraction absent *means* not retracted).
+    ``is_retracted`` is **not** an identifying field, so no re-import ever errors over it in
+    either direction; the clear path exists so a reversed retraction can stop surfacing and
+    the ledger can record that it was reversed. It never opens the ``.md`` (P4): after
+    acknowledgement the ledger is the sole audit record.
+    """
+    from factlog.integrations.common.acknowledge import (
+        ACK_ERROR,
+        ACK_UNCHANGED,
+        ACK_WRITTEN,
+        AcknowledgeSchema,
+        acknowledge,
+    )
+    from factlog.integrations.openalex import refresh as rf
+    from factlog.integrations.openalex.api_client import (
+        OpenAlexConnectionError,
+        OpenAlexError,
+        OpenAlexNotFoundError,
+        OpenAlexRateLimitError,
+        normalize_work_id,
+    )
+    from factlog.integrations.openalex.work_parser import parse_work
+
+    command = "openalex-acknowledge-retraction"
+
+    # Identity is the bare OpenAlex work id. `normalize_work_id` accepts an
+    # `openalex.org/W...` URL and a lowercase `w...`, and rejects zero-padding — the same
+    # validation the import/refresh paths use, so the id keyed here matches the ledger's.
+    try:
+        openalex_id = normalize_work_id(args.id)
+    except OpenAlexError as exc:
+        print(f"factlog {command}: {exc}", file=sys.stderr)
+        return 1
+
+    prepared = _openalex_prepare(args, command)
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    # A command that cannot ask must not guess. Without a terminal — a pipe, a script —
+    # there is no one to confirm to, and silencing a signal is exactly the write that must
+    # never be guessed. `--yes` (only ever paired with the required, explicit `--id`) is
+    # the deliberate act that stands in for the prompt; without it, a non-interactive run
+    # refuses and writes nothing. There is no `--all` and no wildcard: the blast radius is
+    # one id. This refuses BEFORE the query, so no request is spent on a run that cannot
+    # confirm.
+    assume_yes = getattr(args, "yes", False)
+    if not assume_yes and not sys.stdin.isatty():
+        print(
+            f"factlog {command}: refusing to acknowledge without a terminal to confirm "
+            "at. This silences OpenAlex's retraction signal for one id. Re-run in a "
+            "terminal, or pass --yes with --id to confirm non-interactively. Nothing "
+            "written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve ledger presence BEFORE the live query, so a work this command cannot write is
+    # refused for **zero** API requests and with no prompt — the same shape as the TTY gate
+    # above (#107 items 1, 3). `collect_ledger_entries` opens only source-provenance/ and
+    # sources/ front matter; nothing under sources/ is written or opened for writing (P4).
+    entries, ledger_errors = rf.collect_ledger_entries(target)
+
+    # An unreadable ledger might be the one that carries this id — its `is_retracted`
+    # cannot be read, so the recorded value is unknown. Refuse rather than assert "the
+    # ledger did not record" on an incomplete view, and do it before spending a request or
+    # prompting (#107 item 3).
+    if ledger_errors:
+        bad = ", ".join(sorted(e.openalex_id for e in ledger_errors))
+        print(
+            f"factlog {command}: cannot read every provenance ledger ({bad}); one of them "
+            "may carry this id, so its recorded value is unknown. Repair or remove the "
+            "unreadable ledger(s) and retry. No request was made; nothing written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    entry = next((e for e in entries if e.openalex_id == openalex_id), None)
+
+    # `acknowledge()` writes only provenance sidecars. A work known only from front matter
+    # (imported before #84), or absent from the KB, has no sidecar to write, so
+    # acknowledging it can only ever fail — and querying OpenAlex first would spend a
+    # request and the operator's attention on a warning no human can turn off here (#107
+    # item 1). Refuse before the fetch. Backfilling a ledger is #105, not this command.
+    front_matter_only = entry is not None and all(
+        str(s).startswith("sources/") for s in entry.sources
+    )
+    if entry is None or front_matter_only:
+        if entry is None:
+            reason = (
+                f"no OpenAlex record for id {openalex_id!r} is in this KB, so there is "
+                "nothing to acknowledge."
+            )
+        else:
+            reason = (
+                f"{openalex_id!r} is known only from front matter (imported before #84), "
+                "so it has no provenance ledger to record a decision in — and re-import "
+                "will not create one. Backfilling a ledger is tracked in #105; until then "
+                "this signal cannot be acknowledged here."
+            )
+        print(f"factlog {command}: {reason} No request was made; nothing written.",
+              file=sys.stderr)
+        return 1
+
+    # The recorded value comes from the ledger we just confirmed (never front matter).
+    recorded_is_retracted = entry.recorded_is_retracted
+
+    # The live query is mandatory: the value to write lives only upstream.
+    client = _make_openalex_client(config)
+    try:
+        parsed = parse_work(client.get_work(openalex_id))
+    except (OpenAlexConnectionError, OpenAlexRateLimitError) as exc:
+        # Cannot reach OpenAlex (or out of budget): an acknowledgement from a stale cache
+        # would be a lie.
+        print(f"factlog {command}: {exc} Nothing written.", file=sys.stderr)
+        return 2
+    except OpenAlexNotFoundError:
+        print(
+            f"factlog {command}: OpenAlex has no record for {openalex_id!r} (deleted or "
+            "merged away). Nothing written.",
+            file=sys.stderr,
+        )
+        return 1
+    except OpenAlexError as exc:
+        print(f"factlog {command}: {exc} Nothing written.", file=sys.stderr)
+        return 1
+
+    # H3: `get_work` follows redirects and OpenAlex merges works, so a request for `W_a`
+    # can answer under a merged `W_b`. Acknowledging under the old key would record a
+    # decision about the wrong identity; refuse and report the change (re-import to follow
+    # it). `refresh.py` reports the same case; here it must block the write.
+    if parsed.openalex_id != openalex_id:
+        print(
+            f"factlog {command}: OpenAlex answered under a different id "
+            f"{parsed.openalex_id!r} (the work was merged upstream). Refusing to "
+            f"acknowledge under {openalex_id!r}; re-import to follow the new id. Nothing "
+            "written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # OpenAlex's live opinion — `False` when the work is not (or no longer) retracted.
+    current_is_retracted = bool(parsed.openalex_is_retracted)
+
+    # Nothing to acknowledge when the ledger already matches OpenAlex. Say so and exit 0
+    # without a note or a prompt — the divergence-phrased note would be a lie, and there is
+    # no signal to silence (#107 item 7).
+    if current_is_retracted == recorded_is_retracted:
+        if current_is_retracted:
+            print(
+                f"The ledger already records OpenAlex's retraction flag for {openalex_id}; "
+                "nothing to acknowledge."
+            )
+        else:
+            print(
+                f"OpenAlex does not flag {openalex_id} as retracted and the ledger records "
+                "no retraction; nothing to acknowledge."
+            )
+        return 0
+
+    note_source = rf.RefreshCheck(
+        openalex_id=openalex_id,
+        status=rf.STATUS_UNCHANGED,
+        returned_id=parsed.openalex_id,
+        recorded_is_retracted=recorded_is_retracted,
+        current_is_retracted=current_is_retracted,
+        newly_retracted=current_is_retracted and not recorded_is_retracted,
+        un_retracted=(not current_is_retracted) and recorded_is_retracted,
+        recorded_from="ledger",
+    )
+
+    # Show the operator exactly what they are about to record (or clear).
+    if current_is_retracted:
+        print(rf.retraction_note(note_source))
+    else:
+        print(rf.un_retraction_note(note_source))
+
+    if not assume_yes:
+        try:
+            answer = input(
+                f"\nRecord OpenAlex's live retraction flag for {openalex_id} in the "
+                "ledger? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Aborted; nothing written.")
+            return 0
+
+    # Write the live flag: `True` records a retraction, `None` clears one (removing the
+    # key — never a literal `False`, which would change the bytes and diverge from an
+    # import's absent-means-not-retracted convention).
+    value = True if current_is_retracted else None
+    schema = AcknowledgeSchema(type="openalex", field="is_retracted")
+    result = acknowledge(target, openalex_id, value, schema)
+
+    if result.status == ACK_WRITTEN:
+        if current_is_retracted:
+            print(
+                f"Recorded OpenAlex's retraction flag for {openalex_id} in "
+                f"{', '.join(result.ledgers)}."
+            )
+        else:
+            print(
+                f"Cleared the retraction recorded for {openalex_id} in "
+                f"{', '.join(result.ledgers)}."
+            )
+        print(
+            "openalex-refresh will no longer repeat this signal. The ledger is the audit "
+            "record; the source .md is not rewritten (P4)."
+        )
+        return 0
+    if result.status == ACK_UNCHANGED:
+        print(
+            f"The ledger for {openalex_id} already holds OpenAlex's live retraction flag; "
+            "nothing changed. openalex-refresh will not repeat this signal."
+        )
+        return 0
+    if result.status == ACK_ERROR:
+        print(f"factlog {command}: {result.reason}", file=sys.stderr)
+        return 1
+    # ACK_NO_LEDGER cannot occur — ledger presence was confirmed before the fetch — but is
+    # handled defensively rather than mis-reported as success.
+    print(f"factlog {command}: {result.reason or result.status}", file=sys.stderr)
+    return 1
+
+
 def cmd_openalex_cite(args: argparse.Namespace) -> int:
     """Show the citation neighbourhood of a source already in the KB (spec §5.2).
 
@@ -4476,6 +4725,31 @@ def build_parser() -> argparse.ArgumentParser:
              "on stderr",
     )
     oa_refresh.set_defaults(func=cmd_openalex_refresh)
+
+    oa_ack = sub.add_parser(
+        "openalex-acknowledge-retraction",
+        help="record a human decision about one OpenAlex record's retraction, so "
+             "openalex-refresh stops repeating it. Live-queries OpenAlex for the one "
+             "--id (0 credits) and writes its current flag (clearing it when OpenAlex no "
+             "longer reports a retraction); never touches sources/*.md",
+    )
+    oa_ack.add_argument(
+        "--target", default=None,
+        help="KB root (default: the active KB; see `factlog where`)",
+    )
+    oa_ack.add_argument(
+        "--id", required=True,
+        help="the single OpenAlex work id to acknowledge (e.g. W2741809807 or an "
+             "openalex.org/W... URL). No --all, no wildcard: the blast radius is one id, "
+             "chosen by a human.",
+    )
+    oa_ack.add_argument(
+        "--yes", action="store_true",
+        help="skip the confirmation prompt (only ever paired with --id). Required to run "
+             "without a terminal; without it a non-interactive run refuses and writes "
+             "nothing.",
+    )
+    oa_ack.set_defaults(func=cmd_openalex_acknowledge_retraction)
 
     def _arxiv_common(p):
         p.add_argument(

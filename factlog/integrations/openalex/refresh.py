@@ -116,6 +116,7 @@ __all__ = [
     "summarize",
     "apply_auto_update",
     "retraction_note",
+    "un_retraction_note",
     "report_lines",
     "porcelain_lines",
 ]
@@ -158,13 +159,20 @@ class RefreshCheck:
     """The outcome of refreshing one work (or one corrupt ledger).
 
     ``status`` is one of the ``STATUS_*`` constants; it is :data:`STATUS_CHANGED` when
-    any of :data:`COMPARED_FIELDS` diverged or the id was superseded. ``newly_retracted``
-    and ``id_superseded`` are orthogonal flags surfaced regardless of ``status``:
-    OpenAlex can flag a retraction with no field change, and a merged id is an identity
-    change, not a field change. ``changed_fields`` names which of ``doi``/``work_type``/
-    ``journal`` differ. ``returned_id`` is the id OpenAlex actually answered with (equal
-    to ``openalex_id`` unless the work was merged upstream). For an error result the
-    ``openalex_id`` may instead be a ledger path, and ``reason`` explains it.
+    any of :data:`COMPARED_FIELDS` diverged or the id was superseded. ``newly_retracted``,
+    ``un_retracted`` and ``id_superseded`` are orthogonal flags surfaced regardless of
+    ``status``: OpenAlex can flag (or unflag) a retraction with no field change, and a
+    merged id is an identity change, not a field change. ``newly_retracted`` is a *value*
+    comparison against the record, not a presence test — OpenAlex now flags a retraction
+    the record did not carry; ``un_retracted`` is its mirror — OpenAlex has *reversed* a
+    retraction the record still holds, so the record's flag should be cleared. The two are
+    mutually exclusive. ``changed_fields`` names which of ``doi``/``work_type``/``journal``
+    differ. ``returned_id`` is the id OpenAlex actually answered with (equal to
+    ``openalex_id`` unless the work was merged upstream). ``recorded_from`` says where the
+    recorded value came from — ``"ledger"`` (a provenance sidecar) or ``"front-matter"``
+    (a pre-#84 work with no ledger) — so a note never claims "the ledger recorded" a value
+    that came from front matter. For an error result the ``openalex_id`` may instead be a
+    ledger path, and ``reason`` explains it.
     """
 
     openalex_id: str
@@ -179,8 +187,10 @@ class RefreshCheck:
     recorded_is_retracted: bool = False
     current_is_retracted: bool = False
     newly_retracted: bool = False
+    un_retracted: bool = False
     id_superseded: bool = False
     changed_fields: tuple[str, ...] = ()
+    recorded_from: str = "ledger"
     reason: str = ""
     sources: tuple[str, ...] = ()
 
@@ -361,9 +371,18 @@ def _diff(entry: LedgerEntry, parsed) -> RefreshCheck:
         )
         if recorded != current
     )
-    # Retraction is measured against the ledger's own record, independent of any field
-    # change: OpenAlex can flag a retraction with no venue/id change at all.
+    # Retraction is measured against the record's own value, independent of any field
+    # change: OpenAlex can flag (or unflag) a retraction with no venue/id change at all.
+    #
+    # This is a *value* comparison, not a presence test (mirrors arXiv #100). The old
+    # `current and not recorded` form still names a fresh retraction, but on its own it
+    # silently loses the *reverse*: an *un-retraction* (recorded True, upstream now False)
+    # never surfaced, so a retraction OpenAlex has withdrawn stayed recorded forever with
+    # no way to learn it. Comparing the values surfaces both directions: a retraction the
+    # record did not carry is `newly_retracted`, and a retraction the record holds that
+    # OpenAlex no longer flags is `un_retracted`.
     newly_retracted = current_is_retracted and not entry.recorded_is_retracted
+    un_retracted = (not current_is_retracted) and entry.recorded_is_retracted
     status = STATUS_CHANGED if (changed_fields or id_superseded) else STATUS_UNCHANGED
     return RefreshCheck(
         openalex_id=entry.openalex_id,
@@ -378,8 +397,10 @@ def _diff(entry: LedgerEntry, parsed) -> RefreshCheck:
         recorded_is_retracted=entry.recorded_is_retracted,
         current_is_retracted=current_is_retracted,
         newly_retracted=newly_retracted,
+        un_retracted=un_retracted,
         id_superseded=id_superseded,
         changed_fields=changed_fields,
+        recorded_from=_provenance_of(entry.sources),
         sources=entry.sources,
     )
 
@@ -455,6 +476,7 @@ class Summary:
     unchanged: int = 0
     changed: int = 0
     retracted: int = 0
+    un_retracted: int = 0
     superseded: int = 0
     errors: int = 0
     skipped: int = 0
@@ -463,8 +485,9 @@ class Summary:
 def summarize(
     results: Iterable[RefreshCheck], skipped: Sequence[RefreshCheck]
 ) -> Summary:
-    """Count outcomes. ``retracted`` counts newly-retracted works across every checked
-    result, whatever their field status; ``superseded`` counts id changes. ``checked``
+    """Count outcomes. ``retracted`` counts newly-retracted works and ``un_retracted``
+    counts works OpenAlex no longer flags but the record still does, across every checked
+    result whatever their field status; ``superseded`` counts id changes. ``checked``
     excludes skipped."""
     summary = Summary(skipped=len(skipped))
     for result in results:
@@ -478,6 +501,8 @@ def summarize(
             summary.unchanged += 1
         if result.newly_retracted:
             summary.retracted += 1
+        if result.un_retracted:
+            summary.un_retracted += 1
         if result.id_superseded:
             summary.superseded += 1
     return summary
@@ -690,10 +715,13 @@ def retraction_note(result: RefreshCheck) -> str:
 
     Never a bare ``retracted:`` claim: it names OpenAlex as the source, notes PubMed may
     disagree, and does not describe it as an arXiv preprint being pulled by its authors
-    (a different process, no shared handling).
+    (a different process, no shared handling). It attributes the recorded value to its
+    true source — a ledger, or a pre-#84 work's front matter — so it never says "the
+    ledger did not record" a value that came from front matter.
     """
+    where = "front matter" if result.recorded_from == "front-matter" else "ledger"
     return (
-        f"OpenAlex now flags {result.openalex_id} as RETRACTED, which the ledger did "
+        f"OpenAlex now flags {result.openalex_id} as RETRACTED, which the {where} did "
         "not record. This is OpenAlex's opinion — it has false positives, and PubMed "
         "(which owns retraction status) may disagree, as with the Lancet Commission "
         "dementia report. It is a different process from an arXiv preprint being pulled "
@@ -702,16 +730,55 @@ def retraction_note(result: RefreshCheck) -> str:
     )
 
 
+def un_retraction_note(result: RefreshCheck) -> str:
+    """The line for a work OpenAlex no longer flags as retracted but the record still does.
+
+    This is **not** a retraction warning: a retraction being reversed is its own news, and
+    the word stays OpenAlex's opinion throughout.
+
+    Unlike arXiv's ``withdrawn_by``, ``is_retracted`` is **not** an identifying field
+    (``openalex/source_writer.py``): a stale retraction never makes a re-import error in
+    either direction, so this note must not claim a divergence or a re-import error. The
+    clear path exists anyway — a retraction can be reversed and the ledger must be able to
+    say so. For a **ledger**-recorded value the note prescribes the acknowledge command;
+    for a **front-matter**-only work (imported before #84) there is no sidecar to write, so
+    it points at #105 (backfilling a ledger) instead of a command that would exit 1.
+    """
+    if result.recorded_from == "front-matter":
+        return (
+            f"OpenAlex no longer flags {result.openalex_id} as retracted, but its front "
+            "matter still records a retraction. This work has no provenance ledger "
+            "(imported before #84); `is_retracted` is not an identifying field, so nothing "
+            "diverges and a re-import does not error — the front-matter flag is simply "
+            "stale. Backfilling a ledger so this can be acknowledged is tracked in #105."
+        )
+    return (
+        f"OpenAlex no longer flags {result.openalex_id} as retracted, but the ledger still "
+        "records a retraction. `is_retracted` is not an identifying field, so nothing "
+        "diverges and a re-import does not error — but a reversed retraction should not "
+        "keep surfacing, and the ledger should record that it was reversed. Run "
+        f"`factlog openalex-acknowledge-retraction --id {result.openalex_id}` to clear it."
+    )
+
+
 def _sources_suffix(result: RefreshCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
 
+def _provenance_of(sources) -> str:
+    """``"front-matter"`` if *sources* are all ``sources/*.md`` (a pre-#84 work with no
+    ledger), else ``"ledger"``. One work's sources are never mixed:
+    ``collect_ledger_entries`` fills a slot from the ledger *or*, only if no ledger covered
+    it, from front matter — never both."""
+    sources = sources or ()
+    if sources and all(str(s).startswith("sources/") for s in sources):
+        return "front-matter"
+    return "ledger"
+
+
 def _recorded_in(result: RefreshCheck) -> str:
     """Where the recorded values came from: a ledger, or a source's front matter."""
-    sources = result.sources or ()
-    if sources and all(str(s).startswith("sources/") for s in sources):
-        return "front matter"
-    return "ledger"
+    return "front matter" if _provenance_of(result.sources) == "front-matter" else "ledger"
 
 
 def _field_change(name: str, recorded: str | None, current: str | None) -> str:
@@ -750,6 +817,7 @@ def report_lines(
     lines = [header]
 
     retracted = [r for r in results if r.newly_retracted]
+    un_retracted = [r for r in results if r.un_retracted]
     superseded = [r for r in results if r.id_superseded]
     changed = [
         r
@@ -762,6 +830,13 @@ def report_lines(
         lines.append("\nNewly flagged as retracted by OpenAlex (its opinion; PubMed may disagree):")
         for result in retracted:
             lines.append(f"  ⚠ {retraction_note(result)}{_sources_suffix(result)}")
+
+    if un_retracted:
+        lines.append(
+            "\nNo longer flagged as retracted (OpenAlex reversed a retraction this KB records):"
+        )
+        for result in un_retracted:
+            lines.append(f"  ↺ {un_retraction_note(result)}{_sources_suffix(result)}")
 
     if superseded:
         lines.append("\nId superseded upstream (OpenAlex merged the work; not followed):")
@@ -799,17 +874,21 @@ def report_lines(
 
     lines.extend(_auto_update_lines(updates))
 
+    # Labels are padded to the widest ("Retracted (reversed):") so every count lands in one
+    # column. The "reversed" label parallels "Retracted (new):" and, like it, is never a
+    # bare `retracted:` claim (retraction stays OpenAlex's opinion, not a fact).
     lines.append("\nSummary:")
-    lines.append(f"  Checked:            {summary.checked}")
-    lines.append(f"  Up to date:         {summary.unchanged}")
-    lines.append(f"  Metadata changed:   {summary.changed}")
-    lines.append(f"  Retracted (new):    {summary.retracted}")
-    lines.append(f"  Id superseded:      {summary.superseded}")
-    lines.append(f"  Errors:             {summary.errors}")
-    lines.append(f"  Skipped:            {summary.skipped}")
+    lines.append(f"  {'Checked:':<22}{summary.checked}")
+    lines.append(f"  {'Up to date:':<22}{summary.unchanged}")
+    lines.append(f"  {'Metadata changed:':<22}{summary.changed}")
+    lines.append(f"  {'Retracted (new):':<22}{summary.retracted}")
+    lines.append(f"  {'Retracted (reversed):':<22}{summary.un_retracted}")
+    lines.append(f"  {'Id superseded:':<22}{summary.superseded}")
+    lines.append(f"  {'Errors:':<22}{summary.errors}")
+    lines.append(f"  {'Skipped:':<22}{summary.skipped}")
     if updates:
         lines.append(
-            f"  Ledgers updated:    {sum(1 for u in updates if u.status == UPDATE_WRITTEN)}"
+            f"  {'Ledgers updated:':<22}{sum(1 for u in updates if u.status == UPDATE_WRITTEN)}"
         )
     return lines
 
@@ -866,15 +945,18 @@ def porcelain_lines(
     — only under ``--auto-update`` — one ``update`` row per acted-on work, then tallies.
     Parse by the first field.
 
-    ``check\t<id>\t<status>\t<returned_id>\t<changed_fields>\t<retracted>\t<superseded>\t<reason>``
-    with ``changed_fields`` comma-joined (empty for none), ``retracted``/``superseded``
-    as ``0``/``1``. The ``update`` rows are
+    ``check\t<id>\t<status>\t<returned_id>\t<changed_fields>\t<retracted>\t<superseded>\t<reason>\t<un_retracted>``
+    with ``changed_fields`` comma-joined (empty for none), ``retracted``/``superseded``/
+    ``un_retracted`` as ``0``/``1``. ``un_retracted`` distinguishes a work OpenAlex no
+    longer flags (but a record still does) from an unchanged one, whose row is otherwise
+    byte-identical — a count without an id is useless. It is appended last so a parser
+    keying on the earlier fixed columns is unaffected. The ``update`` rows are
     ``update\t<id>\t<status>\t<fields>\t<ledgers>``. Progress stays on stderr only.
     """
     rows: list[str] = []
     for result in sorted([*results, *skipped], key=lambda r: r.openalex_id):
         rows.append(
-            "check\t{id}\t{status}\t{returned}\t{changed}\t{retracted}\t{superseded}\t{reason}".format(
+            "check\t{id}\t{status}\t{returned}\t{changed}\t{retracted}\t{superseded}\t{reason}\t{un}".format(
                 id=result.openalex_id,
                 status=result.status,
                 returned=result.returned_id or "",
@@ -882,6 +964,7 @@ def porcelain_lines(
                 retracted="1" if result.newly_retracted else "0",
                 superseded="1" if result.id_superseded else "0",
                 reason=result.reason,
+                un="1" if result.un_retracted else "0",
             )
         )
     for u in updates:
@@ -897,6 +980,7 @@ def porcelain_lines(
     rows.append(f"unchanged\t{summary.unchanged}")
     rows.append(f"changed\t{summary.changed}")
     rows.append(f"retracted\t{summary.retracted}")
+    rows.append(f"un_retracted\t{summary.un_retracted}")
     rows.append(f"superseded\t{summary.superseded}")
     rows.append(f"errors\t{summary.errors}")
     rows.append(f"skipped\t{summary.skipped}")
