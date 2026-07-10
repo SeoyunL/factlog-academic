@@ -29,6 +29,7 @@ from factlog.integrations.arxiv.id_normalizer import ArxivId
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common.provenance import (
     Provenance,
+    ProvenanceError,
     SourceRecord,
     sidecar_path,
     write_provenance,
@@ -425,6 +426,35 @@ class TestAKbWithNoLedgerIsStillChecked:
         assert len(entries) == 1
         assert entries[0].recorded_version == 7
         assert entries[0].sources == ("source-provenance/a.json",)
+
+    def test_a_sidecar_path_refusal_is_a_per_id_error_and_the_rest_are_still_checked(
+        self, tmp_path, monkeypatch
+    ):
+        # `collect_ledger_entries` calls sidecar_path only on `provenance_sources` paths
+        # (under sources/), where it never refuses — so this refusal is unreachable today.
+        # But sidecar_path DOES refuse a path outside sources/, and an unreachable refusal
+        # that escaped as a traceback would abort the whole check (the #65/#71/#94 shape).
+        # Simulate the refusal for one source and pin that it degrades to that paper's per-id
+        # error while every other paper is still checked (#142). FAILS (the traceback escapes
+        # `collect_ledger_entries`) if the sidecar_path call moves back outside its guard.
+        self._old_style_source(tmp_path, "1706.03762", version=5)  # sources/old.md
+        (tmp_path / "sources" / "good.md").write_text(
+            '---\narxiv_id: "2301.00002"\narxiv_version: 1\nimported_from: arxiv\n---\n# T\n',
+            encoding="utf-8",
+        )
+        real = cv.sidecar_path
+
+        def refuse_one(path, root):
+            if path.name == "old.md":
+                raise ProvenanceError("simulated refusal for a path outside sources/")
+            return real(path, root)
+
+        monkeypatch.setattr(cv, "sidecar_path", refuse_one)
+        entries, errors = cv.collect_ledger_entries(tmp_path)  # must NOT raise
+        assert [(e.arxiv_id, e.status) for e in errors] == [("1706.03762", cv.STATUS_ERROR)]
+        assert "old.md" in errors[0].reason
+        # The batch kept going: the paper whose sidecar_path did not refuse is still checked.
+        assert [e.arxiv_id for e in entries] == ["2301.00002"]
 
     def test_a_source_without_an_arxiv_id_is_ignored(self, tmp_path):
         (tmp_path / "sources").mkdir(parents=True)

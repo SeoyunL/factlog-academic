@@ -379,7 +379,21 @@ def collect_ledger_entries(
         # one whose sidecar will not parse (about which nothing may be said at all: it
         # is in `errors` above, and we never read what it holds). Record which of the
         # three this is rather than making the report guess.
-        sidecar = sidecar_path(path, root)
+        # `provenance_sources` yields only paths under `sources/`, so sidecar_path cannot
+        # refuse here today — but an unreachable refusal that escapes as a traceback would
+        # abort the whole check (the #65/#71/#94 shape). Degrade it to this paper's per-id
+        # error, exactly like the corrupt-ledger path above, and keep checking the rest (#142).
+        try:
+            sidecar = sidecar_path(path, root)
+        except ProvenanceError as exc:
+            errors.append(
+                VersionCheck(
+                    arxiv_id=arxiv_id,
+                    status=STATUS_ERROR,
+                    reason=f"cannot locate provenance sidecar for {_relative(path, root)}: {exc}",
+                )
+            )
+            continue
         if _relative(sidecar, root) in unreadable:
             sidecar_state = SIDECAR_UNREADABLE
         elif sidecar.is_file():
