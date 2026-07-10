@@ -334,11 +334,38 @@ def backfill(
     but a writable paper is reported as :data:`BACKFILL_WRITTEN` without its sidecar being
     opened for write. The preview and the run share one classifier, so they can never
     disagree about which ids are eligible and which are refused.
+
+    A corrupt or unreadable ledger is **not** silently ignored. ``collect_entries`` returns
+    a per-file error for each ledger that would not parse; each becomes a
+    :data:`BACKFILL_ERROR` result so the caller counts it, names it, and exits non-zero. It
+    also *poisons the front-matter classification*: the paper whose arXiv record lives in
+    the unreadable file falls out of the ledger scan and reappears as "front-matter-only",
+    so backfilling it would materialize a sidecar from an incomplete view of what the KB
+    already believes (#111 — never assert about the ledger while a ledger went unread). The
+    file will not parse, so *which* paper that is cannot be known; therefore while **any**
+    ledger is unreadable, no front-matter-only paper is backfilled at all — the errors are
+    surfaced and nothing is written. A clean re-run after the ledger is repaired proceeds
+    normally.
     """
     root = Path(kb_root)
-    entries, _errors = schema.collect_entries(root)
+    entries, collect_errors = schema.collect_entries(root)
 
-    results: list[BackfillResult] = []
+    results: list[BackfillResult] = [
+        BackfillResult(
+            entry_id=str(schema.id_of(err)),
+            status=BACKFILL_ERROR,
+            reason=str(getattr(err, "reason", "") or err),
+        )
+        for err in collect_errors
+    ]
+
+    # An unreadable ledger contaminates the "front-matter-only" set (see the docstring):
+    # any candidate might be the paper whose record is in the file that would not parse, and
+    # we cannot tell which. Refuse to write any of them until the ledgers all read cleanly.
+    if collect_errors:
+        results.sort(key=lambda r: (r.entry_id, r.ledger))
+        return results
+
     for entry in entries:
         # The integration's own predicate: a paper whose sources are all `sources/*.md` is
         # front-matter-only; anything the ledgers cover is left untouched.

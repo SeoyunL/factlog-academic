@@ -433,3 +433,112 @@ class TestPorcelain:
         assert "refused\t0" in lines
         assert "errors\t0" in lines
         assert "dry_run\t0" in lines
+
+
+def _raw_md(path, *, arxiv_id, version=None, imported_at=IMPORTED_AT):
+    """Write a front-matter-only .md at an arbitrary path (which may contain a tab), with an
+    arbitrary (possibly tabbed) arxiv_id. A missing `version` yields the refused case."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["---", f'arxiv_id: "{arxiv_id}"']
+    if version is not None:
+        lines.append(f"arxiv_version: {version}")
+    if imported_at is not None:
+        lines.append(f'imported_at: "{imported_at}"')
+    lines.append("---")
+    path.write_text("\n".join(lines) + "\n# body\n", encoding="utf-8")
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# 10. porcelain column safety — the #111 column-shift, on EVERY caller-driven field
+#     (not just `reason`). A tab in a filename, in an `arxiv_id` read from a document,
+#     or in `--target` must not add or split a column.
+# --------------------------------------------------------------------------- #
+class TestPorcelainColumnSafety:
+    def _result_row(self, out):
+        rows = [ln for ln in out.splitlines() if ln.startswith("result\t")]
+        assert len(rows) == 1, rows
+        return rows[0]
+
+    def test_tabbed_md_filename_does_not_split_the_ledger_column(self, tmp_path, capsys):
+        # The sidecar path is a filename; a tab in it must not become a column boundary.
+        _raw_md(tmp_path / "sources" / "a\tb.md", arxiv_id="2301.00001", version=7)
+        run(["arxiv-backfill-provenance", "--target", str(tmp_path), "--porcelain"])
+        row = self._result_row(capsys.readouterr().out)
+        assert row.split("\t") == ["result", "backfilled", "2301.00001",
+                                   "source-provenance/a b.json", ""]
+        assert len(row.split("\t")) == 5
+
+    def test_tabbed_arxiv_id_from_a_document_does_not_split_the_id_column(
+        self, tmp_path, capsys
+    ):
+        # entry_id is an arxiv_id read verbatim from front matter — a document can carry a
+        # tab. It must not shift `ledger` into the id's overflow (an injected sidecar path).
+        _raw_md(tmp_path / "sources" / "clean.md",
+                arxiv_id="2301.00001\tEVIL", version=7)
+        run(["arxiv-backfill-provenance", "--target", str(tmp_path), "--porcelain"])
+        row = self._result_row(capsys.readouterr().out)
+        fields = row.split("\t")
+        assert len(fields) == 5
+        assert fields[2] == "2301.00001 EVIL"  # the tab is neutralized, not a new column
+        assert fields[3] == "source-provenance/clean.json"
+
+    def test_tabbed_reason_does_not_split_the_last_column(self, tmp_path, capsys):
+        # A refused paper's reason interpolates its (tabbed) source path; the last column
+        # must stay one field. entry_id and ledger are clean here, isolating `reason`.
+        _raw_md(tmp_path / "sources" / "ev\til.md", arxiv_id="2311.09277")  # no version
+        run(["arxiv-backfill-provenance", "--target", str(tmp_path), "--porcelain"])
+        row = self._result_row(capsys.readouterr().out)
+        fields = row.split("\t")
+        assert len(fields) == 5
+        assert fields[1] == "refused"
+        assert fields[3] == ""  # a refusal names no ledger
+        assert "\t" not in fields[4] and "sources/ev il.md" in fields[4]
+
+    def test_tabbed_target_path_does_not_split_the_target_row(self, tmp_path, capsys):
+        # `target` is `--target`; a tab in the KB path must not split its row.
+        kb = tmp_path / "k\tb"
+        _raw_md(kb / "sources" / "p.md", arxiv_id="2301.00001", version=7)
+        run(["arxiv-backfill-provenance", "--target", str(kb), "--porcelain"])
+        rows = [ln for ln in capsys.readouterr().out.splitlines()
+                if ln.startswith("target\t")]
+        assert len(rows) == 1
+        fields = rows[0].split("\t")
+        assert len(fields) == 2  # exactly two: 'target' and the neutralized path
+        expected_path = str(kb / "sources").replace("\t", " ")
+        assert fields == ["target", expected_path]
+
+
+# --------------------------------------------------------------------------- #
+# 11. an unreadable ledger is surfaced and blocks the write (#111), through the CLI
+# --------------------------------------------------------------------------- #
+class TestUnreadableLedgerViaCli:
+    def test_unrelated_corrupt_ledger_exits_nonzero_names_it_and_writes_nothing(
+        self, tmp_path, capsys
+    ):
+        _fm_only(tmp_path, "1706.03762", 7)
+        corrupt = tmp_path / "source-provenance" / "unrelated.json"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_text("{ not json", encoding="utf-8")
+
+        code = run(["arxiv-backfill-provenance", "--target", str(tmp_path), "--porcelain"])
+        lines = capsys.readouterr().out.splitlines()
+        assert code == 1
+        assert "errors\t1" in lines
+        assert "backfilled\t0" in lines
+        assert any("unrelated.json" in ln and ln.startswith("result\t") for ln in lines)
+        # The healthy paper was NOT backfilled from an incomplete view.
+        assert not (tmp_path / "source-provenance" / "1706.03762.json").exists()
+
+    def test_papers_own_corrupt_ledger_is_not_overwritten(self, tmp_path, capsys):
+        md = _fm_only(tmp_path, "1706.03762", 7)
+        side = sidecar_path(md)
+        side.parent.mkdir(parents=True, exist_ok=True)
+        side.write_text("{ corrupt", encoding="utf-8")
+
+        code = run(["arxiv-backfill-provenance", "--target", str(tmp_path)])
+        err_out = capsys.readouterr()
+        assert code == 1
+        assert "1706.03762.json" in (err_out.out + err_out.err)
+        # The corrupt sidecar was left exactly as it was — never "repaired" from front matter.
+        assert side.read_text(encoding="utf-8") == "{ corrupt"

@@ -3919,7 +3919,6 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
     from factlog.integrations.common.backfill import (
         BACKFILL_ERROR,
         BACKFILL_REFUSED,
-        BACKFILL_UNCHANGED,
         BACKFILL_WRITTEN,
         backfill,
     )
@@ -3938,8 +3937,12 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
     # Reads front matter and the ledgers only; constructs no API client (a test asserts it).
     results = backfill(target, backfill_schema(), dry_run=dry_run)
 
+    # BACKFILL_UNCHANGED is intentionally not handled: it can only be produced by a direct
+    # _backfill_source call, never by backfill(). A paper whose sidecar already holds an
+    # identical arXiv record is classified "ledger" by provenance_of and skipped before any
+    # write is attempted, so backfill() never yields it — a status the command cannot
+    # receive gets no dead section here.
     written = [r for r in results if r.status == BACKFILL_WRITTEN]
-    unchanged = [r for r in results if r.status == BACKFILL_UNCHANGED]
     refused = [r for r in results if r.status == BACKFILL_REFUSED]
     errors = [r for r in results if r.status == BACKFILL_ERROR]
 
@@ -3947,16 +3950,26 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
         # Stable machine contract, tab-separated, LF-terminated, order-independent (parse
         # by the first field). A per-id row for every paper acted on or refused:
         #   result\t<status>\t<arxiv id>\t<ledger path or empty>\t<reason or empty>
-        # then the summary counts, then dry_run and the sources dir:
+        # then the summary counts, then dry_run and the sources dir.
+        #
+        # EVERY field a caller can influence is neutralized at emission, not just `reason`:
+        # `entry_id` is an arxiv_id read verbatim from front matter, `ledger` is a filename,
+        # and `target` is `--target` — any of them can carry a tab, CR or LF that would
+        # otherwise shift or split the columns after it (the #111 column-shift, whose danger
+        # is that a *document* — an `arxiv_id: "x<TAB>y"` — not just an exotic filename can
+        # drive it). Neutralizing only the last column leaves the earlier ones exploitable.
+        def _f(value: object) -> str:
+            return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
         for r in results:
-            reason = r.reason.replace("\t", " ").replace("\n", " ")
-            print(f"result\t{r.status}\t{r.entry_id}\t{r.ledger}\t{reason}")
+            print(
+                f"result\t{r.status}\t{_f(r.entry_id)}\t{_f(r.ledger)}\t{_f(r.reason)}"
+            )
         print(f"backfilled\t{len(written)}")
-        print(f"unchanged\t{len(unchanged)}")
         print(f"refused\t{len(refused)}")
         print(f"errors\t{len(errors)}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
-        print(f"target\t{target / 'sources'}")
+        print(f"target\t{_f(target / 'sources')}")
         return 1 if errors else 0
 
     verb = "Would backfill" if dry_run else "Backfilling"
@@ -3976,10 +3989,6 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
         for r in written:
             arrow = "would write" if dry_run else "wrote"
             print(f"  ✎ {r.entry_id}  ({arrow} {r.ledger})")
-    if unchanged:
-        print("\nAlready recorded (nothing to do):")
-        for r in unchanged:
-            print(f"  = {r.entry_id}")
     if refused:
         print("\nRefused (front matter cannot supply a truthful ledger):")
         for r in refused:
@@ -3991,7 +4000,6 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
 
     print("\nSummary:")
     print(f"  {'Would backfill:' if dry_run else 'Backfilled:':<18}{len(written)}")
-    print(f"  {'Already recorded:':<18}{len(unchanged)}")
     print(f"  {'Refused:':<18}{len(refused)}")
     print(f"  {'Errors:':<18}{len(errors)}")
     if written and not dry_run:
