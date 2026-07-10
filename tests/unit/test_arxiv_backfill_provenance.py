@@ -17,8 +17,9 @@ with the real CLI:
   stops on the next check;
 * the note graduation — the un-withdrawal note's front-matter branch (#105) switches to the
   ledger branch prescribing the acknowledge command;
-* the self-healing typo — a hand-typed ``arxiv_withdrawn_by`` is backfilled, flagged by
-  check-versions, and overwritten by acknowledge's live value; it must not persist;
+* the unrecognised agent — a hand-typed ``arxiv_withdrawn_by`` is refused, never promoted
+  into a ledger whose reader would reject it (#109), while check-versions keeps surfacing
+  the signal from front matter; repairing the ``.md`` lets the backfill through;
 * the false-conflict refusal — an OpenAlex-authored ``.md`` carrying ``arxiv_id`` but no
   ``arxiv_version`` is refused, gets no sidecar, and a later arXiv merge import behaves
   identically to a no-backfill control (``merged``, not ``error``);
@@ -212,34 +213,59 @@ class TestNoteGraduation:
 # --------------------------------------------------------------------------- #
 # 3. the self-healing typo: a hand-typed withdrawn_by must not persist
 # --------------------------------------------------------------------------- #
-class TestSelfHealingTypo:
-    def test_typo_is_backfilled_flagged_then_overwritten_by_the_live_value(
+class TestUnrecognisedAgentIsRefusedNotPromoted:
+    """#109 fixed the ledger's value space, and that decides #98's open interaction.
+
+    Front matter keeps a hand-typed ``arxiv_withdrawn_by`` verbatim (loud, not fatal); the
+    ledger's ``withdrawn_by`` is ``null``/``author``/``admin`` and nothing else. Backfill
+    promotes across that boundary, so it must refuse rather than write a ledger the reader
+    below rejects. Dropping the field instead is not available: ``withdrawn_by`` is
+    identifying, so a ledger missing it manufactures the #73/#84 false divergence.
+    """
+
+    def test_typo_is_refused_not_recorded_and_the_signal_keeps_surfacing(
         self, tmp_path, fake, capsys
     ):
         # Front matter carries a hand-typed garbage withdrawal agent (#98's shape).
         _fm_only(tmp_path, "1706.03762", 7, withdrawn_by="typo")
         fake(FakeClient([_work("1706.03762", version=7, withdrawn_by="author")]))
+        before = _md_snapshot(tmp_path)
 
-        # BACKFILL records the typo verbatim (it is what the KB believed at import).
-        run(["arxiv-backfill-provenance", "--target", str(tmp_path)])
-        assert _ledger_withdrawn_by(tmp_path, "1706.03762") == "typo"
+        # BACKFILL refuses the paper: no ledger is written, and the reason names the .md,
+        # the field and the offending value. Nothing is coerced and nothing is dropped.
+        # A refusal, not an error: the KB is intact, so the command still exits 0 — the
+        # same stance it takes for a missing `imported_at`.
+        code = run(["arxiv-backfill-provenance", "--target", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Refused:          1" in out
+        assert "Backfilled:       0" in out
+        assert "'typo'" in out and "withdrawn_by" in out
+        assert not (tmp_path / "source-provenance").exists()
+        assert _md_snapshot(tmp_path) == before  # P4: the original is untouched
 
-        # check-versions flags it: a value comparison ("author" != "typo") resurfaces it,
-        # and the note names the recorded garbage rather than hiding it.
+        # The signal is not lost: check-versions still reads front matter and flags it.
         capsys.readouterr()
         run(["arxiv-check-versions", "--target", str(tmp_path), "--older-than", "0"])
         out = capsys.readouterr().out
         assert "WITHDRAWN by the author" in out
         assert "'typo'" in out
 
-        # acknowledge writes arXiv's LIVE value, overwriting the typo — it self-heals.
+    def test_repairing_the_front_matter_lets_the_backfill_and_the_acknowledge_through(
+        self, tmp_path, fake, capsys
+    ):
+        # The remedy the refusal prescribes: repair the .md, re-run. The paper then
+        # graduates exactly as any other front-matter-only withdrawn paper does.
+        _fm_only(tmp_path, "1706.03762", 7, withdrawn_by="author")
+        fake(FakeClient([_work("1706.03762", version=7, withdrawn_by="author")]))
+
+        assert run(["arxiv-backfill-provenance", "--target", str(tmp_path)]) == 0
+        assert _ledger_withdrawn_by(tmp_path, "1706.03762") == "author"
+
         run([
             "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
             "--target", str(tmp_path), "--yes",
         ])
-        assert _ledger_withdrawn_by(tmp_path, "1706.03762") == "author"
-
-        # And the signal is silenced.
         capsys.readouterr()
         run(["arxiv-check-versions", "--target", str(tmp_path), "--older-than", "0"])
         assert "Newly withdrawn:     0" in capsys.readouterr().out

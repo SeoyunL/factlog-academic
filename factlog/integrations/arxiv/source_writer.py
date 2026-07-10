@@ -200,10 +200,16 @@ class ArxivSourceWriter(BaseSourceWriter):
 
         ``submitted``/``last_updated`` are ``datetime.date``. ``SourceRecord``
         serializes through ``json.dumps``, which raises ``TypeError`` on a
-        ``date``, and ``provenance`` is source-agnostic and correctly refuses to
-        guess types — so the conversion to an ISO string is this builder's job. A
-        ``None`` field is dropped by :meth:`SourceRecord.to_dict`, so optional
-        values pass straight through.
+        ``date``, and ``provenance`` refuses to guess types — so the conversion to
+        an ISO string is this builder's job. A ``None`` field is dropped by
+        :meth:`SourceRecord.to_dict`, so optional values pass straight through.
+
+        ``provenance`` is source-agnostic about every field here **except** the
+        *signal* fields, whose value space it enforces at the read boundary (#109):
+        ``withdrawn_by`` must name a known agent. It knows the two agents without
+        importing arXiv — they are defined in ``common/vocabulary.py`` and
+        re-exported by ``arxiv/work_parser.py`` — so this builder may keep passing
+        ``parsed.withdrawn_by`` straight through.
         """
         fields: dict[str, object | None] = {
             "version": parsed.version,
