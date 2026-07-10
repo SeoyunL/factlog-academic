@@ -23,7 +23,10 @@ import sys
 import urllib.request
 
 TAXONOMY_URL = "https://arxiv.org/category_taxonomy"
-USER_AGENT = "factlog (category taxonomy refresh; https://github.com/semantic-reasoning/factlog)"
+USER_AGENT = (
+    "factlog-academic (category taxonomy refresh; "
+    "https://github.com/SeoyunL/factlog-academic)"
+)
 
 # Categories appear as `<h4>cs.CL <span>...`. Nine archives (`hep-th`, ...) are
 # themselves categories and carry no subject class, so both shapes are matched.
