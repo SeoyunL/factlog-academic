@@ -401,9 +401,8 @@ class TestNoOp:
 # --------------------------------------------------------------------------- #
 class TestBoundaryGuards:
     def test_corrupt_sidecar_read_is_isolated_error(self, tmp_path):
-        # A partially-written sidecar that will not parse is that paper's problem. collect
-        # skips the corrupt file (front-matter fallback makes it a candidate); the backfill
-        # then re-reads the same path and reports a per-id error rather than crashing.
+        # A sidecar that will not parse is surfaced by the collection step as a per-file
+        # error, never a crash — reported, exactly once, naming the file.
         md = _arxiv_md(tmp_path, "p", "2301.00001", 1)
         sidecar_path(md).parent.mkdir(parents=True, exist_ok=True)
         sidecar_path(md).write_text("{ not json", encoding="utf-8")
@@ -456,6 +455,62 @@ class TestBoundaryGuards:
 
 
 # --------------------------------------------------------------------------- #
+# 6b. an unreadable ledger poisons the front-matter classification (#111): while
+#     any ledger cannot be read, no front-matter-only paper is backfilled at all,
+#     and the error is surfaced — never dropped.
+# --------------------------------------------------------------------------- #
+class TestUnreadableLedgerRefusesBackfill:
+    def test_unrelated_corrupt_ledger_is_surfaced_and_blocks_the_write(self, tmp_path):
+        # A healthy front-matter-only paper alongside an unrelated corrupt sidecar. The old
+        # code dropped `_errors`, backfilled the healthy paper, and returned status 0 —
+        # silent. Now the corrupt file is a BACKFILL_ERROR result, and because it *might*
+        # (we cannot tell) hold this paper's own record, the healthy paper is NOT written.
+        _arxiv_md(tmp_path, "healthy", "2301.00001", 3)
+        corrupt = tmp_path / "source-provenance" / "unrelated.json"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_text("{ not json", encoding="utf-8")
+
+        results = backfill(tmp_path, ARXIV)
+        assert any(
+            r.status == BACKFILL_ERROR and "unrelated.json" in r.reason for r in results
+        )
+        # Nothing was backfilled: the healthy paper got no sidecar.
+        assert not (tmp_path / "source-provenance" / "healthy.json").exists()
+        assert all(r.status != BACKFILL_WRITTEN for r in results)
+
+    def test_a_papers_own_corrupt_ledger_is_not_overwritten_from_front_matter(self, tmp_path):
+        # The dangerous case: the corrupt file IS the paper's own arXiv ledger. It drops out
+        # of the ledger scan, so the paper reappears "front-matter-only" — and backfilling it
+        # would materialize a *new* sidecar from an incomplete view of what the KB believes.
+        # It must be refused; the corrupt bytes are left exactly as they were.
+        md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
+        side = sidecar_path(md)
+        side.parent.mkdir(parents=True, exist_ok=True)
+        side.write_text("{ corrupt", encoding="utf-8")
+        before = _stat(side)
+
+        results = backfill(tmp_path, ARXIV)
+        assert [r.status for r in results] == [BACKFILL_ERROR]
+        assert "p.json" in results[0].reason
+        # The sidecar was neither overwritten nor "repaired" from front matter.
+        assert _stat(side) == before
+        assert side.read_text(encoding="utf-8") == "{ corrupt"
+
+    def test_a_clean_rerun_after_repair_proceeds(self, tmp_path):
+        # Once the ledgers all read cleanly, the block lifts and the paper backfills.
+        _arxiv_md(tmp_path, "healthy", "2301.00001", 3)
+        corrupt = tmp_path / "source-provenance" / "unrelated.json"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_text("{ not json", encoding="utf-8")
+        assert all(r.status != BACKFILL_WRITTEN for r in backfill(tmp_path, ARXIV))
+
+        corrupt.unlink()  # repaired (removed)
+        results = backfill(tmp_path, ARXIV)
+        assert [r.status for r in results] == [BACKFILL_WRITTEN]
+        assert (tmp_path / "source-provenance" / "healthy.json").exists()
+
+
+# --------------------------------------------------------------------------- #
 # 7. a partially-populated sidecar: append without disturbing the neighbour
 # --------------------------------------------------------------------------- #
 class TestPartialSidecar:
@@ -491,6 +546,41 @@ class TestNeverTouchesMd:
         before = _stat(md)
         backfill(tmp_path, ARXIV)
         assert _stat(md) == before
+
+
+# --------------------------------------------------------------------------- #
+# 8b. dry_run: classify without writing, sharing the one classifier
+# --------------------------------------------------------------------------- #
+class TestDryRun:
+    def test_dry_run_reports_would_write_but_writes_nothing(self, tmp_path):
+        # A writable paper is classified BACKFILL_WRITTEN (naming the ledger it would write)
+        # but no sidecar is created and the .md is byte- and mtime_ns-identical.
+        md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
+        before_md = _stat(md)
+        results = backfill(tmp_path, ARXIV, dry_run=True)
+        assert [(r.entry_id, r.status) for r in results] == [
+            ("2301.00001", BACKFILL_WRITTEN)
+        ]
+        assert results[0].ledger  # names the ledger it WOULD write
+        assert not (tmp_path / "source-provenance").exists()  # nothing written
+        assert _stat(md) == before_md
+
+    def test_dry_run_still_refuses_the_unreadable_identity(self, tmp_path):
+        # A refusal is classified identically in dry-run (same single classifier).
+        existing = _kb_with_openalex_authored_md(tmp_path)
+        side = sidecar_path(existing)
+        before = _stat(side)
+        results = backfill(tmp_path, ARXIV, dry_run=True)
+        assert [r.status for r in results] == [BACKFILL_REFUSED]
+        assert ("arxiv", "2311.09277") not in _ledger(side)
+        assert _stat(side) == before
+
+    def test_dry_run_then_real_run_agree_on_every_id(self, tmp_path):
+        _arxiv_md(tmp_path, "a", "2301.00001", 3)
+        _kb_with_openalex_authored_md(tmp_path)  # a refused id
+        preview = {(r.entry_id, r.status) for r in backfill(tmp_path, ARXIV, dry_run=True)}
+        real = {(r.entry_id, r.status) for r in backfill(tmp_path, ARXIV)}
+        assert preview == real
 
 
 # --------------------------------------------------------------------------- #
