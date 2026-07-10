@@ -3663,7 +3663,13 @@ def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
         ):
             print(line)
     update_errors = any(u.status == cv.UPDATE_ERROR for u in updates)
-    return 1 if summary.errors or update_errors else 0
+    # A version conflict reaches the exit code, like a per-id error (#112's principle): the
+    # KB's own sources contradict each other about a recorded version, and a command that
+    # returns 0 while that is true is the silent direction #137 exists to close — a script
+    # keying only on the exit status would read a self-contradicting KB as healthy. A
+    # version-less record (#121) is self-consistent and has a working remedy, so it does not;
+    # a conflict has neither.
+    return 1 if summary.errors or update_errors or summary.version_conflict else 0
 
 
 def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:

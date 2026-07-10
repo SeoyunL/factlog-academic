@@ -298,19 +298,24 @@ class TestCheckVersionsStillDedups:
         assert entry.recorded_version == (7 if first == arxiv_name else None)
 
     def test_a_stale_source_is_never_hidden_by_a_fresher_sibling(self, tmp_path):
-        # The blocker a max-fold over `per_source` would introduce, and the reason the
-        # aggregate is not folded. `a.md` records v3, `b.md` records v7, arXiv serves v7.
-        # Folding to the highest reports `unchanged` and the paper three versions behind
-        # vanishes from the one signal `arxiv-check-versions` exists to produce.
+        # `a.md` records v3, `b.md` records v7, arXiv serves v7. Neither a `max` fold
+        # (reports `unchanged`, the paper three versions behind vanishing) nor the old
+        # first-wins (reports a plain v3->v7 change, the v7 source vanishing) may hide that
+        # the KB's own sources disagree. Since #137 this is neither: two front matters
+        # recording two different versions is a *conflict*, its own reportable state naming
+        # each source and the value it holds (the sidecar loop treats the identical
+        # disagreement the same way, so the paper reads the same after a backfill). It is
+        # never `unchanged`, and no longer folded to either source's number.
         _arxiv_md(tmp_path, "a", version=3)
         _arxiv_md(tmp_path, "b", version=7)
 
         entries, _ = cv.collect_ledger_entries(tmp_path)
         (result,) = cv.check_entries(entries, _FakeClient(version=7))
 
-        assert result.recorded_version == 3
-        assert result.status == cv.STATUS_CHANGED
+        assert result.status == cv.STATUS_VERSION_CONFLICT
         assert result.status != cv.STATUS_UNCHANGED
+        assert result.recorded_version is None  # not folded to v3 or v7
+        assert result.version_disagreement == (("sources/a.md", 3), ("sources/b.md", 7))
 
     def test_per_source_views_are_one_per_md_and_carry_their_own_values(self, tmp_path):
         _arxiv_md(tmp_path, "a_arxiv")
