@@ -17,12 +17,17 @@ how #64, #98 and the empty-tuple divergence fixed in #111 all happened.
 ``check_versions._diff`` computes ``changed = recorded is not None and current !=
 recorded``. So:
 
-* an **absent** ``version`` makes ``changed`` false forever — ``--auto-update`` never
-  repairs it and a cross-source merge comparing identifying fields errors permanently.
-  Unhealable, so a backfill must refuse it (an OpenAlex-authored ``.md`` echoes
-  ``arxiv_id`` but never emits ``arxiv_version``: it reads ``None`` here);
+* an **absent** ``version`` silently excludes the record from version checking: with
+  ``recorded is None``, ``changed`` is false regardless of what arXiv serves, so the
+  paper's drift is **never reported at all**. Measured, same paper with arXiv serving v7:
+  a ledger recording ``version: 3`` prints ``Version changed: 1``; a ledger recording no
+  version prints ``Version changed: 0``. A backfill that wrote a version-less record would
+  drop a previously-healthy paper out of the one signal ``arxiv-check-versions`` exists to
+  produce, so it refuses (an OpenAlex-authored ``.md`` echoes ``arxiv_id`` but never emits
+  ``arxiv_version``: it reads ``None`` here). See #121;
 * a merely **wrong** ``version`` (``0``, ``-1``) is ``changed``, gets rewritten by the
-  first ``--auto-update``, and the merge then succeeds — recordable, so *not* refused;
+  first ``--auto-update`` (which writes ``current_version`` unconditionally, not gated on
+  ``_diff``), and is meanwhile still reported — recordable, so *not* refused;
 * ``withdrawn_by`` is ``None`` for every paper that is **not** withdrawn, the overwhelming
   majority; requiring it would refuse almost the whole library. Its ``None`` is a
   legitimate recordable value, not an unreadable identity, so it is **not** required.
@@ -42,7 +47,7 @@ def backfill_schema() -> BackfillSchema:
     already parsed from front matter (``version`` ← ``recorded_version``, ``withdrawn_by``
     ← ``recorded_withdrawn_by``), so a ledger field can only ever be populated from a value
     the front matter actually held. ``required`` is exactly ``("version",)`` — see the
-    module docstring for why that is the one unhealable identity.
+    module docstring for why a version-less record must be refused (#121).
     """
     return BackfillSchema(
         type="arxiv",
