@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 from datetime import date
+from pathlib import Path
 
 from factlog.integrations.arxiv import check_versions
 from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
@@ -141,12 +142,15 @@ def _stat(path):
 
 
 # --------------------------------------------------------------------------- #
-# 0. the editable-install trap: prove we test THIS worktree, not the main repo
+# 0. the editable-install trap: prove we test the tree we think we are testing
 # --------------------------------------------------------------------------- #
-def test_module_under_test_is_this_worktree():
-    # The venv's editable install points at the main checkout; without this guard a green
-    # run could be testing unmodified code. Pin that the imported module is the worktree's.
-    assert "worktrees" in bf.__file__
+def test_module_under_test_comes_from_this_checkout():
+    # A venv's editable install can point at a different checkout than the one under
+    # test, so a green run may be exercising unmodified code. Pin that the imported
+    # module belongs to the tree this test file lives in — true in a worktree and on
+    # main alike. Asserting "worktrees" in the path was true only in a worktree, and
+    # it broke `main` the moment it merged.
+    assert Path(bf.__file__).is_relative_to(Path(__file__).resolve().parents[2])
 
 
 # --------------------------------------------------------------------------- #
