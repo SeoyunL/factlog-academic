@@ -338,6 +338,44 @@ factlog zotero-import --collection "Systematic Review" --pdf            # 서지
 factlog zotero-import --collection "Systematic Review" --annotations    # + 하이라이트·노트
 ```
 
+#### OpenAlex 서지 가져오기 (`factlog openalex-*`)
+
+공개 서지 데이터베이스 [OpenAlex](https://openalex.org) 에서 문헌을 검색·임포트하고,
+인용 그래프를 한 단계 넓히고, 이미 가져온 레코드의 메타데이터를 다시 확인할 수
+있습니다. 임포트된 항목은 Zotero와 마찬가지로 여전히 **후보**이며 `sync → review →
+accept` 게이트를 거칩니다. `pip install 'factlog[openalex]'` 가 필요하고, OpenAlex는
+**인증이 없어** API 키나 계정이 필요 없습니다.
+
+```bash
+factlog openalex-search --query "neurosymbolic AI" --year 2020-2025 --limit 50
+factlog openalex-import --doi 10.1007/s10462-023-10448-w   # 또는 --work-id W2741809807
+factlog openalex-cite --for smith-2023-neurosymbolic --direction citing
+factlog openalex-refresh                                    # 보고만. 원장에 쓰지 않음
+factlog openalex-acknowledge-retraction --id W2741809807
+```
+
+검색은 **1회당 10 크레딧**(하루 약 1000)이고 결과를 몇 건 받든 비용이 같습니다 —
+`--limit` 을 아껴도 절약되지 않으니 처음부터 넉넉히 요청하세요. 단건 조회는 0
+크레딧이라 `openalex-import` 와 `openalex-refresh` 는 사실상 무료입니다.
+
+**결정론 경계** — 이걸 모르면 `--auto-update` 가 무엇을 고쳤는지 오해합니다.
+
+1. 임포트는 원장(ledger)을 고쳐 쓸 권한이 없습니다.
+2. `openalex-refresh --auto-update` 는 `doi` / `work_type` / `journal` 만 원장에 적습니다.
+   `sources/*.md` 는 절대 건드리지 않습니다.
+3. **철회(원장의 `is_retracted`)는 두 모드 모두에서 자동 흡수되지 않습니다.** 사람에게
+   보고되고 `factlog openalex-acknowledge-retraction --id <id>` 로만 종결됩니다. 이 값은
+   factlog가 주장하는 사실이 아니라 **OpenAlex의 의견**입니다 — OpenAlex가 철회로
+   표시한 문헌을 PubMed는 철회로 기록하지 않는 사례가 있습니다. 그래서 source의 front
+   matter 키는 맨 `retracted:` 가 아니라 `openalex_is_retracted` 입니다.
+4. 임포트된 항목은 여전히 후보이며 사람의 `accept` 게이트를 지나야 사실이 됩니다.
+
+설정은 `<KB>/policy/openalex-config.toml` > `~/.config/factlog/openalex.toml` > 내장
+기본값 순으로 해석됩니다. Zotero와 달리 **secrets 경계가 없습니다**: `email` 은 인증이
+아니라 신원 표기용 예의라 커밋되는 KB 정책 파일에 둬도 안전합니다(Zotero의
+`web_api_key` 는 사용자 레벨 파일에서만 읽습니다). 자세한 옵션·크레딧 예산·provenance
+front matter 는 [docs/openalex.md](docs/openalex.md) 를 참고하세요.
+
 #### 어휘 살펴보기 (`factlog vocab`)
 
 `ask` 와 `provenance` 는 정확한 엔티티/관계 이름을 필요로 합니다. `factlog vocab`
