@@ -24,6 +24,7 @@ from factlog.integrations.arxiv.config import (
     build_submitted_date,
     from_mapping,
     load_config,
+    low_delay_warning,
     as_phrase,
     compose_search_query,
     validate_category,
@@ -219,6 +220,33 @@ def test_default_limit_is_clamped_to_the_operators_ceiling():
 def test_bad_request_delay_falls_back_to_the_recommendation(value):
     # bool is an int subclass; `true` must not read as a one-second delay.
     assert from_mapping({"client": {"request_delay": value}}).request_delay == 3.0
+
+
+def test_low_delay_warning_wording_is_pinned():
+    # The exact stderr line for a below-recommendation delay. #134: the comment on
+    # `_as_delay` long promised this warning while the code emitted nothing, and a
+    # docs branch shipped the phantom promise to the README. Pin the words so the
+    # comment and the code can no longer drift apart unnoticed.
+    assert low_delay_warning(0.0) == (
+        "request_delay is 0s, below arXiv's recommended 3s. arXiv will not push "
+        "back on the faster rate (#57); the cost of it falls on a shared public "
+        "service, not on you. Lower it only when you know your load is small."
+    )
+
+
+def test_low_delay_warning_names_the_configured_value():
+    assert low_delay_warning(1.5).startswith("request_delay is 1.5s, below arXiv's recommended 3s.")
+
+
+@pytest.mark.parametrize("delay", [3.0, 3.5, 10.0, REQUEST_DELAY_SECONDS])
+def test_no_warning_at_or_above_the_recommendation(delay):
+    # A delay that meets or exceeds the recommendation — including the built-in
+    # default — says nothing, so an ordinary run is quiet.
+    assert low_delay_warning(delay) is None
+
+
+def test_default_config_earns_no_delay_warning():
+    assert low_delay_warning(ArxivConfig().request_delay) is None
 
 
 def test_missing_config_file_named_explicitly_is_an_error(tmp_path):

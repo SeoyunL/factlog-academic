@@ -3158,7 +3158,11 @@ def _arxiv_prepare(args, command: str):
     """Resolve the target KB and arXiv settings, or None on a user error."""
     from pathlib import Path
 
-    from factlog.integrations.arxiv.config import ArxivConfigError, load_config
+    from factlog.integrations.arxiv.config import (
+        ArxivConfigError,
+        load_config,
+        low_delay_warning,
+    )
 
     porcelain = getattr(args, "porcelain", False)
     target_str, source = factlog_config.resolve_root(args.target)
@@ -3168,10 +3172,17 @@ def _arxiv_prepare(args, command: str):
     if not _require_kb(target, command):
         return None
     try:
-        return target, load_config(kb_root=target)
+        config = load_config(kb_root=target)
     except ArxivConfigError as exc:
         print(f"factlog {command}: {exc}", file=sys.stderr)
         return None
+    # A below-recommendation request_delay is honoured, but never in silence: name
+    # it once here, at the single per-run config-resolution choke point, so it is
+    # said once rather than per request. stderr, so --porcelain stdout stays clean.
+    warning = low_delay_warning(config.request_delay)
+    if warning is not None:
+        print(f"factlog {command}: {warning}", file=sys.stderr)
+    return target, config
 
 
 def _arxiv_withdrawal_warnings(report, works) -> list[str]:

@@ -617,7 +617,60 @@ class TestThePhraseRewriteIsAnnounced:
         # The CLI hands the raw query to the client; `compose_search_query` — the
         # one place that builds `search_query` — is what applies the phrase form.
         assert client.calls[0]["query"] == "chain of thought"
-        assert compose_search_query("chain of thought") == 'all:"chain of thought"' 
+        assert compose_search_query("chain of thought") == 'all:"chain of thought"'
+
+
+def _kb_with_delay(tmp_path, delay):
+    kb = _kb(tmp_path)
+    policy = kb / "policy"
+    policy.mkdir()
+    (policy / "arxiv-config.toml").write_text(f"[client]\nrequest_delay = {delay}\n")
+    return kb
+
+
+class TestLowDelayWarningIsEmitted:
+    """A below-recommendation `request_delay` is honoured but not in silence (#134).
+
+    The `_as_delay` comment promised this caution for a long time while the code
+    emitted nothing; a docs branch then trusted the comment and shipped the phantom
+    promise to the README. The warning is now real, on stderr, once per run — matching
+    the project's posture of never silencing a signal on the operator's behalf."""
+
+    def test_below_recommendation_warns_on_stderr(self, tmp_path, fake, capsys):
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers",
+             "--target", str(_kb_with_delay(tmp_path, "0.0")), "--show-query"])
+        err = capsys.readouterr().err
+        assert "request_delay is 0s, below arXiv's recommended 3s." in err
+        assert "shared public service" in err
+
+    def test_the_warning_is_said_once_not_per_request(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "transformers",
+             "--target", str(_kb_with_delay(tmp_path, "0.5")), "--all"])
+        assert capsys.readouterr().err.count("below arXiv's recommended") == 1
+
+    def test_porcelain_stdout_is_not_polluted(self, tmp_path, fake, capsys):
+        fake(FakeSearchClient())
+        run(["arxiv-search", "--query", "transformers",
+             "--target", str(_kb_with_delay(tmp_path, "0.0")), "--show-query", "--porcelain"])
+        captured = capsys.readouterr()
+        assert "below arXiv's recommended" in captured.err
+        for line in captured.out.strip().splitlines():
+            assert line.startswith("query\t"), line
+
+    def test_default_delay_says_nothing(self, tmp_path, fake, capsys):
+        # No policy file → built-in 3.0s default → an ordinary run is quiet.
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers", "--target", str(_kb(tmp_path)),
+             "--show-query"])
+        assert "request_delay" not in capsys.readouterr().err
+
+    def test_at_the_recommendation_says_nothing(self, tmp_path, fake, capsys):
+        fake(FakeClient())
+        run(["arxiv-search", "--query", "transformers",
+             "--target", str(_kb_with_delay(tmp_path, "3.0")), "--show-query"])
+        assert "request_delay" not in capsys.readouterr().err
 
     def test_show_query_shows_the_quoted_form(self, tmp_path, fake, capsys):
         fake(FakeSearchClient())
