@@ -99,11 +99,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from factlog.integrations.arxiv.work_parser import (
+from factlog.integrations.common._textio import atomic_write_text
+from factlog.integrations.common.vocabulary import (
     WITHDRAWN_BY_ADMIN,
     WITHDRAWN_BY_AUTHOR,
 )
-from factlog.integrations.common._textio import atomic_write_text
 
 #: Sibling directory of ``sources/`` that holds provenance sidecars. Exported so
 #: later steps (#64 matching, #65 merge) reference the name in exactly one place.
@@ -145,9 +145,11 @@ def _is_withdrawal_agent(value: object) -> bool:
 #: make a corrupt ledger's fate depend on which modules a process happened to import, so a
 #: reader that never imported arXiv would read a bad ``withdrawn_by`` silently. That is the
 #: failure this table exists to remove, so the table is always present. The two allowed
-#: agents are imported from their owner rather than re-typed, so a third agent is added in
-#: one place. Generalizing this into a per-integration schema (the shape ``BackfillSchema``
-#: / ``AcknowledgeSchema`` take) is a real seam, but those objects are constructed by the
+#: agents come from ``common/vocabulary.py`` rather than being re-typed, so a third agent is
+#: added in one place and ``common`` never has to import ``arxiv`` to know them (the
+#: dependency is inverted: ``arxiv/work_parser.py`` re-exports them under its own name).
+#: Generalizing this into a per-integration schema (the shape ``BackfillSchema`` /
+#: ``AcknowledgeSchema`` take) is a real seam, but those objects are constructed by the
 #: *caller* of a command and are not in reach of a low-level reader; building that seam is
 #: not this issue's job.
 _FIELD_VALUE_SPACE: dict[tuple[str, str], tuple[Callable[[object], bool], str]] = {

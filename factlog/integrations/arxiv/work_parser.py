@@ -33,6 +33,14 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from factlog.integrations.arxiv.id_normalizer import ArxivId, parse_entry_id
+# The two agents are *values*, and their definition sits at the bottom of the package so
+# `common/provenance.py` can judge a ledger's `withdrawn_by` without importing arXiv (#109).
+# They are re-exported here because the word remains arXiv's: a reader of `withdrawn_by`
+# meets it in this module, and a third agent is still added in exactly one place.
+from factlog.integrations.common.vocabulary import (
+    WITHDRAWN_BY_ADMIN,
+    WITHDRAWN_BY_AUTHOR,
+)
 
 __all__ = [
     "ParsedArxivWork",
@@ -41,9 +49,6 @@ __all__ = [
     "detect_withdrawal",
     "parse_entry",
 ]
-
-WITHDRAWN_BY_AUTHOR = "author"
-WITHDRAWN_BY_ADMIN = "admin"
 
 # An administrator withdrawal usually opens with this lead-in, sometimes inside
 # the bracket. Consumed before the marker is matched so both agents share one
