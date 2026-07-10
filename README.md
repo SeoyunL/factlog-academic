@@ -148,6 +148,7 @@ factlog openalex-import --doi 10.1007/s10462-023-10448-w   # or --work-id W27418
 factlog openalex-cite --for smith-2023-neurosymbolic --direction citing
 factlog openalex-refresh                                    # reports only; never writes the ledger
 factlog openalex-acknowledge-retraction --id W2741809807
+factlog openalex-backfill-provenance                        # gives a ledger to works that have only front matter
 ```
 
 A search costs **10 credits** (out of roughly 1,000 a day), and it costs the same
@@ -166,7 +167,12 @@ changed.
    openalex-acknowledge-retraction --id <id>`. This value is **OpenAlex's opinion**,
    not a fact factlog asserts — OpenAlex flags some works as retracted that PubMed
    does not. That is why the source's front-matter key is `openalex_is_retracted`,
-   not a bare `retracted:`.
+   not a bare `retracted:`. A work known only from front matter (imported before
+   #84) has no ledger to close, so acknowledge refuses it and points to `factlog
+   openalex-backfill-provenance`, which builds the ledger from front matter (no
+   network, never touches `sources/*.md`) so the retraction can then be
+   acknowledged. Unlike arXiv, nothing is lost — every ledger field has a
+   front-matter key — so no value has to be added by hand first.
 4. Imported items are still candidates; they become facts only after passing a
    human `accept` gate.
 
