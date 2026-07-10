@@ -31,7 +31,8 @@ httpx 하나만 추가됩니다. OpenAlex API는 **인증이 없어** API 키나
 나머지는 `--porcelain`(스크립트용 탭 구분 출력)을 받습니다. `search` / `import` /
 `cite` / `backfill-provenance` 는 `--dry-run`(파일을 만들지 않음)을 받습니다.
 
-> `--dry-run` 만으로 계획이 출력되는 명령은 `openalex-import` 뿐입니다. `search` 는
+> `--dry-run` 만으로 계획이 출력되는 명령은 `openalex-import` 와
+> `openalex-backfill-provenance` 입니다. `search` 는
 > `--dry-run` 이 대화형 선택을 끄기 때문에 아무것도 선택되지 않으므로 `--dry-run --all`
 > 이 필요하고, `cite` 는 `--auto-import` 없이는 `--dry-run` 을 보기도 전에 반환하므로
 > `--dry-run --auto-import` 가 필요합니다.
@@ -155,7 +156,8 @@ factlog openalex-backfill-provenance
 이 명령이 필요한 이유는 종결에 있습니다. #84 이전에 임포트된 저작은 front matter만 있고
 원장이 없어 재임포트해도 원장이 생기지 않습니다(front matter의 정체 일치에서 sidecar writer
 전에 멈춥니다). 원장이 없으면 결정을 적을 곳이 없으므로 `openalex-acknowledge-retraction`
-이 그 저작을 **거부**하고(`no-ledger`, 위 절 참조) 바로 이 명령을 가리킵니다. 백필은 front
+이 그 저작을 **거부**하고(front matter만 있어 결정을 적을 원장이 없다며) 바로 이 명령을
+가리킵니다. 백필은 front
 matter가 이미 주장하는 값으로 원장을 세워 그 종결을 가능하게 합니다 — 새 주장을 만드는 것이
 아니라 믿음이 저장되는 위치만 바꾸므로, acknowledge와 달리 **확인 프롬프트도 `--yes` 도 TTY
 게이트도 없습니다.** API 클라이언트를 만들지 않고 front matter를 **읽기만** 합니다(P4: 모든
