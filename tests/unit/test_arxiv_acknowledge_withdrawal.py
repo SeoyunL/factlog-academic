@@ -129,9 +129,22 @@ def run(argv):
 
 
 def _confirm(monkeypatch, answer):
-    """Put the command on an interactive terminal and answer its prompt with `answer`."""
+    """Put the command on an interactive terminal and answer its prompt with `answer`.
+
+    Returns a list of the prompts `input()` was actually called with. A caller that
+    asserts only on the outcome cannot tell a consulted human from a deleted
+    `if not assume_yes:` block, so every test that reaches the write through this
+    helper asserts the prompt was consulted exactly once (P1/P5).
+    """
+    prompts: list[str] = []
+
+    def _input(prompt="", *a, **k):
+        prompts.append(prompt)
+        return answer
+
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda *a, **k: answer)
+    monkeypatch.setattr("builtins.input", _input)
+    return prompts
 
 
 def _md_snapshot(kb):
@@ -262,13 +275,14 @@ class TestAcknowledgeCommand:
         # note and confirms at the prompt (#106). `--yes` cannot reach this write.
         _seed(tmp_path, "1706.03762", 7, withdrawn_by="author")
         fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)]))
-        _confirm(monkeypatch, "y")
+        prompts = _confirm(monkeypatch, "y")
         code = run([
             "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
             "--target", str(tmp_path),
         ])
         out = capsys.readouterr().out
         assert code == 0
+        assert len(prompts) == 1  # the human was asked, not assumed
         assert "Cleared the withdrawal" in out
         # The identifying field is gone from the ledger — not left as "author".
         assert _ledger_withdrawn_by(tmp_path, "1706.03762") is None
@@ -388,11 +402,12 @@ class TestAcknowledgeCommand:
         assert _md_snapshot(tmp_path) == before
 
         fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)]))
-        _confirm(monkeypatch, "y")  # the clear needs a human (#106)
+        prompts = _confirm(monkeypatch, "y")  # the clear needs a human (#106)
         run([
             "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
             "--target", str(tmp_path),
         ])
+        assert len(prompts) == 1  # the clear ran through the prompt, not around it
         assert _md_snapshot(tmp_path) == before
 
 
@@ -442,12 +457,13 @@ class TestReimportable:
         # confirmed by --yes, #106); the identifying field is CLEARED, not left as
         # "author".
         fake(FakeClient([un_withdrawn]))
-        _confirm(monkeypatch, "y")
+        prompts = _confirm(monkeypatch, "y")
         code = run([
             "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
             "--target", str(tmp_path),
         ])
         assert code == 0
+        assert len(prompts) == 1  # a human confirmed the clear that repaired re-import
         assert _ledger_withdrawn_by(tmp_path, "1706.03762") is None
 
         # Now the same fresh import merges cleanly again — the divergence is gone.
@@ -640,6 +656,10 @@ class TestYesCannotClear:
         err = capsys.readouterr().err
         assert code == 1
         assert "refusing to clear the withdrawal" in err
+        # It names the recorded value it declines to erase. Asserted as the whole
+        # rendered fragment: a bare `"author" in err` would also match the note's
+        # "withdrawal by the author", so it would pass a message that dropped the value.
+        assert "1706.03762 (author)" in err
         # It names the working path: an interactive re-run without --yes.
         assert "without --yes" in err and "terminal" in err and "prompt" in err
         assert "Nothing written." in err
@@ -660,7 +680,10 @@ class TestYesCannotClear:
         ])
         err = capsys.readouterr().err
         assert "could not be read" in err
-        assert "admin" in err  # names the value it is refusing to erase
+        # Names the value it is refusing to erase. `"admin" in err` would be a no-op
+        # assertion: "admin" is a substring of the "arXiv administrators" this command
+        # renders elsewhere, so it would hold even if the message named no value at all.
+        assert "1706.03762 (admin)" in err
         assert "retracted" not in err.lower()
 
     def test_yes_still_sets_a_withdrawal(self, tmp_path, fake, capsys):
@@ -690,15 +713,16 @@ class TestYesCannotClear:
     def test_interactive_confirm_still_clears(self, tmp_path, fake, monkeypatch, capsys):
         _seed(tmp_path, "1706.03762", 7, withdrawn_by="author")
         fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)]))
-        _confirm(monkeypatch, "y")
+        prompts = _confirm(monkeypatch, "y")
         code = run([
             "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
             "--target", str(tmp_path),
         ])
         out = capsys.readouterr().out
         assert code == 0
-        # The human saw the un-withdrawal note before answering.
+        # The human saw the un-withdrawal note, was asked exactly once, and answered.
         assert "arXiv no longer reports 1706.03762 as withdrawn" in out
+        assert len(prompts) == 1
         assert "Cleared the withdrawal" in out
         assert _ledger_withdrawn_by(tmp_path, "1706.03762") is None
 
@@ -706,12 +730,13 @@ class TestYesCannotClear:
         _seed(tmp_path, "1706.03762", 7, withdrawn_by="author")
         before = _kb_snapshot(tmp_path)
         fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)]))
-        _confirm(monkeypatch, "n")
+        prompts = _confirm(monkeypatch, "n")
         code = run([
             "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
             "--target", str(tmp_path),
         ])
         assert code == 0
+        assert len(prompts) == 1
         assert "Aborted; nothing written." in capsys.readouterr().out
         assert _kb_snapshot(tmp_path) == before
         assert _ledger_withdrawn_by(tmp_path, "1706.03762") == "author"
