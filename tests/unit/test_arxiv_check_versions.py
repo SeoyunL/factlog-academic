@@ -130,7 +130,15 @@ def _snapshot(kb):
 # module-level unit tests
 # --------------------------------------------------------------------------- #
 class TestCollect:
-    def test_gathers_arxiv_records_and_dedups_by_id(self, tmp_path):
+    def test_two_ledgers_recording_different_versions_conflict_not_max(self, tmp_path):
+        # Inverted from the pre-#137 `the highest recorded wins`. Two ledgers claiming a
+        # *different* `arxiv_version` for one paper is a conflict, not an input to `max`:
+        # a `max` here silently dropped the lower record, and when arXiv served the higher
+        # value the command reported `unchanged` for a paper versions behind — the inverse
+        # of the one signal it exists to produce. The paper now has no single
+        # `recorded_version` (there is no one value the KB recorded), and
+        # `version_disagreement` names each source and the value it holds so the report can
+        # too. Reverting the fold to `max`/first-wins fails this.
         _seed(tmp_path, "1706.03762", 5, name="a")
         # A second ledger cites the same paper at a lower version + a non-arxiv record.
         _seed(tmp_path, "1706.03762", 3, name="b",
@@ -141,8 +149,23 @@ class TestCollect:
         assert len(entries) == 1
         entry = entries[0]
         assert entry.arxiv_id == "1706.03762"
-        assert entry.recorded_version == 5  # the highest recorded wins
+        assert entry.recorded_version is None  # not 5, not 3 — no single recorded value
+        assert entry.version_disagreement == (
+            ("source-provenance/a.json", 5),
+            ("source-provenance/b.json", 3),
+        )
         assert set(entry.sources) == {"source-provenance/a.json", "source-provenance/b.json"}
+
+    def test_two_ledgers_agreeing_on_a_version_are_not_a_conflict(self, tmp_path):
+        # The fold only fires on *distinct* versions. Two ledgers recording the same v5 is
+        # agreement, folded to the one value, no disagreement, no conflict — the ordinary
+        # dedup a duplicate-cited preprint has always been.
+        _seed(tmp_path, "1706.03762", 5, name="a")
+        _seed(tmp_path, "1706.03762", 5, name="b")
+        (entry,), errors = cv.collect_ledger_entries(tmp_path)
+        assert errors == []
+        assert entry.recorded_version == 5
+        assert entry.version_disagreement == ()
 
     def test_records_withdrawal_agent_from_ledger(self, tmp_path):
         _seed(tmp_path, "1904.09773", 1, withdrawn_by="admin")
@@ -458,15 +481,39 @@ class TestAKbWithNoLedgerIsStillChecked:
         assert [(e.arxiv_id, e.recorded_version) for e in entries] == [("1706.03762", 5)]
         assert entries[0].sources == ("sources/old.md",)
 
-    def test_a_ledger_wins_over_front_matter_when_both_exist(self, tmp_path):
-        # The ledger is what a refresh updates, so it is authoritative, and its
-        # `sources` name the ledgers a reader should open.
+    def test_a_ledger_still_names_the_ledger_but_a_differing_front_matter_conflicts(
+        self, tmp_path
+    ):
+        # The ledger stays authoritative for the entry's *identity*: its `sources` name the
+        # ledgers a reader should open, and (see the agreeing case below) its value stands
+        # when the front matter matches. But a sidecar-less `.md` records its version only in
+        # front matter, and dropping a *differing* one whole — as this used to, asserting the
+        # ledger's 7 and losing old.md's 5 — is the "one of each" silence #137 closes. The
+        # front-matter version now joins the fold, so the disagreement is a conflict naming
+        # both sources. Inverted from the pre-#137 `recorded_version == 7`.
         _seed(tmp_path, "1706.03762", 7, name="a")
         self._old_style_source(tmp_path, "1706.03762", version=5)
         entries, _ = cv.collect_ledger_entries(tmp_path)
         assert len(entries) == 1
-        assert entries[0].recorded_version == 7
+        assert entries[0].recorded_version is None  # not folded to the ledger's 7
+        assert entries[0].version_disagreement == (
+            ("source-provenance/a.json", 7),
+            ("sources/old.md", 5),
+        )
+        # The ledger still names itself for a reader (the sidecar loop set `sources`; the
+        # front-matter version joined `recorded` only, not `sources`).
         assert entries[0].sources == ("source-provenance/a.json",)
+
+    def test_a_ledger_and_an_agreeing_front_matter_keep_the_ledger_value(self, tmp_path):
+        # The guard that "ledger wins" survives for the common case: when the sidecar-less
+        # `.md` records the *same* version, no conflict is manufactured and the ledger's
+        # value stands, byte-for-byte as before #137.
+        _seed(tmp_path, "1706.03762", 7, name="a")
+        self._old_style_source(tmp_path, "1706.03762", version=7)
+        (entry,), _ = cv.collect_ledger_entries(tmp_path)
+        assert entry.recorded_version == 7
+        assert entry.version_disagreement == ()
+        assert entry.sources == ("source-provenance/a.json",)
 
     def test_a_sidecar_path_refusal_is_a_per_id_error_and_the_rest_are_still_checked(
         self, tmp_path, monkeypatch
