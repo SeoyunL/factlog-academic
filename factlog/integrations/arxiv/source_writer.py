@@ -240,18 +240,18 @@ class ArxivSourceWriter(BaseSourceWriter):
         Python value, not a version (#116). That case now gets its own message and
         never emits a bare ``None``.
 
-        Its remedy is stated by *provenance*, not by naming a command. The
-        version-drift branch prescribes ``arxiv-check-versions`` because a drift is a
-        refresh's job (#58). A record that never carried a version is a different thing:
-        :func:`check_versions._diff` computes
+        Its remedy differs from the drift branch's, and both halves are measured, not
+        reasoned. ``arxiv-check-versions --auto-update`` **does** record the missing
+        version and the merge then succeeds: ``apply_auto_update`` is not gated on the
+        ``changed`` flag — it writes ``version = current_version`` for any result with a
+        live version (``check_versions._refreshed_fields``), version-less or not. But the
+        *plain* check does not surface the paper: :func:`check_versions._diff` computes
         ``changed = recorded is not None and current != recorded``, so a version-less
-        record is reported ``unchanged`` — the plain "run arxiv-check-versions to record
-        the new version" instruction would not surface it as a drift at all. And since
-        #113 no importer writes such a record, so it was hand-edited or produced outside
-        factlog; giving a record its *first* version is an import's authority, not a
-        refresh's (#58). The honest message therefore names no command and points at the
-        ledger's origin. (Whether ``--auto-update`` happens to overwrite the field is a
-        check_versions concern, not one this text may promise across that boundary.)
+        record is reported ``unchanged`` and nothing in that report tells the operator to
+        act. The message names the flag that works and warns of that trap. #113 (no
+        importer writes a version-less record, so it came from a hand-edit or an external
+        tool) is kept as context, not offered as the remedy — an earlier draft told the
+        operator to "correct it there", which is false, because the command repairs it.
 
         ``now`` is ``incoming.fields.get("version")``, sourced from
         :class:`ParsedArxivWork`'s ``version: int`` — always a live-parsed integer,
@@ -262,16 +262,19 @@ class ArxivSourceWriter(BaseSourceWriter):
         was, now = existing.fields.get("version"), incoming.fields.get("version")
         if was != now:
             if was is None:
-                # The ledger holds no version to have drifted from, so this is not the
-                # refresh's version-bump case. #113 means no importer wrote this record;
-                # name no command, state what is true, and point at the ledger's origin.
+                # The ledger holds no version to have drifted from. --auto-update
+                # DOES record it (measured: version written, re-merge succeeds), but
+                # the plain check reports this paper `unchanged`, so the report never
+                # tells the operator to act — name the flag that works AND that trap.
                 return (
                     f"ledger records no version for this paper, arXiv now serves v{now}; "
-                    "a record that never carried a version is not a version that drifted, "
-                    "so arxiv-check-versions reports it as unchanged rather than as the "
-                    "bump this error would otherwise name. Since #113 an importer never "
-                    "writes a version-less arxiv record, so this ledger entry was "
-                    "hand-edited or produced outside factlog and must be corrected there"
+                    "run arxiv-check-versions --auto-update to record it, after which "
+                    "the merge succeeds. Plain arxiv-check-versions will not list this "
+                    "paper: a record with no recorded version is reported unchanged (the "
+                    "check needs a recorded version to compare against), so nothing in "
+                    "that report tells you to act. Since #113 an importer never writes a "
+                    "version-less arxiv record, so this entry came from a hand-edit or an "
+                    "external tool"
                 )
             return (
                 f"ledger records v{was}, arXiv now serves v{now}; run "
