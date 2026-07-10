@@ -747,7 +747,14 @@ class BaseSourceWriter:
         fault — is a per-id ``error``, never a batch crash: one paper's problem
         does not stop the imports queued behind it.
         """
-        sidecar = sidecar_path(decision.path, target)
+        try:
+            sidecar = sidecar_path(decision.path, target)
+        except ProvenanceError as exc:
+            # `decision.path` is under `sources/` for every call today, so this refusal is
+            # unreachable — but an unreachable refusal that escapes as a traceback is exactly
+            # the batch-aborting shape these guards exist to close (#65/#71/#94, #142). Degrade
+            # it to this one paper's per-id error like every other sidecar fault below.
+            return WriteResult(decision.path, "error", str(exc))
         record = self._provenance_record(parsed, imported_at)
         try:
             provenance = read_provenance(sidecar)
@@ -831,7 +838,12 @@ class BaseSourceWriter:
         if not self.merges_cross_source:
             return decision
         record = self._provenance_record(parsed, imported_at)
-        sidecar = sidecar_path(decision.path, target)
+        try:
+            sidecar = sidecar_path(decision.path, target)
+        except ProvenanceError as exc:
+            # See `_upsert_sidecar`: a sidecar_path refusal is this paper's per-id error, never
+            # a batch-aborting traceback (#142).
+            return WriteResult(decision.path, "error", str(exc))
         fresh = Provenance()
         add_source(fresh, record)
         try:
