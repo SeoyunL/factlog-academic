@@ -29,6 +29,11 @@ openalex = ["httpx>=0.27"]
 # reports a truncated body only via `bozo` rather than raising, so `client.py`
 # treats `bozo` as a hard failure — see #57.
 arxiv = ["httpx>=0.27", "feedparser>=6.0"]
+# PubMed integration (roadmap phase 4). httpx only for now: the E-utilities
+# surface factlog needs is a couple of GET endpoints, matching the openalex
+# reasoning above. Whether biopython is worth pulling in is deferred to the
+# spike in #160 — see #159.
+pubmed = ["httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/semantic-reasoning/factlog"
@@ -44,6 +49,7 @@ packages = [
     "factlog.integrations.zotero",
     "factlog.integrations.openalex",
     "factlog.integrations.arxiv",
+    "factlog.integrations.pubmed",
 ]
 
 [tool.pytest.ini_options]
