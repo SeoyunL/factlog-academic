@@ -232,9 +232,50 @@ class ArxivSourceWriter(BaseSourceWriter):
         messages name it. This text names arXiv commands and so must never reach a
         non-arXiv error — which it cannot, because a writer keeping the empty
         :attr:`_IDENTIFYING_FIELDS` default never reaches :meth:`_divergence`.
+
+        **A version-less ledger record is not a version drift.** ``was`` is
+        ``existing.fields.get("version")``; a hand-edited or externally-produced
+        ledger (since #113 no importer writes one) can carry no ``version``, in which
+        case ``was`` is ``None``. Interpolating it as ``v{was}`` printed ``vNone`` — a
+        Python value, not a version (#116). That case now gets its own message and
+        never emits a bare ``None``.
+
+        Its remedy differs from the drift branch's, and both halves are measured, not
+        reasoned. ``arxiv-check-versions --auto-update`` **does** record the missing
+        version and the merge then succeeds: ``apply_auto_update`` is not gated on the
+        ``changed`` flag — it writes ``version = current_version`` for any result with a
+        live version (``check_versions._refreshed_fields``), version-less or not. But the
+        *plain* check does not surface the paper: :func:`check_versions._diff` computes
+        ``changed = recorded is not None and current != recorded``, so a version-less
+        record is reported ``unchanged`` and nothing in that report tells the operator to
+        act. The message names the flag that works and warns of that trap. #113 (no
+        importer writes a version-less record, so it came from a hand-edit or an external
+        tool) is kept as context, not offered as the remedy — an earlier draft told the
+        operator to "correct it there", which is false, because the command repairs it.
+
+        ``now`` is ``incoming.fields.get("version")``, sourced from
+        :class:`ParsedArxivWork`'s ``version: int`` — always a live-parsed integer,
+        never ``None`` — so the withdrawal branches below, which interpolate only
+        ``now``, cannot print ``vNone``. Only ``was`` (the ledger's recorded value)
+        can be absent, and only the version-drift branch reads it.
         """
         was, now = existing.fields.get("version"), incoming.fields.get("version")
         if was != now:
+            if was is None:
+                # The ledger holds no version to have drifted from. --auto-update
+                # DOES record it (measured: version written, re-merge succeeds), but
+                # the plain check reports this paper `unchanged`, so the report never
+                # tells the operator to act — name the flag that works AND that trap.
+                return (
+                    f"ledger records no version for this paper, arXiv now serves v{now}; "
+                    "run arxiv-check-versions --auto-update to record it, after which "
+                    "the merge succeeds. Plain arxiv-check-versions will not list this "
+                    "paper: a record with no recorded version is reported unchanged (the "
+                    "check needs a recorded version to compare against), so nothing in "
+                    "that report tells you to act. Since #113 an importer never writes a "
+                    "version-less arxiv record, so this entry came from a hand-edit or an "
+                    "external tool"
+                )
             return (
                 f"ledger records v{was}, arXiv now serves v{now}; run "
                 "arxiv-check-versions to record the new version"

@@ -24,6 +24,8 @@ import pytest
 from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common.provenance import (
+    SourceRecord,
+    add_source,
     is_sidecar,
     read_provenance,
     sidecar_path,
@@ -443,3 +445,134 @@ class TestOnlyIdentifyingFieldsDiverge:
         assert "arxiv-acknowledge-withdrawal" in result.reason
         assert "run arxiv-check-versions" not in result.reason
         assert "record the new version" not in result.reason
+
+
+def _seed_versionless_arxiv_record(sidecar, arxiv_id="2311.09277"):
+    """Append an arXiv provenance record that carries NO ``version``.
+
+    Since #113 no importer writes one, so this is what a hand-edited or
+    externally-produced ledger looks like. ``to_dict`` drops ``None``, so a record
+    built without ``version`` reads back as ``{"version": None}`` — the exact input
+    that made ``_divergence`` print ``vNone`` (#116).
+    """
+    prov = read_provenance(sidecar)
+    add_source(
+        prov,
+        SourceRecord(
+            type="arxiv",
+            id=arxiv_id,
+            imported_at="2026-01-01T00:00:00Z",
+            fields={"comment": "10 pages", "primary_category": "cs.CL"},
+        ),
+    )
+    write_provenance(sidecar, prov)
+    assert "version" not in _arxiv_record(sidecar).to_dict()
+
+
+class TestVersionlessLedgerRecord:
+    """#116: a ledger record with no ``version`` is not a version drift.
+
+    It must never print ``vNone`` (a Python value, not a version). Its remedy is
+    measured, not reasoned: ``arxiv-check-versions --auto-update`` DOES record the
+    missing version (``apply_auto_update`` is not gated on ``changed``; it writes
+    ``version = current_version`` for any result with a live version), and the merge
+    then succeeds. But ``check_versions._diff`` computes
+    ``changed = recorded is not None and current != recorded``, so the *plain* check
+    reports a version-less record ``unchanged`` and the report never tells the operator
+    to act. The message names the flag that works and warns of that trap; #113 (no
+    importer writes a version-less record) is context, not the remedy.
+    """
+
+    def test_no_version_message_never_prints_the_python_none(self, tmp_path):
+        kb, original = _kb_with_openalex(tmp_path)
+        sidecar = sidecar_path(original)
+        _seed_versionless_arxiv_record(sidecar)
+
+        result = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
+        assert result.status == "error"
+        # The single load-bearing regression: no bare None reaches operator text.
+        assert "None" not in result.reason
+        assert "vNone" not in result.reason
+        # It says what is true: the ledger records no version, arXiv serves v7.
+        assert "no version" in result.reason
+        assert "v7" in result.reason
+
+    def test_no_version_message_names_the_command_that_works_and_warns_of_the_report(
+        self, tmp_path
+    ):
+        kb, original = _kb_with_openalex(tmp_path)
+        sidecar = sidecar_path(original)
+        _seed_versionless_arxiv_record(sidecar)
+
+        result = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
+        assert result.status == "error"
+        # Name the command that MEASURABLY repairs it (see the end-to-end test below).
+        assert "arxiv-check-versions --auto-update" in result.reason
+        # Warn that the plain check reports the paper unchanged, so its report is silent.
+        assert "unchanged" in result.reason
+        # Keep #113 provenance as context, not as the remedy.
+        assert "#113" in result.reason
+
+    def test_no_version_divergence_leaves_the_ledger_untouched(self, tmp_path):
+        kb, original = _kb_with_openalex(tmp_path)
+        sidecar = sidecar_path(original)
+        _seed_versionless_arxiv_record(sidecar)
+        before = sidecar.read_bytes()
+
+        result = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
+        assert result.status == "error"
+        assert sidecar.read_bytes() == before  # the merge itself writes nothing
+
+    def test_the_prescribed_command_actually_repairs_the_version_less_record(
+        self, tmp_path
+    ):
+        # End-to-end proof the remedy the message names is real: version-less ledger
+        # -> merge errors -> arxiv-check-versions --auto-update writes the version ->
+        # merge succeeds. If this ever regresses, the message becomes a lie.
+        from factlog.integrations.arxiv import check_versions as cv
+
+        kb, original = _kb_with_openalex(tmp_path)
+        sidecar = sidecar_path(original)
+        _seed_versionless_arxiv_record(sidecar)
+        assert _arxiv_record(sidecar).fields.get("version") is None  # before
+
+        errored = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
+        assert errored.status == "error"
+
+        # Follow the prescribed command against a live v7 work.
+        work = _arxiv(version=7)
+        entries, _unreadable = cv.collect_ledger_entries(kb)
+        checks = [cv._diff(e, work) for e in entries if e.arxiv_id == "2311.09277"]
+        updates = cv.apply_auto_update(checks, kb)
+        assert any(u.status == cv.UPDATE_WRITTEN for u in updates)
+        assert _arxiv_record(sidecar).fields.get("version") == 7  # after
+
+        healed = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
+        assert healed.status == "merged"
+
+    def test_plain_check_reports_the_version_less_record_unchanged(self, tmp_path):
+        # The surprising half: without --auto-update the report says nothing changed,
+        # so an operator reading only the report would never know to act. This pins
+        # _diff's classification (changed requires `recorded is not None`).
+        from factlog.integrations.arxiv import check_versions as cv
+
+        kb, original = _kb_with_openalex(tmp_path)
+        _seed_versionless_arxiv_record(sidecar_path(original))
+
+        work = _arxiv(version=7)
+        entries, _unreadable = cv.collect_ledger_entries(kb)
+        checks = [cv._diff(e, work) for e in entries if e.arxiv_id == "2311.09277"]
+        assert checks and all(c.status == cv.STATUS_UNCHANGED for c in checks)
+
+    def test_a_recorded_version_that_drifts_still_names_both_and_prints_no_none(
+        self, tmp_path
+    ):
+        # The v3 -> v7 path must not regress: it still prescribes arxiv-check-versions
+        # and names both versions, and it too must never print a bare None.
+        kb, original = _kb_with_openalex(tmp_path)
+        ArxivSourceWriter().write(_arxiv(version=3), kb, imported_at="t")
+        result = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
+        assert result.status == "error"
+        assert "None" not in result.reason
+        assert "v3" in result.reason and "v7" in result.reason
+        assert "arxiv-check-versions" in result.reason
