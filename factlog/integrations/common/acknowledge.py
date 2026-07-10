@@ -233,7 +233,11 @@ def acknowledge(
             entry_id=entry_id,
             status=ACK_NO_LEDGER,
             reason=(
-                f"no provenance ledger carries an {schema.type!r} record for id "
+                # No article before the interpolated type: "a"/"an" cannot be chosen
+                # for an arbitrary schema type (`arxiv`, `openalex`, a future
+                # consonant-initial `pubmed`/`crossref`), so the sentence is worded to
+                # need none (#107 item 6).
+                f"no provenance ledger carries a record of type {schema.type!r} for id "
                 f"{entry_id!r}; acknowledgement records a decision about an existing "
                 "record and never creates one."
             ),

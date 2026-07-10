@@ -274,7 +274,7 @@ class TestCli:
         assert code == 1  # an error sets the exit code
         out = capsys.readouterr().out
         assert "no entry returned by arXiv" in out
-        assert "Up to date:      0" in out
+        assert "Up to date:          0" in out
 
     def test_older_than_skips_recent_and_touches_nothing(self, tmp_path, fake, capsys):
         md = _seed(tmp_path, "1706.03762", 5)
@@ -290,7 +290,7 @@ class TestCli:
         assert client.calls == []  # nothing queried
         assert _snapshot(tmp_path) == before  # sources/ + ledgers untouched
         assert check_log_path(tmp_path).read_bytes() == log_before  # log untouched too
-        assert "Skipped:         1" in capsys.readouterr().out
+        assert "Skipped:             1" in capsys.readouterr().out
         assert md.exists()
 
     def test_corrupt_ledger_is_per_id_error_not_traceback(self, tmp_path, fake, capsys):
@@ -301,7 +301,7 @@ class TestCli:
         assert code == 1
         out = capsys.readouterr().out
         assert "corrupt provenance ledger" in out
-        assert "Up to date:      1" in out  # the good paper was still checked
+        assert "Up to date:          1" in out  # the good paper was still checked
 
     def test_corrupt_check_log_is_a_clear_failure(self, tmp_path, fake, capsys):
         _seed(tmp_path, "1706.03762", 5)
@@ -358,6 +358,33 @@ class TestCli:
         # Progress/ETA is on stderr, never stdout.
         assert "checked 2/2" in captured.err
         assert "checked 2/2" not in captured.out
+
+    def test_porcelain_marks_the_un_withdrawn_paper(self, tmp_path, fake, capsys):
+        # An un-withdrawn paper's row is otherwise byte-identical to an unchanged one
+        # (empty withdrawn_by, newly_withdrawn 0); the appended un_withdrawn column is
+        # the only way porcelain can name which paper came back (#107 item 5).
+        _seed(tmp_path, "1904.09773", 1, withdrawn_by="author")  # ledger records author
+        _seed(tmp_path, "1810.04805", 1, name="bert")  # never withdrawn
+        fake(FakeClient([
+            _work("1904.09773", version=1, withdrawn_by=None),  # arXiv reversed it
+            _work("1810.04805", version=1),
+        ]))
+        run(["arxiv-check-versions", "--target", str(tmp_path), "--porcelain"])
+        rows = {}
+        checks = {}
+        for line in capsys.readouterr().out.strip().splitlines():
+            fields = line.split("\t")
+            (checks if fields[0] == "check" else rows).__setitem__(
+                fields[1] if fields[0] == "check" else fields[0],
+                fields,
+            )
+        # The un_withdrawn flag is the last column; 1 for the reversed paper, 0 else.
+        assert checks["1904.09773"][-1] == "1"
+        assert checks["1810.04805"][-1] == "0"
+        # And the earlier fixed columns a #78 parser reads are unchanged.
+        assert checks["1904.09773"][2] == "unchanged"
+        assert checks["1904.09773"][6] == "0"  # newly_withdrawn stays 0
+        assert rows["un_withdrawn"][1] == "1"
 
     def test_no_records_is_a_clean_zero(self, tmp_path, capsys):
         (tmp_path / "sources").mkdir()
@@ -578,7 +605,7 @@ class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
         assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
         out = capsys.readouterr().out
         assert "WITHDRAWN" not in out
-        assert "Newly withdrawn: 0" in out
+        assert "Newly withdrawn:     0" in out
 
     def test_a_genuinely_new_withdrawal_still_surfaces(self, tmp_path, fake, capsys):
         self._front_matter_only(
@@ -588,7 +615,7 @@ class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
         assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
         out = capsys.readouterr().out
         assert "WITHDRAWN by the author" in out
-        assert "Newly withdrawn: 1" in out
+        assert "Newly withdrawn:     1" in out
 
     def test_an_empty_agent_does_not_suppress_a_new_withdrawal(self, tmp_path, fake, capsys):
         self._front_matter_only(
@@ -600,7 +627,7 @@ class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
         assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
         out = capsys.readouterr().out
         assert "WITHDRAWN by the author" in out
-        assert "Newly withdrawn: 1" in out
+        assert "Newly withdrawn:     1" in out
 
     def test_a_ledger_takes_precedence_and_still_surfaces_the_withdrawal(
         self, tmp_path, fake, capsys
@@ -617,7 +644,7 @@ class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
         assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
         out = capsys.readouterr().out
         assert "WITHDRAWN by arXiv administrators" in out
-        assert "Newly withdrawn: 1" in out
+        assert "Newly withdrawn:     1" in out
 
 
 # --------------------------------------------------------------------------- #

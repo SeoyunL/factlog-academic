@@ -160,7 +160,7 @@ class TestResurfacing:
         out = capsys.readouterr().out
         assert code == 0
         assert "WITHDRAWN by arXiv administrators" in out
-        assert "Newly withdrawn: 1" in out
+        assert "Newly withdrawn:     1" in out
         assert "retracted" not in out.lower()
 
     def test_un_withdrawal_resurfaces_and_is_not_a_withdrawal_warning(
@@ -178,7 +178,7 @@ class TestResurfacing:
         assert "arxiv-acknowledge-withdrawal --id 1904.09773" in out
         # It must not masquerade as a fresh withdrawal.
         assert "WITHDRAWN by" not in out
-        assert "Newly withdrawn: 0" in out
+        assert "Newly withdrawn:     0" in out
         assert "retracted" not in out.lower()
 
     def test_garbage_front_matter_value_resurfaces(self, tmp_path, fake, capsys):
@@ -190,7 +190,7 @@ class TestResurfacing:
         out = capsys.readouterr().out
         assert code == 0
         assert "WITHDRAWN by the author" in out
-        assert "Newly withdrawn: 1" in out
+        assert "Newly withdrawn:     1" in out
         # The note names the recorded garbage rather than hiding it behind "arXiv".
         assert "'typo'" in out
         assert "retracted" not in out.lower()
@@ -201,7 +201,7 @@ class TestResurfacing:
         fake(FakeClient([_work("1904.09773", version=1, withdrawn_by="admin")]))
         run(["arxiv-check-versions", "--target", str(tmp_path)])
         out = capsys.readouterr().out
-        assert "Newly withdrawn: 0" in out
+        assert "Newly withdrawn:     0" in out
         assert "No longer withdrawn: 0" in out
 
 
@@ -232,7 +232,7 @@ class TestAcknowledgeCommand:
         # The repeat is silenced on the next check.
         run(["arxiv-check-versions", "--target", str(tmp_path)])
         out = capsys.readouterr().out
-        assert "Newly withdrawn: 0" in out
+        assert "Newly withdrawn:     0" in out
 
     def test_prints_the_note_being_silenced_from_the_live_value(
         self, tmp_path, fake, capsys
@@ -451,4 +451,151 @@ def test_fresh_withdrawal_none_recorded_still_surfaces(tmp_path, fake, capsys):
     out = capsys.readouterr().out
     assert "WITHDRAWN by the author" in out
     assert "which the ledger did not record" in out
-    assert "Newly withdrawn: 1" in out
+    assert "Newly withdrawn:     1" in out
+
+
+def _kb_snapshot(kb):
+    """Bytes and mtime_ns for every file under sources/ and source-provenance/."""
+    snap = {}
+    for sub in ("sources", "source-provenance"):
+        root = kb / sub
+        if root.is_dir():
+            for path in root.rglob("*"):
+                if path.is_file():
+                    st = path.stat()
+                    snap[path] = (path.read_bytes(), st.st_mtime_ns)
+    return snap
+
+
+# --------------------------------------------------------------------------- #
+# #107 item 2 — the notes must not claim "ledger" or divergence for a front-matter value
+# --------------------------------------------------------------------------- #
+class TestNoteProvenance:
+    def test_front_matter_withdrawal_note_says_front_matter_not_ledger(
+        self, tmp_path, fake, capsys
+    ):
+        # A pre-#82 paper whose front matter records "author"; arXiv now reports "admin".
+        _seed_front_matter_only(tmp_path, "1904.09773", 1, withdrawn_by="author")
+        fake(FakeClient([_work("1904.09773", version=1, withdrawn_by="admin")]))
+        run(["arxiv-check-versions", "--target", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert "WITHDRAWN by arXiv administrators" in out
+        # It attributes the recorded value to the front matter, never to a ledger.
+        assert "where the front matter recorded a withdrawal by the author" in out
+        assert "the ledger recorded" not in out
+
+    def test_front_matter_un_withdrawal_note_makes_no_false_claim(
+        self, tmp_path, fake, capsys
+    ):
+        # A pre-#82 paper whose front matter records a withdrawal arXiv has reversed.
+        _seed_front_matter_only(tmp_path, "1904.09773", 1, withdrawn_by="author")
+        fake(FakeClient([_work("1904.09773", version=1, withdrawn_by=None)]))
+        run(["arxiv-check-versions", "--target", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert "No longer withdrawn" in out
+        assert "its front matter still records a withdrawal by the author" in out
+        # It must NOT claim a divergence/re-import error (there is no ledger to diverge),
+        # nor prescribe the acknowledge command (which would exit 1 for this paper).
+        assert "re-import will error" not in out
+        assert "diverges from a fresh import" not in out
+        assert "arxiv-acknowledge-withdrawal --id" not in out
+        assert "#105" in out
+
+
+# --------------------------------------------------------------------------- #
+# #107 items 1 & 3 — refuse BEFORE the live query, for zero API requests
+# --------------------------------------------------------------------------- #
+class TestRefusesBeforeQuery:
+    def test_front_matter_only_refuses_before_query_zero_api(
+        self, tmp_path, fake, capsys
+    ):
+        # A pre-#82 paper: front matter carries the withdrawal, no sidecar. acknowledge()
+        # writes only sidecars, so this can never be written; the command must refuse
+        # before the fetch (not after spending a request and prompting) and point at #105.
+        _seed_front_matter_only(tmp_path, "1706.03762", 7, withdrawn_by="author")
+        before = _kb_snapshot(tmp_path)
+        client = fake(FakeClient([_work("1706.03762", version=7, withdrawn_by="admin")]))
+        code = run([
+            "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
+            "--target", str(tmp_path), "--yes",
+        ])
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "front matter" in err and "#105" in err
+        assert client.calls == []  # ZERO API requests
+        assert not (tmp_path / "source-provenance").exists()  # no ledger fabricated
+        assert _kb_snapshot(tmp_path) == before  # .md byte- and mtime_ns-identical
+
+    def test_absent_id_refuses_before_query_zero_api(self, tmp_path, fake, capsys):
+        _seed(tmp_path, "1706.03762", 7, withdrawn_by="author")  # a different paper
+        before = _kb_snapshot(tmp_path)
+        client = fake(FakeClient([_work("2005.13421", version=1, withdrawn_by="admin")]))
+        code = run([
+            "arxiv-acknowledge-withdrawal", "--id", "2005.13421",
+            "--target", str(tmp_path), "--yes",
+        ])
+        assert code == 1
+        assert "no arXiv record" in capsys.readouterr().err
+        assert client.calls == []  # ZERO API requests
+        assert _kb_snapshot(tmp_path) == before
+
+    def test_unreadable_ledger_refuses_before_query_zero_api_mtime_identical(
+        self, tmp_path, fake, capsys
+    ):
+        # One clean sidecar (no withdrawn_by) for the target id, plus one corrupt sidecar
+        # that could carry it: the recorded value is unknowable, so refuse before the
+        # fetch rather than assert "the ledger did not record" on an incomplete view.
+        _seed(tmp_path, "1706.03762", 7, name="good")
+        (tmp_path / "source-provenance" / "bad.json").write_text("{ broken")
+        before = _kb_snapshot(tmp_path)
+        client = fake(FakeClient([_work("1706.03762", version=7, withdrawn_by="admin")]))
+        code = run([
+            "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
+            "--target", str(tmp_path), "--yes",
+        ])
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "cannot read every provenance ledger" in err
+        assert client.calls == []  # ZERO API requests
+        assert _kb_snapshot(tmp_path) == before  # every sidecar byte- and mtime-identical
+
+
+# --------------------------------------------------------------------------- #
+# #107 item 7 — nothing to acknowledge exits 0 without a note or a prompt
+# --------------------------------------------------------------------------- #
+class TestNothingToAcknowledge:
+    def test_both_none_exits_zero_without_prompting(
+        self, tmp_path, fake, monkeypatch, capsys
+    ):
+        # Ledger records no withdrawal, arXiv reports none: nothing to silence. It must
+        # not print a divergence note, must not prompt, and must not claim it silenced
+        # a signal that never existed.
+        _seed(tmp_path, "1706.03762", 7)  # not withdrawn
+        fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)]))
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        def _boom(*a, **k):
+            raise AssertionError("must not prompt when there is nothing to acknowledge")
+
+        monkeypatch.setattr("builtins.input", _boom)
+        code = run([
+            "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
+            "--target", str(tmp_path),
+        ])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "nothing to acknowledge" in out
+        assert "no longer repeat this signal" not in out
+        assert "WITHDRAWN by" not in out
+
+    def test_same_agent_exits_zero_without_writing(self, tmp_path, fake, capsys):
+        _seed(tmp_path, "1706.03762", 7, withdrawn_by="admin")
+        fake(FakeClient([_work("1706.03762", version=7, withdrawn_by="admin")]))
+        code = run([
+            "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
+            "--target", str(tmp_path), "--yes",
+        ])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "already records" in out
+        assert _ledger_withdrawn_by(tmp_path, "1706.03762") == "admin"

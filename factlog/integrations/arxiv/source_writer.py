@@ -221,14 +221,17 @@ class ArxivSourceWriter(BaseSourceWriter):
     def _divergence(self, existing: SourceRecord, incoming: SourceRecord) -> str:
         """Why an import refuses to revise the ledger, naming the field that moved.
 
-        Overrides the base's generic message to point at ``arxiv-check-versions``,
-        the refresh command that alone may rewrite the entry via
-        :func:`update_source`. The message must not invent a version bump: a
-        withdrawal can appear without one, and pointing a user at a version
-        comparison for a change that command does not look at would leave them with
-        no way forward. This text names ``arxiv-check-versions`` and so must never
-        reach a non-arXiv error — which it cannot, because a writer keeping the
-        empty :attr:`_IDENTIFYING_FIELDS` default never reaches :meth:`_divergence`.
+        Overrides the base's generic message to name the command that alone can clear
+        the divergence, and that command differs by field. A **version** bump is fixed
+        by ``arxiv-check-versions --auto-update``, whose ``AUTO_UPDATE_FIELDS`` includes
+        ``version``. A **withdrawn_by** divergence is not — ``AUTO_UPDATE_FIELDS`` never
+        contains it (a refresh may not absorb the human gate), so pointing a user at
+        ``arxiv-check-versions`` would send them to a command that exits 0, changes
+        nothing, and leaves the re-import erroring (measured, #107 item 4). Only
+        ``arxiv-acknowledge-withdrawal`` writes ``withdrawn_by``, so both withdrawal
+        messages name it. This text names arXiv commands and so must never reach a
+        non-arXiv error — which it cannot, because a writer keeping the empty
+        :attr:`_IDENTIFYING_FIELDS` default never reaches :meth:`_divergence`.
         """
         was, now = existing.fields.get("version"), incoming.fields.get("version")
         if was != now:
@@ -240,9 +243,11 @@ class ArxivSourceWriter(BaseSourceWriter):
         if withdrawn:
             return (
                 f"arXiv now reports v{now} as withdrawn by {withdrawal_agent(withdrawn)}; "
-                "run arxiv-check-versions and review before relying on this source"
+                f"run `arxiv-acknowledge-withdrawal --id {existing.id}` to record it "
+                "(arxiv-check-versions cannot: --auto-update never writes withdrawn_by)"
             )
         return (
-            f"ledger no longer records v{now} as withdrawn; run arxiv-check-versions "
-            "to refresh the entry"
+            f"ledger records a withdrawal arXiv no longer reports for v{now}; run "
+            f"`arxiv-acknowledge-withdrawal --id {existing.id}` to clear it "
+            "(arxiv-check-versions cannot: --auto-update never writes withdrawn_by)"
         )
