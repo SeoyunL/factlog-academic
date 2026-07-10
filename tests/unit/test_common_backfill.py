@@ -494,6 +494,41 @@ class TestNeverTouchesMd:
 
 
 # --------------------------------------------------------------------------- #
+# 8b. dry_run: classify without writing, sharing the one classifier
+# --------------------------------------------------------------------------- #
+class TestDryRun:
+    def test_dry_run_reports_would_write_but_writes_nothing(self, tmp_path):
+        # A writable paper is classified BACKFILL_WRITTEN (naming the ledger it would write)
+        # but no sidecar is created and the .md is byte- and mtime_ns-identical.
+        md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
+        before_md = _stat(md)
+        results = backfill(tmp_path, ARXIV, dry_run=True)
+        assert [(r.entry_id, r.status) for r in results] == [
+            ("2301.00001", BACKFILL_WRITTEN)
+        ]
+        assert results[0].ledger  # names the ledger it WOULD write
+        assert not (tmp_path / "source-provenance").exists()  # nothing written
+        assert _stat(md) == before_md
+
+    def test_dry_run_still_refuses_the_unreadable_identity(self, tmp_path):
+        # A refusal is classified identically in dry-run (same single classifier).
+        existing = _kb_with_openalex_authored_md(tmp_path)
+        side = sidecar_path(existing)
+        before = _stat(side)
+        results = backfill(tmp_path, ARXIV, dry_run=True)
+        assert [r.status for r in results] == [BACKFILL_REFUSED]
+        assert ("arxiv", "2311.09277") not in _ledger(side)
+        assert _stat(side) == before
+
+    def test_dry_run_then_real_run_agree_on_every_id(self, tmp_path):
+        _arxiv_md(tmp_path, "a", "2301.00001", 3)
+        _kb_with_openalex_authored_md(tmp_path)  # a refused id
+        preview = {(r.entry_id, r.status) for r in backfill(tmp_path, ARXIV, dry_run=True)}
+        real = {(r.entry_id, r.status) for r in backfill(tmp_path, ARXIV)}
+        assert preview == real
+
+
+# --------------------------------------------------------------------------- #
 # 9. vocabulary neutrality — the field name is supplied by the schema
 # --------------------------------------------------------------------------- #
 def test_module_never_names_a_vocabulary_word():

@@ -3887,6 +3887,121 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
+    """Materialize the provenance ledger a front-matter-only arXiv paper already implies (#114, #105).
+
+    A paper imported before #82 has front matter and no sidecar, so a re-import
+    short-circuits on the front-matter identity match before the sidecar writer, its
+    ledger is never created, and its withdrawal signal can never be acknowledged (both
+    acknowledge commands refuse a paper with no ledger, and point here). This builds that
+    ledger from what the ``.md`` already asserts — ``add_source`` into a fresh sidecar, no
+    new claim — so acknowledge can then silence the repeat.
+
+    **No network.** This makes no new claim: the record is derived deterministically from
+    front matter, which a human reviewed at import. It changes where a belief is stored,
+    not what is believed — so, unlike acknowledge, there is **no confirmation prompt, no
+    ``--yes`` and no TTY gate**. It never constructs an API client. It only *reads* front
+    matter (P4: every ``.md`` stays byte- and ``mtime_ns``-identical).
+
+    ``--dry-run`` writes nothing and names both the ids that would get a ledger and the ids
+    that are refused (a missing ``imported_at``, or an unreadable identifying ``version`` —
+    an OpenAlex-authored ``.md`` echoing ``arxiv_id`` but carrying no ``arxiv_version``).
+    ``submitted``, ``last_updated`` and ``comment`` are not in front matter; the first
+    ``arxiv-check-versions --auto-update`` fills the latter two, but ``submitted`` is not in
+    ``AUTO_UPDATE_FIELDS`` and is unrecoverable — it is not invented and not queried for.
+
+    Re-running is a byte- and ``mtime_ns``-identical no-op (a record already present is not
+    rewritten). A per-id read/write fault is reported for that paper, never a batch crash.
+    """
+    from pathlib import Path
+
+    from factlog.integrations.arxiv.backfill import backfill_schema
+    from factlog.integrations.common.backfill import (
+        BACKFILL_ERROR,
+        BACKFILL_REFUSED,
+        BACKFILL_UNCHANGED,
+        BACKFILL_WRITTEN,
+        backfill,
+    )
+
+    command = "arxiv-backfill-provenance"
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    target_str, source = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if source in ("config", "cwd") and not porcelain:
+        print(f"factlog {command}: target KB {target} (from {source})")
+    if not _require_kb(target, command):
+        return 1
+
+    # Reads front matter and the ledgers only; constructs no API client (a test asserts it).
+    results = backfill(target, backfill_schema(), dry_run=dry_run)
+
+    written = [r for r in results if r.status == BACKFILL_WRITTEN]
+    unchanged = [r for r in results if r.status == BACKFILL_UNCHANGED]
+    refused = [r for r in results if r.status == BACKFILL_REFUSED]
+    errors = [r for r in results if r.status == BACKFILL_ERROR]
+
+    if porcelain:
+        # Stable machine contract, tab-separated, LF-terminated, order-independent (parse
+        # by the first field). A per-id row for every paper acted on or refused:
+        #   result\t<status>\t<arxiv id>\t<ledger path or empty>\t<reason or empty>
+        # then the summary counts, then dry_run and the sources dir:
+        for r in results:
+            reason = r.reason.replace("\t", " ").replace("\n", " ")
+            print(f"result\t{r.status}\t{r.entry_id}\t{r.ledger}\t{reason}")
+        print(f"backfilled\t{len(written)}")
+        print(f"unchanged\t{len(unchanged)}")
+        print(f"refused\t{len(refused)}")
+        print(f"errors\t{len(errors)}")
+        print(f"dry_run\t{'1' if dry_run else '0'}")
+        print(f"target\t{target / 'sources'}")
+        return 1 if errors else 0
+
+    verb = "Would backfill" if dry_run else "Backfilling"
+    print(
+        f"\n{verb} provenance ledgers for front-matter-only arXiv papers in KB: {target}\n"
+    )
+    if not results:
+        print(
+            "No front-matter-only arXiv papers found (every arXiv paper the check "
+            "commands can read already has a provenance ledger)."
+        )
+        return 0
+
+    if written:
+        label = "Would get a provenance ledger:" if dry_run else "Provenance ledger written:"
+        print(label)
+        for r in written:
+            arrow = "would write" if dry_run else "wrote"
+            print(f"  ✎ {r.entry_id}  ({arrow} {r.ledger})")
+    if unchanged:
+        print("\nAlready recorded (nothing to do):")
+        for r in unchanged:
+            print(f"  = {r.entry_id}")
+    if refused:
+        print("\nRefused (front matter cannot supply a truthful ledger):")
+        for r in refused:
+            print(f"  ✗ {r.entry_id}: {r.reason}")
+    if errors:
+        print("\nCould not read or write a sidecar:")
+        for r in errors:
+            print(f"  ✗ {r.entry_id}: {r.reason}")
+
+    print("\nSummary:")
+    print(f"  {'Would backfill:' if dry_run else 'Backfilled:':<18}{len(written)}")
+    print(f"  {'Already recorded:':<18}{len(unchanged)}")
+    print(f"  {'Refused:':<18}{len(refused)}")
+    print(f"  {'Errors:':<18}{len(errors)}")
+    if written and not dry_run:
+        print(
+            "\nNext step: a withdrawn paper among these can now be acknowledged with "
+            "'factlog arxiv-acknowledge-withdrawal --id <id>'."
+        )
+    return 1 if errors else 0
+
+
 def cmd_openalex_refresh(args: argparse.Namespace) -> int:
     """Has any OpenAlex record in the KB drifted from what OpenAlex now serves? (#83).
     Reads the provenance ledgers and a KB-level check-log, re-fetches each work by id
@@ -4867,6 +4982,27 @@ def build_parser() -> argparse.ArgumentParser:
              "writes nothing.",
     )
     ax_ack.set_defaults(func=cmd_arxiv_acknowledge_withdrawal)
+
+    ax_backfill = sub.add_parser(
+        "arxiv-backfill-provenance",
+        help="give every front-matter-only arXiv paper (imported before #82) the "
+             "provenance ledger its front matter implies, so its withdrawal can be "
+             "acknowledged. No network, never touches sources/*.md; --dry-run previews",
+    )
+    ax_backfill.add_argument(
+        "--target", default=None,
+        help="KB root (default: the active KB; see `factlog where`)",
+    )
+    ax_backfill.add_argument(
+        "--dry-run", action="store_true",
+        help="name the ids that would get a ledger and the ids refused (missing "
+             "imported_at, or an unreadable arxiv_version) without writing anything",
+    )
+    ax_backfill.add_argument(
+        "--porcelain", action="store_true",
+        help="machine-readable output (tab-separated rows) for scripts",
+    )
+    ax_backfill.set_defaults(func=cmd_arxiv_backfill_provenance)
 
     return parser
 

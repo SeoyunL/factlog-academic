@@ -209,6 +209,7 @@ def _backfill_source(
     fields: Mapping[str, Any],
     missing_required: Sequence[str],
     schema: BackfillSchema,
+    dry_run: bool = False,
 ) -> BackfillResult:
     """Materialize one front-matter-only paper's ledger into its sidecar.
 
@@ -221,6 +222,11 @@ def _backfill_source(
     guarded with ``(ProvenanceError, OSError)`` so one paper's failure is that paper's
     problem, and a record already present identically is a byte- and ``mtime_ns``-identical
     no-op.
+
+    ``dry_run`` classifies without writing: it runs every read and every refusal exactly as
+    a real run would (so the previewed ids are the true ids), and reports what *would* be
+    written as :data:`BACKFILL_WRITTEN` without opening the sidecar for write. It shares this
+    function's single classification so a preview can never diverge from the run it previews.
     """
     if missing_required:
         return BackfillResult(
@@ -281,6 +287,12 @@ def _backfill_source(
             ),
         )
 
+    # A dry run stops here: it has classified this paper as writable (past every refusal
+    # and the no-op guard) without opening the sidecar for write, so nothing is written and
+    # every .md and sidecar stays byte- and mtime_ns-identical. The ledger it *would* write.
+    if dry_run:
+        return BackfillResult(entry_id, BACKFILL_WRITTEN, ledger=rel)
+
     # The WRITE is guarded too: write_provenance re-raises OSError and its mkdir raises one
     # — guarding only the read is the crash shipped in #65, #71 and #94. add_source appends
     # this record beside any neighbour without disturbing it.
@@ -293,7 +305,9 @@ def _backfill_source(
     return BackfillResult(entry_id, BACKFILL_WRITTEN, ledger=rel)
 
 
-def backfill(kb_root: Path | str, schema: BackfillSchema) -> list[BackfillResult]:
+def backfill(
+    kb_root: Path | str, schema: BackfillSchema, dry_run: bool = False
+) -> list[BackfillResult]:
     """Give every front-matter-only paper a provenance ledger, returning one result each.
 
     Membership is decided by the integration's own ``collect_ledger_entries`` and exported
@@ -307,6 +321,12 @@ def backfill(kb_root: Path | str, schema: BackfillSchema) -> list[BackfillResult
     from the schema's fields, and it is ``add_source``d into a fresh sidecar. Both the read
     and write are guarded per id, so one paper's failure never aborts the rest. Results are
     returned in ``entry_id`` order for reproducibility.
+
+    ``dry_run`` previews without writing: every paper is classified exactly as a real run
+    would classify it (refusals, no-ops and per-id read errors are all reported the same),
+    but a writable paper is reported as :data:`BACKFILL_WRITTEN` without its sidecar being
+    opened for write. The preview and the run share one classifier, so they can never
+    disagree about which ids are eligible and which are refused.
     """
     root = Path(kb_root)
     entries, _errors = schema.collect_entries(root)
@@ -330,7 +350,8 @@ def backfill(kb_root: Path | str, schema: BackfillSchema) -> list[BackfillResult
         for source_rel in sources:
             results.append(
                 _backfill_source(
-                    root, entry_id, source_rel, fields, missing_required, schema
+                    root, entry_id, source_rel, fields, missing_required, schema,
+                    dry_run=dry_run,
                 )
             )
 
