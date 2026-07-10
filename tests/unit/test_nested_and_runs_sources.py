@@ -602,12 +602,20 @@ class TestTheTwoSourceWalksShareOneEnumeration:
 
     def test_the_index_walk_preserves_the_pre_refactor_file_set_and_order(self, tmp_path):
         """Behaviour preservation (determinism is load-bearing: order fixes the output). The
-        shared walk yields exactly the `.md` *files* the old `sorted(sources_dir.rglob("*.md"))`
-        did — a directory named `adir.md` is the only thing dropped, and it was never a source."""
+        baseline is the OLD walk verbatim — `sorted(sources_dir.rglob("*.md"))`, no `is_file`
+        — so the test proves the divergence rather than assuming it: the only thing the shared
+        walk drops is the one directory whose name ends in `.md`, which was never a source."""
         kb = self._kb_with_every_shape(tmp_path)
         sources_dir = kb / "sources"
-        old = [p for p in sorted(sources_dir.rglob("*.md")) if p.is_file()]
-        assert walk_source_dir(sources_dir, include_hidden=True, suffix=".md") == old
+        old_literal_walk = sorted(sources_dir.rglob("*.md"))  # what `_index` ran, verbatim
+        new_walk = walk_source_dir(sources_dir, include_hidden=True, suffix=".md")
+        # Exactly one entry is dropped, and it is the directory — proven independently, not
+        # baked into the baseline.
+        adir = sources_dir / "adir.md"
+        assert adir.is_dir()
+        assert [p for p in old_literal_walk if p not in new_walk] == [adir]
+        # Order and membership of every real file are otherwise identical.
+        assert new_walk == [p for p in old_literal_walk if p != adir]
 
     def test_provenance_sources_is_the_source_walk_over_the_provenance_root(self, tmp_path):
         """The other consumer routes through the same function too: the eligible half of the

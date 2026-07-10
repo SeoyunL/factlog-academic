@@ -402,6 +402,28 @@ class TestNoOp:
 # 6. both boundaries guarded, per id (requirement 6)
 # --------------------------------------------------------------------------- #
 class TestBoundaryGuards:
+    def test_a_sidecar_path_refusal_is_a_per_id_error_not_a_traceback(self, tmp_path):
+        # sidecar_path REFUSES a path outside <kb>/sources/ (a `runs/sources/` conversion,
+        # #112). The public `backfill` only ever passes it a `provenance_sources` path
+        # (under sources/), so the refusal is unreachable there today — but it must degrade
+        # like every other per-id fault, not escape as a batch-aborting traceback (#142,
+        # same shape as #65/#71/#94). Reach it the one way it can be reached: a source_rel
+        # outside sources/. FAILS (raises ProvenanceError) if the sidecar_path call moves
+        # back outside its guard.
+        d = tmp_path / "runs" / "sources"
+        d.mkdir(parents=True)
+        (d / "z.md").write_text(
+            '---\narxiv_id: 2301.00001\narxiv_version: 1\n'
+            'imported_at: "2026-01-01T00:00:00Z"\n---\nbody\n',
+            encoding="utf-8",
+        )
+        result = _backfill_source(
+            tmp_path, "2301.00001", "runs/sources/z.md", {"version": 1}, (), ARXIV
+        )
+        assert result.status == BACKFILL_ERROR
+        assert "runs/sources/z.md" in result.reason
+        assert not (tmp_path / "source-provenance").exists()  # nothing was written
+
     def test_corrupt_sidecar_read_is_isolated_error(self, tmp_path):
         # A sidecar that will not parse is surfaced by the collection step as a per-file
         # error, never a crash — reported, exactly once, naming the file.
