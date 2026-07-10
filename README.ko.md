@@ -365,6 +365,7 @@ factlog openalex-import --doi 10.1007/s10462-023-10448-w   # 또는 --work-id W2
 factlog openalex-cite --for smith-2023-neurosymbolic --direction citing
 factlog openalex-refresh                                    # 보고만. 원장에 쓰지 않음
 factlog openalex-acknowledge-retraction --id W2741809807
+factlog openalex-backfill-provenance                        # front matter만 있는 저작에 원장을 만들어 줌
 ```
 
 검색은 **1회당 10 크레딧**(하루 약 1000)이고 결과를 몇 건 받든 비용이 같습니다 —
@@ -380,7 +381,12 @@ factlog openalex-acknowledge-retraction --id W2741809807
    보고되고 `factlog openalex-acknowledge-retraction --id <id>` 로만 종결됩니다. 이 값은
    factlog가 주장하는 사실이 아니라 **OpenAlex의 의견**입니다 — OpenAlex가 철회로
    표시한 문헌을 PubMed는 철회로 기록하지 않는 사례가 있습니다. 그래서 source의 front
-   matter 키는 맨 `retracted:` 가 아니라 `openalex_is_retracted` 입니다.
+   matter 키는 맨 `retracted:` 가 아니라 `openalex_is_retracted` 입니다. front matter만
+   있는 저작(#84 이전 임포트)은 종결할 원장이 없어 acknowledge가 거부하고 `factlog
+   openalex-backfill-provenance` 를 가리킵니다. 이 명령이 front matter로 원장을
+   만들면(네트워크 없음, `sources/*.md` 미변경) 비로소 철회를 종결할 수 있습니다.
+   arXiv와 달리 잃는 값이 없어 — 원장의 모든 필드가 front matter 키를 가지므로 — 사람이
+   먼저 손으로 값을 채워 넣을 필요가 없습니다.
 4. 임포트된 항목은 여전히 후보이며 사람의 `accept` 게이트를 지나야 사실이 됩니다.
 
 설정은 `<KB>/policy/openalex-config.toml` > `~/.config/factlog/openalex.toml` > 내장
