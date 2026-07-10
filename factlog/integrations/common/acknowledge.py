@@ -233,7 +233,7 @@ def acknowledge(
             entry_id=entry_id,
             status=ACK_NO_LEDGER,
             reason=(
-                f"no provenance ledger carries a {schema.type!r} record for id "
+                f"no provenance ledger carries an {schema.type!r} record for id "
                 f"{entry_id!r}; acknowledgement records a decision about an existing "
                 "record and never creates one."
             ),

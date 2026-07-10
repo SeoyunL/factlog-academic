@@ -3650,6 +3650,186 @@ def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     return 1 if summary.errors or update_errors else 0
 
 
+def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
+    """Record a human's decision about one arXiv record's withdrawal signal (#100).
+
+    ``arxiv-check-versions`` surfaces a withdrawal on every run until a human records
+    it; this is the verb that records it, the same human gate (P1) as ``accept`` /
+    ``reject``: one explicit ``--id``, never a sweep. Running it *is* the decision.
+
+    A **live** upstream query is mandatory. The check-log stores only
+    ``{arxiv_id, last_checked_at, version}`` — not ``withdrawn_by`` — so the command
+    cannot know what to write without asking arXiv. An acknowledgement written from a
+    stale cache is a lie: upstream may already have reversed the withdrawal. On a
+    connection/rate-limit failure or a missing entry: non-zero exit, nothing written.
+
+    It writes arXiv's **live** value into the ledger's ``withdrawn_by`` via the shared
+    acknowledge primitive — including ``None`` when arXiv reports the paper is no longer
+    withdrawn, which *clears* the field. ``withdrawn_by`` is an identifying field, so a
+    stale withdrawal left after an un-withdrawal makes re-import error permanently and a
+    refresh may not clear it; only this human write may. It never opens the ``.md`` (P4):
+    a paper imported before it was withdrawn keeps showing nothing on its KB page, so
+    after acknowledgement the ledger becomes the sole audit record.
+
+    Withdrawal is not retraction: arXiv has no peer-reviewed retraction process, and the
+    word "retracted" never appears here.
+    """
+    from factlog.integrations.arxiv import check_versions as cv
+    from factlog.integrations.arxiv.client import ArxivConnectionError, ArxivError
+    from factlog.integrations.arxiv.id_normalizer import (
+        ArxivIdError,
+        normalize_arxiv_id,
+    )
+    from factlog.integrations.common.acknowledge import (
+        ACK_ERROR,
+        ACK_NO_LEDGER,
+        ACK_UNCHANGED,
+        ACK_WRITTEN,
+        AcknowledgeSchema,
+        acknowledge,
+    )
+
+    command = "arxiv-acknowledge-withdrawal"
+
+    # Identity is the base id. A version-pinned id (`1706.03762v5`) names a version,
+    # not the paper the ledger records `withdrawn_by` against, so it is rejected rather
+    # than silently stripped — an operator who pinned a version has the wrong mental
+    # model of what is being acknowledged and should be told.
+    try:
+        identifier = normalize_arxiv_id(args.id)
+    except ArxivIdError as exc:
+        print(f"factlog {command}: {exc}", file=sys.stderr)
+        return 1
+    if identifier.version is not None:
+        print(
+            f"factlog {command}: identity is the base id, not a version. Drop the "
+            f"version pin (got {args.id!r}; acknowledge {identifier.base!r}).",
+            file=sys.stderr,
+        )
+        return 1
+    arxiv_id = identifier.base
+
+    prepared = _arxiv_prepare(args, command)
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    # A command that cannot ask must not guess (the `_select_search_results` rule).
+    # Without a terminal — a pipe, a script — there is no one to confirm to, and
+    # silencing a signal is exactly the write that must never be guessed. `--yes`
+    # (only ever paired with the required, explicit `--id`) is the deliberate act that
+    # stands in for the prompt; without it, a non-interactive run refuses and writes
+    # nothing. There is no `--all` and no wildcard: the blast radius is one id.
+    assume_yes = getattr(args, "yes", False)
+    if not assume_yes and not sys.stdin.isatty():
+        print(
+            f"factlog {command}: refusing to acknowledge without a terminal to confirm "
+            "at. This silences arXiv's withdrawal signal for one id. Re-run in a "
+            "terminal, or pass --yes with --id to confirm non-interactively. Nothing "
+            "written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # The live query is mandatory: the value to write lives only upstream.
+    client = _make_arxiv_client(config)
+    try:
+        batch = client.fetch_works([arxiv_id])
+    except ArxivConnectionError as exc:
+        # Cannot reach arXiv: an acknowledgement from a stale cache would be a lie.
+        print(f"factlog {command}: {exc} Nothing written.", file=sys.stderr)
+        return 2
+    except ArxivError as exc:
+        print(f"factlog {command}: {exc} Nothing written.", file=sys.stderr)
+        return 1
+    work = next((w for w in batch.works if w.arxiv_id == arxiv_id), None)
+    if work is None:
+        print(
+            f"factlog {command}: arXiv returned no entry for {arxiv_id!r} "
+            "(nonexistent id, or a transient empty response). Nothing written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # arXiv's live value — `None` when the paper is not (or no longer) withdrawn.
+    upstream_by = work.withdrawn_by
+
+    # The ledger's recorded value, read-only, so the note names both sides of any
+    # divergence. `collect_ledger_entries` opens only source-provenance/ and sources/
+    # front matter; no `.md` is written and none is opened for writing (P4).
+    entries, _ = cv.collect_ledger_entries(target)
+    recorded_by = next(
+        (e.recorded_withdrawn_by for e in entries if e.arxiv_id == arxiv_id), None
+    )
+
+    note_source = cv.VersionCheck(
+        arxiv_id=arxiv_id,
+        status=cv.STATUS_UNCHANGED,
+        current_version=work.version,
+        newly_withdrawn=upstream_by is not None and upstream_by != recorded_by,
+        un_withdrawn=upstream_by is None and recorded_by is not None,
+        withdrawn_by=upstream_by,
+        recorded_withdrawn_by=recorded_by,
+    )
+
+    # Show the operator exactly what they are about to silence (or clear).
+    if upstream_by is not None:
+        print(cv.withdrawal_note(note_source))
+    elif recorded_by is not None:
+        print(cv.un_withdrawal_note(note_source))
+    else:
+        print(
+            f"arXiv reports {arxiv_id} is not withdrawn, and the ledger records no "
+            "withdrawal. There is nothing to acknowledge."
+        )
+
+    if not assume_yes:
+        try:
+            answer = input(
+                f"\nRecord arXiv's live value for {arxiv_id} in the ledger? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Aborted; nothing written.")
+            return 0
+
+    # Write the live value — including `None`, which clears the identifying field.
+    schema = AcknowledgeSchema(type="arxiv", field="withdrawn_by")
+    result = acknowledge(target, arxiv_id, upstream_by, schema)
+
+    if result.status == ACK_WRITTEN:
+        if upstream_by is None:
+            print(
+                f"Cleared the withdrawal recorded for {arxiv_id} in "
+                f"{', '.join(result.ledgers)}."
+            )
+        else:
+            print(
+                f"Recorded withdrawal by {upstream_by} for {arxiv_id} in "
+                f"{', '.join(result.ledgers)}."
+            )
+        print(
+            "arxiv-check-versions will no longer repeat this signal. The ledger is the "
+            "audit record; the source .md is not rewritten (P4)."
+        )
+        return 0
+    if result.status == ACK_UNCHANGED:
+        print(
+            f"The ledger for {arxiv_id} already holds arXiv's live value; nothing "
+            "changed. arxiv-check-versions will not repeat this signal."
+        )
+        return 0
+    if result.status == ACK_NO_LEDGER:
+        print(f"factlog {command}: {result.reason}", file=sys.stderr)
+        return 1
+    if result.status == ACK_ERROR:
+        print(f"factlog {command}: {result.reason}", file=sys.stderr)
+        return 1
+    print(f"factlog {command}: unexpected result {result.status!r}", file=sys.stderr)
+    return 1
+
+
 def cmd_openalex_refresh(args: argparse.Namespace) -> int:
     """Has any OpenAlex record in the KB drifted from what OpenAlex now serves? (#83).
     Reads the provenance ledgers and a KB-level check-log, re-fetches each work by id
@@ -4331,6 +4511,31 @@ def build_parser() -> argparse.ArgumentParser:
              "and ETA stay on stderr",
     )
     ax_check.set_defaults(func=cmd_arxiv_check_versions)
+
+    ax_ack = sub.add_parser(
+        "arxiv-acknowledge-withdrawal",
+        help="record a human decision about one arXiv record's withdrawal, so "
+             "arxiv-check-versions stops repeating it. Live-queries arXiv for the "
+             "one --id and writes its current value (clearing the field when arXiv "
+             "no longer reports a withdrawal); never touches sources/*.md",
+    )
+    ax_ack.add_argument(
+        "--target", default=None,
+        help="KB root (default: the active KB; see `factlog where`)",
+    )
+    ax_ack.add_argument(
+        "--id", required=True,
+        help="the single arXiv id to acknowledge (base id; a version pin like "
+             "2311.09277v2 is rejected — identity is the base id). No --all, no "
+             "wildcard: the blast radius is one id, chosen by a human.",
+    )
+    ax_ack.add_argument(
+        "--yes", action="store_true",
+        help="skip the confirmation prompt (only ever paired with --id). Required to "
+             "run without a terminal; without it a non-interactive run refuses and "
+             "writes nothing.",
+    )
+    ax_ack.set_defaults(func=cmd_arxiv_acknowledge_withdrawal)
 
     return parser
 

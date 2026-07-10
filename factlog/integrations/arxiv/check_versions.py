@@ -67,6 +67,10 @@ from pathlib import Path
 from factlog.integrations.arxiv.client import MAX_ID_LIST
 from factlog.integrations.arxiv.check_log import CheckLog
 from factlog.integrations.arxiv.source_writer import withdrawal_agent
+from factlog.integrations.arxiv.work_parser import (
+    WITHDRAWN_BY_ADMIN,
+    WITHDRAWN_BY_AUTHOR,
+)
 from factlog.integrations.common.front_matter import read_scalars
 from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
@@ -137,11 +141,18 @@ class VersionCheck:
     """The outcome of checking one paper (or one corrupt ledger).
 
     ``status`` is one of the ``STATUS_*`` constants. ``newly_withdrawn`` is set
-    whenever arXiv now reports a withdrawal the ledger did not record, *independent*
-    of ``status`` — a withdrawn paper whose version did not change is still
-    ``unchanged`` but ``newly_withdrawn``. ``withdrawn_by`` carries arXiv's current
-    agent (``"author"``/``"admin"``) when the paper is withdrawn now. For an error
-    result the ``arxiv_id`` may instead be a ledger path (a corrupt file), and
+    whenever arXiv's current withdrawing agent **differs** from the one the ledger
+    recorded (a *value* comparison, not presence — #100): a fresh withdrawal, and
+    also a *re-withdrawal by a different agent* (an acknowledged ``author``
+    withdrawal that arXiv administrators later pull), which a presence test
+    (``recorded is None``) silenced. It is *independent* of ``status`` — a withdrawn
+    paper whose version did not change is still ``unchanged`` but ``newly_withdrawn``.
+    ``un_withdrawn`` is its mirror: arXiv no longer reports a withdrawal the ledger
+    still records, so the paper has come back and the ledger must be cleared. The two
+    are mutually exclusive. ``withdrawn_by`` carries arXiv's current agent
+    (``"author"``/``"admin"``) when the paper is withdrawn now; ``recorded_withdrawn_by``
+    carries what the ledger held, so the note can name both sides of a divergence. For
+    an error result the ``arxiv_id`` may instead be a ledger path (a corrupt file), and
     ``reason`` explains it.
 
     ``current_last_updated`` (an ISO date string) and ``current_comment`` carry the
@@ -158,7 +169,9 @@ class VersionCheck:
     current_last_updated: str | None = None
     current_comment: str | None = None
     newly_withdrawn: bool = False
+    un_withdrawn: bool = False
     withdrawn_by: str | None = None
+    recorded_withdrawn_by: str | None = None
     reason: str = ""
     sources: tuple[str, ...] = ()
 
@@ -328,7 +341,20 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
     recorded = entry.recorded_version
     # Withdrawal is measured against the ledger's own record, independently of the
     # version: a paper can be withdrawn without a new version (#57).
-    newly_withdrawn = bool(work.withdrawn) and entry.recorded_withdrawn_by is None
+    #
+    # This is a *value* comparison, not a presence test (#100). The old
+    # `recorded is None` presence test lost three signals it has been MEASURED to
+    # lose: (a) an acknowledged `author` withdrawal that arXiv administrators later
+    # pull never re-surfaced, because `"admin"` is also not None; (b) an
+    # *un-withdrawal* (`author -> None`) never surfaced at all; and (c) a hand-typed
+    # garbage value in front matter (`arxiv_withdrawn_by: "typo"`) permanently
+    # suppressed a real withdrawal. Comparing the values re-surfaces all three: a
+    # withdrawal whose agent differs from the ledger's is `newly_withdrawn`, and a
+    # withdrawal the ledger records that arXiv no longer reports is `un_withdrawn`.
+    recorded_by = entry.recorded_withdrawn_by
+    upstream_by = work.withdrawn_by
+    newly_withdrawn = upstream_by is not None and upstream_by != recorded_by
+    un_withdrawn = upstream_by is None and recorded_by is not None
     changed = recorded is not None and current != recorded
     return VersionCheck(
         arxiv_id=entry.arxiv_id,
@@ -342,7 +368,9 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
         current_last_updated=work.last_updated.isoformat() if work.last_updated else None,
         current_comment=work.comment,
         newly_withdrawn=newly_withdrawn,
-        withdrawn_by=work.withdrawn_by,
+        un_withdrawn=un_withdrawn,
+        withdrawn_by=upstream_by,
+        recorded_withdrawn_by=recorded_by,
         sources=entry.sources,
     )
 
@@ -402,6 +430,7 @@ class Summary:
     unchanged: int = 0
     changed: int = 0
     withdrawn: int = 0
+    un_withdrawn: int = 0
     errors: int = 0
     skipped: int = 0
 
@@ -409,8 +438,9 @@ class Summary:
 def summarize(
     results: Iterable[VersionCheck], skipped: Sequence[VersionCheck]
 ) -> Summary:
-    """Count outcomes. ``withdrawn`` counts newly-withdrawn papers across every
-    checked result, whatever their version status. ``checked`` excludes skipped."""
+    """Count outcomes. ``withdrawn`` counts newly-withdrawn papers and ``un_withdrawn``
+    counts papers arXiv no longer reports as withdrawn but the ledger still does, across
+    every checked result whatever their version status. ``checked`` excludes skipped."""
     summary = Summary(skipped=len(skipped))
     for result in results:
         if result.status == STATUS_ERROR:
@@ -423,6 +453,8 @@ def summarize(
             summary.unchanged += 1
         if result.newly_withdrawn:
             summary.withdrawn += 1
+        if result.un_withdrawn:
+            summary.un_withdrawn += 1
     return summary
 
 
@@ -651,15 +683,59 @@ def format_eta(papers: int, batch_size: int, delay: float) -> str:
     return f"~{seconds}s"
 
 
+#: The withdrawing agents the parser recognises. A recorded value outside this set
+#: (a hand-typed garbage front-matter value, #100 case c) is shown verbatim rather
+#: than run through ``withdrawal_agent``, whose fallback ("arXiv") would hide that it
+#: was never a real agent in the first place.
+_KNOWN_AGENTS = (WITHDRAWN_BY_AUTHOR, WITHDRAWN_BY_ADMIN)
+
+
+def _recorded_phrase(recorded: str) -> str:
+    """How the ledger's recorded withdrawal reads in a divergence note."""
+    if recorded in _KNOWN_AGENTS:
+        return f"a withdrawal by {withdrawal_agent(recorded)}"
+    return f"the unrecognised value {recorded!r}"
+
+
 def withdrawal_note(result: VersionCheck) -> str:
-    """The prominent, retraction-free withdrawal line for a newly-withdrawn paper."""
+    """The prominent, retraction-free withdrawal line for a newly-withdrawn paper.
+
+    Names both sides of the divergence: a fresh withdrawal the ledger did not record,
+    or a withdrawal whose agent differs from the one the ledger recorded (an
+    acknowledged ``author`` withdrawal arXiv administrators later pulled, or a garbage
+    recorded value — #100). It never uses the word "retracted".
+    """
     agent = withdrawal_agent(result.withdrawn_by)
     version = f"v{result.current_version}" if result.current_version else "the current version"
+    recorded = result.recorded_withdrawn_by
+    if recorded is None:
+        provenance = "which the ledger did not record"
+    else:
+        provenance = f"where the ledger recorded {_recorded_phrase(recorded)}"
     return (
         f"arXiv now reports {result.arxiv_id} ({version}) as WITHDRAWN by {agent}, "
-        "which the ledger did not record. Withdrawal is not retraction; this "
+        f"{provenance}. Withdrawal is not retraction; this "
         "unverified signal flags the paper for human review before any claim from "
         "it is trusted."
+    )
+
+
+def un_withdrawal_note(result: VersionCheck) -> str:
+    """The line for a paper arXiv no longer reports as withdrawn but the ledger does.
+
+    This is **not** a withdrawal warning: a paper coming back is its own kind of news.
+    ``withdrawn_by`` is an *identifying* field (``arxiv/source_writer.py``), so a ledger
+    left recording a withdrawal arXiv has reversed diverges from a fresh import (which
+    parses ``None``) and makes re-import error permanently; a refresh may not clear it.
+    Only a human's acknowledgement may, so the note tells the operator to run it.
+    """
+    recorded = result.recorded_withdrawn_by or ""
+    return (
+        f"arXiv no longer reports {result.arxiv_id} as withdrawn, but the ledger still "
+        f"records {_recorded_phrase(recorded)}. `withdrawn_by` is an identifying field: "
+        "until this is acknowledged, the ledger diverges from a fresh import and "
+        "re-import will error. Run "
+        f"`factlog arxiv-acknowledge-withdrawal --id {result.arxiv_id}` to clear it."
     )
 
 
@@ -704,8 +780,11 @@ def report_lines(
     lines = [header]
 
     withdrawn = [r for r in results if r.newly_withdrawn]
+    un_withdrawn = [r for r in results if r.un_withdrawn]
     changed = [
-        r for r in results if r.status == STATUS_CHANGED and not r.newly_withdrawn
+        r
+        for r in results
+        if r.status == STATUS_CHANGED and not r.newly_withdrawn and not r.un_withdrawn
     ]
     errors = [r for r in results if r.status == STATUS_ERROR]
 
@@ -720,6 +799,13 @@ def report_lines(
                     f"v{result.current_version}."
                 )
             lines.append(f"  ⚠ {note}{_sources_suffix(result)}")
+
+    if un_withdrawn:
+        lines.append(
+            "\nNo longer withdrawn (arXiv reversed a withdrawal the ledger records):"
+        )
+        for result in un_withdrawn:
+            lines.append(f"  ↺ {un_withdrawal_note(result)}{_sources_suffix(result)}")
 
     if changed:
         lines.append("\nVersion diverged (the source evolved; this is a report, not a verdict):")
@@ -742,6 +828,7 @@ def report_lines(
     lines.append(f"  Up to date:      {summary.unchanged}")
     lines.append(f"  Version changed: {summary.changed}")
     lines.append(f"  Newly withdrawn: {summary.withdrawn}")
+    lines.append(f"  No longer withdrawn: {summary.un_withdrawn}")
     lines.append(f"  Errors:          {summary.errors}")
     lines.append(f"  Skipped:         {summary.skipped}")
     if updates:
@@ -836,6 +923,7 @@ def porcelain_lines(
     rows.append(f"unchanged\t{summary.unchanged}")
     rows.append(f"changed\t{summary.changed}")
     rows.append(f"withdrawn\t{summary.withdrawn}")
+    rows.append(f"un_withdrawn\t{summary.un_withdrawn}")
     rows.append(f"errors\t{summary.errors}")
     rows.append(f"skipped\t{summary.skipped}")
     if updates:
