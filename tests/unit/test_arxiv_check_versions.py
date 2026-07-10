@@ -720,11 +720,14 @@ class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
 
 class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
     """A front-matter-only paper (imported before #82) newly reported withdrawn cannot be
-    acknowledged: `arxiv-acknowledge-withdrawal` writes a sidecar and there is no ledger
-    to write, so it would exit 1. The warning must stay loud (a withdrawal the KB never
-    recorded is real news), but it must also stop being unactionable wallpaper (#93): it
-    names the missing ledger and points at #105 (the backfill), never at a command that
-    would exit 1. The *un*-withdrawal note already does this; #110 is the sibling gap.
+    acknowledged directly: `arxiv-acknowledge-withdrawal` writes a sidecar and there is no
+    ledger to write, so it would exit 1. The warning must stay loud (a withdrawal the KB
+    never recorded is real news) but stop being unactionable wallpaper (#93): it names the
+    missing ledger and the working next step. That step depends on whether the front matter
+    can supply the ledger — `arxiv-backfill-provenance` when it carries `arxiv_version`
+    (#114, measured in test_arxiv_backfill_provenance), and #135 when it does not, because
+    backfill refuses a version-less paper (#113). #132: the note used to deny the backfill
+    (#105) even for the paper it can repair.
     """
 
     def _front_matter_only(self, kb, lines):
@@ -733,9 +736,11 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
         path.write_text("---\n" + "\n".join(lines) + "\n---\n# T\n", encoding="utf-8")
         return path
 
-    def test_the_note_names_the_missing_ledger_and_105_and_still_fires(
+    def test_a_paper_with_arxiv_version_is_pointed_at_the_backfill_command(
         self, tmp_path, fake, capsys
     ):
+        # Front matter carries `arxiv_version`, so `arxiv-backfill-provenance` can build
+        # the ledger from it (#114) and the withdrawal graduates to acknowledgeable.
         self._front_matter_only(
             tmp_path, ['arxiv_id: "0704.0001"', "arxiv_version: 3"]
         )
@@ -745,30 +750,114 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
         # Still loud.
         assert "WITHDRAWN by the author" in out
         assert "Newly withdrawn:     1" in out
-        # Now actionable: names the missing ledger and points at the backfill.
+        # Now actionable: names the missing ledger and the command that builds it.
         assert "no provenance ledger (imported before #82)" in out
         assert "cannot be acknowledged" in out
-        assert "#105" in out
+        assert "run `factlog arxiv-backfill-provenance`" in out
+        # The command it names exists (#114), so it must not deny it via the closed #105.
+        assert "#105" not in out
         # arXiv's word is "withdrawn", never "retracted" (#57 §6.3).
         assert "retracted" not in out.lower()
 
-    def test_the_note_names_the_missing_ledger_directly(self):
+    def test_the_version_backed_note_names_the_command_directly(self):
         note = cv.withdrawal_note(
             cv.VersionCheck(
                 arxiv_id="0704.0001",
                 status="ok",
+                recorded_version=3,
                 current_version=3,
                 newly_withdrawn=True,
                 withdrawn_by="author",
                 recorded_withdrawn_by=None,
                 recorded_from="front-matter",
+                sidecar_state=cv.SIDECAR_ABSENT,
                 sources=("sources/old.md",),
             )
         )
         assert "no provenance ledger (imported before #82)" in note
         assert "cannot be acknowledged" in note
-        assert "#105" in note
+        assert "run `factlog arxiv-backfill-provenance`" in note
+        assert "#105" not in note
         assert "retracted" not in note.lower()
+
+    def test_a_version_less_paper_is_told_no_command_can_and_points_at_135(self):
+        # No sidecar and no `arxiv_version`: backfill refuses it (#113), so no command can
+        # build the ledger. The note must say so and point at #135 — never a command, never
+        # #105.
+        note = cv.withdrawal_note(
+            cv.VersionCheck(
+                arxiv_id="0704.0001",
+                status="ok",
+                recorded_version=None,
+                current_version=3,
+                newly_withdrawn=True,
+                withdrawn_by="author",
+                recorded_withdrawn_by=None,
+                recorded_from="front-matter",
+                sidecar_state=cv.SIDECAR_ABSENT,
+                sources=("sources/old.md",),
+            )
+        )
+        assert "no provenance ledger (imported before #82)" in note
+        assert "cannot be acknowledged" in note
+        assert "no arxiv_version" in note
+        assert "#113" in note
+        assert "#135" in note
+        # The command cannot repair this paper, so it must not be prescribed, nor may the
+        # closed #105 reappear.
+        assert "run `factlog arxiv-backfill-provenance`" not in note
+        assert "#105" not in note
+
+    def test_a_readable_sidecar_with_no_arxiv_record_is_sent_to_arxiv_import(self):
+        # #132 regression: a paper whose sidecar exists (another integration echoed the id)
+        # but holds no arXiv record HAS a ledger — `arxiv-import` merges a record into it
+        # (measured). Branching on `arxiv_version` alone denied that working command and
+        # sent the operator to #135. It must name arxiv-import, and must not claim there is
+        # no ledger, nor prescribe a backfill (which would build a false-conflict record).
+        note = cv.withdrawal_note(
+            cv.VersionCheck(
+                arxiv_id="0704.0001",
+                status="ok",
+                recorded_version=None,
+                current_version=3,
+                newly_withdrawn=True,
+                withdrawn_by="author",
+                recorded_withdrawn_by=None,
+                recorded_from="front-matter",
+                sidecar_state=cv.SIDECAR_READABLE,
+                sources=("sources/old.md",),
+            )
+        )
+        assert "holds no arXiv record" in note
+        assert "run `factlog arxiv-import --id 0704.0001` to add one" in note
+        assert "#135" not in note
+        assert "arxiv-backfill-provenance" not in note
+        assert "no provenance ledger" not in note
+
+    def test_an_unreadable_sidecar_is_sent_to_a_hand_repair_not_a_backfill(self):
+        # #132 regression: a corrupt sidecar is repaired by no command — `arxiv-import`
+        # errors and `arxiv-backfill-provenance` errors (`corrupt provenance ledger`).
+        # Branching on `arxiv_version` alone prescribed the backfill here. The note must
+        # say the ledger could not be read and prescribe a hand repair, no command.
+        note = cv.withdrawal_note(
+            cv.VersionCheck(
+                arxiv_id="0704.0001",
+                status="ok",
+                recorded_version=3,
+                current_version=3,
+                newly_withdrawn=True,
+                withdrawn_by="admin",
+                recorded_withdrawn_by="author",
+                recorded_from="front-matter",
+                sidecar_state=cv.SIDECAR_UNREADABLE,
+                sources=("sources/old.md",),
+            )
+        )
+        assert "could not be read" in note
+        assert "repaired by hand" in note
+        assert "arxiv-backfill-provenance" not in note
+        assert "arxiv-import" not in note
+        assert "#135" not in note
 
 
 def test_a_ledger_backed_withdrawal_note_is_byte_for_byte_unchanged():
@@ -795,6 +884,151 @@ def test_a_ledger_backed_withdrawal_note_is_byte_for_byte_unchanged():
     # The #105 pointer belongs only to the front-matter branch.
     assert "#105" not in note
     assert "no provenance ledger" not in note
+
+
+class TestUnWithdrawalNoteNamesTheWorkingNextStep:
+    """A reversed withdrawal recorded only in front matter (#132). The note must name the
+    step that actually gives the paper a ledger, and that step is the same four-way split
+    `ledger_fix` makes — not `arxiv_version` alone: a readable sidecar with no arXiv record
+    is repaired by `arxiv-import`, an absent one by the backfill only with a version (#114),
+    an unreadable one by a hand repair, a version-less absent one by nothing (#135)."""
+
+    def _fm(self, recorded_version, sidecar_state=cv.SIDECAR_ABSENT):
+        return cv.VersionCheck(
+            arxiv_id="0704.0001",
+            status="ok",
+            recorded_version=recorded_version,
+            current_version=7,
+            withdrawn_by=None,
+            recorded_withdrawn_by="author",
+            recorded_from="front-matter",
+            sidecar_state=sidecar_state,
+            sources=("sources/old.md",),
+        )
+
+    def test_with_arxiv_version_and_no_sidecar_it_prescribes_the_backfill(self):
+        note = cv.un_withdrawal_note(self._fm(7))
+        assert "the front-matter note is simply stale" in note
+        assert "run `factlog arxiv-backfill-provenance`" in note.lower()
+        assert "after which this can be acknowledged" in note
+        # It must not prescribe the acknowledge command (exit 1 here) or resurrect #105.
+        assert "arxiv-acknowledge-withdrawal --id" not in note
+        assert "#105" not in note
+
+    def test_version_less_absent_sidecar_points_at_135_and_names_no_command(self):
+        note = cv.un_withdrawal_note(self._fm(None))
+        assert "the front-matter note is simply stale" in note
+        assert "no arxiv_version" in note
+        assert "#113" in note
+        assert "#135" in note
+        # No command repairs this paper, so none is prescribed, and #105 stays closed.
+        assert "run `factlog arxiv-backfill-provenance`" not in note.lower()
+        assert "#105" not in note
+
+    def test_readable_sidecar_with_no_arxiv_record_prescribes_arxiv_import(self):
+        # #132: the ledger exists but holds no arXiv record; `arxiv-import` merges one.
+        note = cv.un_withdrawal_note(self._fm(None, cv.SIDECAR_READABLE))
+        assert "the front-matter note is simply stale" in note
+        assert "holds no arXiv record" in note
+        assert "run `factlog arxiv-import --id 0704.0001` to add one" in note
+        assert "arxiv-backfill-provenance" not in note
+        assert "#135" not in note
+
+    def test_unreadable_sidecar_prescribes_a_hand_repair_not_a_backfill(self):
+        # #132: the reviewer's reproduced regression — the backfill errors on a corrupt
+        # ledger, so the note must not prescribe it here even though a version is present.
+        note = cv.un_withdrawal_note(self._fm(7, cv.SIDECAR_UNREADABLE))
+        assert "the front-matter note is simply stale" in note
+        assert "could not be read" in note
+        assert "repaired by hand" in note
+        assert "arxiv-backfill-provenance" not in note
+        assert "arxiv-import" not in note
+        assert "#135" not in note
+
+
+class TestLedgerFixIsTheOneClassifier:
+    """The four `provenance_of`-"front-matter" papers and the command that repairs each.
+    `no_ledger_remedy`, the withdrawal/un-withdrawal notes and the acknowledge refusal all
+    read this one function, so a paper cannot be told two different remedies (#116/#132).
+    The axis is `sidecar_state` first, then `arxiv_version` — the reverse of what #132's
+    two-way split did."""
+
+    def test_unreadable_sidecar_beats_a_present_version(self):
+        # A version is present, but the sidecar will not parse: no command repairs it.
+        assert (
+            cv.ledger_fix(cv.SIDECAR_UNREADABLE, has_recorded_version=True)
+            == cv.LEDGER_FIX_REPAIR_BY_HAND
+        )
+
+    def test_readable_sidecar_beats_a_missing_version(self):
+        # No version, but a sidecar exists holding no arXiv record: arxiv-import merges one.
+        assert (
+            cv.ledger_fix(cv.SIDECAR_READABLE, has_recorded_version=False)
+            == cv.LEDGER_FIX_IMPORT
+        )
+
+    def test_absent_sidecar_splits_on_the_version(self):
+        assert (
+            cv.ledger_fix(cv.SIDECAR_ABSENT, has_recorded_version=True)
+            == cv.LEDGER_FIX_BACKFILL
+        )
+        assert (
+            cv.ledger_fix(cv.SIDECAR_ABSENT, has_recorded_version=False)
+            == cv.LEDGER_FIX_NONE
+        )
+
+    def test_no_ledger_remedy_reads_the_same_classifier(self):
+        # The --auto-update remedy the notes were split off from must still agree with them.
+        by_hand = cv.no_ledger_remedy(
+            "0704.0001", sidecar_state=cv.SIDECAR_UNREADABLE, has_recorded_version=True
+        )
+        assert "repaired by hand" in by_hand and "arxiv-backfill-provenance" not in by_hand
+        imp = cv.no_ledger_remedy(
+            "0704.0001", sidecar_state=cv.SIDECAR_READABLE, has_recorded_version=False
+        )
+        assert "arxiv-import --id 0704.0001" in imp
+
+
+class TestFrontMatterAcknowledgeRefusal:
+    """The acknowledge command's refusal reason for a front-matter paper reads the same
+    `ledger_fix`, so it never denies a working remedy (`arxiv-import`) nor prescribes one
+    that errors (a backfill on a corrupt ledger) — the #132 defect, one layer up."""
+
+    def test_readable_sidecar_names_arxiv_import_and_admits_the_ledger(self):
+        reason = cv.front_matter_acknowledge_refusal(
+            "0704.0001", sidecar_state=cv.SIDECAR_READABLE, has_recorded_version=False
+        )
+        assert "has a provenance ledger" in reason
+        assert "run `factlog arxiv-import --id 0704.0001` to add one".lower() in reason.lower()
+        assert "#135" not in reason
+        assert "arxiv-backfill-provenance" not in reason
+
+    def test_absent_with_version_names_the_backfill(self):
+        reason = cv.front_matter_acknowledge_refusal(
+            "0704.0001", sidecar_state=cv.SIDECAR_ABSENT, has_recorded_version=True
+        )
+        assert "run `factlog arxiv-backfill-provenance`" in reason.lower()
+        assert "#135" not in reason
+
+    def test_absent_without_version_points_at_135_and_names_no_command(self):
+        reason = cv.front_matter_acknowledge_refusal(
+            "0704.0001", sidecar_state=cv.SIDECAR_ABSENT, has_recorded_version=False
+        )
+        assert "no arxiv_version" in reason
+        assert "#113" in reason and "#135" in reason
+        assert "run `factlog arxiv-backfill-provenance`" not in reason.lower()
+
+    def test_unreadable_sidecar_names_a_hand_repair_no_command(self):
+        # Unreachable through the CLI (the ledger_errors guard intercepts it), but the one
+        # classifier must still answer honestly rather than fall through to the #135 lie.
+        reason = cv.front_matter_acknowledge_refusal(
+            "0704.0001", sidecar_state=cv.SIDECAR_UNREADABLE, has_recorded_version=True
+        )
+        assert "could not be read" in reason
+        assert "repaired by hand" in reason
+        assert "arxiv-backfill-provenance" not in reason
+        assert "arxiv-import" not in reason
+        assert "#135" not in reason
 
 
 # --------------------------------------------------------------------------- #
