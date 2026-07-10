@@ -84,7 +84,7 @@ class TestFalseMergeRegression:
         existing = (kb / "sources").glob("*.md").__next__()
         before_bytes = existing.read_bytes()
         before_mtime = existing.stat().st_mtime_ns
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, kb)
         before_sidecar = sidecar.read_bytes()
         before_sidecar_mtime = sidecar.stat().st_mtime_ns
         report = oa_import([_oa("W_MEDRXIV", MEDRXIV_DOI)], target=kb, imported_at=T)
@@ -104,7 +104,7 @@ class TestFalseMergeRegression:
         _report, existing, (b_bytes, b_mtime, s_bytes, s_mtime) = self._seed_and_import(kb)
         assert existing.read_bytes() == b_bytes
         assert existing.stat().st_mtime_ns == b_mtime
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, tmp_path)
         assert sidecar.read_bytes() == s_bytes
         assert sidecar.stat().st_mtime_ns == s_mtime
 

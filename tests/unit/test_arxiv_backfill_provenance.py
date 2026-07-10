@@ -293,7 +293,7 @@ class TestFalseConflictRefusal:
         self, tmp_path, fake, capsys
     ):
         existing = self._openalex_authored_md(tmp_path)
-        side = sidecar_path(existing)
+        side = sidecar_path(existing, tmp_path)
         before = side.read_bytes(), side.stat().st_mtime_ns
 
         code = run(["arxiv-backfill-provenance", "--target", str(tmp_path)])
@@ -558,7 +558,7 @@ class TestUnreadableLedgerViaCli:
 
     def test_papers_own_corrupt_ledger_is_not_overwritten(self, tmp_path, capsys):
         md = _fm_only(tmp_path, "1706.03762", 7)
-        side = sidecar_path(md)
+        side = sidecar_path(md, tmp_path)
         side.parent.mkdir(parents=True, exist_ok=True)
         side.write_text("{ corrupt", encoding="utf-8")
 

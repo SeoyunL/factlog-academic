@@ -55,6 +55,7 @@ from factlog.integrations.openalex.work_parser import ParsedWork
 # ever be populated from a value the entry holds (the #111/#4 guard, structurally).
 ARXIV = BackfillSchema(
     type="arxiv",
+    id_key="arxiv_id",
     collect_entries=check_versions.collect_ledger_entries,
     provenance_of=check_versions.provenance_of,
     id_of=lambda e: e.arxiv_id,
@@ -69,6 +70,7 @@ ARXIV = BackfillSchema(
 )
 OPENALEX = BackfillSchema(
     type="openalex",
+    id_key="openalex_id",
     collect_entries=refresh.collect_ledger_entries,
     provenance_of=refresh.provenance_of,
     id_of=lambda e: e.openalex_id,
@@ -201,7 +203,7 @@ class TestGainsLedger:
         # requirement 2: a ledger-backed paper is provenance_of == "ledger" and skipped
         # entirely — never re-stamped. Assert mtime_ns, not just that nothing errored.
         md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
-        side = sidecar_path(md)
+        side = sidecar_path(md, tmp_path)
         write_provenance(side, Provenance(records=[
             SourceRecord("arxiv", "2301.00001", "2020-01-01T00:00:00Z", {"version": 3}),
         ]))
@@ -311,7 +313,7 @@ def _kb_with_openalex_authored_md(kb):
 class TestManufacturedConflictRegression:
     def test_backfill_refuses_the_openalex_authored_md_and_writes_no_arxiv_record(self, tmp_path):
         existing = _kb_with_openalex_authored_md(tmp_path)
-        side = sidecar_path(existing)
+        side = sidecar_path(existing, tmp_path)
         before = _stat(side)  # the sidecar OpenAlex wrote, with its own record
 
         results = backfill(tmp_path, ARXIV)
@@ -369,7 +371,7 @@ class TestNoOp:
         # If the record the ledger would receive is already there, do NOT write: the bytes
         # are deterministic but mtime_ns would move. Same guard as acknowledge/_upsert.
         md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
-        side = sidecar_path(md)
+        side = sidecar_path(md, tmp_path)
         write_provenance(side, Provenance(records=[
             SourceRecord("arxiv", "2301.00001", IMPORTED_AT, {"version": 3}),
         ]))
@@ -385,7 +387,7 @@ class TestNoOp:
         # The sidecar already holds a DIFFERENT record for this (type, id): refuse to
         # overwrite an audit entry (add_source's stance), reported per-id.
         md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
-        side = sidecar_path(md)
+        side = sidecar_path(md, tmp_path)
         write_provenance(side, Provenance(records=[
             SourceRecord("arxiv", "2301.00001", IMPORTED_AT, {"version": 9}),
         ]))
@@ -404,8 +406,8 @@ class TestBoundaryGuards:
         # A sidecar that will not parse is surfaced by the collection step as a per-file
         # error, never a crash — reported, exactly once, naming the file.
         md = _arxiv_md(tmp_path, "p", "2301.00001", 1)
-        sidecar_path(md).parent.mkdir(parents=True, exist_ok=True)
-        sidecar_path(md).write_text("{ not json", encoding="utf-8")
+        sidecar_path(md, tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        sidecar_path(md, tmp_path).write_text("{ not json", encoding="utf-8")
         results = backfill(tmp_path, ARXIV)
         assert [r.status for r in results] == [BACKFILL_ERROR]
         assert "p.json" in results[0].reason
@@ -484,7 +486,7 @@ class TestUnreadableLedgerRefusesBackfill:
         # would materialize a *new* sidecar from an incomplete view of what the KB believes.
         # It must be refused; the corrupt bytes are left exactly as they were.
         md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
-        side = sidecar_path(md)
+        side = sidecar_path(md, tmp_path)
         side.parent.mkdir(parents=True, exist_ok=True)
         side.write_text("{ corrupt", encoding="utf-8")
         before = _stat(side)
@@ -519,7 +521,7 @@ class TestPartialSidecar:
         # integration's record in its sidecar. Backfilling this integration must append its
         # record without disturbing the neighbour or its imported_at.
         md = _arxiv_md(tmp_path, "p", "2301.00001", 3)
-        side = sidecar_path(md)
+        side = sidecar_path(md, tmp_path)
         neighbour = SourceRecord(
             "openalex", "W9", "2020-05-05T00:00:00Z",
             {"doi": "10.1/x", "journal": "Nature"},
@@ -568,7 +570,7 @@ class TestDryRun:
     def test_dry_run_still_refuses_the_unreadable_identity(self, tmp_path):
         # A refusal is classified identically in dry-run (same single classifier).
         existing = _kb_with_openalex_authored_md(tmp_path)
-        side = sidecar_path(existing)
+        side = sidecar_path(existing, tmp_path)
         before = _stat(side)
         results = backfill(tmp_path, ARXIV, dry_run=True)
         assert [r.status for r in results] == [BACKFILL_REFUSED]

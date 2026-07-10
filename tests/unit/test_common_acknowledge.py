@@ -52,7 +52,7 @@ def _seed(kb: Path, name: str, records, *, make_md: bool = True) -> Path:
     md = kb / "sources" / f"{name}.md"
     if make_md:
         md.write_text("---\narxiv_id: x\n---\n# body\n", encoding="utf-8")
-    side = sidecar_path(md)
+    side = sidecar_path(md, kb)
     write_provenance(side, Provenance(records=list(records)))
     return side
 

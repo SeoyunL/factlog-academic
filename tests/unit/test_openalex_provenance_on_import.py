@@ -85,7 +85,7 @@ class TestOpenAlexRecordsItsOwnLedger:
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W9"), tmp_path, imported_at="2026-02-02T00:00:00Z")
         assert result.status == "imported"
-        sidecar = sidecar_path(result.path)
+        sidecar = sidecar_path(result.path, tmp_path)
         recs = read_provenance(sidecar).records
         assert len(recs) == 1
         rec = recs[0]
@@ -96,7 +96,7 @@ class TestOpenAlexRecordsItsOwnLedger:
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W9", doi="10.1/x", journal="Nature", work_type="article"),
             tmp_path, imported_at="t")
-        rec = read_provenance(sidecar_path(result.path)).records[0].to_dict()
+        rec = read_provenance(sidecar_path(result.path, tmp_path)).records[0].to_dict()
         assert rec["doi"] == "10.1/x"
         assert rec["work_type"] == "article"
         assert rec["journal"] == "Nature"
@@ -112,7 +112,7 @@ class TestOpenAlexRecordsItsOwnLedger:
         # reserved record type on the flat serialization. It is keyed ``work_type``.
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W9", work_type="preprint"), tmp_path, imported_at="t")
-        rec = read_provenance(sidecar_path(result.path)).records[0]
+        rec = read_provenance(sidecar_path(result.path, tmp_path)).records[0]
         assert rec.type == "openalex"
         assert rec.fields["work_type"] == "preprint"
 
@@ -121,7 +121,7 @@ class TestRetractionIsTrueOrAbsent:
     def test_not_retracted_omits_is_retracted_entirely(self, tmp_path):
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W9", openalex_is_retracted=False), tmp_path, imported_at="t")
-        rec = read_provenance(sidecar_path(result.path)).records[0].to_dict()
+        rec = read_provenance(sidecar_path(result.path, tmp_path)).records[0].to_dict()
         # Absent, NOT ``false`` — a false would survive to_dict and break the
         # byte-determinism the ledger depends on.
         assert "is_retracted" not in rec
@@ -129,7 +129,7 @@ class TestRetractionIsTrueOrAbsent:
     def test_retracted_records_is_retracted_true(self, tmp_path):
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W9", openalex_is_retracted=True), tmp_path, imported_at="t")
-        rec = read_provenance(sidecar_path(result.path)).records[0].to_dict()
+        rec = read_provenance(sidecar_path(result.path, tmp_path)).records[0].to_dict()
         assert rec["is_retracted"] is True
 
 
@@ -142,11 +142,11 @@ class TestDriftIsAbsorbedFirstImportWins:
         # is a plain skip that rewrites nothing.
         first = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W1", cited_by_count=10), tmp_path, imported_at="a")
-        before = sidecar_path(first.path).read_bytes()
+        before = sidecar_path(first.path, tmp_path).read_bytes()
         again = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W1", cited_by_count=999), tmp_path, imported_at="b")
         assert again.status == "skipped"
-        assert sidecar_path(first.path).read_bytes() == before
+        assert sidecar_path(first.path, tmp_path).read_bytes() == before
 
     def test_a_merge_absorbs_a_changed_doi_without_erroring(self, tmp_path):
         # Seed an arXiv-primary file, then merge an OpenAlex record, then merge a
@@ -155,7 +155,7 @@ class TestDriftIsAbsorbedFirstImportWins:
         ax = ArxivSourceWriter().write(_arxiv(), tmp_path, imported_at="t")
         OpenAlexSourceWriter().write(
             _openalex(openalex_id="W1", journal="First"), tmp_path, imported_at="t")
-        sidecar = sidecar_path(ax.path)
+        sidecar = sidecar_path(ax.path, tmp_path)
         before = _record_set(sidecar)
         # A fresh writer/index re-imports the same openalex id via the arXiv-id join.
         again = OpenAlexSourceWriter().write(
@@ -202,7 +202,7 @@ class TestOrderIndependence:
         merged = OpenAlexSourceWriter().write(_openalex(), tmp_path, imported_at="t2")
         assert merged.status == "merged"
         assert merged.path == ax.path
-        types = sorted(r.type for r in read_provenance(sidecar_path(ax.path)).records)
+        types = sorted(r.type for r in read_provenance(sidecar_path(ax.path, tmp_path)).records)
         assert types == ["arxiv", "openalex"]
 
 
@@ -216,7 +216,7 @@ class TestDryRunAndCorruptSidecar:
         # An arXiv-primary file whose sidecar is corrupt. An OpenAlex import of the
         # same paper must report a per-id error, never raise.
         ax = ArxivSourceWriter().write(_arxiv(), tmp_path, imported_at="t")
-        sidecar = sidecar_path(ax.path)
+        sidecar = sidecar_path(ax.path, tmp_path)
         sidecar.write_text("{ not json", encoding="utf-8")
         result = OpenAlexSourceWriter().write(_openalex(), tmp_path, imported_at="t2")
         assert result.status == "error"
@@ -228,7 +228,7 @@ class TestDryRunAndCorruptSidecar:
         # One paper's sidecar is corrupt (via a pre-existing arXiv file); a second,
         # unrelated OpenAlex work must still import.
         ax = ArxivSourceWriter().write(_arxiv(arxiv_id="2311.09277"), tmp_path, imported_at="t")
-        sidecar_path(ax.path).write_text("{ corrupt", encoding="utf-8")
+        sidecar_path(ax.path, tmp_path).write_text("{ corrupt", encoding="utf-8")
         report = import_works(
             [_openalex(openalex_id="W1", arxiv_id="2311.09277"),        # error (corrupt)
              _openalex(openalex_id="W2", arxiv_id="9999.99999", doi=None, title="Fresh")],  # imported
@@ -251,7 +251,7 @@ class TestSameSourceDuplicateStillSkips:
         assert second.status == "skipped"
         assert second.path == first.path
         # W1's ledger is untouched: no W2 record folded in.
-        ids = [r.id for r in read_provenance(sidecar_path(first.path)).records]
+        ids = [r.id for r in read_provenance(sidecar_path(first.path, tmp_path)).records]
         assert ids == ["W1"]
 
     def test_a_reimport_of_the_same_id_stays_skipped_despite_a_typoed_provenance(self, tmp_path):
@@ -297,7 +297,7 @@ class TestAStaleSidecarIsReplacedForOpenAlexToo:
         first = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W1", arxiv_id=None), tmp_path, imported_at="t1")
         assert first.status == "imported"
-        sidecar = sidecar_path(first.path)
+        sidecar = sidecar_path(first.path, tmp_path)
         assert [r.id for r in read_provenance(sidecar).records] == ["W1"]
 
         first.path.unlink()  # the user deletes the source; the ledger is left behind
@@ -307,7 +307,7 @@ class TestAStaleSidecarIsReplacedForOpenAlexToo:
         assert second.status == "imported"
         assert second.path.name == first.path.name  # the slug really is reused
 
-        ids = [r.id for r in read_provenance(sidecar_path(second.path)).records]
+        ids = [r.id for r in read_provenance(sidecar_path(second.path, tmp_path)).records]
         assert ids == ["W2"], (
             "the new original's ledger claims it also came from the deleted paper"
         )
@@ -322,7 +322,7 @@ class TestAStaleSidecarIsReplacedForOpenAlexToo:
         assert merged.status == "merged"
         assert merged.path == existing.path
 
-        records = read_provenance(sidecar_path(existing.path)).records
+        records = read_provenance(sidecar_path(existing.path, tmp_path)).records
         assert sorted((r.type, r.id) for r in records) == [
             ("arxiv", "2311.09277"), ("openalex", "W1")
         ]

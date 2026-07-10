@@ -69,7 +69,7 @@ def _seed(kb, arxiv_id, version, *, withdrawn_by=None, name=None, extra_records=
                      fields=fields),
         *extra_records,
     ]
-    write_provenance(sidecar_path(md), Provenance(records=records))
+    write_provenance(sidecar_path(md, kb), Provenance(records=records))
     return md
 
 
@@ -764,14 +764,14 @@ def _seed_full(kb, arxiv_id="1706.03762", version=5, *, name="paper",
                      fields=fields),
         *extra_records,
     ]
-    write_provenance(sidecar_path(md), Provenance(records=records))
+    write_provenance(sidecar_path(md, kb), Provenance(records=records))
     return md
 
 
 def _ledger_dict(md):
     """The on-disk provenance records for a source, as flat dicts keyed by (type, id)."""
     from factlog.integrations.common.provenance import read_provenance
-    prov = read_provenance(sidecar_path(md))
+    prov = read_provenance(sidecar_path(md, md.parent.parent))
     return {(r.type, r.id): r.to_dict() for r in prov.records}
 
 
@@ -823,7 +823,7 @@ class TestApplyAutoUpdate:
     def test_no_upstream_change_is_a_byte_identical_noop(self, tmp_path):
         # Ledger already holds exactly what arXiv serves: no write, no mtime move.
         md = _seed_full(tmp_path, "1706.03762", 7, comment="same", last_updated="2021-03-03")
-        ledger_path = sidecar_path(md)
+        ledger_path = sidecar_path(md, tmp_path)
         before = (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns)
         results = _run_check(tmp_path, [_full_work(version=7, last_updated=date(2021, 3, 3),
                                                    comment="same")])
@@ -897,7 +897,7 @@ class TestAutoUpdateCli:
         self, tmp_path, fake
     ):
         md = _seed_full(tmp_path, "1706.03762", 5)
-        ledger_path = sidecar_path(md)
+        ledger_path = sidecar_path(md, tmp_path)
         before = (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns)
         fake(FakeClient([_full_work(version=7)]))
         run(["arxiv-check-versions", "--target", str(tmp_path)])  # no --auto-update
@@ -910,7 +910,7 @@ class TestAutoUpdateCli:
         md = _seed_full(tmp_path, "1706.03762", 5)
         fake(FakeClient([_full_work(version=7)]))
         run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
-        ledger_path = sidecar_path(md)
+        ledger_path = sidecar_path(md, tmp_path)
         log_path = check_log_path(tmp_path)
         after_first = {
             "ledger": (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns),

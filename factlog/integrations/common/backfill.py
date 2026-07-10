@@ -37,14 +37,24 @@ papers have front matter but no ledger — is decided by the integration's *own*
 copy: two copies of one predicate is how #64, #98 and the empty-tuple divergence fixed in
 #111 all happened.
 
-## The flat walk is inherited on purpose (#112)
+## The walk is inherited on purpose (#112)
 
-``collect_ledger_entries`` walks ``sources/*.md`` **flat**, while the KB's canonical
-enumeration is ``rglob`` over ``SOURCE_ROOTS``. That asymmetry is a real defect (#112),
-and it must move across every consumer at once, not be patched here. Backfill reuses
-``collect_ledger_entries``, so it covers exactly the set the consuming commands can read
-and act on. A ledger nothing reads is worse than no ledger, so the coverage of backfill
-is deliberately tied to the coverage of the commands that would consume it.
+Backfill has never had a walk of its own: membership comes from the integration's
+``collect_ledger_entries``, so its coverage *is* the coverage of the commands that would
+consume the ledgers it writes. A ledger nothing reads is worse than no ledger, and this is
+the mechanism that makes the two sets equal by construction rather than by review.
+
+#112 widened that shared walk from a flat ``sources/*.md`` to the KB's own enumeration
+(``provenance_sources``: ``rglob`` under ``sources/``), so a nested paper — which
+``factlog sources`` always listed, and which ``ingest`` produces by mirroring an
+original's subtree — now gets a ledger here and is checked, reported and acknowledgeable
+there. Backfill widened with the consumers because it inherits them; nothing here changed
+to make that happen, which is the property the inheritance was for.
+
+It did **not** widen to ``runs/sources/``. Nothing there can hold a sidecar (see
+``provenance.sidecar_path``), so a ledger written for it would be a ledger nothing reads —
+precisely the trade this module refuses. Such a paper is reported as a
+:data:`BACKFILL_ERROR` via :attr:`BackfillSchema.id_key`, never silently skipped.
 
 ## The traps this is built around
 
@@ -95,7 +105,10 @@ from factlog.integrations.common.provenance import (
     ProvenanceError,
     SourceRecord,
     add_source,
+    excluded_reason,
+    excluded_sources_by_id,
     read_provenance,
+    rerun_remedy,
     sidecar_path,
     signal_field_error,
     write_provenance,
@@ -139,11 +152,19 @@ class BackfillSchema:
 
     ``type`` is the provenance record type (``"arxiv"`` / ``"openalex"``).
 
+    ``id_key`` is the integration's *front-matter* identity key (``arxiv_id`` /
+    ``openalex_id``) — the word a ``.md`` uses to name a paper, which is not always the
+    record type. It exists so a source outside the provenance root that names one of this
+    integration's papers can be reported (``excluded_sources_by_id``) instead of dropped. It
+    has no default: an integration that forgets it would silently skip such a paper, and a
+    silent skip is the defect (#112).
+
     ``collect_entries`` is the integration's own ``collect_ledger_entries`` — the *one*
     place per integration that reads the front-matter scalar keys and maps them to ledger
-    fields (#112's flat walk is inherited through it). ``provenance_of`` is the same
-    integration's exported predicate; the pair decides which papers are front-matter-only
-    without a second copy of either the walk or the predicate.
+    fields, and the *one* walk (the KB's own, via ``provenance_sources``) that this module
+    inherits rather than copies. ``provenance_of`` is the same integration's exported
+    predicate; the pair decides which papers are front-matter-only without a second copy of
+    either the walk or the predicate.
 
     ``id_of`` extracts the record id from one entry (integrations name it ``arxiv_id`` /
     ``openalex_id``). ``fields`` maps each ledger field name to a callable that reads its
@@ -184,6 +205,7 @@ class BackfillSchema:
     """
 
     type: str
+    id_key: str
     collect_entries: Callable[[Path | str], tuple[Sequence[Any], Sequence[Any]]]
     provenance_of: Callable[[Sequence[str]], str]
     id_of: Callable[[Any], str]
@@ -309,7 +331,7 @@ def _backfill_source(
             ),
         )
 
-    sidecar = sidecar_path(source_path)
+    sidecar = sidecar_path(source_path, kb_root)
     rel = _relative(sidecar, kb_root)
 
     # The READ is guarded: a corrupt or unreadable sidecar (a partially-populated one that
@@ -370,9 +392,11 @@ def backfill(
 
     Membership is decided by the integration's own ``collect_ledger_entries`` and exported
     ``provenance_of`` — never a second copy — so backfill covers exactly the set the
-    consuming commands can read (the #112 flat walk is inherited, not fixed here). A paper
-    that already has a ledger is ``ledger``-classified by ``provenance_of`` and skipped
-    entirely, so it stays byte- and ``mtime_ns``-identical.
+    consuming commands can read (the walk is inherited, never re-implemented here; see the
+    module docstring for what #112 widened it to). A paper that already has a ledger is
+    ``ledger``-classified by ``provenance_of`` and skipped entirely, so it stays byte- and
+    ``mtime_ns``-identical. A source outside the provenance root can hold no ledger at all
+    and is reported as a :data:`BACKFILL_ERROR`, never skipped.
 
     Each front-matter-only paper is materialized with :func:`_backfill_source`: its
     ``imported_at`` is read from front matter (refused per-id if absent), a record is built
@@ -422,6 +446,28 @@ def backfill(
         )
         for err in collect_errors
     ]
+
+    # A source that names one of this integration's papers but sits outside the provenance
+    # root can never receive a sidecar (#112). It is an error, not a skip: the operator ran
+    # a command whose whole job is to give that paper a ledger, and it cannot. Reported in
+    # `dry_run` and in a real run identically — nothing about it depends on writing.
+    #
+    # The remedy is `rerun_remedy`, not `backfill_remedy`: this text prints inside *this*
+    # command's own output, so naming this command as the fix would tell the operator to run
+    # the thing they have just run. The move is the only step they have not taken.
+    #
+    # It does not poison the write below, unlike an unreadable ledger: an unread ledger
+    # makes the front-matter-only classification of *other* papers untrustworthy (#111),
+    # while an excluded source tells us nothing about any paper but itself.
+    remedy = rerun_remedy(f"{schema.type}-backfill-provenance")
+    results.extend(
+        BackfillResult(
+            entry_id=entry_id,
+            status=BACKFILL_ERROR,
+            reason=excluded_reason(", ".join(refs), remedy),
+        )
+        for entry_id, refs in excluded_sources_by_id(root, schema.id_key).items()
+    )
 
     # An unreadable ledger contaminates the "front-matter-only" set (see the docstring):
     # any candidate might be the paper whose record is in the file that would not parse, and

@@ -350,7 +350,7 @@ class TestCrossSourceDuplicates:
         assert result.path == z.path
         assert "duplicate DOI" in result.reason
         from factlog.integrations.common.provenance import read_provenance, sidecar_path
-        recs = read_provenance(sidecar_path(z.path)).records
+        recs = read_provenance(sidecar_path(z.path, tmp_path)).records
         assert [r.type for r in recs] == ["openalex"]
 
     def test_pmid_match_without_doi(self, tmp_path):

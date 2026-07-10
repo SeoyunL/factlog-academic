@@ -95,7 +95,7 @@ class TestMergeWritesTheSidecar:
         assert result.status == "merged"
         assert result.path == existing  # points at the existing original
 
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, tmp_path)
         assert sidecar.exists()
         assert is_sidecar(sidecar)
         rec = _arxiv_record(sidecar)
@@ -134,7 +134,7 @@ class TestOriginalIsImmutable:
 class TestIdempotence:
     def test_merging_twice_adds_exactly_one_record(self, tmp_path):
         kb, existing = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, tmp_path)
 
         first = ArxivSourceWriter().write(_arxiv(), kb, imported_at="t")
         assert first.status == "merged"
@@ -151,7 +151,7 @@ class TestIdempotence:
         # deposit, not the clock: a re-import of the same version is a no-op that
         # keeps the FIRST timestamp and leaves the ledger byte-identical (P3).
         kb, existing = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, tmp_path)
         first = ArxivSourceWriter().write(_arxiv(), kb, imported_at="2026-01-01T00:00:00Z")
         assert first.status == "merged"
         first_bytes = sidecar.read_bytes()
@@ -166,7 +166,7 @@ class TestIdempotence:
 class TestVersionDivergence:
     def test_a_newer_version_is_a_per_id_error_not_a_crash(self, tmp_path):
         kb, existing = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, tmp_path)
         ArxivSourceWriter().write(_arxiv(version=2), kb, imported_at="t")
         before = sidecar.read_bytes()
 
@@ -200,7 +200,7 @@ class TestVersionDivergence:
 class TestDryRun:
     def test_dry_run_predicts_merged_and_writes_nothing(self, tmp_path):
         kb, existing = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, tmp_path)
         # The OpenAlex-primary import wrote its OWN one-record ledger (#73), so the
         # sidecar already exists. The dry run must leave it byte-identical and add
         # no arXiv record — a plan predicts, it never writes.
@@ -217,7 +217,7 @@ class TestDryRun:
         from factlog.integrations.arxiv.importer import import_works
 
         kb, existing = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(existing)
+        sidecar = sidecar_path(existing, tmp_path)
         before = sidecar.read_bytes()  # OpenAlex's own ledger, from the seed import
         report = import_works([_arxiv()], target=kb, imported_at="t", dry_run=True)
         assert report.merged == 1
@@ -235,7 +235,7 @@ class TestRecordFields:
         kb, existing = _kb_with_openalex(tmp_path)
         ArxivSourceWriter().write(
             _arxiv(withdrawn_by="admin"), kb, imported_at="t")
-        rec = _arxiv_record(sidecar_path(existing)).to_dict()
+        rec = _arxiv_record(sidecar_path(existing, tmp_path)).to_dict()
         assert rec["version"] == 2
         assert rec["submitted"] == "2023-11-15"
         assert rec["last_updated"] == "2023-11-20"
@@ -247,20 +247,20 @@ class TestRecordFields:
         kb, existing = _kb_with_openalex(tmp_path)
         ArxivSourceWriter().write(
             _arxiv(doi="10.1/x"), kb, imported_at="t")
-        rec = _arxiv_record(sidecar_path(existing)).to_dict()
+        rec = _arxiv_record(sidecar_path(existing, tmp_path)).to_dict()
         for excluded in ("abs_url", "pdf_url", "doi", "journal_ref", "preprint"):
             assert excluded not in rec
 
     def test_withdrawn_by_is_absent_when_not_withdrawn(self, tmp_path):
         kb, existing = _kb_with_openalex(tmp_path)
         ArxivSourceWriter().write(_arxiv(withdrawn_by=None), kb, imported_at="t")
-        assert "withdrawn_by" not in _arxiv_record(sidecar_path(existing)).to_dict()
+        assert "withdrawn_by" not in _arxiv_record(sidecar_path(existing, tmp_path)).to_dict()
 
     def test_none_optional_fields_are_dropped(self, tmp_path):
         kb, existing = _kb_with_openalex(tmp_path)
         ArxivSourceWriter().write(
             _arxiv(comment=None, submitted=None, last_updated=None), kb, imported_at="t")
-        rec = _arxiv_record(sidecar_path(existing)).to_dict()
+        rec = _arxiv_record(sidecar_path(existing, tmp_path)).to_dict()
         assert "comment" not in rec
         assert "submitted" not in rec
         assert "last_updated" not in rec
@@ -297,7 +297,7 @@ class TestOptOut:
         ax = ArxivSourceWriter().write(
             _arxiv(arxiv_id="2311.09277"), tmp_path, imported_at="t")
         assert ax.status == "imported"
-        sidecar = sidecar_path(ax.path)
+        sidecar = sidecar_path(ax.path, tmp_path)
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W7", arxiv_id="2311.09277"), tmp_path, imported_at="t")
         assert result.status == "merged"
@@ -317,7 +317,7 @@ class TestOptOut:
 
         decision = WriteResult(tmp_path / "sources" / "x.md", "merged", "r")
         # The base hook returns the decision unchanged and touches no filesystem.
-        out = BaseSourceWriter()._merge(object(), decision, "t")
+        out = BaseSourceWriter()._merge(object(), decision, "t", tmp_path)
         assert out is decision
         assert not (tmp_path / "source-provenance").exists()
 
@@ -328,7 +328,7 @@ class TestSameRecordReimportStillSkips:
         first = ArxivSourceWriter().write(_arxiv(), tmp_path, imported_at="t")
         assert first.status == "imported"
         # The new import wrote its own one-record ledger (#72).
-        sidecar = sidecar_path(first.path)
+        sidecar = sidecar_path(first.path, tmp_path)
         before = sidecar.read_bytes()
         second = ArxivSourceWriter().write(_arxiv(version=3), tmp_path, imported_at="t")
         assert second.status == "skipped"
@@ -346,7 +346,7 @@ class TestACorruptLedgerIsOnePapersProblem:
     is broken."""
 
     def _corrupt(self, original, text="{ corrupt"):
-        sidecar = sidecar_path(original)
+        sidecar = sidecar_path(original, original.parent.parent)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(text, encoding="utf-8")
         return sidecar
@@ -378,7 +378,7 @@ class TestACorruptLedgerIsOnePapersProblem:
         result = ArxivSourceWriter().write(_arxiv("2311.09277"), kb, imported_at="t")
         assert result.status == "error"
         # The broken ledger is left exactly as found; nothing is overwritten.
-        assert sidecar_path(original).read_text(encoding="utf-8") == text
+        assert sidecar_path(original, tmp_path).read_text(encoding="utf-8") == text
 
 
 class TestOnlyIdentifyingFieldsDiverge:
@@ -406,9 +406,9 @@ class TestOnlyIdentifyingFieldsDiverge:
         # The ledger goes stale rather than lying: only a refresh may revise it.
         kb, original = _kb_with_openalex(tmp_path)
         self._merge(kb, _arxiv(version=2, comment="5 pages"))
-        before = sidecar_path(original).read_bytes()
+        before = sidecar_path(original, tmp_path).read_bytes()
         self._merge(kb, _arxiv(version=2, comment="Accepted at ICML 2024"))
-        assert sidecar_path(original).read_bytes() == before
+        assert sidecar_path(original, tmp_path).read_bytes() == before
 
     def test_a_version_bump_still_errors_and_names_both_versions(self, tmp_path):
         kb, original = _kb_with_openalex(tmp_path)
@@ -486,7 +486,7 @@ class TestVersionlessLedgerRecord:
 
     def test_no_version_message_never_prints_the_python_none(self, tmp_path):
         kb, original = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(original)
+        sidecar = sidecar_path(original, tmp_path)
         _seed_versionless_arxiv_record(sidecar)
 
         result = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
@@ -502,7 +502,7 @@ class TestVersionlessLedgerRecord:
         self, tmp_path
     ):
         kb, original = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(original)
+        sidecar = sidecar_path(original, tmp_path)
         _seed_versionless_arxiv_record(sidecar)
 
         result = ArxivSourceWriter().write(_arxiv(version=7), kb, imported_at="t")
@@ -518,7 +518,7 @@ class TestVersionlessLedgerRecord:
 
     def test_no_version_divergence_leaves_the_ledger_untouched(self, tmp_path):
         kb, original = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(original)
+        sidecar = sidecar_path(original, tmp_path)
         _seed_versionless_arxiv_record(sidecar)
         before = sidecar.read_bytes()
 
@@ -535,7 +535,7 @@ class TestVersionlessLedgerRecord:
         from factlog.integrations.arxiv import check_versions as cv
 
         kb, original = _kb_with_openalex(tmp_path)
-        sidecar = sidecar_path(original)
+        sidecar = sidecar_path(original, tmp_path)
         _seed_versionless_arxiv_record(sidecar)
         assert _arxiv_record(sidecar).fields.get("version") is None  # before
 
@@ -560,7 +560,7 @@ class TestVersionlessLedgerRecord:
         from factlog.integrations.arxiv import check_versions as cv
 
         kb, original = _kb_with_openalex(tmp_path)
-        _seed_versionless_arxiv_record(sidecar_path(original))
+        _seed_versionless_arxiv_record(sidecar_path(original, tmp_path))
 
         work = _arxiv(version=7)
         entries, _unreadable = cv.collect_ledger_entries(kb)

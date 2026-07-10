@@ -415,8 +415,28 @@ class BaseSourceWriter:
         if cached is None:
             cached = _DirIndex()
             if sources_dir.is_dir():
-                for path in sorted(sources_dir.glob("*.md")):
-                    cached.claimed.add(path.name)
+                # `rglob`, because `ingest` mirrors an original's subtree and a nested
+                # original is a real source (#112). A flat walk left `sources/sub/x.md`
+                # out of `by_identity`, so re-importing that paper wrote a *second* `.md`
+                # for it and broke P3 idempotence in silence.
+                #
+                # Hidden paths are NOT filtered here, and this index is the one sources/
+                # walk that must not filter them. `provenance_sources` excludes them
+                # because they are not *sources* (#67) — nothing syncs them, nothing gives
+                # them a ledger. This index answers a different question: does a file on
+                # disk already claim this identity, or this name? A `.md` that exists can
+                # be duplicated whether or not `sync` counts it. Skipping `sources/.h/x.md`
+                # here makes a re-import of that paper write a *second* `.md` — measured,
+                # and the same silent P3 break #112 fixes for nested files. Indexing it
+                # instead yields a `skipped`, which the report names. A skip the operator
+                # can see beats a duplicate they cannot.
+                for path in sorted(sources_dir.rglob("*.md")):
+                    # `claimed` stays flat on purpose: it exists to keep `_unique_path`
+                    # from overwriting a file, and this writer only ever creates files
+                    # directly under `sources/`. Adding a nested file's bare name would
+                    # push a new import to `x-2.md` because an unrelated `sub/x.md` exists.
+                    if path.parent == sources_dir:
+                        cached.claimed.add(path.name)
                     scalars = read_scalars(path, self._scan_keys(), self.ignore_re)
                     identity = scalars.get(self.identity_key, "")
                     # Registration is unconditional, and provenance rides along.
@@ -700,8 +720,10 @@ class BaseSourceWriter:
             f"for id {existing.id!r}; an import may not revise it"
         )
 
-    def _upsert_sidecar(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
-        """Read-modify-write this source's record into ``sidecar_path(decision.path)``.
+    def _upsert_sidecar(
+        self, parsed, decision: WriteResult, imported_at: str, target: Path
+    ) -> WriteResult:
+        """Read-modify-write this source's record into ``sidecar_path(decision.path, target)``.
 
         The shared mechanism behind both :meth:`_merge` (fold into an *existing*
         original's ledger) and :meth:`_record` (write a *new* original's own
@@ -725,7 +747,7 @@ class BaseSourceWriter:
         fault — is a per-id ``error``, never a batch crash: one paper's problem
         does not stop the imports queued behind it.
         """
-        sidecar = sidecar_path(decision.path)
+        sidecar = sidecar_path(decision.path, target)
         record = self._provenance_record(parsed, imported_at)
         try:
             provenance = read_provenance(sidecar)
@@ -760,7 +782,9 @@ class BaseSourceWriter:
             )
         return decision
 
-    def _merge(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
+    def _merge(
+        self, parsed, decision: WriteResult, imported_at: str, target: Path
+    ) -> WriteResult:
         """Fold *parsed* into the **existing** original's provenance sidecar (§7.3).
 
         Gated by :attr:`merges_cross_source`. A writer that does not opt in returns
@@ -773,9 +797,11 @@ class BaseSourceWriter:
         """
         if not self.merges_cross_source:
             return decision
-        return self._upsert_sidecar(parsed, decision, imported_at)
+        return self._upsert_sidecar(parsed, decision, imported_at, target)
 
-    def _record(self, parsed, decision: WriteResult, imported_at: str) -> WriteResult:
+    def _record(
+        self, parsed, decision: WriteResult, imported_at: str, target: Path
+    ) -> WriteResult:
         """Write this source's OWN record for a **new** original (#72).
 
         Gated by the SAME :attr:`merges_cross_source` flag as :meth:`_merge`, and
@@ -805,7 +831,7 @@ class BaseSourceWriter:
         if not self.merges_cross_source:
             return decision
         record = self._provenance_record(parsed, imported_at)
-        sidecar = sidecar_path(decision.path)
+        sidecar = sidecar_path(decision.path, target)
         fresh = Provenance()
         add_source(fresh, record)
         try:
@@ -820,7 +846,7 @@ class BaseSourceWriter:
         if decision.status == "merged":
             # The existing original stays byte- and mtime-immutable (P4); the only
             # write is to its sidecar, and only writers that opt in do it.
-            return self._merge(parsed, decision, imported_at)
+            return self._merge(parsed, decision, imported_at, Path(target))
         if decision.status != "imported":
             return decision
         # Sidecar FIRST, original LAST. The ``.md`` is the P3 skip key: once it
@@ -833,7 +859,7 @@ class BaseSourceWriter:
         # (#72, risk 2). ``_record`` is a no-op unless a writer opts in via
         # :attr:`merges_cross_source`, so a Zotero import writes the ``.md``
         # exactly as before; arXiv and OpenAlex write their ledger first (#73).
-        recorded = self._record(parsed, decision, imported_at)
+        recorded = self._record(parsed, decision, imported_at, Path(target))
         if recorded.status != "imported":
             return recorded
         sources_dir = Path(target) / "sources"

@@ -47,6 +47,40 @@ in, because the enumerators above use ``rglob`` and ``ingest`` mirrors an
 original's subtree — a stem-only mapping would silently merge the ledgers of
 ``sources/a/x.md`` and ``sources/b/x.md``.
 
+## Only ``sources/`` has provenance (#112)
+
+``common.SOURCE_ROOTS`` names two roots, and a sidecar directory is one directory.
+Mapping both roots into it is **not injective**: ``sources/z.md`` and
+``runs/sources/z.md`` are two different papers and would land on one
+``source-provenance/z.json``, silently merging their ledgers — the same hazard
+:func:`sidecar_path` already refuses for ``sources/a/x.md`` vs ``sources/b/x.md``.
+Namespacing the second root inside the first (``source-provenance/runs/…``) does not
+close it either, because ``sources/runs/…`` is a directory a user can simply create.
+Keeping the root component (``source-provenance/sources/…``) *is* injective, but it
+relocates every sidecar that exists on disk today, orphaning ledgers that every
+walker would then fail to find — a ledger nothing reads is worse than no ledger.
+A second sidecar root (``runs/source-provenance/``) would double the root set of
+every sidecar walker to serve a directory that, by construction, holds no imports.
+
+So provenance is defined for exactly one root, :data:`PROVENANCE_SOURCE_ROOT`, and
+:func:`sidecar_path` **raises** for anything else. Collision is then impossible by
+construction rather than improbable: a path outside ``<kb>/sources/`` has no sidecar
+to collide on, and within ``<kb>/sources/`` the map (strip the root, replace the
+final suffix) is injective over the ``.md`` files :func:`provenance_sources` yields.
+
+This is not an arbitrary restriction. ``runs/sources/`` holds ``factlog ingest``'s
+*derived* conversions (``cli.py:1936``: "generated run outputs under runs/sources/ —
+never in sources/, which holds the user's originals"), and every importer writes into
+``<target>/sources`` (``source_writer.py:642``, ``:839``). A conversion is not an
+import: its origin is the original beside it, recorded in its own first-line
+provenance header (``common.conversion_origin``). Giving it a sidecar would file a
+second ledger for one paper.
+
+The exclusion is **reported, never silent**. :func:`excluded_sources_by_id` names every
+paper whose only ``.md`` lies outside the provenance root, so ``arxiv-check-versions`` /
+``openalex-refresh`` / both backfills surface it as a per-id error instead of dropping it
+from the denominator. Skipping such a paper quietly is the failure #112 exists to remove.
+
 ## Determinism contract
 
 ``imported_at`` is supplied by the caller and is **never** read from a clock
@@ -99,7 +133,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from factlog.common import source_files
 from factlog.integrations.common._textio import atomic_write_text
+from factlog.integrations.common.front_matter import read_scalars
 from factlog.integrations.common.vocabulary import (
     WITHDRAWN_BY_ADMIN,
     WITHDRAWN_BY_AUTHOR,
@@ -108,6 +144,25 @@ from factlog.integrations.common.vocabulary import (
 #: Sibling directory of ``sources/`` that holds provenance sidecars. Exported so
 #: later steps (#64 matching, #65 merge) reference the name in exactly one place.
 SIDECAR_DIR = "source-provenance"
+
+#: The one member of ``common.SOURCE_ROOTS`` a provenance ledger may describe (#112).
+#: See the module docstring: one sidecar directory cannot injectively hold two roots,
+#: and the other root holds derived conversions, not imports.
+PROVENANCE_SOURCE_ROOT = "sources"
+
+#: The extension a source must have to carry front matter, and so to have provenance.
+#: Every importer writes ``.md`` (``source_writer.py`` renders one), and a binary original
+#: under ``sources/`` carries no front matter to read.
+#:
+#: This filter is **not** what keeps ``ingest``'s conversions quiet, and it must not be
+#: read as if it were: pandoc's ``out_suffix`` *is* ``.md`` (``cli.py:2121``), so a
+#: conversion is a ``.md`` like any other. What keeps it quiet is that ``ingest`` writes its
+#: provenance header on line 1, so ``front_matter_block`` — which requires the file to
+#: *start* with ``---`` — returns ``None`` and the conversion names no paper. (``ingest``
+#: also refuses a ``.md`` original outright, so no conversion can inherit one's front
+#: matter.) Stating a false reason for a true conclusion is the #134 shape; the conclusion
+#: here rests on the header, and a test pins it.
+SOURCE_SUFFIX = ".md"
 
 #: File extension of a sidecar. A sidecar is a ``.json`` file directly inside a
 #: ``source-provenance/`` directory.
@@ -187,39 +242,165 @@ def is_sidecar(path: Path | str) -> bool:
     return p.suffix == SIDECAR_SUFFIX and SIDECAR_DIR in p.parts[:-1]
 
 
-def sidecar_path(source_path: Path | str) -> Path:
-    """Map a source file to its provenance sidecar. The one place that knows the
-    naming rule.
+#: Why "move it and re-import" is not the remedy, stated once. An import short-circuits on
+#: the front-matter identity match *before* it reaches the sidecar writer, so a re-import of
+#: a paper the KB already holds is ``skipped`` and no ledger is created — measured, and the
+#: reason ``*-backfill-provenance`` (#105) had to exist at all. Prescribing a re-import
+#: sends the operator to a command that spends an API request and changes nothing.
+_REIMPORT_IS_A_NO_OP = (
+    "A re-import after the move is a no-op: the identity match returns before the sidecar "
+    "writer, so it is reported as `skipped` and still no ledger is written (#105)."
+)
 
-    ``<kb>/sources/foo.md`` -> ``<kb>/source-provenance/foo.json``. The KB root
-    is the parent of the source's directory (i.e. the parent of ``sources/``);
-    the sidecar keeps the source's stem and takes a ``.json`` extension. A source
-    with no ``.md`` extension, or a multi-dot stem, is handled the same way
-    (only the final extension is replaced)::
+
+def backfill_remedy(command: str) -> str:
+    """The remedy for a caller that is **not** the backfill command: move, then backfill."""
+    return (
+        f"Move it under {PROVENANCE_SOURCE_ROOT}/ and run `factlog {command}` (no network). "
+        + _REIMPORT_IS_A_NO_OP
+    )
+
+
+def rerun_remedy(command: str) -> str:
+    """The remedy for the backfill command itself. It must not tell the operator to run the
+    command whose output they are reading; the move is the only step they have not taken."""
+    return (
+        f"Move it under {PROVENANCE_SOURCE_ROOT}/ and re-run `factlog {command}`. "
+        + _REIMPORT_IS_A_NO_OP
+    )
+
+
+def excluded_reason(ref: str, remedy: str = "") -> str:
+    """Why *ref* — a KB-relative source path outside the provenance root — has no ledger.
+
+    One sentence per fact a reader needs: what cannot happen, why it cannot, and what to do.
+    Written once here so every consuming command says the same thing.
+
+    *remedy* is the caller's, because the working next step depends on who is speaking:
+    :func:`backfill_remedy` for a check or an acknowledge, :func:`rerun_remedy` for the
+    backfill command itself. The default names no command, for the callers (``sidecar_path``)
+    that do not know the integration. Whichever is chosen, it must name a command that has
+    been *measured* to fix the paper — naming a plausible one is the #7ad3412 defect, and it
+    is why the remedy is not hardcoded here where the integration is unknown.
+    """
+    if not remedy:
+        remedy = (
+            f"Move it under {PROVENANCE_SOURCE_ROOT}/ and run the integration's "
+            "`*-backfill-provenance` command (no network). " + _REIMPORT_IS_A_NO_OP
+        )
+    return (
+        f"{ref} is not under '{PROVENANCE_SOURCE_ROOT}/', so it can have no provenance "
+        f"ledger: a sidecar's path is the source's path below {PROVENANCE_SOURCE_ROOT}/, "
+        "and one sidecar directory cannot hold two source roots without mapping two "
+        "different papers onto one ledger. runs/sources/ holds `factlog ingest`'s derived "
+        "conversions, whose origin is the original beside them in sources/ and is recorded "
+        f"in the conversion's own header, not in a ledger. {remedy} It is reported rather "
+        "than skipped because a paper this command cannot act on must never vanish from "
+        "its report."
+    )
+
+
+def sidecar_path(source_path: Path | str, kb_root: Path | str) -> Path:
+    """Map a source file under ``<kb_root>/sources/`` to its provenance sidecar. The one
+    place that knows the naming rule.
+
+    ``<kb>/sources/foo.md`` -> ``<kb>/source-provenance/foo.json``. The sidecar keeps the
+    source's path *below* ``sources/`` and replaces the final extension with ``.json``::
 
         sources/foo.md              -> source-provenance/foo.json
+        sources/sub/foo.md          -> source-provenance/sub/foo.json
         sources/foo.provenance.md   -> source-provenance/foo.provenance.json
         sources/report.pdf          -> source-provenance/report.json
+
+    *kb_root* is supplied by the caller rather than inferred from the path, and that is the
+    whole safety property. Inferring it means searching *source_path*'s components for one
+    named ``sources``, and either direction of that search is wrong on a path a user can
+    construct: the innermost match sends ``sources/a/sources/x.md``'s sidecar to
+    ``sources/a/source-provenance/x.json`` — *inside* ``sources/``, where the next
+    enumeration counts it as a source — and the outermost match sends
+    ``/home/sources/kb/sources/x.md``'s sidecar out of the KB entirely. With the root
+    given, ``relative_to`` decides, and neither path is reachable.
+
+    Raises :class:`ValueError` when *source_path* is not under ``<kb_root>/sources/``.
+    ``runs/sources/`` is the case that matters (#112): it has no sidecar, by construction,
+    because it would collide with ``sources/`` on one — see the module docstring, and
+    :func:`excluded_sources_by_id` for how a caller reports such a paper instead of
+    dropping it. Over the ``.md`` sources :func:`provenance_sources` yields, this map is injective,
+    so two papers can never share a ledger.
     """
-    src = Path(source_path)
-    parts = src.parts
-    # Anchor on the innermost `sources/` component rather than assuming the file
-    # sits directly inside it. `src.parent.parent` would place the sidecar for
-    # `sources/a/x.md` at `sources/source-provenance/x.json` — *inside* the very
-    # directory the sidecar must stay out of — and would collide with
-    # `sources/b/x.md`, silently merging two papers' ledgers into one file.
-    for index in range(len(parts) - 2, -1, -1):
-        if parts[index] == "sources":
-            break
-    else:
+    src, root = Path(source_path), Path(kb_root)
+    try:
+        rel = src.relative_to(root)
+    except ValueError as exc:
         raise ValueError(
-            f"{src} is not under a 'sources/' directory; there is no KB root to "
-            "anchor a provenance sidecar to."
-        )
-    kb_root = Path(*parts[:index]) if index else Path()
+            f"{src} is not under the KB root {root}; there is no sidecar for it."
+        ) from exc
+    parts = rel.parts
+    if len(parts) < 2 or parts[0] != PROVENANCE_SOURCE_ROOT:
+        raise ValueError(excluded_reason(rel.as_posix()))
     # The path *below* sources/ is preserved, so nested sources cannot collide.
-    relative = Path(*parts[index + 1:]).with_suffix(SIDECAR_SUFFIX)
-    return kb_root / SIDECAR_DIR / relative
+    relative = Path(*parts[1:]).with_suffix(SIDECAR_SUFFIX)
+    return root / SIDECAR_DIR / relative
+
+
+def _partition_sources(kb_root: Path | str) -> tuple[list[Path], list[Path]]:
+    """Split the KB's front-matter-bearing sources into (has provenance, cannot have).
+
+    Both halves come from ``common.source_files`` — the KB's *one* canonical enumeration,
+    which is what ``factlog sources`` and coverage count and which already filters hidden
+    paths (#67). Deriving both halves from it is the point: a walker narrower than the
+    executor is exactly the silent drop #112 reports, and a partition cannot be narrower
+    than the thing it partitions. The two halves are disjoint and their union is every
+    ``.md`` the KB has, so no source can fall out of both.
+    """
+    root = Path(kb_root)
+    eligible: list[Path] = []
+    excluded: list[Path] = []
+    for path in source_files(root):
+        # Only `.md` carries front matter: every importer renders one, while a binary
+        # original and an ingest `.txt` conversion carry none, so neither can name a paper.
+        if path.suffix != SOURCE_SUFFIX:
+            continue
+        under_root = path.relative_to(root).parts[0] == PROVENANCE_SOURCE_ROOT
+        (eligible if under_root else excluded).append(path)
+    return eligible, excluded
+
+
+def provenance_sources(kb_root: Path | str) -> list[Path]:
+    """Every source a provenance ledger may describe: the ``.md`` under ``<kb>/sources/``,
+    at any depth, hidden paths excluded.
+
+    This replaces the flat ``sources_dir.glob("*.md")`` each consumer used to write for
+    itself (#112). ``ingest`` mirrors an original's subtree, so nested originals are
+    produced rather than hypothetical, and a paper the KB lists must be a paper the check
+    commands can see.
+    """
+    return _partition_sources(kb_root)[0]
+
+
+def excluded_sources_by_id(kb_root: Path | str, id_key: str) -> dict[str, tuple[str, ...]]:
+    """The papers named by a source that can have no provenance ledger: the front-matter
+    *id_key* value mapped to the sorted KB-relative paths of the sources naming it.
+
+    *id_key* is the integration's front-matter identity key (``arxiv_id`` /
+    ``openalex_id``), so a conversion or a hand-placed note that names no paper is silent —
+    a warning that fires on every run for every ingested PDF is how an operator learns to
+    skim past the alarm the KB most needs read (#93). A source that *does* name a paper is
+    loud: the command that cannot act on it reports it rather than leaving it out of the
+    denominator.
+
+    Keyed by id (not a flat list) so ``arxiv-acknowledge-withdrawal --id X`` can tell "X is
+    not in this KB" from "X is in this KB, in a place that cannot hold a ledger" — the
+    second sentence was the first one's lie in #112's measurement.
+    """
+    root = Path(kb_root)
+    by_id: dict[str, list[str]] = {}
+    for path in _partition_sources(root)[1]:
+        entry_id = read_scalars(path, (id_key,)).get(id_key)
+        if entry_id:
+            by_id.setdefault(entry_id, []).append(path.relative_to(root).as_posix())
+    return {entry_id: tuple(sorted(refs)) for entry_id, refs in by_id.items()}
+
 
 
 @dataclass(frozen=True)

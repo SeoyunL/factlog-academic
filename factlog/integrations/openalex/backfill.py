@@ -199,6 +199,7 @@ def backfill_schema() -> BackfillSchema:
     """
     return BackfillSchema(
         type="openalex",
+        id_key="openalex_id",
         collect_entries=_collect_entries,
         provenance_of=refresh.provenance_of,
         id_of=lambda entry: entry.openalex_id,

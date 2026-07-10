@@ -82,6 +82,10 @@ from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
     SourceRecord,
+    backfill_remedy,
+    excluded_reason,
+    excluded_sources_by_id,
+    provenance_sources,
     read_provenance,
     update_source,
     write_provenance,
@@ -112,6 +116,7 @@ __all__ = [
     "COMPARED_FIELDS",
     "RETRACTION_KEY",
     "collect_ledger_entries",
+    "excluded_checks",
     "parse_retraction_flag",
     "provenance_of",
     "partition_by_freshness",
@@ -313,8 +318,11 @@ def collect_ledger_entries(
     # wrong about all of its input. The front matter carries `openalex_id`, `type`
     # (the work type), `doi`, `journal` and `openalex_is_retracted`, which is what a
     # compare needs, and reading it writes nothing.
-    sources_dir = root / "sources"
-    for path in sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else ():
+    # The KB's own enumeration (`rglob` under `sources/`, hidden paths excluded), not a
+    # flat `glob` that would leave a nested paper out of this command's denominator while
+    # `factlog sources` lists it (#112). A source outside the provenance root is reported
+    # by `excluded_checks`, never dropped.
+    for path in provenance_sources(root):
         scalars = read_scalars(
             path, ("openalex_id", "type", "doi", "journal", RETRACTION_KEY)
         )
@@ -349,6 +357,34 @@ def collect_ledger_entries(
     entries.sort(key=lambda e: e.openalex_id)
     errors.sort(key=lambda e: e.openalex_id)
     return entries, errors
+
+
+def excluded_checks(kb_root: Path | str) -> list[RefreshCheck]:
+    """One ``error`` :class:`RefreshCheck` per OpenAlex work named only by a source outside
+    the provenance root, so no ledger can exist for it (#112).
+
+    Keyed by **openalex_id**, not by path: the id is what every other row of this report and
+    of ``--porcelain`` carries in that column, and what ``openalex-acknowledge-retraction
+    --id`` takes. The paths go to the ``sources`` column and the reason.
+
+    Deliberately a separate channel from :func:`collect_ledger_entries`' errors, which
+    ``common/backfill.py`` treats as a poison that stops every write (#111): an unreadable
+    ledger contaminates the front-matter-only classification, while an excluded source
+    contaminates nothing. It is an *error* rather than a note because a retraction on this
+    work will never be reported, and a command that exits 0 while that is true is the
+    silent direction #112 closes. The arXiv twin is ``check_versions.excluded_checks``.
+    """
+    root = Path(kb_root)
+    remedy = backfill_remedy("openalex-backfill-provenance")
+    return [
+        RefreshCheck(
+            openalex_id=openalex_id,
+            status=STATUS_ERROR,
+            reason=excluded_reason(", ".join(refs), remedy),
+            sources=refs,
+        )
+        for openalex_id, refs in sorted(excluded_sources_by_id(root, "openalex_id").items())
+    ]
 
 
 def _empty_slot() -> dict:
@@ -895,7 +931,12 @@ def report_lines(
     field outcome; then id supersedes; then field divergences; then per-id errors; then,
     under ``--auto-update``, what was written; then the tally."""
     total = len(results) + len(skipped)
-    header = f"Checked {len(results)} of {total} OpenAlex record(s) in KB: {target}"
+    # `summary.checked`, not `len(results)`: `results` carries the per-file errors
+    # (a corrupt ledger, a source outside the provenance root), and a paper this run
+    # could not check has not been checked. `Checked 4 of 4` above `Errors: 1` was a
+    # false statement about the run. The denominator keeps every record considered,
+    # so the excluded paper is still counted, never dropped (#112).
+    header = f"Checked {summary.checked} of {total} OpenAlex record(s) in KB: {target}"
     if skipped:
         header += (
             f"\n  ({len(skipped)} skipped: checked within the last "
