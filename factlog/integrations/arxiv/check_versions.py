@@ -170,6 +170,23 @@ class LedgerEntry:
     remedies, and collapsing any of them is how a report ends up asserting the contents
     of a file it never parsed, or prescribing a command that does nothing (#116, #121).
     For a ledger-backed paper it is trivially :data:`SIDECAR_READABLE`.
+
+    ``per_source`` is one :class:`LedgerEntry` per ``.md`` that carries this paper's id,
+    each speaking for exactly *its own* front matter (#117). It is empty for a ledger-backed
+    paper, whose record belongs to a *ledger* and to no ``.md``; a backfill never touches
+    such a paper, and an empty tuple here is that fact, not a missing value (#111).
+
+    Deduplication and source aggregation are different concerns. A **check** needs the
+    paper once, so the fields above answer for it — and they are the *first* source in
+    sorted-path order, verbatim, never a fold across sources. A **backfill** writes one
+    sidecar *per ``.md``*, from that ``.md``'s own front matter, and reads ``per_source``.
+    Two ``.md`` can legitimately carry one ``arxiv_id`` (an arXiv deposit, and an OpenAlex
+    import echoing it as a cross-reference without ever emitting ``arxiv_version``), and
+    collapsing them made the backfill's outcome depend on a *filename*: the arXiv-authored
+    file, the only one able to supply ``version``, was never consulted when it lost the
+    sort. Adding the per-source detail beside the aggregate — rather than folding the
+    aggregate, or deriving it by a second walk — is what fixes the backfill while leaving
+    every byte of the check's report where it was.
     """
 
     arxiv_id: str
@@ -177,6 +194,7 @@ class LedgerEntry:
     recorded_withdrawn_by: str | None
     sources: tuple[str, ...] = ()
     sidecar_state: str = SIDECAR_READABLE
+    per_source: tuple["LedgerEntry", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -248,6 +266,14 @@ def collect_ledger_entries(
     and an OpenAlex-primary one that cites the same preprint). They collapse to one
     entry keyed by ``arxiv_id``; the highest recorded version wins, any recorded
     withdrawal agent is kept, and every referencing source path is retained.
+
+    Several ``sources/*.md`` may likewise carry one ``arxiv_id``. The entry a check reads is
+    the **first in sorted-path order**, unchanged by #117 and unfolded — a paper is checked
+    once, and no value is invented for it that no single source recorded. Each source's own
+    front matter is kept *beside* that answer, verbatim, in :attr:`LedgerEntry.per_source`,
+    which is what a backfill reads. Dedup and source aggregation are separate concerns
+    (#117), and keeping them separate is what lets the backfill stop depending on a
+    filename without the check's report moving at all.
     """
     root = Path(kb_root)
     slots: dict[str, dict] = {}
@@ -305,6 +331,10 @@ def collect_ledger_entries(
     # writes nothing, so report-only holds. A ledger, when present, is authoritative:
     # it is what a refresh updates.
     sources_dir = root / "sources"
+    #: One view per `.md`, keyed by id, in sorted-path order. A second `.md` carrying an id
+    #: is *not* dropped here (it was, before #117): it is a source of the same paper, and a
+    #: backfill writes a sidecar next to each `.md`, from that `.md`'s own front matter.
+    per_source: dict[str, list[LedgerEntry]] = {}
     for path in sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else ():
         scalars = read_scalars(path, ("arxiv_id", "arxiv_version", "arxiv_withdrawn_by"))
         arxiv_id = scalars.get("arxiv_id", "")
@@ -340,11 +370,44 @@ def collect_ledger_entries(
             sidecar_state = SIDECAR_READABLE
         else:
             sidecar_state = SIDECAR_ABSENT
+        per_source.setdefault(arxiv_id, []).append(
+            LedgerEntry(
+                arxiv_id=arxiv_id,
+                recorded_version=version,
+                recorded_withdrawn_by=scalars.get("arxiv_withdrawn_by") or None,
+                sources=(_relative(path, root),),
+                sidecar_state=sidecar_state,
+            )
+        )
+
+    for arxiv_id, views in per_source.items():
+        # The check's answer is the FIRST source in sorted-path order, exactly as before
+        # #117 — every field of it, unfolded. This *is* first-wins dedup, and #117 says it
+        # is correct for a check: a paper is checked once. `per_source` is added beside it,
+        # never folded into it.
+        #
+        # It is tempting to fold the views instead (the highest version wins, as the ledger
+        # loop above folds its sidecars). MEASURED, that silences the one signal this
+        # command exists to produce: `a.md` recording v3 beside `b.md` recording v7, arXiv
+        # serving v7, reports `unchanged` — the paper three versions behind vanishes from
+        # the report. `max` is a guess, not a reading.
+        #
+        # Two sources disagreeing about a paper's `arxiv_version` is a *conflict*, and this
+        # repo reports or refuses a conflict rather than resolve it silently (`add_source`
+        # raises rather than overwrite; #113/#121 refuse rather than write a field they
+        # cannot read). Making it a reportable state is right, and it is NOT this issue: the
+        # ledger loop above folds the identical disagreement between two *sidecars* with the
+        # same `max`, pinned by a test. Fixing only this loop would mean a paper reported as
+        # conflicting before `arxiv-backfill-provenance` runs, and silently folded after —
+        # the report's meaning changing because a ledger was created. It must move across
+        # both consumers at once, like #112.
+        first = views[0]
         slots[arxiv_id] = {
-            "version": version,
-            "withdrawn_by": scalars.get("arxiv_withdrawn_by") or None,
-            "sources": {_relative(path, root)},
-            "sidecar_state": sidecar_state,
+            "version": first.recorded_version,
+            "withdrawn_by": first.recorded_withdrawn_by,
+            "sources": {first.sources[0]},
+            "sidecar_state": first.sidecar_state,
+            "per_source": tuple(views),
         }
 
     entries = [
@@ -354,6 +417,7 @@ def collect_ledger_entries(
             recorded_withdrawn_by=slot["withdrawn_by"],
             sources=tuple(sorted(slot["sources"])),
             sidecar_state=slot.get("sidecar_state", SIDECAR_READABLE),
+            per_source=slot.get("per_source", ()),
         )
         for arxiv_id, slot in slots.items()
     ]
