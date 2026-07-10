@@ -62,15 +62,47 @@ of ``sources/`` in #58).
 
 ``schema_version`` is written from day one so a future reader has a single hook
 to judge a format it does not recognise.
+
+## Which values the read boundary judges (#109)
+
+``from_dict`` type-checks the three reserved keys because a non-string ``id``
+survives ``json`` and dies far from the corrupt file that caused it. Two of the
+*source-specific* fields need the same boundary for the same reason, and one
+stronger one: they are read as **signals**, and a corrupt value does not merely
+crash late — it is read as "no signal". ``refresh.py`` tests
+``fields.get("is_retracted") is True``, so ``"is_retracted": "true"`` reads as
+*not retracted*; the retraction direction then self-heals (upstream retracted ->
+still loud) while the *un*-retraction direction is permanently invisible: nothing
+surfaces, ``openalex-acknowledge-retraction`` exits 0 with "nothing to
+acknowledge", and the string stays in the ledger forever. ``withdrawn_by`` has
+the same shape, where any non-empty string is a truthy "some withdrawal was
+recorded".
+
+Coercing ``"true"`` to ``True`` is not the answer: ``"1"``, ``"yes"``, ``"on"``
+and ``"false"`` would each need a rule, and a ledger records what a source said —
+inventing a value for a corrupt one is the write this project forbids. So the
+value space is enforced here, at the one boundary every consumer passes through,
+and a bad value raises :class:`ProvenanceError`. Every reader already guards
+``read_provenance`` with it, so strictness lands in a path that already exists:
+``openalex-acknowledge-retraction`` and ``arxiv-acknowledge-withdrawal`` refuse
+before their live query (zero API requests, no prompt), while ``openalex-refresh``
+and ``arxiv-check-versions`` report the unreadable ledger as a per-file error and
+keep going. ``write_provenance`` enforces the same rule, so this module can never
+create a ledger it would then refuse to read (``common/backfill.py``, which
+promotes a front-matter value into a record, refuses in its own words first).
 """
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from factlog.integrations.arxiv.work_parser import (
+    WITHDRAWN_BY_ADMIN,
+    WITHDRAWN_BY_AUTHOR,
+)
 from factlog.integrations.common._textio import atomic_write_text
 
 #: Sibling directory of ``sources/`` that holds provenance sidecars. Exported so
@@ -87,6 +119,46 @@ SCHEMA_VERSION = 1
 #: The three record fields every source carries; everything else is a
 #: source-specific flat field stored in :attr:`SourceRecord.fields`.
 _RESERVED_KEYS = ("type", "id", "imported_at")
+
+
+def _is_bool(value: object) -> bool:
+    # `isinstance(True, int)` is True, so an int check would admit booleans; the
+    # mirror of that trap is what this must NOT do — admit `1`/`0` as booleans.
+    # `isinstance(value, bool)` is false for `1`, which is the whole point.
+    return isinstance(value, bool)
+
+
+def _is_withdrawal_agent(value: object) -> bool:
+    # `True in (WITHDRAWN_BY_AUTHOR, ...)` is False, so a bool cannot sneak through this
+    # membership test.
+    return value in (WITHDRAWN_BY_AUTHOR, WITHDRAWN_BY_ADMIN)
+
+
+#: The value space of the source-specific fields that are read as **signals**, keyed
+#: by ``(record type, field name)`` -> ``(predicate, what a valid value is)``. A ``None``
+#: never reaches a predicate: it is the field's absence (:func:`signal_field_error`).
+#:
+#: The vocabulary is deliberately *not* this module's. ``withdrawn_by`` is arXiv's word
+#: and ``is_retracted`` is OpenAlex's (#57 §6.3, #93 Q2); the two integrations own their
+#: fields' meanings, and the names are repeated here only because the *read boundary* is
+#: shared. The alternative — a registry each integration populates at import time — would
+#: make a corrupt ledger's fate depend on which modules a process happened to import, so a
+#: reader that never imported arXiv would read a bad ``withdrawn_by`` silently. That is the
+#: failure this table exists to remove, so the table is always present. The two allowed
+#: agents are imported from their owner rather than re-typed, so a third agent is added in
+#: one place. Generalizing this into a per-integration schema (the shape ``BackfillSchema``
+#: / ``AcknowledgeSchema`` take) is a real seam, but those objects are constructed by the
+#: *caller* of a command and are not in reach of a low-level reader; building that seam is
+#: not this issue's job.
+_FIELD_VALUE_SPACE: dict[tuple[str, str], tuple[Callable[[object], bool], str]] = {
+    # owner: factlog/integrations/openalex
+    ("openalex", "is_retracted"): (_is_bool, "a boolean (true or false)"),
+    # owner: factlog/integrations/arxiv
+    ("arxiv", "withdrawn_by"): (
+        _is_withdrawal_agent,
+        f"{WITHDRAWN_BY_AUTHOR!r} or {WITHDRAWN_BY_ADMIN!r} (or absent)",
+    ),
+}
 
 
 class ProvenanceError(ValueError):
@@ -285,6 +357,49 @@ def _serialize(provenance: Provenance) -> str:
     return json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
 
 
+def signal_field_error(record: SourceRecord) -> str | None:
+    """The reason *record* carries a signal field outside its integration's value space,
+    or ``None`` when every field it carries is in range (see :data:`_FIELD_VALUE_SPACE`).
+
+    A field the record does not carry is not judged: absence is a value (an absent
+    ``is_retracted`` *means* not retracted). ``None`` **is** that absence — ``to_dict``
+    drops it on write, and callers pass a record's optional fields through unfiltered — so
+    a ``None`` is skipped rather than rejected, in either direction. Everything else is
+    judged: ``"true"``, ``1`` and ``0`` are not booleans, and ``"maintainer"`` is not a
+    withdrawal agent.
+
+    Exported so a caller that *promotes* a value into the ledger from a looser medium can
+    refuse in its own vocabulary before building a record. ``common/backfill.py`` copies
+    arXiv's ``withdrawn_by`` out of front matter, where an unrecognised hand-typed value is
+    kept verbatim on purpose (#98): that boundary is loud, not fatal, and it must not
+    become a ledger the reader below then rejects.
+    """
+    for name, value in record.fields.items():
+        rule = _FIELD_VALUE_SPACE.get((record.type, name))
+        if rule is None or value is None:
+            continue
+        predicate, expected = rule
+        if not predicate(value):
+            return (
+                f"record field {name!r} must be {expected}, got "
+                f"{type(value).__name__} {value!r} (record {record.type} {record.id!r})"
+            )
+    return None
+
+
+def _validate_signal_fields(record: SourceRecord, path: Path) -> None:
+    """Raise :class:`ProvenanceError` for a record :func:`signal_field_error` rejects,
+    naming the file. Guards both ends: nothing this module writes can be a ledger it
+    would refuse to read back."""
+    reason = signal_field_error(record)
+    if reason is not None:
+        raise ProvenanceError(
+            f"sidecar {reason}: {path}. The value is not coerced — a ledger records what "
+            "a source said, and inventing a value for a corrupt one is a lie. Repair it "
+            "by hand."
+        )
+
+
 def read_provenance(path: Path | str) -> Provenance:
     """Read a sidecar. A missing file yields an empty :class:`Provenance` (not an
     error), so a caller can read-modify-write a source that has none yet. A file
@@ -326,7 +441,13 @@ def read_provenance(path: Path | str) -> Provenance:
     if not isinstance(raw_records, list):
         raise ProvenanceError(f"sidecar 'records' is not a list: {p}")
 
-    records = [SourceRecord.from_dict(r) for r in raw_records]
+    # The path is named in the error, so the signal fields are judged here rather than in
+    # `from_dict` (which never sees the file it came from).
+    records: list[SourceRecord] = []
+    for raw in raw_records:
+        record = SourceRecord.from_dict(raw)
+        _validate_signal_fields(record, p)
+        records.append(record)
     # `add_source` guarantees one record per (type, id). A file that violates it
     # was not written by this module, and a read-modify-write of it would pick an
     # arbitrary one of the duplicates to compare against.
@@ -345,7 +466,16 @@ def write_provenance(path: Path | str, provenance: Provenance) -> None:
     """Write *provenance* to *path* atomically (temp file + ``os.replace`` via
     ``_textio.atomic_write_text``), creating the ``source-provenance/`` directory
     if needed. Deterministic: two writes of the same data produce identical
-    bytes."""
+    bytes.
+
+    A record whose signal field is outside its integration's value space raises
+    :class:`ProvenanceError` **before** anything is created — the symmetric half of the
+    read boundary. Without it the stricter reader would only mean this module can write a
+    ledger it then refuses to read, which is a worse failure than the one it fixes. Every
+    writer already guards this call with ``(ProvenanceError, OSError)``, so the refusal is
+    that record's per-id problem, never a batch crash."""
     p = Path(path)
+    for record in provenance.records:
+        _validate_signal_fields(record, p)
     p.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(p, _serialize(provenance))
