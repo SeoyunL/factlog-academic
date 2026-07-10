@@ -279,6 +279,10 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
         assert "no command currently records a version for it" in out
         assert "already imported (arxiv_id match)" in out
         assert "refuses a paper whose front matter carries no arxiv_version" in out
+        # The remedy for this paper really is unbuilt, and its tracking issue moved from
+        # the now-closed #105 to #135 (#132). Point at the live one, never the closed one.
+        assert "#135" in out
+        assert "#105" not in out
         # Not one of these is a working remedy for this paper, so not one is prescribed
         # as an imperative.
         assert "arxiv-check-versions --auto-update" not in out

@@ -727,6 +727,38 @@ class LedgerUpdate:
     sidecar_state: str = SIDECAR_READABLE
 
 
+#: The four papers ``provenance_of`` calls "front-matter" and the command (if any) that
+#: gives each one a usable arXiv ledger. Every message that speaks to such a paper — the
+#: ``--auto-update`` remedy, the withdrawal note, the un-withdrawal note and the acknowledge
+#: refusal — must agree on this classification, so it lives here once. Naming one remedy for
+#: all four is #116 recreated at the prose layer, and #132 is that recreation caught a layer
+#: up: the acknowledge/withdrawal messages branched on ``arxiv_version`` alone and so denied
+#: ``arxiv-import`` to a paper it repairs and prescribed a backfill that errors on a corrupt
+#: ledger. Each mapping below was measured, not reasoned (see ``no_ledger_remedy``).
+LEDGER_FIX_REPAIR_BY_HAND = "repair-by-hand"  #: SIDECAR_UNREADABLE — no command; repair the file
+LEDGER_FIX_IMPORT = "import"  #: SIDECAR_READABLE, holds no arXiv record — `arxiv-import` merges one
+LEDGER_FIX_BACKFILL = "backfill"  #: SIDECAR_ABSENT, front matter has a version — backfill builds it
+LEDGER_FIX_NONE = "none"  #: SIDECAR_ABSENT, no version — nothing repairs it (#135)
+
+
+def ledger_fix(sidecar_state: str, *, has_recorded_version: bool) -> str:
+    """Classify a front-matter paper by which command gives it a usable arXiv ledger.
+
+    ``sidecar_state`` is read *first*: whether the front matter carries ``arxiv_version``
+    only matters once we know there is no sidecar at all. A readable sidecar that holds no
+    arXiv record is repaired by ``arxiv-import`` regardless of the front matter's version,
+    and an unreadable one is repaired by nothing — reading the version would be answering
+    the wrong question, the #132 defect. Returns one of the ``LEDGER_FIX_*`` constants.
+    """
+    if sidecar_state == SIDECAR_UNREADABLE:
+        return LEDGER_FIX_REPAIR_BY_HAND
+    if sidecar_state == SIDECAR_READABLE:
+        return LEDGER_FIX_IMPORT
+    if has_recorded_version:
+        return LEDGER_FIX_BACKFILL
+    return LEDGER_FIX_NONE
+
+
 def no_ledger_remedy(
     arxiv_id: str, *, sidecar_state: str, has_recorded_version: bool
 ) -> str:
@@ -755,7 +787,8 @@ def no_ledger_remedy(
       #113). Saying so is the honest answer #116 asked for; naming a command here would
       be the same lie in a new place.
     """
-    if sidecar_state == SIDECAR_UNREADABLE:
+    fix = ledger_fix(sidecar_state, has_recorded_version=has_recorded_version)
+    if fix == LEDGER_FIX_REPAIR_BY_HAND:
         # Say nothing about the contents of a file that never parsed, and prescribe
         # nothing: every command that touches it fails or silently no-ops.
         return (
@@ -763,13 +796,13 @@ def no_ledger_remedy(
             "holds is unknown and no command can record a version for this paper until "
             "the ledger is repaired by hand."
         )
-    if sidecar_state == SIDECAR_READABLE:
+    if fix == LEDGER_FIX_IMPORT:
         return (
             "Its provenance ledger holds no arXiv record for this paper (another "
             "integration wrote the ledger and only echoed the id), so --auto-update has "
             f"no record to fill. Run `factlog arxiv-import --id {arxiv_id}` to add one."
         )
-    if has_recorded_version:
+    if fix == LEDGER_FIX_BACKFILL:
         return (
             "This paper has no provenance ledger (imported before #82), so --auto-update "
             "has none to fill. Run `factlog arxiv-backfill-provenance` to build one from "
@@ -780,7 +813,114 @@ def no_ledger_remedy(
         "currently records a version for it: --auto-update has no ledger to write into, "
         "`factlog arxiv-import` answers `already imported (arxiv_id match)`, and "
         "`factlog arxiv-backfill-provenance` refuses a paper whose front matter carries "
-        "no arxiv_version (#113). Backfilling a ledger for it is tracked in #105."
+        "no arxiv_version (#113). Backfilling a ledger for it is tracked in #135."
+    )
+
+
+def front_matter_acknowledge_refusal(
+    arxiv_id: str, *, sidecar_state: str, has_recorded_version: bool
+) -> str:
+    """Why ``arxiv-acknowledge-withdrawal`` cannot yet record a decision for a front-matter
+    paper, and the working next step — classified by :func:`ledger_fix` so it agrees with
+    the check-versions notes and never denies a command that repairs the paper (#132).
+
+    The UNREADABLE case is unreachable through the CLI (the command's ``ledger_errors``
+    guard refuses before this branch, for zero API requests), but it is classified here so
+    the one function answering this question answers it for all four papers, and a future
+    caller that reaches it is not handed the #135 lie meant for a version-less paper.
+    """
+    fix = ledger_fix(sidecar_state, has_recorded_version=has_recorded_version)
+    if fix == LEDGER_FIX_REPAIR_BY_HAND:
+        return (
+            f"{arxiv_id!r} has a provenance ledger that could not be read, so what it "
+            "records is unknown and no command can record a decision for it until the "
+            "ledger is repaired by hand."
+        )
+    if fix == LEDGER_FIX_IMPORT:
+        # A sidecar exists (another integration echoed the id) but holds no arXiv record,
+        # so "it has no provenance ledger" is false. `arxiv-import` merges an arXiv record
+        # into that ledger: measured `merged`, after which the signal no longer surfaces.
+        return (
+            f"{arxiv_id!r} has a provenance ledger, but it holds no arXiv record (another "
+            "integration wrote it and only echoed the id), so there is no arXiv record "
+            f"here to acknowledge. Run `factlog arxiv-import --id {arxiv_id}` to add one."
+        )
+    if fix == LEDGER_FIX_BACKFILL:
+        return (
+            f"{arxiv_id!r} is known only from front matter (imported before #82), so it "
+            "has no provenance ledger to record a decision in — and re-import will not "
+            "create one. Run `factlog arxiv-backfill-provenance` to build one from its "
+            "front matter, then re-run this command to acknowledge."
+        )
+    return (
+        f"{arxiv_id!r} is known only from front matter (imported before #82), so it has "
+        "no provenance ledger to record a decision in, and its front matter carries no "
+        "arxiv_version, so `arxiv-backfill-provenance` refuses it (#113); no command can "
+        "build a ledger for it, so this signal cannot be acknowledged here (#135)."
+    )
+
+
+def _withdrawal_ledger_suffix(result: VersionCheck) -> str:
+    """The clause the front-matter :func:`withdrawal_note` appends: the missing-ledger fact
+    and the command (if any) that lets the withdrawal be recorded, per :func:`ledger_fix`."""
+    fix = ledger_fix(
+        result.sidecar_state, has_recorded_version=result.recorded_version is not None
+    )
+    if fix == LEDGER_FIX_REPAIR_BY_HAND:
+        return (
+            "Its provenance ledger could not be read (see `Could not check:`), so what it "
+            "holds is unknown and no command can record this withdrawal until the ledger "
+            "is repaired by hand."
+        )
+    if fix == LEDGER_FIX_IMPORT:
+        return (
+            "Its provenance ledger holds no arXiv record for this paper (another "
+            "integration wrote the ledger and only echoed the id), so there is no arXiv "
+            f"record here to acknowledge; run `factlog arxiv-import --id {result.arxiv_id}` "
+            "to add one."
+        )
+    if fix == LEDGER_FIX_BACKFILL:
+        return (
+            "This paper has no provenance ledger (imported before #82), so the withdrawal "
+            "cannot be acknowledged until one exists; run `factlog arxiv-backfill-provenance` "
+            "to build one from its front matter."
+        )
+    return (
+        "This paper has no provenance ledger (imported before #82) and its front matter "
+        "carries no arxiv_version, so `arxiv-backfill-provenance` refuses it (#113) and the "
+        "withdrawal cannot be acknowledged and will keep surfacing until a ledger exists "
+        "(#135)."
+    )
+
+
+def _un_withdrawal_ledger_suffix(result: VersionCheck) -> str:
+    """The clause the front-matter :func:`un_withdrawal_note` appends: the command (if any)
+    that gives the paper a ledger so the reversed withdrawal can be cleared, per
+    :func:`ledger_fix`. The lead sentence ("the front-matter note is simply stale") is the
+    caller's; this names only the next step."""
+    fix = ledger_fix(
+        result.sidecar_state, has_recorded_version=result.recorded_version is not None
+    )
+    if fix == LEDGER_FIX_REPAIR_BY_HAND:
+        return (
+            "Its provenance ledger could not be read (see `Could not check:`), so no "
+            "command can give it a ledger to acknowledge this in until it is repaired by "
+            "hand."
+        )
+    if fix == LEDGER_FIX_IMPORT:
+        return (
+            "Its provenance ledger holds no arXiv record for this paper (another "
+            "integration wrote the ledger and only echoed the id); run "
+            f"`factlog arxiv-import --id {result.arxiv_id}` to add one."
+        )
+    if fix == LEDGER_FIX_BACKFILL:
+        return (
+            "Run `factlog arxiv-backfill-provenance` to give it a ledger, after which this "
+            "can be acknowledged."
+        )
+    return (
+        "Its front matter carries no arxiv_version, so `arxiv-backfill-provenance` refuses "
+        "it (#113) and no command can give it a ledger to acknowledge this in (#135)."
     )
 
 
@@ -1000,13 +1140,19 @@ def withdrawal_note(result: VersionCheck) -> str:
     pre-#82 paper's front matter (#98) — so it never says "the ledger recorded" a value
     that came from front matter. It never uses the word "retracted".
 
-    For a **front-matter**-only paper (imported before #82, #98) there is no provenance
-    ledger, so ``arxiv-acknowledge-withdrawal`` — which writes a sidecar — cannot record
-    the operator's decision and would exit 1. The warning must stay loud (a withdrawal
-    the KB never recorded is real news), but a loud warning that prescribes nothing is
-    the exact wallpaper #93 exists to remove, so the note adds that the ledger is missing,
-    that the withdrawal cannot be acknowledged until one exists, and points at #105 (the
-    backfill), not at a command that would exit 1.
+    For a **front-matter** paper (``recorded_from == "front-matter"``, one of four kinds,
+    #98) the recorded value is not in an arXiv ledger, so ``arxiv-acknowledge-withdrawal``
+    — which writes a sidecar — cannot record the operator's decision yet and would exit 1.
+    The warning must stay loud (a withdrawal the KB never recorded is real news), but a loud
+    warning that prescribes nothing is the exact wallpaper #93 exists to remove, so the note
+    adds the missing-ledger fact and the working next step. That step is *not* a function of
+    ``arxiv_version`` alone: :func:`ledger_fix` reads ``sidecar_state`` first. A readable
+    sidecar that holds no arXiv record is repaired by ``arxiv-import`` (measured ``merged``),
+    an unreadable one by nothing but a hand repair, an absent one by ``arxiv-backfill-
+    provenance`` when the front matter has a version (#114) and by nothing when it does not
+    (#113, tracked in #135). Branching on the version alone denied ``arxiv-import`` to the
+    paper it fixes and prescribed a backfill that errors on a corrupt ledger — the #132
+    defect. :func:`_withdrawal_ledger_suffix` names the one command that actually works.
     """
     agent = withdrawal_agent(result.withdrawn_by)
     version = f"v{result.current_version}" if result.current_version else "the current version"
@@ -1028,11 +1174,7 @@ def withdrawal_note(result: VersionCheck) -> str:
         "it is trusted."
     )
     if result.recorded_from == "front-matter":
-        return (
-            f"{body} This paper has no provenance ledger (imported before #82), so the "
-            "withdrawal cannot be acknowledged and will keep surfacing until one exists; "
-            "backfilling a ledger is tracked in #105."
-        )
+        return f"{body} {_withdrawal_ledger_suffix(result)}"
     return body
 
 
@@ -1047,21 +1189,27 @@ def un_withdrawal_note(result: VersionCheck) -> str:
     error; a refresh may not clear it, so only a human's acknowledgement may, and the
     note prescribes it.
 
-    For a **front-matter**-only paper (imported before #82, #98) there is no provenance
-    record to diverge, so a re-import does *not* error and
-    ``arxiv-acknowledge-withdrawal`` — which writes sidecars — cannot help. The note
-    must not claim either, so it states plainly that the front-matter note is now stale
-    and points at #105 (backfilling a ledger), not at a command that would exit 1.
+    For a **front-matter** value (``recorded_from == "front-matter"``, #98) the withdrawal
+    lives only in front matter, not in an arXiv ledger record, so ``withdrawn_by`` (an
+    identifying *ledger* field) does not diverge, a re-import does *not* error, and
+    ``arxiv-acknowledge-withdrawal`` — which writes sidecars — cannot help until a ledger
+    exists. The note must claim neither a divergence nor a re-import error, so it states
+    plainly that the front-matter note is now stale, then names the working next step from
+    :func:`ledger_fix` — ``arxiv-import`` for a readable sidecar with no arXiv record,
+    ``arxiv-backfill-provenance`` for an absent sidecar with a version (#114), a hand repair
+    for an unreadable one, and #135 for a version-less absent one. Branching on the version
+    alone prescribed a backfill that errors on a corrupt ledger — the #132 defect.
+    :func:`_un_withdrawal_ledger_suffix` names the one command that actually works.
     """
     recorded = result.recorded_withdrawn_by or ""
     if result.recorded_from == "front-matter":
-        return (
+        stale = (
             f"arXiv no longer reports {result.arxiv_id} as withdrawn, but its front "
-            f"matter still records {_recorded_phrase(recorded)}. This paper has no "
-            "provenance ledger (imported before #82), so nothing diverges and a "
-            "re-import does not error; the front-matter note is simply stale. "
-            "Backfilling a ledger so this can be acknowledged is tracked in #105."
+            f"matter still records {_recorded_phrase(recorded)}. That withdrawal lives "
+            "only in front matter, not in an arXiv ledger record, so nothing diverges and "
+            "a re-import does not error; the front-matter note is simply stale."
         )
+        return f"{stale} {_un_withdrawal_ledger_suffix(result)}"
     return (
         f"arXiv no longer reports {result.arxiv_id} as withdrawn, but the ledger still "
         f"records {_recorded_phrase(recorded)}. `withdrawn_by` is an identifying field: "
