@@ -127,8 +127,8 @@ class BatchResult:
 def _user_agent(config: ArxivConfig) -> str:
     """arXiv operators may throttle unidentified clients (spec §2)."""
     if config.email:
-        return f"factlog/{__version__} (contact: {config.email})"
-    return f"factlog/{__version__}"
+        return f"factlog-academic/{__version__} (contact: {config.email})"
+    return f"factlog-academic/{__version__}"
 
 
 class _RateLimiter:
