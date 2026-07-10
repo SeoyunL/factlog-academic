@@ -12,6 +12,7 @@ check-log fail per-id / clearly rather than as a traceback.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -385,6 +386,44 @@ class TestCli:
         assert checks["1904.09773"][2] == "unchanged"
         assert checks["1904.09773"][6] == "0"  # newly_withdrawn stays 0
         assert rows["un_withdrawn"][1] == "1"
+
+    def test_porcelain_neutralizes_tab_cr_lf_in_caller_influenced_fields(self):
+        # A source path (or a corrupt-ledger path in `arxiv_id`, an exception in
+        # `reason`) can carry a tab, CR or LF; unescaped, it adds/breaks a column and a
+        # positional #78 parser reads the wrong field. Every caller-influenced value —
+        # `arxiv_id`, `withdrawn_by`, `reason` on a check row; `arxiv_id` and `ledgers`
+        # on an update row — must keep the documented field count. The contract is 9
+        # tab-separated fields for `check`, 6 for `update`.
+        error = cv.VersionCheck(
+            arxiv_id="sources/a\tb\r\nc.md",  # a corrupt-ledger path stands in for the id
+            status=cv.STATUS_ERROR,
+            reason="could not read sources/a\tb.md:\nEISDIR",
+        )
+        withdrawn = cv.VersionCheck(
+            arxiv_id="1810.04805",
+            status=cv.STATUS_UNCHANGED,
+            recorded_version=1,
+            current_version=1,
+            newly_withdrawn=True,
+            withdrawn_by="ad\tmin\r\n",
+        )
+        update = cv.LedgerUpdate(
+            arxiv_id="1810.04805",
+            status=cv.UPDATE_WRITTEN,
+            ledgers=("sources/a\tb.md", "x\ny\rz.md"),
+        )
+        summary = cv.summarize([error, withdrawn], [])
+        rows = cv.porcelain_lines(
+            [error, withdrawn], [], summary, target=Path("kb"), updates=[update]
+        )
+        for row in rows:
+            # No raw CR/LF survives in any record, so one row is one line.
+            assert "\r" not in row and "\n" not in row, repr(row)
+            first = row.split("\t", 1)[0]
+            if first == "check":
+                assert row.count("\t") == 8, repr(row)  # 9 fields
+            elif first == "update":
+                assert row.count("\t") == 5, repr(row)  # 6 fields
 
     def test_no_records_is_a_clean_zero(self, tmp_path, capsys):
         (tmp_path / "sources").mkdir()
