@@ -719,9 +719,22 @@ def retraction_note(result: RefreshCheck) -> str:
     (a different process, no shared handling). It attributes the recorded value to its
     true source — a ledger, or a pre-#84 work's front matter — so it never says "the
     ledger did not record" a value that came from front matter.
+
+    For a **front-matter**-only work (imported before #84) there is no provenance ledger,
+    so ``openalex-acknowledge-retraction`` — which writes a sidecar — cannot record the
+    operator's decision and would exit 1. The warning must stay loud (a retraction the KB
+    never recorded is real news), but a loud warning that prescribes nothing is the exact
+    wallpaper #93 exists to remove, so the note adds that the ledger is missing, that the
+    retraction cannot be acknowledged until one exists, and points at #105 (the backfill),
+    not at a command that would exit 1. The word stays OpenAlex's opinion throughout.
     """
     where = "front matter" if result.recorded_from == "front-matter" else "ledger"
-    return (
+    # Build the shared body once, so the two branches cannot drift. Restating it would
+    # let an edit to one silently leave the other behind: only the ledger string is
+    # pinned byte-for-byte by a test, so updating that literal would never reveal that
+    # the front-matter note kept the old prose. `where` is what makes the body correct
+    # for both — it says "front matter" or "ledger" according to the value's real source.
+    body = (
         f"OpenAlex now flags {result.openalex_id} as RETRACTED, which the {where} did "
         "not record. This is OpenAlex's opinion — it has false positives, and PubMed "
         "(which owns retraction status) may disagree, as with the Lancet Commission "
@@ -729,6 +742,13 @@ def retraction_note(result: RefreshCheck) -> str:
         "by its authors, with no shared handling. Confirm before trusting any claim "
         "from this work."
     )
+    if result.recorded_from == "front-matter":
+        return (
+            f"{body} This work has no provenance ledger (imported before #84), so the "
+            "retraction cannot be acknowledged and will keep surfacing until one exists; "
+            "backfilling a ledger is tracked in #105."
+        )
+    return body
 
 
 def un_retraction_note(result: RefreshCheck, *, prescribe: bool = True) -> str:

@@ -647,6 +647,85 @@ class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
         assert "Newly withdrawn:     1" in out
 
 
+class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
+    """A front-matter-only paper (imported before #82) newly reported withdrawn cannot be
+    acknowledged: `arxiv-acknowledge-withdrawal` writes a sidecar and there is no ledger
+    to write, so it would exit 1. The warning must stay loud (a withdrawal the KB never
+    recorded is real news), but it must also stop being unactionable wallpaper (#93): it
+    names the missing ledger and points at #105 (the backfill), never at a command that
+    would exit 1. The *un*-withdrawal note already does this; #110 is the sibling gap.
+    """
+
+    def _front_matter_only(self, kb, lines):
+        (kb / "sources").mkdir(parents=True, exist_ok=True)
+        path = kb / "sources" / "old.md"
+        path.write_text("---\n" + "\n".join(lines) + "\n---\n# T\n", encoding="utf-8")
+        return path
+
+    def test_the_note_names_the_missing_ledger_and_105_and_still_fires(
+        self, tmp_path, fake, capsys
+    ):
+        self._front_matter_only(
+            tmp_path, ['arxiv_id: "0704.0001"', "arxiv_version: 3"]
+        )
+        fake(FakeClient([_work("0704.0001", version=3, withdrawn_by="author")]))
+        assert run(["arxiv-check-versions", "--target", str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        # Still loud.
+        assert "WITHDRAWN by the author" in out
+        assert "Newly withdrawn:     1" in out
+        # Now actionable: names the missing ledger and points at the backfill.
+        assert "no provenance ledger (imported before #82)" in out
+        assert "cannot be acknowledged" in out
+        assert "#105" in out
+        # arXiv's word is "withdrawn", never "retracted" (#57 §6.3).
+        assert "retracted" not in out.lower()
+
+    def test_the_note_names_the_missing_ledger_directly(self):
+        note = cv.withdrawal_note(
+            cv.VersionCheck(
+                arxiv_id="0704.0001",
+                status="ok",
+                current_version=3,
+                newly_withdrawn=True,
+                withdrawn_by="author",
+                recorded_withdrawn_by=None,
+                recorded_from="front-matter",
+                sources=("sources/old.md",),
+            )
+        )
+        assert "no provenance ledger (imported before #82)" in note
+        assert "cannot be acknowledged" in note
+        assert "#105" in note
+        assert "retracted" not in note.lower()
+
+
+def test_a_ledger_backed_withdrawal_note_is_byte_for_byte_unchanged():
+    """The regression that matters: giving the front-matter path a #105 branch must not
+    move the ledger path by a single byte. This locks the exact string `main` produces.
+    """
+    note = cv.withdrawal_note(
+        cv.VersionCheck(
+            arxiv_id="1706.03762",
+            status="ok",
+            current_version=7,
+            newly_withdrawn=True,
+            withdrawn_by="author",
+            recorded_withdrawn_by=None,
+            recorded_from="ledger",
+            sources=("source-provenance/a.json",),
+        )
+    )
+    assert note == (
+        "arXiv now reports 1706.03762 (v7) as WITHDRAWN by the author, which the "
+        "ledger did not record. Withdrawal is not retraction; this unverified signal "
+        "flags the paper for human review before any claim from it is trusted."
+    )
+    # The #105 pointer belongs only to the front-matter branch.
+    assert "#105" not in note
+    assert "no provenance ledger" not in note
+
+
 # --------------------------------------------------------------------------- #
 # --auto-update (#79): version-tracking fields only, the ledger, never the .md
 # --------------------------------------------------------------------------- #

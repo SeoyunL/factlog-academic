@@ -458,6 +458,30 @@ class TestCli:
         assert _ledger(md)[("openalex", "W1")]["work_type"] == "review"
         assert "is_retracted" not in _ledger(md)[("openalex", "W1")]
 
+    def test_retraction_of_front_matter_only_work_points_at_the_backfill(
+        self, tmp_path, fake, capsys
+    ):
+        # A pre-#84 work (front matter only, no ledger) newly flagged retracted cannot be
+        # acknowledged — `openalex-acknowledge-retraction` writes a sidecar and there is
+        # none — so the note must name the missing ledger and point at #105 (#110), while
+        # the warning stays loud. The word is OpenAlex's "retracted", never "withdrawn".
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / "old.md").write_text(
+            '---\nopenalex_id: "W1"\ntype: "preprint"\n---\n# T\n', encoding="utf-8")
+        fake(FakeClient({"W1": _raw_work("W1", work_type="preprint", is_retracted=True)}))
+        code = run(["openalex-refresh", "--target", str(tmp_path)])
+        assert code == 0
+        out = capsys.readouterr().out
+        # Still loud, still OpenAlex's opinion.
+        assert "RETRACTED" in out
+        assert "OpenAlex" in out
+        # Now actionable.
+        assert "no provenance ledger (imported before #84)" in out
+        assert "cannot be acknowledged" in out
+        assert "#105" in out
+        # OpenAlex's word is "retracted", never "withdrawn" (#57 §6.3).
+        assert "withdraw" not in out.lower()
+
     def test_auto_update_writes_ledger_and_leaves_md_identical(self, tmp_path, fake, capsys):
         md = _seed(tmp_path, "W1", doi="10.1234/old", work_type="preprint", journal=None)
         md_before = _md_stat(md)
@@ -568,3 +592,50 @@ class TestCli:
         assert "W1" in log.entries
         stamped = datetime.fromisoformat(log.entries["W1"].last_checked_at)
         assert stamped.tzinfo is not None
+
+
+# --------------------------------------------------------------------------- #
+# retraction_note: the #105 branch (#110) must not move the ledger path
+# --------------------------------------------------------------------------- #
+class TestRetractionNote:
+    def test_front_matter_only_note_names_the_missing_ledger_and_105(self):
+        note = rf.retraction_note(
+            rf.RefreshCheck(
+                openalex_id="W1",
+                status=rf.STATUS_UNCHANGED,
+                newly_retracted=True,
+                current_is_retracted=True,
+                recorded_from="front-matter",
+                sources=("sources/old.md",),
+            )
+        )
+        assert "no provenance ledger (imported before #84)" in note
+        assert "cannot be acknowledged" in note
+        assert "#105" in note
+        # OpenAlex's opinion, never bare fact; never arXiv's word.
+        assert "OpenAlex's opinion" in note
+        assert "withdraw" not in note.lower()
+
+    def test_ledger_backed_note_is_byte_for_byte_unchanged(self):
+        # The regression that matters: the front-matter branch must not move the ledger
+        # path by a single byte. This locks the exact string `main` produces.
+        note = rf.retraction_note(
+            rf.RefreshCheck(
+                openalex_id="W1",
+                status=rf.STATUS_UNCHANGED,
+                newly_retracted=True,
+                current_is_retracted=True,
+                recorded_from="ledger",
+                sources=("source-provenance/a.json",),
+            )
+        )
+        assert note == (
+            "OpenAlex now flags W1 as RETRACTED, which the ledger did not record. This "
+            "is OpenAlex's opinion — it has false positives, and PubMed (which owns "
+            "retraction status) may disagree, as with the Lancet Commission dementia "
+            "report. It is a different process from an arXiv preprint being pulled by "
+            "its authors, with no shared handling. Confirm before trusting any claim "
+            "from this work."
+        )
+        assert "#105" not in note
+        assert "no provenance ledger" not in note
