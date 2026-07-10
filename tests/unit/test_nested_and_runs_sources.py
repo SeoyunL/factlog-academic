@@ -21,7 +21,7 @@ from datetime import date
 import pytest
 
 from factlog import cli
-from factlog.common import source_files
+from factlog.common import is_hidden_source, source_files, walk_source_dir
 from factlog.integrations.arxiv import check_versions as cv
 from factlog.integrations.arxiv.client import BatchResult
 from factlog.integrations.arxiv.id_normalizer import ArxivId
@@ -567,6 +567,63 @@ class TestTheImporterIndexSeesEveryMdOnDisk:
         _plant(kb, "sources/.hidden-x.md")
         assert provenance_sources(kb) == []
         assert cv.collect_ledger_entries(kb) == ([], [])
+
+
+class TestTheTwoSourceWalksShareOneEnumeration:
+    """#142.1: the importer index used to hand-roll its own `sorted(sources_dir.rglob("*.md"))`,
+    a third copy of a walk the KB already owns. The deliberate divergence from `provenance_sources`
+    — the index counts hidden `.md`, the source walk does not (#67 vs P3) — was enforced only by a
+    comment. These pin it as *structural*: both walks are `common.walk_source_dir`, and the sole
+    axis on which they differ is its `include_hidden` argument. A future change to either question
+    now moves this one function or fails, so the two can never silently diverge again."""
+
+    def _kb_with_every_shape(self, tmp_path):
+        kb = _kb(tmp_path)
+        _plant(kb, "sources/flat.md")
+        _plant(kb, "sources/sub/nested.md")
+        _plant(kb, "sources/.hidden-x.md")          # dot-prefixed file
+        _plant(kb, "sources/.h/deep.md")            # inside a hidden directory
+        (kb / "sources" / "binary.pdf").write_text("x", encoding="utf-8")  # a non-.md source
+        (kb / "sources" / "adir.md").mkdir()        # a *directory* whose name ends in .md
+        return kb
+
+    def test_the_index_walk_and_the_source_walk_differ_only_by_hidden(self, tmp_path):
+        kb = self._kb_with_every_shape(tmp_path)
+        sources_dir = kb / "sources"
+        index_walk = walk_source_dir(sources_dir, include_hidden=True, suffix=".md")
+        source_walk = walk_source_dir(sources_dir, include_hidden=False, suffix=".md")
+        # Same function, one argument apart: the source walk is the index walk with its
+        # hidden `.md` removed — nothing more, nothing less.
+        assert source_walk == [p for p in index_walk if not is_hidden_source(p, sources_dir)]
+        # And the difference is exactly the hidden set, not some other quiet filter.
+        assert set(index_walk) - set(source_walk) == {
+            sources_dir / ".hidden-x.md", sources_dir / ".h" / "deep.md"
+        }
+
+    def test_the_index_walk_preserves_the_pre_refactor_file_set_and_order(self, tmp_path):
+        """Behaviour preservation (determinism is load-bearing: order fixes the output). The
+        baseline is the OLD walk verbatim — `sorted(sources_dir.rglob("*.md"))`, no `is_file`
+        — so the test proves the divergence rather than assuming it: the only thing the shared
+        walk drops is the one directory whose name ends in `.md`, which was never a source."""
+        kb = self._kb_with_every_shape(tmp_path)
+        sources_dir = kb / "sources"
+        old_literal_walk = sorted(sources_dir.rglob("*.md"))  # what `_index` ran, verbatim
+        new_walk = walk_source_dir(sources_dir, include_hidden=True, suffix=".md")
+        # Exactly one entry is dropped, and it is the directory — proven independently, not
+        # baked into the baseline.
+        adir = sources_dir / "adir.md"
+        assert adir.is_dir()
+        assert [p for p in old_literal_walk if p not in new_walk] == [adir]
+        # Order and membership of every real file are otherwise identical.
+        assert new_walk == [p for p in old_literal_walk if p != adir]
+
+    def test_provenance_sources_is_the_source_walk_over_the_provenance_root(self, tmp_path):
+        """The other consumer routes through the same function too: the eligible half of the
+        KB's `.md` sources is `walk_source_dir(sources/, include_hidden=False, suffix=".md")`."""
+        kb = self._kb_with_every_shape(tmp_path)
+        sources_dir = kb / "sources"
+        assert provenance_sources(kb) == walk_source_dir(
+            sources_dir, include_hidden=False, suffix=".md")
 
 
 # --------------------------------------------------------------------------- #

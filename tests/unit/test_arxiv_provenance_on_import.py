@@ -412,3 +412,41 @@ class TestAFailedRecordDoesNotFreeItsSlug:
         # depend on whether an unrelated write happened to fail.
         assert b.path.name.endswith("-2.md")
         assert [r.id for r in _arxiv_records(sidecar_path(b.path, tmp_path))] == ["2222.22222"]
+
+
+class TestASidecarPathRefusalIsAPerIdErrorNotATraceback:
+    """`sidecar_path` refuses a path outside `<kb>/sources/` (#112). It raises
+    `ProvenanceError`, a `ValueError` subclass — and the sidecar writers guard with
+    `except (ProvenanceError, OSError)`. Before #142 the refusal was a *bare* `ValueError`,
+    which that guard does not catch (a subclass never catches its parent), so a refusal
+    escaped as an uncaught traceback that aborts the batch — the #65/#71/#94 shape.
+
+    Both writers reach `sidecar_path` through `decision.path`, which is under `sources/` for
+    every call today, so the refusal is unreachable in normal flow. These tests reach it the
+    only way it can be reached — a `decision.path` outside `sources/` — and pin that each
+    site degrades it to this one paper's per-id `error`. They fail (traceback, not an `error`
+    result) if the raise reverts to a bare `ValueError`."""
+
+    def test_sidecar_path_refuses_with_a_provenance_error_not_a_bare_value_error(self, tmp_path):
+        from factlog.integrations.common.provenance import ProvenanceError, sidecar_path as sp
+        import pytest
+        # The refusal a guarded caller must be able to catch: `runs/sources/` has no ledger.
+        with pytest.raises(ProvenanceError):
+            sp(tmp_path / "runs" / "sources" / "z.md", tmp_path)
+
+    def _decision_outside_sources(self, tmp_path):
+        return WriteResult(tmp_path / "runs" / "sources" / "z.md", "imported")
+
+    def test_record_degrades_a_refusal_to_a_per_id_error(self, tmp_path):
+        writer = ArxivSourceWriter()
+        decision = self._decision_outside_sources(tmp_path)
+        result = writer._record(_arxiv(arxiv_id="2311.09277"), decision, "t", tmp_path)
+        assert result.status == "error"
+        assert "runs/sources/z.md" in result.reason
+
+    def test_upsert_sidecar_degrades_a_refusal_to_a_per_id_error(self, tmp_path):
+        writer = ArxivSourceWriter()
+        decision = self._decision_outside_sources(tmp_path)
+        result = writer._upsert_sidecar(_arxiv(arxiv_id="2311.09277"), decision, "t", tmp_path)
+        assert result.status == "error"
+        assert "runs/sources/z.md" in result.reason
