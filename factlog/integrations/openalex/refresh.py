@@ -110,7 +110,9 @@ __all__ = [
     "UPDATE_ERROR",
     "AUTO_UPDATE_FIELDS",
     "COMPARED_FIELDS",
+    "RETRACTION_KEY",
     "collect_ledger_entries",
+    "parse_retraction_flag",
     "provenance_of",
     "partition_by_freshness",
     "check_entries",
@@ -124,6 +126,17 @@ __all__ = [
 
 #: A provenance record's ``type`` for an OpenAlex contribution.
 _OPENALEX_TYPE = "openalex"
+
+#: The front-matter key ``OpenAlexSourceWriter`` emits for OpenAlex's retraction claim.
+#: Source-scoped on purpose (#51): never a bare ``retracted:``.
+RETRACTION_KEY = "openalex_is_retracted"
+
+#: The boolean words :func:`parse_retraction_flag` recognises, matched case-insensitively.
+#: YAML 1.2's core schema, and the only values ``OpenAlexSourceWriter`` ever emits. Widening
+#: this to YAML 1.1's ``yes``/``on`` is a one-line change *here*, and every caller moves with
+#: it — which is the whole reason the literal lives in exactly one place.
+_RETRACTION_TRUE = "true"
+_RETRACTION_FALSE = "false"
 
 #: The venue/identifier fields a refresh compares and may learn. ``is_retracted`` is
 #: compared too (below) but is a human-gate signal, never an auto-updatable field.
@@ -207,6 +220,47 @@ def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def parse_retraction_flag(raw: str) -> bool | str:
+    """What a front-matter ``openalex_is_retracted`` scalar says, or the scalar itself.
+
+    Front matter has no booleans. ``front_matter.read_scalars`` is a line reader, not a YAML
+    parser — it strips one optional layer of double quotes — so what reaches here is always a
+    string, and ``openalex_is_retracted: true`` and ``: "true"`` are the *same document*.
+
+    Returns ``True`` or ``False`` for a value this tool can read as a boolean, and the raw
+    text **verbatim** for one it cannot. An absent key (``read_scalars`` yields ``""``) and an
+    empty value are ``False``: they carry no claim, and the writer emits the key only when
+    OpenAlex flags a retraction, so silence *means* not retracted. ``: ""`` cannot be
+    distinguished from an absent key by ``_key_pattern`` (its capture group needs at least one
+    non-quote character), and ``: ''`` reaches here as the two-character token ``''``; both
+    are empty once unquoted, and both mean absence.
+
+    The two callers must never disagree about a value. ``collect_ledger_entries`` narrows the
+    result to a ``bool`` for the comparison a refresh needs, so a value this function will not
+    read as a boolean is compared as *not retracted* and silently surfaces nothing. A backfill
+    (#115) cannot narrow it: promoting an unreadable value into the ledger would either assert
+    a retraction no source made or assert the absence of one the ``.md`` was trying to state,
+    so it passes the verbatim text through and ``common/backfill.py`` refuses that paper.
+
+    Both read this one function on purpose. Were the boolean words written down twice, widening
+    one copy to YAML 1.1's ``yes``/``on`` would make ``openalex-refresh`` report a paper
+    retracted that ``openalex-backfill-provenance`` still refuses a ledger — and a retraction
+    that can never be acknowledged repeats forever, which is the failure #105 exists to end.
+    That is #64, #98 and #111 in their exact shape.
+    """
+    text = (raw or "").strip()
+    if text in ("''", '""'):  # an explicitly empty scalar, unquoted by hand
+        text = ""
+    if not text:
+        return False
+    folded = text.lower()
+    if folded == _RETRACTION_TRUE:
+        return True
+    if folded == _RETRACTION_FALSE:
+        return False
+    return text
+
+
 def collect_ledger_entries(
     kb_root: Path | str,
 ) -> tuple[list[LedgerEntry], list[RefreshCheck]]:
@@ -262,7 +316,7 @@ def collect_ledger_entries(
     sources_dir = root / "sources"
     for path in sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else ():
         scalars = read_scalars(
-            path, ("openalex_id", "type", "doi", "journal", "openalex_is_retracted")
+            path, ("openalex_id", "type", "doi", "journal", RETRACTION_KEY)
         )
         openalex_id = scalars.get("openalex_id", "")
         # A ledger, when one exists, is authoritative; front matter only speaks for a
@@ -273,7 +327,11 @@ def collect_ledger_entries(
             "doi": scalars.get("doi") or None,
             "work_type": scalars.get("type") or None,
             "journal": scalars.get("journal") or None,
-            "is_retracted": scalars.get("openalex_is_retracted", "").strip().lower() == "true",
+            # A compare needs a bool, so a value `parse_retraction_flag` will not read as
+            # one is compared as "not retracted" — this command reports, it does not judge
+            # the `.md`. The backfill shares the parser and refuses that value instead of
+            # narrowing it; see `parse_retraction_flag` for why the two must not disagree.
+            "is_retracted": parse_retraction_flag(scalars.get(RETRACTION_KEY, "")) is True,
             "sources": {_relative(path, root)},
         }
 
@@ -725,8 +783,9 @@ def retraction_note(result: RefreshCheck) -> str:
     operator's decision and would exit 1. The warning must stay loud (a retraction the KB
     never recorded is real news), but a loud warning that prescribes nothing is the exact
     wallpaper #93 exists to remove, so the note adds that the ledger is missing, that the
-    retraction cannot be acknowledged until one exists, and points at #105 (the backfill),
-    not at a command that would exit 1. The word stays OpenAlex's opinion throughout.
+    retraction cannot be acknowledged until one exists, and prescribes
+    ``openalex-backfill-provenance`` (#115), which builds one — not a command that would
+    exit 1. The word stays OpenAlex's opinion throughout.
     """
     where = "front matter" if result.recorded_from == "front-matter" else "ledger"
     # Build the shared body once, so the two branches cannot drift. Restating it would
@@ -746,7 +805,7 @@ def retraction_note(result: RefreshCheck) -> str:
         return (
             f"{body} This work has no provenance ledger (imported before #84), so the "
             "retraction cannot be acknowledged and will keep surfacing until one exists; "
-            "backfilling a ledger is tracked in #105."
+            "run `factlog openalex-backfill-provenance` to give it one."
         )
     return body
 
@@ -763,7 +822,8 @@ def un_retraction_note(result: RefreshCheck, *, prescribe: bool = True) -> str:
     clear path exists anyway — a retraction can be reversed and the ledger must be able to
     say so. For a **ledger**-recorded value the note prescribes the acknowledge command;
     for a **front-matter**-only work (imported before #84) there is no sidecar to write, so
-    it points at #105 (backfilling a ledger) instead of a command that would exit 1.
+    it prescribes ``openalex-backfill-provenance`` (#115), which creates one, instead of a
+    command that would exit 1.
     """
     if result.recorded_from == "front-matter":
         return (
@@ -771,7 +831,8 @@ def un_retraction_note(result: RefreshCheck, *, prescribe: bool = True) -> str:
             "matter still records a retraction. This work has no provenance ledger "
             "(imported before #84); `is_retracted` is not an identifying field, so nothing "
             "diverges and a re-import does not error — the front-matter flag is simply "
-            "stale. Backfilling a ledger so this can be acknowledged is tracked in #105."
+            "stale. Run `factlog openalex-backfill-provenance` to give it a ledger, after "
+            "which this can be acknowledged."
         )
     note = (
         f"OpenAlex no longer flags {result.openalex_id} as retracted, but the ledger still "

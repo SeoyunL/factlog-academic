@@ -412,7 +412,7 @@ class TestRefusesBeforeQuery:
     def test_front_matter_only_refuses_before_query_zero_api(self, tmp_path, fake, capsys):
         # A pre-#84 work: front matter carries the retraction, no sidecar. acknowledge()
         # writes only sidecars, so this can never be written; refuse before the fetch and
-        # point at #105 (not a command that would exit 1).
+        # prescribe openalex-backfill-provenance (not a command that would exit 1).
         _seed_front_matter_only(tmp_path, "W1", is_retracted=True)
         before = _kb_snapshot(tmp_path)
         client = fake(FakeClient({"W1": _raw_work("W1", is_retracted=False)}))
@@ -420,7 +420,7 @@ class TestRefusesBeforeQuery:
                     "--target", str(tmp_path), "--yes"])
         assert code == 1
         err = capsys.readouterr().err
-        assert "front matter" in err and "#105" in err
+        assert "front matter" in err and "openalex-backfill-provenance" in err
         assert client.call_count == 0  # ZERO API requests
         assert not (tmp_path / "source-provenance").exists()  # no ledger fabricated
         assert _kb_snapshot(tmp_path) == before
@@ -541,7 +541,7 @@ class TestNoteProvenance:
         # command that would exit 1 for this work.
         assert "re-import will error" not in out
         assert "openalex-acknowledge-retraction --id" not in out
-        assert "#105" in out
+        assert "openalex-backfill-provenance" in out
 
 
 # --------------------------------------------------------------------------- #

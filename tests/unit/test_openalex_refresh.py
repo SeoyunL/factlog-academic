@@ -463,8 +463,9 @@ class TestCli:
     ):
         # A pre-#84 work (front matter only, no ledger) newly flagged retracted cannot be
         # acknowledged — `openalex-acknowledge-retraction` writes a sidecar and there is
-        # none — so the note must name the missing ledger and point at #105 (#110), while
-        # the warning stays loud. The word is OpenAlex's "retracted", never "withdrawn".
+        # none — so the note must name the missing ledger and prescribe the command that
+        # builds one (#115), while the warning stays loud. The word is OpenAlex's
+        # "retracted", never "withdrawn".
         (tmp_path / "sources").mkdir()
         (tmp_path / "sources" / "old.md").write_text(
             '---\nopenalex_id: "W1"\ntype: "preprint"\n---\n# T\n', encoding="utf-8")
@@ -478,7 +479,7 @@ class TestCli:
         # Now actionable.
         assert "no provenance ledger (imported before #84)" in out
         assert "cannot be acknowledged" in out
-        assert "#105" in out
+        assert "openalex-backfill-provenance" in out
         # OpenAlex's word is "retracted", never "withdrawn" (#57 §6.3).
         assert "withdraw" not in out.lower()
 
@@ -595,10 +596,10 @@ class TestCli:
 
 
 # --------------------------------------------------------------------------- #
-# retraction_note: the #105 branch (#110) must not move the ledger path
+# retraction_note: the backfill branch (#110) must not move the ledger path
 # --------------------------------------------------------------------------- #
 class TestRetractionNote:
-    def test_front_matter_only_note_names_the_missing_ledger_and_105(self):
+    def test_front_matter_only_note_names_the_missing_ledger_and_the_backfill_command(self):
         note = rf.retraction_note(
             rf.RefreshCheck(
                 openalex_id="W1",
@@ -611,7 +612,7 @@ class TestRetractionNote:
         )
         assert "no provenance ledger (imported before #84)" in note
         assert "cannot be acknowledged" in note
-        assert "#105" in note
+        assert "openalex-backfill-provenance" in note
         # OpenAlex's opinion, never bare fact; never arXiv's word.
         assert "OpenAlex's opinion" in note
         assert "withdraw" not in note.lower()
@@ -637,5 +638,5 @@ class TestRetractionNote:
             "its authors, with no shared handling. Confirm before trusting any claim "
             "from this work."
         )
-        assert "#105" not in note
+        assert "openalex-backfill-provenance" not in note
         assert "no provenance ledger" not in note

@@ -76,8 +76,9 @@ class TestRetractionNoteSharesOneBody:
         assert front_matter.startswith(ledger.replace("the ledger", "the front matter"))
 
     def test_only_the_front_matter_note_carries_the_backfill_pointer(self):
-        assert "#105" in rf.retraction_note(_openalex("front-matter"))
-        assert "#105" not in rf.retraction_note(_openalex("ledger"))
+        # It names the command that builds a ledger (#115), not the issue that tracked it.
+        assert "openalex-backfill-provenance" in rf.retraction_note(_openalex("front-matter"))
+        assert "openalex-backfill-provenance" not in rf.retraction_note(_openalex("ledger"))
 
     def test_the_suffix_is_the_only_difference(self):
         ledger = rf.retraction_note(_openalex("ledger"))
