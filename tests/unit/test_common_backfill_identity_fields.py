@@ -126,8 +126,14 @@ class TestARefusedRecordIsWhatKeepsALaterMergeClean:
 
     def test_refusing_leaves_a_later_merge_able_to_succeed(self):
         root, original = _kb_with_openalex_original()
-        results = bf.backfill(root, _schema())
-        assert [r.status for r in results] == ["refused"]
+        (result,) = bf.backfill(root, _schema())
+        assert result.status == bf.BACKFILL_REFUSED
+        # Pin *which* refusal. `backfill` has several, and #113's unreadable-identity
+        # refusal is the only one this contrast is about: a test that merely saw
+        # "refused" would keep passing if this paper started being refused for the
+        # signal-field value space (#109) or a missing `imported_at` instead, and the
+        # measurement below would then prove nothing about `required`.
+        assert "identifying field(s) version" in result.reason
         assert "version" not in read_provenance(sidecar_path(original)).records[0].fields
 
         merged = ArxivSourceWriter().write(_arxiv_work(version=7), root, imported_at="t")
@@ -155,6 +161,7 @@ class TestARefusedRecordIsWhatKeepsALaterMergeClean:
         assert errored.status == "error"
         assert "no version" in errored.reason
         assert "None" not in errored.reason  # #116: never a bare Python None
+
 
 class TestTheThreeVersionStatesAreDistinct:
     def test_an_absent_version_is_never_the_changed_signal(self):
