@@ -3664,18 +3664,23 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     connection/rate-limit failure or a missing entry: non-zero exit, nothing written.
 
     It writes arXiv's **live** value into the ledger's ``withdrawn_by`` via the shared
-    acknowledge primitive — including ``None`` when arXiv reports the paper is no longer
-    withdrawn, which *clears* the field. ``withdrawn_by`` is an identifying field, so a
-    stale withdrawal left after an un-withdrawal makes re-import error permanently and a
-    refresh may not clear it; only this human write may. It never opens the ``.md`` (P4):
-    a paper imported before it was withdrawn keeps showing nothing on its KB page, so
-    after acknowledgement the ledger becomes the sole audit record.
+    acknowledge primitive. Two directions, gated differently (#106):
 
-    ``--yes`` may **set** ``withdrawn_by`` (or change its agent), never **clear** it
-    (#106). Setting is the loud direction; clearing is the silencing direction, which this
-    project gates on a human (#93). A ``--yes`` clear is refused with a non-zero exit and
-    nothing written; the working path is an interactive re-run, where the note is printed
-    before the prompt.
+    * **Setting** it — a fresh withdrawal, or a change of agent (``author`` -> ``admin``)
+      — is the loud direction. ``--yes`` may do it.
+    * **Clearing** it — writing ``None`` when arXiv reports the paper is no longer
+      withdrawn — is the silencing direction, which this project gates on a human (#93).
+      Only a human at the prompt, who has seen the printed note, may do it. A ``--yes``
+      clear is refused: non-zero exit, nothing written, and the message names the
+      interactive re-run as the working path.
+
+    The clear itself is necessary, which is why it exists at all: ``withdrawn_by`` is an
+    identifying field, so a stale withdrawal left after an un-withdrawal makes re-import
+    error permanently and a refresh may not clear it; only this human write may.
+
+    It never opens the ``.md`` (P4): a paper imported before it was withdrawn keeps showing
+    nothing on its KB page, so after acknowledgement the ledger becomes the sole audit
+    record.
 
     Withdrawal is not retraction: arXiv has no peer-reviewed retraction process, and the
     word "retracted" never appears here.
