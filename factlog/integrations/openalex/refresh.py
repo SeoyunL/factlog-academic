@@ -78,6 +78,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from factlog.integrations.common.front_matter import read_scalars
+from factlog.integrations.common.porcelain import porcelain_field
 from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
@@ -1063,16 +1064,6 @@ def _auto_update_lines(updates: Sequence[LedgerRefresh]) -> list[str]:
     return lines
 
 
-def _porcelain_field(text: str) -> str:
-    """Neutralize a free-text field so it cannot shift the columns after it.
-
-    ``reason`` interpolates an exception string, and an ``OSError``'s message carries a
-    path — a path may contain a tab. ``un_retracted`` is appended after ``reason``, so an
-    unescaped tab there silently moves the last column. Newlines would break the row.
-    """
-    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
-
-
 def porcelain_lines(
     results: Sequence[RefreshCheck],
     skipped: Sequence[RefreshCheck],
@@ -1097,23 +1088,23 @@ def porcelain_lines(
     for result in sorted([*results, *skipped], key=lambda r: r.openalex_id):
         rows.append(
             "check\t{id}\t{status}\t{returned}\t{changed}\t{retracted}\t{superseded}\t{reason}\t{un}".format(
-                id=result.openalex_id,
+                id=porcelain_field(result.openalex_id),
                 status=result.status,
-                returned=result.returned_id or "",
+                returned=porcelain_field(result.returned_id or ""),
                 changed=",".join(result.changed_fields),
                 retracted="1" if result.newly_retracted else "0",
                 superseded="1" if result.id_superseded else "0",
-                reason=_porcelain_field(result.reason),
+                reason=porcelain_field(result.reason),
                 un="1" if result.un_retracted else "0",
             )
         )
     for u in updates:
         rows.append(
             "update\t{id}\t{status}\t{fields}\t{ledgers}".format(
-                id=u.openalex_id,
+                id=porcelain_field(u.openalex_id),
                 status=u.status,
                 fields=",".join(u.fields),
-                ledgers=",".join(u.ledgers),
+                ledgers=porcelain_field(",".join(u.ledgers)),
             )
         )
     rows.append(f"checked\t{summary.checked}")

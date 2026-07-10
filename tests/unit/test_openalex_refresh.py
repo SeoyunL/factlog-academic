@@ -13,6 +13,7 @@ check-log.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -584,6 +585,42 @@ class TestCli:
         assert "doi" in checks["W1"][4] and "work_type" in checks["W1"][4]
         assert "checked 2/2" in captured.err
         assert "checked 2/2" not in captured.out
+
+    def test_porcelain_neutralizes_tab_cr_lf_in_caller_influenced_fields(self):
+        # A source path (in `ledgers`), a corrupt-ledger path (in `openalex_id` on an
+        # error row, `refresh.py:296-297`) or an exception message (in `reason`) can
+        # carry a tab, CR or LF; unescaped, a tab adds a column and a CR/LF breaks the
+        # row, so a positional #78 parser reads the wrong field. Every caller-influenced
+        # value must keep the documented field count: 9 fields for `check`, 5 for
+        # `update`. The `changed_fields`/`fields` columns are omitted deliberately — they
+        # are joined from the fixed COMPARED_FIELDS names and cannot carry a separator.
+        error = rf.RefreshCheck(
+            openalex_id="openalex/a\tb\r\nc.json",  # a corrupt-ledger path stands in
+            status=rf.STATUS_ERROR,
+            reason="corrupt provenance ledger:\ta\nb",
+        )
+        merged = rf.RefreshCheck(
+            openalex_id="W1",
+            status=rf.STATUS_UNCHANGED,
+            returned_id="W2\t9\r\n",  # the id OpenAlex answered with, interpolated raw
+        )
+        update = rf.LedgerRefresh(
+            openalex_id="W1\t9",
+            status=rf.UPDATE_WRITTEN,
+            ledgers=("openalex/a\tb.json", "x\ny\rz.json"),
+            fields=("doi",),
+        )
+        summary = rf.summarize([error, merged], [])
+        rows = rf.porcelain_lines(
+            [error, merged], [], summary, target=Path("kb"), updates=[update]
+        )
+        for row in rows:
+            assert "\r" not in row and "\n" not in row, repr(row)
+            first = row.split("\t", 1)[0]
+            if first == "check":
+                assert row.count("\t") == 8, repr(row)  # 9 fields
+            elif first == "update":
+                assert row.count("\t") == 4, repr(row)  # 5 fields
 
     def test_records_the_checklog_timestamp_for_answered_works(self, tmp_path, fake):
         _seed(tmp_path, "W1", doi="10.1234/a")

@@ -72,6 +72,7 @@ from factlog.integrations.arxiv.work_parser import (
     WITHDRAWN_BY_AUTHOR,
 )
 from factlog.integrations.common.front_matter import read_scalars
+from factlog.integrations.common.porcelain import porcelain_field
 from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
@@ -1328,13 +1329,13 @@ def porcelain_lines(
         current = "" if result.current_version is None else str(result.current_version)
         rows.append(
             "check\t{id}\t{status}\t{recorded}\t{current}\t{by}\t{withdrawn}\t{reason}\t{un}".format(
-                id=result.arxiv_id,
+                id=porcelain_field(result.arxiv_id),
                 status=result.status,
                 recorded=recorded,
                 current=current,
-                by=result.withdrawn_by or "",
+                by=porcelain_field(result.withdrawn_by or ""),
                 withdrawn="1" if result.newly_withdrawn else "0",
-                reason=result.reason,
+                reason=porcelain_field(result.reason),
                 un="1" if result.un_withdrawn else "0",
             )
         )
@@ -1343,11 +1344,11 @@ def porcelain_lines(
         current = "" if u.current_version is None else str(u.current_version)
         rows.append(
             "update\t{id}\t{status}\t{recorded}\t{current}\t{ledgers}".format(
-                id=u.arxiv_id,
+                id=porcelain_field(u.arxiv_id),
                 status=u.status,
                 recorded=recorded,
                 current=current,
-                ledgers=",".join(u.ledgers),
+                ledgers=porcelain_field(",".join(u.ledgers)),
             )
         )
     rows.append(f"checked\t{summary.checked}")
