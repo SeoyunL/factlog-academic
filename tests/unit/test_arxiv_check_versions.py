@@ -391,9 +391,11 @@ class TestCli:
         # A source path (or a corrupt-ledger path in `arxiv_id`, an exception in
         # `reason`) can carry a tab, CR or LF; unescaped, it adds/breaks a column and a
         # positional #78 parser reads the wrong field. Every caller-influenced value —
-        # `arxiv_id`, `withdrawn_by`, `reason` on a check row; `arxiv_id` and `ledgers`
-        # on an update row — must keep the documented field count. The contract is 9
-        # tab-separated fields for `check`, 6 for `update`.
+        # `arxiv_id` and `reason` on a check row; `arxiv_id` and `ledgers` on an update
+        # row — must keep the documented field count. `withdrawn_by` only ever holds
+        # WITHDRAWN_BY_AUTHOR or WITHDRAWN_BY_ADMIN, so it is already safe; it is
+        # neutralized for symmetry and asserted here so that stays true. The contract is
+        # 9 tab-separated fields for `check`, 6 for `update`.
         error = cv.VersionCheck(
             arxiv_id="sources/a\tb\r\nc.md",  # a corrupt-ledger path stands in for the id
             status=cv.STATUS_ERROR,

@@ -8,8 +8,8 @@ corrupt-ledger *path* in an id column, an ``OSError`` message that carries a pat
 split the row; either way a positional consumer reads the wrong field, silently.
 
 The arXiv and OpenAlex integrations both emit such rows, so the rule lives here rather
-than hand-mirrored in each (#111 added it to OpenAlex's ``reason`` alone; #141 found the
-copy in arXiv had drifted to cover more fields). One definition keeps "both integrations'
+than hand-mirrored in each (#111 added it to OpenAlex's ``reason`` alone, and arXiv had
+no such helper at all until #141 wrote one). One definition keeps "both integrations'
 porcelain emits the documented field count" from quietly splitting in two.
 """
 from __future__ import annotations
