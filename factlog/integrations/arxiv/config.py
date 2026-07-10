@@ -378,12 +378,37 @@ def _as_limit(value: object, default: int) -> int:
 
 
 def _as_delay(value: object, default: float) -> float:
-    # A delay below the recommendation is accepted but never silently: arXiv will
-    # not push back on it (#57), so an operator lowering it takes the risk
-    # knowingly. Non-numeric or negative values fall back.
+    # A delay below the recommendation is accepted (an operator may know their
+    # load is small), but not silently: the caution is emitted once per run at
+    # config resolution — see :func:`low_delay_warning`, called from the CLI's
+    # `_arxiv_prepare`. This helper only coerces; non-numeric or negative values
+    # fall back to the default without comment (that fallback's own silence is a
+    # separate question, out of scope here).
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
         return float(value)
     return default
+
+
+def low_delay_warning(delay: float) -> str | None:
+    """The one-line caution for a below-recommendation request delay, or ``None``.
+
+    Returns ``None`` when ``delay`` is at or above :data:`REQUEST_DELAY_SECONDS`
+    (including the built-in default), so a normal run says nothing. Below it, the
+    operator is trading a shared public service's headroom, not their own: arXiv
+    answered 200 to twelve zero-delay requests (#57), so nothing on the wire will
+    flag the risk. factlog names it once, in keeping with its posture of never
+    silencing a signal on the operator's behalf (#93, #106, #109).
+
+    Pure and side-effect-free: it returns the message; the CLI writes it to stderr.
+    """
+    if delay >= REQUEST_DELAY_SECONDS:
+        return None
+    return (
+        f"request_delay is {delay:g}s, below arXiv's recommended "
+        f"{REQUEST_DELAY_SECONDS:g}s. arXiv will not push back on the faster rate "
+        "(#57); the cost of it falls on a shared public service, not on you. "
+        "Lower it only when you know your load is small."
+    )
 
 
 def from_mapping(data: dict) -> ArxivConfig:
