@@ -3664,12 +3664,23 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     connection/rate-limit failure or a missing entry: non-zero exit, nothing written.
 
     It writes arXiv's **live** value into the ledger's ``withdrawn_by`` via the shared
-    acknowledge primitive — including ``None`` when arXiv reports the paper is no longer
-    withdrawn, which *clears* the field. ``withdrawn_by`` is an identifying field, so a
-    stale withdrawal left after an un-withdrawal makes re-import error permanently and a
-    refresh may not clear it; only this human write may. It never opens the ``.md`` (P4):
-    a paper imported before it was withdrawn keeps showing nothing on its KB page, so
-    after acknowledgement the ledger becomes the sole audit record.
+    acknowledge primitive. Two directions, gated differently (#106):
+
+    * **Setting** it — a fresh withdrawal, or a change of agent (``author`` -> ``admin``)
+      — is the loud direction. ``--yes`` may do it.
+    * **Clearing** it — writing ``None`` when arXiv reports the paper is no longer
+      withdrawn — is the silencing direction, which this project gates on a human (#93).
+      Only a human at the prompt, who has seen the printed note, may do it. A ``--yes``
+      clear is refused: non-zero exit, nothing written, and the message names the
+      interactive re-run as the working path.
+
+    The clear itself is necessary, which is why it exists at all: ``withdrawn_by`` is an
+    identifying field, so a stale withdrawal left after an un-withdrawal makes re-import
+    error permanently and a refresh may not clear it; only this human write may.
+
+    It never opens the ``.md`` (P4): a paper imported before it was withdrawn keeps showing
+    nothing on its KB page, so after acknowledgement the ledger becomes the sole audit
+    record.
 
     Withdrawal is not retraction: arXiv has no peer-reviewed retraction process, and the
     word "retracted" never appears here.
@@ -3823,6 +3834,32 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
                 f"{arxiv_id}; nothing to acknowledge."
             )
         return 0
+
+    # A **clear** may not be confirmed by `--yes` (#106). Setting `withdrawn_by` is the
+    # loud direction; clearing it is the silencing direction, and this project gates the
+    # silencing direction on a human (#93). `detect_withdrawal` returning `None` cannot
+    # distinguish "arXiv reversed the withdrawal" from "we failed to read the withdrawal
+    # sentence" — a truncated abstract, or a phrasing outside the regex, reads as an
+    # un-withdrawal. Under `--yes` the operator never sees the note, so a parser miss
+    # would silently erase a recorded withdrawal. The interactive path prints the note
+    # first, so a human can catch exactly that. The fix is not a wider regex: #79 measured
+    # that trade (a silent clear for silent false positives) and rejected it.
+    #
+    # This cannot be refused before the fetch: `recorded_by` is known from the ledger, but
+    # only arXiv's live answer distinguishes a clear (`None`) from a legitimate agent
+    # change (`author` -> `admin`), which `--yes` still performs. One request is spent.
+    if assume_yes and upstream_by is None:
+        print(
+            f"factlog {command}: refusing to clear the withdrawal recorded for "
+            f"{arxiv_id} ({recorded_by}) with --yes. arXiv reports no withdrawal, but "
+            "that also happens when the withdrawal sentence could not be read (a "
+            "truncated abstract, an unmatched phrasing) — the code cannot tell the two "
+            "apart, and --yes means no human sees the note. Clearing silences a recorded "
+            "signal, so it needs a human: re-run in a terminal without --yes and confirm "
+            "at the prompt. Nothing written.",
+            file=sys.stderr,
+        )
+        return 1
 
     note_source = cv.VersionCheck(
         arxiv_id=arxiv_id,
@@ -4987,7 +5024,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true",
         help="skip the confirmation prompt (only ever paired with --id). Required to "
              "run without a terminal; without it a non-interactive run refuses and "
-             "writes nothing.",
+             "writes nothing. It may record a withdrawal, never clear one: clearing "
+             "silences a recorded signal and is refused unless a human confirms it "
+             "interactively.",
     )
     ax_ack.set_defaults(func=cmd_arxiv_acknowledge_withdrawal)
 
