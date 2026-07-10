@@ -730,21 +730,24 @@ def withdrawal_note(result: VersionCheck) -> str:
         provenance = f"which the {where} did not record"
     else:
         provenance = f"where the {where} recorded {_recorded_phrase(recorded)}"
-    if result.recorded_from == "front-matter":
-        return (
-            f"arXiv now reports {result.arxiv_id} ({version}) as WITHDRAWN by {agent}, "
-            f"{provenance}. Withdrawal is not retraction; this unverified signal flags "
-            "the paper for human review before any claim from it is trusted. This paper "
-            "has no provenance ledger (imported before #82), so the withdrawal cannot be "
-            "acknowledged and will keep surfacing until one exists; backfilling a ledger "
-            "is tracked in #105."
-        )
-    return (
+    # Build the shared body once. Restating it in both branches would let an edit to
+    # one silently leave the other behind: only the ledger string is pinned byte-for-byte
+    # by a test, so a maintainer who updates that literal would never learn the
+    # front-matter note had kept the old prose. The ledger note is a prefix of the
+    # front-matter note by construction, and a test asserts exactly that.
+    body = (
         f"arXiv now reports {result.arxiv_id} ({version}) as WITHDRAWN by {agent}, "
         f"{provenance}. Withdrawal is not retraction; this "
         "unverified signal flags the paper for human review before any claim from "
         "it is trusted."
     )
+    if result.recorded_from == "front-matter":
+        return (
+            f"{body} This paper has no provenance ledger (imported before #82), so the "
+            "withdrawal cannot be acknowledged and will keep surfacing until one exists; "
+            "backfilling a ledger is tracked in #105."
+        )
+    return body
 
 
 def un_withdrawal_note(result: VersionCheck) -> str:
