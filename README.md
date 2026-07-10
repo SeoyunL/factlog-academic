@@ -223,8 +223,11 @@ changed.
    code cannot tell the two apart. Clearing has to be confirmed by a human reading
    the note at the prompt. A paper with no ledger can be closed only if its front
    matter carries `arxiv_version`, in which case `arxiv-backfill-provenance` builds
-   a ledger first; without it the backfill refuses, so there is currently no way to
-   close it (#135).
+   a ledger first; without it the backfill refuses, and no command closes it. A
+   human must add `arxiv_version: <N>` to the paper's `sources/*.md` front matter by
+   hand — `<N>` is the paper's real arXiv version, read from
+   `https://arxiv.org/abs/<id>` (factlog does not fetch it) — after which the
+   backfill can build the ledger and the withdrawal can be acknowledged.
 4. A paper whose version cannot be compared is reported not as `unchanged` but as
    its own state, **`no-version`**. Nothing was compared, so it cannot be called
    "unchanged". The command that fixes it depends on the cause, and in some cases
