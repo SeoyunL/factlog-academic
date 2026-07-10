@@ -426,3 +426,20 @@ class TestOnlyIdentifyingFieldsDiverge:
         # Pointing at "record the new version" would send the user nowhere:
         # arxiv-check-versions compares versions, and this one did not change.
         assert "record the new version" not in result.reason
+        # It must name the command that CAN write withdrawn_by, not arxiv-check-versions,
+        # whose --auto-update never touches the field (#107 item 4).
+        assert "arxiv-acknowledge-withdrawal" in result.reason
+        assert "run arxiv-check-versions" not in result.reason
+
+    def test_an_un_withdrawal_divergence_points_at_acknowledge_not_check_versions(
+        self, tmp_path
+    ):
+        # The ledger records a withdrawal arXiv has reversed; a re-import parses None and
+        # diverges. arxiv-check-versions cannot clear withdrawn_by; acknowledge can.
+        kb, original = _kb_with_openalex(tmp_path)
+        self._merge(kb, _arxiv(version=2, withdrawn_by="admin"))
+        result = self._merge(kb, _arxiv(version=2, withdrawn_by=None))
+        assert result.status == "error"
+        assert "arxiv-acknowledge-withdrawal" in result.reason
+        assert "run arxiv-check-versions" not in result.reason
+        assert "record the new version" not in result.reason

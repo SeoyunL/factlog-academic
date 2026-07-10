@@ -3682,7 +3682,6 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     )
     from factlog.integrations.common.acknowledge import (
         ACK_ERROR,
-        ACK_NO_LEDGER,
         ACK_UNCHANGED,
         ACK_WRITTEN,
         AcknowledgeSchema,
@@ -3731,6 +3730,61 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Resolve ledger presence BEFORE the live query, so a paper this command cannot
+    # write is refused for **zero** API requests and with no prompt — the same shape as
+    # the TTY gate above (#107 items 1, 3). `collect_ledger_entries` opens only
+    # source-provenance/ and sources/ front matter; nothing under sources/ is written or
+    # opened for writing (P4).
+    entries, ledger_errors = cv.collect_ledger_entries(target)
+
+    # An unreadable ledger might be the one that carries this id — its `withdrawn_by`
+    # cannot be read, so the recorded value is unknown. Refuse rather than assert "the
+    # ledger did not record" on an incomplete view, and do it before spending a request
+    # or prompting (#107 item 3).
+    if ledger_errors:
+        bad = ", ".join(sorted(e.arxiv_id for e in ledger_errors))
+        print(
+            f"factlog {command}: cannot read every provenance ledger ({bad}); one of "
+            "them may carry this id, so its recorded value is unknown. Repair or remove "
+            "the unreadable ledger(s) and retry. No request was made; nothing written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    entry = next((e for e in entries if e.arxiv_id == arxiv_id), None)
+
+    # `acknowledge()` writes only provenance sidecars. A paper known only from
+    # front matter (imported before #82, #98), or absent from the KB, has no sidecar to
+    # write, so acknowledging it can only ever fail — and querying arXiv first would burn
+    # a request and the operator's attention on a warning no human can turn off here
+    # (#107 item 1). Refuse before the fetch. Backfilling a ledger is #105, not this
+    # command.
+    # A ledger-backed paper's sources are `source-provenance/*.json`; a front-matter-only
+    # paper's are the `sources/*.md` themselves (`collect_ledger_entries` never mixes the
+    # two for one id).
+    front_matter_only = entry is not None and all(
+        str(s).startswith("sources/") for s in entry.sources
+    )
+    if entry is None or front_matter_only:
+        if entry is None:
+            reason = (
+                f"no arXiv record for id {arxiv_id!r} is in this KB, so there is nothing "
+                "to acknowledge."
+            )
+        else:
+            reason = (
+                f"{arxiv_id!r} is known only from front matter (imported before #82), so "
+                "it has no provenance ledger to record a decision in — and re-import will "
+                "not create one. Backfilling a ledger is tracked in #105; until then this "
+                "signal cannot be acknowledged here."
+            )
+        print(f"factlog {command}: {reason} No request was made; nothing written.",
+              file=sys.stderr)
+        return 1
+
+    # The recorded value comes from the ledger we just confirmed (never front matter).
+    recorded_by = entry.recorded_withdrawn_by
+
     # The live query is mandatory: the value to write lives only upstream.
     client = _make_arxiv_client(config)
     try:
@@ -3754,34 +3808,38 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     # arXiv's live value — `None` when the paper is not (or no longer) withdrawn.
     upstream_by = work.withdrawn_by
 
-    # The ledger's recorded value, read-only, so the note names both sides of any
-    # divergence. `collect_ledger_entries` opens only source-provenance/ and sources/
-    # front matter; no `.md` is written and none is opened for writing (P4).
-    entries, _ = cv.collect_ledger_entries(target)
-    recorded_by = next(
-        (e.recorded_withdrawn_by for e in entries if e.arxiv_id == arxiv_id), None
-    )
+    # Nothing to acknowledge when the ledger already matches arXiv (both `None`, or the
+    # same agent). Say so and exit 0 without a note or a prompt — the divergence-phrased
+    # note would be a lie here, and there is no signal to silence (#107 item 7).
+    if upstream_by == recorded_by:
+        if upstream_by is None:
+            print(
+                f"arXiv reports {arxiv_id} is not withdrawn and the ledger records no "
+                "withdrawal; nothing to acknowledge."
+            )
+        else:
+            print(
+                f"The ledger already records arXiv's live value ({upstream_by}) for "
+                f"{arxiv_id}; nothing to acknowledge."
+            )
+        return 0
 
     note_source = cv.VersionCheck(
         arxiv_id=arxiv_id,
         status=cv.STATUS_UNCHANGED,
         current_version=work.version,
-        newly_withdrawn=upstream_by is not None and upstream_by != recorded_by,
-        un_withdrawn=upstream_by is None and recorded_by is not None,
+        newly_withdrawn=upstream_by is not None,
+        un_withdrawn=upstream_by is None,
         withdrawn_by=upstream_by,
         recorded_withdrawn_by=recorded_by,
+        recorded_from="ledger",
     )
 
     # Show the operator exactly what they are about to silence (or clear).
     if upstream_by is not None:
         print(cv.withdrawal_note(note_source))
-    elif recorded_by is not None:
-        print(cv.un_withdrawal_note(note_source))
     else:
-        print(
-            f"arXiv reports {arxiv_id} is not withdrawn, and the ledger records no "
-            "withdrawal. There is nothing to acknowledge."
-        )
+        print(cv.un_withdrawal_note(note_source))
 
     if not assume_yes:
         try:
@@ -3820,13 +3878,12 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
             "changed. arxiv-check-versions will not repeat this signal."
         )
         return 0
-    if result.status == ACK_NO_LEDGER:
-        print(f"factlog {command}: {result.reason}", file=sys.stderr)
-        return 1
     if result.status == ACK_ERROR:
         print(f"factlog {command}: {result.reason}", file=sys.stderr)
         return 1
-    print(f"factlog {command}: unexpected result {result.status!r}", file=sys.stderr)
+    # ACK_NO_LEDGER cannot occur — ledger presence was confirmed before the fetch — but
+    # is handled defensively rather than mis-reported as success.
+    print(f"factlog {command}: {result.reason or result.status}", file=sys.stderr)
     return 1
 
 

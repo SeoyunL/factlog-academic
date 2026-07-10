@@ -151,9 +151,13 @@ class VersionCheck:
     still records, so the paper has come back and the ledger must be cleared. The two
     are mutually exclusive. ``withdrawn_by`` carries arXiv's current agent
     (``"author"``/``"admin"``) when the paper is withdrawn now; ``recorded_withdrawn_by``
-    carries what the ledger held, so the note can name both sides of a divergence. For
-    an error result the ``arxiv_id`` may instead be a ledger path (a corrupt file), and
-    ``reason`` explains it.
+    carries what the ledger held, so the note can name both sides of a divergence.
+    ``recorded_from`` says where that recorded value came from — ``"ledger"`` (a
+    provenance sidecar) or ``"front-matter"`` (a pre-#82 paper with no ledger, #98) —
+    so the notes never claim "the ledger recorded" a value that came from front matter,
+    nor assert an identifying-field divergence for a paper that has no provenance record
+    to diverge. For an error result the ``arxiv_id`` may instead be a ledger path (a
+    corrupt file), and ``reason`` explains it.
 
     ``current_last_updated`` (an ISO date string) and ``current_comment`` carry the
     two *other* version-tracking values arXiv returned, alongside
@@ -172,6 +176,7 @@ class VersionCheck:
     un_withdrawn: bool = False
     withdrawn_by: str | None = None
     recorded_withdrawn_by: str | None = None
+    recorded_from: str = "ledger"
     reason: str = ""
     sources: tuple[str, ...] = ()
 
@@ -361,6 +366,7 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
         status=STATUS_CHANGED if changed else STATUS_UNCHANGED,
         recorded_version=recorded,
         current_version=current,
+        recorded_from=_provenance_of(entry.sources),
         # The two other version-tracking values --auto-update writes. Dates are
         # serialized to ISO strings here (the ledger stores strings, not `date`,
         # for the same reason the arXiv writer does: `json` cannot serialize a
@@ -700,18 +706,21 @@ def _recorded_phrase(recorded: str) -> str:
 def withdrawal_note(result: VersionCheck) -> str:
     """The prominent, retraction-free withdrawal line for a newly-withdrawn paper.
 
-    Names both sides of the divergence: a fresh withdrawal the ledger did not record,
-    or a withdrawal whose agent differs from the one the ledger recorded (an
-    acknowledged ``author`` withdrawal arXiv administrators later pulled, or a garbage
-    recorded value — #100). It never uses the word "retracted".
+    Names both sides of the divergence: a fresh withdrawal the record did not carry,
+    or a withdrawal whose agent differs from the one it recorded (an acknowledged
+    ``author`` withdrawal arXiv administrators later pulled, or a garbage recorded
+    value — #100). It attributes the recorded value to its true source — a ledger, or a
+    pre-#82 paper's front matter (#98) — so it never says "the ledger recorded" a value
+    that came from front matter. It never uses the word "retracted".
     """
     agent = withdrawal_agent(result.withdrawn_by)
     version = f"v{result.current_version}" if result.current_version else "the current version"
     recorded = result.recorded_withdrawn_by
+    where = "front matter" if result.recorded_from == "front-matter" else "ledger"
     if recorded is None:
-        provenance = "which the ledger did not record"
+        provenance = f"which the {where} did not record"
     else:
-        provenance = f"where the ledger recorded {_recorded_phrase(recorded)}"
+        provenance = f"where the {where} recorded {_recorded_phrase(recorded)}"
     return (
         f"arXiv now reports {result.arxiv_id} ({version}) as WITHDRAWN by {agent}, "
         f"{provenance}. Withdrawal is not retraction; this "
@@ -721,15 +730,31 @@ def withdrawal_note(result: VersionCheck) -> str:
 
 
 def un_withdrawal_note(result: VersionCheck) -> str:
-    """The line for a paper arXiv no longer reports as withdrawn but the ledger does.
+    """The line for a paper arXiv no longer reports as withdrawn but the record does.
 
     This is **not** a withdrawal warning: a paper coming back is its own kind of news.
-    ``withdrawn_by`` is an *identifying* field (``arxiv/source_writer.py``), so a ledger
-    left recording a withdrawal arXiv has reversed diverges from a fresh import (which
-    parses ``None``) and makes re-import error permanently; a refresh may not clear it.
-    Only a human's acknowledgement may, so the note tells the operator to run it.
+
+    For a **ledger**-recorded value, ``withdrawn_by`` is an *identifying* field
+    (``arxiv/source_writer.py``), so a ledger left recording a withdrawal arXiv has
+    reversed diverges from a fresh import (which parses ``None``) and makes a re-import
+    error; a refresh may not clear it, so only a human's acknowledgement may, and the
+    note prescribes it.
+
+    For a **front-matter**-only paper (imported before #82, #98) there is no provenance
+    record to diverge, so a re-import does *not* error and
+    ``arxiv-acknowledge-withdrawal`` — which writes sidecars — cannot help. The note
+    must not claim either, so it states plainly that the front-matter note is now stale
+    and points at #105 (backfilling a ledger), not at a command that would exit 1.
     """
     recorded = result.recorded_withdrawn_by or ""
+    if result.recorded_from == "front-matter":
+        return (
+            f"arXiv no longer reports {result.arxiv_id} as withdrawn, but its front "
+            f"matter still records {_recorded_phrase(recorded)}. This paper has no "
+            "provenance ledger (imported before #82), so nothing diverges and a "
+            "re-import does not error; the front-matter note is simply stale. "
+            "Backfilling a ledger so this can be acknowledged is tracked in #105."
+        )
     return (
         f"arXiv no longer reports {result.arxiv_id} as withdrawn, but the ledger still "
         f"records {_recorded_phrase(recorded)}. `withdrawn_by` is an identifying field: "
@@ -743,6 +768,17 @@ def _sources_suffix(result: VersionCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
 
+def _provenance_of(sources) -> str:
+    """``"front-matter"`` if *sources* are all ``sources/*.md`` (a pre-#82 paper with
+    no ledger, #98), else ``"ledger"``. One paper's sources are never mixed:
+    ``collect_ledger_entries`` fills a slot from the ledger *or*, only if no ledger
+    covered it, from front matter — never both."""
+    sources = sources or ()
+    if sources and all(str(s).startswith("sources/") for s in sources):
+        return "front-matter"
+    return "ledger"
+
+
 def _recorded_in(result) -> str:
     """Where the recorded version came from: a ledger, or a source's front matter.
 
@@ -750,8 +786,7 @@ def _recorded_in(result) -> str:
     names a file that does not exist. Ledger sources live under
     ``source-provenance/``; front-matter ones are the ``sources/*.md`` themselves.
     """
-    sources = getattr(result, "sources", ()) or ()
-    if sources and all(str(s).startswith("sources/") for s in sources):
+    if _provenance_of(getattr(result, "sources", ())) == "front-matter":
         return "front matter records"
     return "ledger records"
 
@@ -802,7 +837,7 @@ def report_lines(
 
     if un_withdrawn:
         lines.append(
-            "\nNo longer withdrawn (arXiv reversed a withdrawal the ledger records):"
+            "\nNo longer withdrawn (arXiv reversed a withdrawal this KB records):"
         )
         for result in un_withdrawn:
             lines.append(f"  ↺ {un_withdrawal_note(result)}{_sources_suffix(result)}")
@@ -823,18 +858,19 @@ def report_lines(
 
     lines.extend(_auto_update_lines(updates))
 
+    # Labels are padded to the widest ("No longer withdrawn:") so every count lands in
+    # one column; the un-withdrawal line no longer juts out of the block.
     lines.append("\nSummary:")
-    lines.append(f"  Checked:         {summary.checked}")
-    lines.append(f"  Up to date:      {summary.unchanged}")
-    lines.append(f"  Version changed: {summary.changed}")
-    lines.append(f"  Newly withdrawn: {summary.withdrawn}")
-    lines.append(f"  No longer withdrawn: {summary.un_withdrawn}")
-    lines.append(f"  Errors:          {summary.errors}")
-    lines.append(f"  Skipped:         {summary.skipped}")
+    lines.append(f"  {'Checked:':<21}{summary.checked}")
+    lines.append(f"  {'Up to date:':<21}{summary.unchanged}")
+    lines.append(f"  {'Version changed:':<21}{summary.changed}")
+    lines.append(f"  {'Newly withdrawn:':<21}{summary.withdrawn}")
+    lines.append(f"  {'No longer withdrawn:':<21}{summary.un_withdrawn}")
+    lines.append(f"  {'Errors:':<21}{summary.errors}")
+    lines.append(f"  {'Skipped:':<21}{summary.skipped}")
     if updates:
-        lines.append(
-            f"  Ledgers updated: {sum(1 for u in updates if u.status == UPDATE_WRITTEN)}"
-        )
+        updated = sum(1 for u in updates if u.status == UPDATE_WRITTEN)
+        lines.append(f"  {'Ledgers updated:':<21}{updated}")
     return lines
 
 
@@ -884,9 +920,12 @@ def porcelain_lines(
     (checked, skipped, or errored), then — only under ``--auto-update`` — one
     ``update`` row per acted-on paper, then the tallies. Parse by the first field.
 
-    ``check\t<id>\t<status>\t<recorded>\t<current>\t<withdrawn_by>\t<newly_withdrawn>\t<reason>``
-    with empty fields for absent values, ``newly_withdrawn`` as ``0``/``1``, and
-    versions as bare integers. The ``update`` rows are
+    ``check\t<id>\t<status>\t<recorded>\t<current>\t<withdrawn_by>\t<newly_withdrawn>\t<reason>\t<un_withdrawn>``
+    with empty fields for absent values, ``newly_withdrawn``/``un_withdrawn`` as
+    ``0``/``1``, and versions as bare integers. ``un_withdrawn`` distinguishes a paper
+    arXiv no longer reports as withdrawn (but a record still does) from an unchanged one,
+    whose row is otherwise byte-identical; it is appended last so a #78 parser keying on
+    the earlier fixed columns is unaffected. The ``update`` rows are
     ``update\t<id>\t<status>\t<recorded>\t<current>\t<ledgers>`` where ``status`` is
     one of ``updated``/``unchanged``/``no-ledger``/``error`` and ``ledgers`` is a
     comma-joined list (empty unless ``updated``). They are absent when the flag is
@@ -897,7 +936,7 @@ def porcelain_lines(
         recorded = "" if result.recorded_version is None else str(result.recorded_version)
         current = "" if result.current_version is None else str(result.current_version)
         rows.append(
-            "check\t{id}\t{status}\t{recorded}\t{current}\t{by}\t{withdrawn}\t{reason}".format(
+            "check\t{id}\t{status}\t{recorded}\t{current}\t{by}\t{withdrawn}\t{reason}\t{un}".format(
                 id=result.arxiv_id,
                 status=result.status,
                 recorded=recorded,
@@ -905,6 +944,7 @@ def porcelain_lines(
                 by=result.withdrawn_by or "",
                 withdrawn="1" if result.newly_withdrawn else "0",
                 reason=result.reason,
+                un="1" if result.un_withdrawn else "0",
             )
         )
     for u in updates:
