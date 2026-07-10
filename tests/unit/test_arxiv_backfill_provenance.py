@@ -15,8 +15,8 @@ with the real CLI:
 * the graduation — a front-matter-only withdrawn paper is un-acknowledgeable before backfill
   (``no provenance ledger``, **0** API requests) and acknowledgeable after, and the repeat
   stops on the next check;
-* the note graduation — the un-withdrawal note's front-matter branch (#105) switches to the
-  ledger branch prescribing the acknowledge command;
+* the note graduation — the un-withdrawal note's front-matter branch prescribes the backfill
+  (#114), and switches to the ledger branch prescribing the acknowledge command afterward;
 * the unrecognised agent — a hand-typed ``arxiv_withdrawn_by`` is refused, never promoted
   into a ledger whose reader would reject it (#109), while check-versions keeps surfacing
   the signal from front matter; repairing the ``.md`` lets the backfill through;
@@ -185,18 +185,21 @@ class TestGraduation:
 # 2. the note graduation: the un-withdrawal note switches branches
 # --------------------------------------------------------------------------- #
 class TestNoteGraduation:
-    def test_un_withdrawal_note_switches_from_105_to_the_acknowledge_command(
+    def test_un_withdrawal_note_switches_from_backfill_to_the_acknowledge_command(
         self, tmp_path, fake, capsys
     ):
         # Front matter records a withdrawal arXiv has since reversed (un_withdrawn).
         _fm_only(tmp_path, "1706.03762", 7, withdrawn_by="author")
         fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)]))
 
-        # BEFORE backfill: the front-matter branch — points at #105, not a command.
+        # BEFORE backfill: the front-matter branch — prescribes the backfill (#114), the
+        # step actually missing, not the acknowledge command that would exit 1, and never
+        # the closed #105 (#132).
         run(["arxiv-check-versions", "--target", str(tmp_path), "--older-than", "0"])
         out = capsys.readouterr().out
         assert "No longer withdrawn" in out
-        assert "#105" in out
+        assert "arxiv-backfill-provenance" in out
+        assert "#105" not in out
         assert "arxiv-acknowledge-withdrawal --id 1706.03762" not in out
 
         # BACKFILL, then re-check.

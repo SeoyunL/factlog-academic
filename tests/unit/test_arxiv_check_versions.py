@@ -720,11 +720,14 @@ class TestFrontMatterRecordsAWithdrawalTheLedgerFallbackMustRead:
 
 class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
     """A front-matter-only paper (imported before #82) newly reported withdrawn cannot be
-    acknowledged: `arxiv-acknowledge-withdrawal` writes a sidecar and there is no ledger
-    to write, so it would exit 1. The warning must stay loud (a withdrawal the KB never
-    recorded is real news), but it must also stop being unactionable wallpaper (#93): it
-    names the missing ledger and points at #105 (the backfill), never at a command that
-    would exit 1. The *un*-withdrawal note already does this; #110 is the sibling gap.
+    acknowledged directly: `arxiv-acknowledge-withdrawal` writes a sidecar and there is no
+    ledger to write, so it would exit 1. The warning must stay loud (a withdrawal the KB
+    never recorded is real news) but stop being unactionable wallpaper (#93): it names the
+    missing ledger and the working next step. That step depends on whether the front matter
+    can supply the ledger — `arxiv-backfill-provenance` when it carries `arxiv_version`
+    (#114, measured in test_arxiv_backfill_provenance), and #135 when it does not, because
+    backfill refuses a version-less paper (#113). #132: the note used to deny the backfill
+    (#105) even for the paper it can repair.
     """
 
     def _front_matter_only(self, kb, lines):
@@ -733,9 +736,11 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
         path.write_text("---\n" + "\n".join(lines) + "\n---\n# T\n", encoding="utf-8")
         return path
 
-    def test_the_note_names_the_missing_ledger_and_105_and_still_fires(
+    def test_a_paper_with_arxiv_version_is_pointed_at_the_backfill_command(
         self, tmp_path, fake, capsys
     ):
+        # Front matter carries `arxiv_version`, so `arxiv-backfill-provenance` can build
+        # the ledger from it (#114) and the withdrawal graduates to acknowledgeable.
         self._front_matter_only(
             tmp_path, ['arxiv_id: "0704.0001"', "arxiv_version: 3"]
         )
@@ -745,18 +750,21 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
         # Still loud.
         assert "WITHDRAWN by the author" in out
         assert "Newly withdrawn:     1" in out
-        # Now actionable: names the missing ledger and points at the backfill.
+        # Now actionable: names the missing ledger and the command that builds it.
         assert "no provenance ledger (imported before #82)" in out
         assert "cannot be acknowledged" in out
-        assert "#105" in out
+        assert "run `factlog arxiv-backfill-provenance`" in out
+        # The command it names exists (#114), so it must not deny it via the closed #105.
+        assert "#105" not in out
         # arXiv's word is "withdrawn", never "retracted" (#57 §6.3).
         assert "retracted" not in out.lower()
 
-    def test_the_note_names_the_missing_ledger_directly(self):
+    def test_the_version_backed_note_names_the_command_directly(self):
         note = cv.withdrawal_note(
             cv.VersionCheck(
                 arxiv_id="0704.0001",
                 status="ok",
+                recorded_version=3,
                 current_version=3,
                 newly_withdrawn=True,
                 withdrawn_by="author",
@@ -767,8 +775,35 @@ class TestANewWithdrawalPointsAFrontMatterOnlyPaperAtTheBackfill:
         )
         assert "no provenance ledger (imported before #82)" in note
         assert "cannot be acknowledged" in note
-        assert "#105" in note
+        assert "run `factlog arxiv-backfill-provenance`" in note
+        assert "#105" not in note
         assert "retracted" not in note.lower()
+
+    def test_a_version_less_paper_is_told_no_command_can_and_points_at_135(self):
+        # No `arxiv_version`: backfill refuses it (#113), so no command can build the
+        # ledger. The note must say so and point at #135 — never at a command, never #105.
+        note = cv.withdrawal_note(
+            cv.VersionCheck(
+                arxiv_id="0704.0001",
+                status="ok",
+                recorded_version=None,
+                current_version=3,
+                newly_withdrawn=True,
+                withdrawn_by="author",
+                recorded_withdrawn_by=None,
+                recorded_from="front-matter",
+                sources=("sources/old.md",),
+            )
+        )
+        assert "no provenance ledger (imported before #82)" in note
+        assert "cannot be acknowledged" in note
+        assert "no arxiv_version" in note
+        assert "#113" in note
+        assert "#135" in note
+        # The command cannot repair this paper, so it must not be prescribed, nor may the
+        # closed #105 reappear.
+        assert "run `factlog arxiv-backfill-provenance`" not in note
+        assert "#105" not in note
 
 
 def test_a_ledger_backed_withdrawal_note_is_byte_for_byte_unchanged():
@@ -795,6 +830,43 @@ def test_a_ledger_backed_withdrawal_note_is_byte_for_byte_unchanged():
     # The #105 pointer belongs only to the front-matter branch.
     assert "#105" not in note
     assert "no provenance ledger" not in note
+
+
+class TestUnWithdrawalNoteNamesTheWorkingNextStep:
+    """A reversed withdrawal recorded only in front matter (#132). The note must name the
+    step that actually gives the paper a ledger: the backfill when the front matter carries
+    `arxiv_version` (#114), and #135 when it does not, because backfill refuses it (#113)."""
+
+    def _fm(self, recorded_version):
+        return cv.VersionCheck(
+            arxiv_id="0704.0001",
+            status="ok",
+            recorded_version=recorded_version,
+            current_version=7,
+            withdrawn_by=None,
+            recorded_withdrawn_by="author",
+            recorded_from="front-matter",
+            sources=("sources/old.md",),
+        )
+
+    def test_with_arxiv_version_it_prescribes_the_backfill(self):
+        note = cv.un_withdrawal_note(self._fm(7))
+        assert "the front-matter note is simply stale" in note
+        assert "run `factlog arxiv-backfill-provenance`" in note.lower()
+        assert "after which this can be acknowledged" in note
+        # It must not prescribe the acknowledge command (exit 1 here) or resurrect #105.
+        assert "arxiv-acknowledge-withdrawal --id" not in note
+        assert "#105" not in note
+
+    def test_without_arxiv_version_it_points_at_135_and_names_no_command(self):
+        note = cv.un_withdrawal_note(self._fm(None))
+        assert "the front-matter note is simply stale" in note
+        assert "no arxiv_version" in note
+        assert "#113" in note
+        assert "#135" in note
+        # No command repairs this paper, so none is prescribed, and #105 stays closed.
+        assert "run `factlog arxiv-backfill-provenance`" not in note.lower()
+        assert "#105" not in note
 
 
 # --------------------------------------------------------------------------- #
