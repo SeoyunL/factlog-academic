@@ -3579,7 +3579,11 @@ def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
 
     # A corrupt *ledger* is one source's problem (a per-id error), never a crash.
     entries, ledger_errors = cv.collect_ledger_entries(target)
-    if not entries and not ledger_errors:
+    # A paper named by a source outside the provenance root can never be checked (#112).
+    # It joins the per-file errors so it is named in the report and counted in the exit
+    # code — the one thing it must not do is quietly leave the denominator.
+    excluded = cv.excluded_checks(target)
+    if not entries and not ledger_errors and not excluded:
         if not porcelain:
             print(f"factlog arxiv-check-versions: no arXiv records in {target}")
         else:
@@ -3634,7 +3638,7 @@ def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     # review. Only `results` (papers actually checked this run) are eligible.
     updates = cv.apply_auto_update(results, target) if auto_update else []
 
-    all_results = results + ledger_errors
+    all_results = results + ledger_errors + excluded
     summary = cv.summarize(all_results, skipped)
     if porcelain:
         for line in cv.porcelain_lines(
@@ -3698,6 +3702,10 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
         ACK_WRITTEN,
         AcknowledgeSchema,
         acknowledge,
+    )
+    from factlog.integrations.common.provenance import (
+        excluded_reason,
+        excluded_sources_by_id,
     )
 
     command = "arxiv-acknowledge-withdrawal"
@@ -3779,10 +3787,21 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     front_matter_only = entry is not None and cv.provenance_of(entry.sources) == "front-matter"
     if entry is None or front_matter_only:
         if entry is None:
-            reason = (
-                f"no arXiv record for id {arxiv_id!r} is in this KB, so there is nothing "
-                "to acknowledge."
-            )
+            # "Not in this KB" was measured to be a lie for a paper that IS in the KB, in a
+            # place no ledger can describe (#112). Name the files rather than deny the paper.
+            excluded = excluded_sources_by_id(target, "arxiv_id").get(arxiv_id, ())
+            if excluded:
+                reason = (
+                    f"{arxiv_id!r} is named by {', '.join(excluded)}, which "
+                    f"{'is' if len(excluded) == 1 else 'are'} outside the provenance root, "
+                    "so no ledger can record a decision about it. "
+                    + excluded_reason(excluded[0])
+                )
+            else:
+                reason = (
+                    f"no arXiv record for id {arxiv_id!r} is in this KB, so there is nothing "
+                    "to acknowledge."
+                )
         else:
             reason = (
                 f"{arxiv_id!r} is known only from front matter (imported before #82), so "
@@ -4032,7 +4051,9 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
         for r in refused:
             print(f"  ✗ {r.entry_id}: {r.reason}")
     if errors:
-        print("\nCould not read or write a sidecar:")
+        # Not only sidecar faults: a source outside the provenance root can hold no
+        # ledger at all (#112), and it is reported here rather than skipped.
+        print("\nCould not backfill:")
         for r in errors:
             print(f"  ✗ {r.entry_id}: {r.reason}")
 
@@ -4100,7 +4121,10 @@ def cmd_openalex_refresh(args: argparse.Namespace) -> int:
 
     # A corrupt *ledger* is one source's problem (a per-id error), never a crash.
     entries, ledger_errors = rf.collect_ledger_entries(target)
-    if not entries and not ledger_errors:
+    # A work named by a source outside the provenance root can never be refreshed (#112);
+    # it is reported as a per-file error rather than left out of the denominator.
+    excluded = rf.excluded_checks(target)
+    if not entries and not ledger_errors and not excluded:
         if not porcelain:
             print(f"factlog openalex-refresh: no OpenAlex records in {target}")
         else:
@@ -4154,7 +4178,7 @@ def cmd_openalex_refresh(args: argparse.Namespace) -> int:
     # (works actually checked this run) are eligible.
     updates = rf.apply_auto_update(results, target) if auto_update else []
 
-    all_results = results + ledger_errors
+    all_results = results + ledger_errors + excluded
     summary = rf.summarize(all_results, skipped)
     if porcelain:
         for line in rf.porcelain_lines(
@@ -4205,6 +4229,10 @@ def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
         ACK_WRITTEN,
         AcknowledgeSchema,
         acknowledge,
+    )
+    from factlog.integrations.common.provenance import (
+        excluded_reason,
+        excluded_sources_by_id,
     )
     from factlog.integrations.openalex import refresh as rf
     from factlog.integrations.openalex.api_client import (
@@ -4282,10 +4310,21 @@ def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
     front_matter_only = entry is not None and rf.provenance_of(entry.sources) == "front-matter"
     if entry is None or front_matter_only:
         if entry is None:
-            reason = (
-                f"no OpenAlex record for id {openalex_id!r} is in this KB, so there is "
-                "nothing to acknowledge."
-            )
+            # "Not in this KB" is a lie for a work that IS in the KB, in a place no ledger
+            # can describe (#112). Name the files rather than deny the work.
+            excluded = excluded_sources_by_id(target, "openalex_id").get(openalex_id, ())
+            if excluded:
+                reason = (
+                    f"{openalex_id!r} is named by {', '.join(excluded)}, which "
+                    f"{'is' if len(excluded) == 1 else 'are'} outside the provenance root, "
+                    "so no ledger can record a decision about it. "
+                    + excluded_reason(excluded[0])
+                )
+            else:
+                reason = (
+                    f"no OpenAlex record for id {openalex_id!r} is in this KB, so there is "
+                    "nothing to acknowledge."
+                )
         else:
             reason = (
                 f"{openalex_id!r} is known only from front matter (imported before #84), "
@@ -4535,7 +4574,9 @@ def cmd_openalex_backfill_provenance(args: argparse.Namespace) -> int:
         for r in refused:
             print(f"  ✗ {r.entry_id}: {r.reason}")
     if errors:
-        print("\nCould not read or write a sidecar:")
+        # Not only sidecar faults: a source outside the provenance root can hold no
+        # ledger at all (#112), and it is reported here rather than skipped.
+        print("\nCould not backfill:")
         for r in errors:
             print(f"  ✗ {r.entry_id}: {r.reason}")
 

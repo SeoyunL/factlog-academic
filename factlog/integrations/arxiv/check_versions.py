@@ -76,6 +76,9 @@ from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
     SourceRecord,
+    excluded_reason,
+    excluded_source_refs,
+    provenance_sources,
     read_provenance,
     sidecar_path,
     update_source,
@@ -101,6 +104,7 @@ __all__ = [
     "UPDATE_ERROR",
     "AUTO_UPDATE_FIELDS",
     "collect_ledger_entries",
+    "excluded_checks",
     "provenance_of",
     "partition_by_freshness",
     "check_entries",
@@ -267,7 +271,14 @@ def collect_ledger_entries(
     entry keyed by ``arxiv_id``; the highest recorded version wins, any recorded
     withdrawal agent is kept, and every referencing source path is retained.
 
-    Several ``sources/*.md`` may likewise carry one ``arxiv_id``. The entry a check reads is
+    The front-matter fallback walks the KB's own enumeration (``provenance_sources``:
+    ``rglob`` under ``sources/``), so a nested paper is seen exactly as a top-level one is.
+    It used to walk ``sources/*.md`` flat while the sidecars above were walked with
+    ``rglob``, and that asymmetry made a paper ``factlog sources`` lists absent from
+    ``checked N/N`` and its withdrawal never reported (#112). A source outside the
+    provenance root is reported by :func:`excluded_checks`, never dropped.
+
+    Several ``sources/**/*.md`` may likewise carry one ``arxiv_id``. The entry a check reads is
     the **first in sorted-path order**, unchanged by #117 and unfolded — a paper is checked
     once, and no value is invented for it that no single source recorded. Each source's own
     front matter is kept *beside* that answer, verbatim, in :attr:`LedgerEntry.per_source`,
@@ -330,12 +341,16 @@ def collect_ledger_entries(
     # `source_writer.py:165-167`), which is exactly what a check needs, and reading it
     # writes nothing, so report-only holds. A ledger, when present, is authoritative:
     # it is what a refresh updates.
-    sources_dir = root / "sources"
     #: One view per `.md`, keyed by id, in sorted-path order. A second `.md` carrying an id
     #: is *not* dropped here (it was, before #117): it is a source of the same paper, and a
     #: backfill writes a sidecar next to each `.md`, from that `.md`'s own front matter.
     per_source: dict[str, list[LedgerEntry]] = {}
-    for path in sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else ():
+    # `provenance_sources` is the KB's own enumeration (rglob, hidden paths excluded),
+    # narrowed to the one root a sidecar can describe. It replaces the flat
+    # `sources_dir.glob("*.md")` that made a nested paper invisible to this command while
+    # `factlog sources` listed it (#112). The papers it *cannot* cover are not dropped:
+    # `excluded_checks` reports each one.
+    for path in provenance_sources(root):
         scalars = read_scalars(path, ("arxiv_id", "arxiv_version", "arxiv_withdrawn_by"))
         arxiv_id = scalars.get("arxiv_id", "")
         # A ledger, when one exists, is authoritative — it is what a refresh
@@ -363,7 +378,7 @@ def collect_ledger_entries(
         # one whose sidecar will not parse (about which nothing may be said at all: it
         # is in `errors` above, and we never read what it holds). Record which of the
         # three this is rather than making the report guess.
-        sidecar = sidecar_path(path)
+        sidecar = sidecar_path(path, root)
         if _relative(sidecar, root) in unreadable:
             sidecar_state = SIDECAR_UNREADABLE
         elif sidecar.is_file():
@@ -424,6 +439,27 @@ def collect_ledger_entries(
     entries.sort(key=lambda e: e.arxiv_id)
     errors.sort(key=lambda e: e.arxiv_id)
     return entries, errors
+
+
+def excluded_checks(kb_root: Path | str) -> list[VersionCheck]:
+    """One ``error`` :class:`VersionCheck` per source that names an arXiv paper but lies
+    outside the provenance root, so no ledger can exist for it (#112).
+
+    These are **not** returned by :func:`collect_ledger_entries`. Its second channel is the
+    unreadable-ledger errors, and ``common/backfill.py`` treats any of those as a poison
+    that stops every write, because an unread ledger contaminates the front-matter-only
+    classification (#111). An excluded source contaminates nothing — it is simply a paper
+    no command can act on — so it must be reported without stopping the papers that can be.
+
+    Reported as an error rather than a note because the exit code is what a script reads: a
+    withdrawal on this paper will never be detected, and a command that returns 0 while
+    that is true is the silent direction #112 exists to close.
+    """
+    root = Path(kb_root)
+    return [
+        VersionCheck(arxiv_id=ref, status=STATUS_ERROR, reason=excluded_reason(ref))
+        for ref in excluded_source_refs(root, "arxiv_id")
+    ]
 
 
 def _parse_iso(value: str) -> datetime | None:

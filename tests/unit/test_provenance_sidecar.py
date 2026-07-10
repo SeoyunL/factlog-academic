@@ -53,26 +53,26 @@ def _two_source_prov() -> Provenance:
 class TestSidecarPath:
     def test_md_source_maps_to_sibling_json(self, tmp_path):
         src = tmp_path / "sources" / "foo.md"
-        assert sidecar_path(src) == tmp_path / SIDECAR_DIR / "foo.json"
+        assert sidecar_path(src, tmp_path) == tmp_path / SIDECAR_DIR / "foo.json"
 
     def test_kb_root_is_parent_of_sources(self, tmp_path):
         # The sidecar dir sits beside sources/, not inside it.
         src = tmp_path / "sources" / "foo.md"
-        result = sidecar_path(src)
+        result = sidecar_path(src, tmp_path)
         assert result.parent == tmp_path / SIDECAR_DIR
         assert result.parent.parent == tmp_path
 
     def test_multidot_stem_replaces_only_final_suffix(self, tmp_path):
         src = tmp_path / "sources" / "foo.provenance.md"
-        assert sidecar_path(src) == tmp_path / SIDECAR_DIR / "foo.provenance.json"
+        assert sidecar_path(src, tmp_path) == tmp_path / SIDECAR_DIR / "foo.provenance.json"
 
     def test_non_md_source(self, tmp_path):
         src = tmp_path / "sources" / "report.pdf"
-        assert sidecar_path(src) == tmp_path / SIDECAR_DIR / "report.json"
+        assert sidecar_path(src, tmp_path) == tmp_path / SIDECAR_DIR / "report.json"
 
     def test_accepts_str(self, tmp_path):
         src = str(tmp_path / "sources" / "foo.md")
-        assert sidecar_path(src) == tmp_path / SIDECAR_DIR / "foo.json"
+        assert sidecar_path(src, str(tmp_path)) == tmp_path / SIDECAR_DIR / "foo.json"
 
 
 class TestIsSidecar:
@@ -90,7 +90,7 @@ class TestIsSidecar:
 
     def test_sidecar_path_output_is_a_sidecar(self, tmp_path):
         # The two exports agree: whatever sidecar_path builds, is_sidecar accepts.
-        assert is_sidecar(sidecar_path(tmp_path / "sources" / "foo.md"))
+        assert is_sidecar(sidecar_path(tmp_path / "sources" / "foo.md", tmp_path))
 
 
 # --- round-trip --------------------------------------------------------------
@@ -264,7 +264,7 @@ def _make_kb(tmp_path):
 
 
 def _add_sidecar(kb):
-    write_provenance(sidecar_path(kb / "sources" / "doe-2020-a-study.md"),
+    write_provenance(sidecar_path(kb / "sources" / "doe-2020-a-study.md", kb),
                      _two_source_prov())
 
 
@@ -336,32 +336,64 @@ class TestSidecarPathAnchoring:
     """
 
     def test_nested_sources_do_not_collide(self, tmp_path):
-        a = prov.sidecar_path(tmp_path / "sources" / "a" / "x.md")
-        b = prov.sidecar_path(tmp_path / "sources" / "b" / "x.md")
+        a = prov.sidecar_path(tmp_path / "sources" / "a" / "x.md", tmp_path)
+        b = prov.sidecar_path(tmp_path / "sources" / "b" / "x.md", tmp_path)
         assert a != b
         assert a == tmp_path / prov.SIDECAR_DIR / "a" / "x.json"
 
     def test_a_nested_source_sidecar_stays_out_of_sources(self, tmp_path):
-        path = prov.sidecar_path(tmp_path / "sources" / "deep" / "er" / "x.md")
+        path = prov.sidecar_path(tmp_path / "sources" / "deep" / "er" / "x.md", tmp_path)
         assert "sources" not in path.relative_to(tmp_path).parts
 
     def test_flat_source_is_unchanged(self, tmp_path):
-        assert prov.sidecar_path(tmp_path / "sources" / "x.md") == (
+        assert prov.sidecar_path(tmp_path / "sources" / "x.md", tmp_path) == (
             tmp_path / prov.SIDECAR_DIR / "x.json"
         )
 
-    def test_runs_sources_anchors_on_its_own_root(self, tmp_path):
-        # `runs/sources/` is the other SOURCE_ROOT; its sidecar is a sibling of
-        # that directory, not of the KB's top-level sources/.
-        assert prov.sidecar_path(tmp_path / "runs" / "sources" / "x.md") == (
-            tmp_path / "runs" / prov.SIDECAR_DIR / "x.json"
-        )
+    def test_runs_sources_has_no_sidecar_at_all(self, tmp_path):
+        # `runs/sources/` is the other SOURCE_ROOT, and #112 gives it NO sidecar. It
+        # used to anchor on its own root (`runs/source-provenance/x.json`), a directory
+        # no walker reads — a ledger nothing reads is worse than no ledger.
+        with pytest.raises(ValueError, match="not under 'sources/'"):
+            prov.sidecar_path(tmp_path / "runs" / "sources" / "x.md", tmp_path)
+
+    def test_the_two_source_roots_cannot_collide_on_one_ledger(self, tmp_path):
+        """The adversarial pair. `sources/z.md` and `runs/sources/z.md` are two different
+        papers; mapping both into one `source-provenance/` would put both ledgers in
+        `source-provenance/z.json` and silently merge them (#258's slug collision, in the
+        provenance layer). The collision is impossible by *construction*, not improbable:
+        only one root maps at all, so there is no second path to collide with."""
+        flat = prov.sidecar_path(tmp_path / "sources" / "z.md", tmp_path)
+        assert flat == tmp_path / prov.SIDECAR_DIR / "z.json"
+        with pytest.raises(ValueError):
+            prov.sidecar_path(tmp_path / "runs" / "sources" / "z.md", tmp_path)
+
+    def test_a_source_dir_named_sources_cannot_put_a_sidecar_inside_sources(self, tmp_path):
+        """`sources/a/sources/x.md` is a path a user can simply mkdir. Anchoring on the
+        innermost `sources/` component sent its sidecar to `sources/a/source-provenance/`
+        — *inside* `sources/`, where the next enumeration counts the ledger as a source.
+        With the KB root given, the sidecar cannot land under `sources/` at all."""
+        path = prov.sidecar_path(tmp_path / "sources" / "a" / "sources" / "x.md", tmp_path)
+        assert path == tmp_path / prov.SIDECAR_DIR / "a" / "sources" / "x.json"
+        assert path.relative_to(tmp_path).parts[0] == prov.SIDECAR_DIR
+
+    def test_a_kb_root_that_itself_contains_sources_stays_inside_the_kb(self, tmp_path):
+        """The mirror trap: anchoring on the *outermost* `sources/` component would send
+        `/x/sources/kb/sources/p.md`'s sidecar to `/x/source-provenance/kb/sources/p.json`
+        — outside the KB. `relative_to(kb_root)` cannot reach either failure."""
+        kb = tmp_path / "sources" / "kb"
+        path = prov.sidecar_path(kb / "sources" / "p.md", kb)
+        assert path == kb / prov.SIDECAR_DIR / "p.json"
 
     def test_a_path_outside_sources_is_refused(self, tmp_path):
         # Silently producing `<kb>/source-provenance/x.json` for an arbitrary
         # path would write a ledger for a file that is not a source.
-        with pytest.raises(ValueError, match="not under a 'sources/' directory"):
-            prov.sidecar_path(tmp_path / "elsewhere" / "x.md")
+        with pytest.raises(ValueError, match="not under 'sources/'"):
+            prov.sidecar_path(tmp_path / "elsewhere" / "x.md", tmp_path)
+
+    def test_a_path_outside_the_kb_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="not under the KB root"):
+            prov.sidecar_path(tmp_path / "sources" / "x.md", tmp_path / "other")
 
     def test_is_sidecar_recognises_a_nested_sidecar(self):
         from pathlib import Path
@@ -474,6 +506,6 @@ class TestUpdateSource:
         p = Provenance(records=[self._record()])
         prov.update_source(p, SourceRecord(type="arxiv", id="2311.09277",
                                            imported_at="t", fields={"version": 3}))
-        sidecar = prov.sidecar_path(path)
+        sidecar = prov.sidecar_path(path, tmp_path)
         prov.write_provenance(sidecar, p)
         assert prov.read_provenance(sidecar).records[0].fields["version"] == 3

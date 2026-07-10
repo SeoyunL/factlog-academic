@@ -74,7 +74,7 @@ def _seed(kb, arxiv_id, version, *, withdrawn_by=None, name=None):
     record = SourceRecord(
         type="arxiv", id=arxiv_id, imported_at="2026-01-01T00:00:00+00:00", fields=fields
     )
-    write_provenance(sidecar_path(md), Provenance(records=[record]))
+    write_provenance(sidecar_path(md, kb), Provenance(records=[record]))
     return md
 
 
@@ -434,7 +434,7 @@ class TestReimportable:
                          imported_at="2026-01-01T00:00:00+00:00",
                          fields={"version": 7, "withdrawn_by": "author"}),
         ]
-        write_provenance(sidecar_path(md), Provenance(records=records))
+        write_provenance(sidecar_path(md, kb), Provenance(records=records))
         return md
 
     def test_acknowledged_then_unwithdrawn_then_acknowledged_is_reimportable(

@@ -82,7 +82,7 @@ def _seed(kb, oid="W123", *, doi=None, work_type="article", journal=None,
     }
     records = [SourceRecord(type="openalex", id=oid, imported_at=IMPORTED_AT, fields=fields),
                *extra_records]
-    write_provenance(sidecar_path(md), Provenance(records=records))
+    write_provenance(sidecar_path(md, kb), Provenance(records=records))
     return md
 
 
@@ -131,7 +131,7 @@ def _snapshot(kb):
 
 
 def _ledger(md):
-    prov = read_provenance(sidecar_path(md))
+    prov = read_provenance(sidecar_path(md, md.parent.parent))
     return {(r.type, r.id): r.to_dict() for r in prov.records}
 
 
@@ -337,7 +337,7 @@ class TestApplyAutoUpdate:
 
     def test_no_upstream_change_is_a_byte_identical_noop(self, tmp_path):
         md = _seed(tmp_path, "W1", doi="10.1234/a", work_type="article", journal="J")
-        ledger_path = sidecar_path(md)
+        ledger_path = sidecar_path(md, tmp_path)
         before = (ledger_path.read_bytes(), ledger_path.stat().st_mtime_ns)
         results = _run_check(tmp_path, {
             "W1": _raw_work("W1", doi="10.1234/a", work_type="article", journal="J")})
@@ -356,13 +356,13 @@ class TestApplyAutoUpdate:
     def test_superseded_id_is_reported_and_never_written(self, tmp_path):
         md = _seed(tmp_path, "W1", doi="10.1234/a", work_type="preprint")
         before = _md_stat(md)
-        ledger_before = sidecar_path(md).read_bytes()
+        ledger_before = sidecar_path(md, tmp_path).read_bytes()
         results = _run_check(tmp_path, {"W1": _raw_work("W2", doi="10.1234/new", work_type="article")})
         (update,) = rf.apply_auto_update(results, tmp_path)
         assert update.status == rf.UPDATE_ID_SUPERSEDED
         # The (type, id) key W1 is untouched; the fields of W2 are not written under it.
         assert _ledger(md)[("openalex", "W1")]["doi"] == "10.1234/a"
-        assert sidecar_path(md).read_bytes() == ledger_before
+        assert sidecar_path(md, tmp_path).read_bytes() == ledger_before
         assert _md_stat(md) == before
 
     def test_front_matter_only_work_gets_no_ledger(self, tmp_path):
@@ -399,7 +399,7 @@ class TestApplyAutoUpdate:
             "W2": _raw_work("W2", doi="10.1234/b", work_type="article")})
 
         real_write = rf.write_provenance
-        bad_sidecar = sidecar_path(bad)
+        bad_sidecar = sidecar_path(bad, tmp_path)
 
         def guarded(path, provenance):
             if str(path) == str(bad_sidecar):

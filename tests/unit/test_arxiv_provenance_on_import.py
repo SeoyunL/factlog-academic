@@ -86,7 +86,7 @@ class TestNewImportWritesItsOwnLedger:
         assert result.status == "imported"
         assert result.path.exists()  # the .md
 
-        sidecar = sidecar_path(result.path)
+        sidecar = sidecar_path(result.path, tmp_path)
         assert sidecar.exists()
         assert is_sidecar(sidecar)
         recs = _arxiv_records(sidecar)
@@ -100,13 +100,13 @@ class TestNewImportWritesItsOwnLedger:
         # Never inside sources/, so no enumerator counts it as a source.
         assert not list((tmp_path / "sources").glob("*.json"))
         assert (tmp_path / "source-provenance").is_dir()
-        assert sidecar_path(result.path).parent == tmp_path / "source-provenance"
+        assert sidecar_path(result.path, tmp_path).parent == tmp_path / "source-provenance"
 
     def test_the_record_reuses_the_merge_builder(self, tmp_path):
         # Same builder, so the field set matches _merge's exactly (H3).
         writer = ArxivSourceWriter()
         result = writer.write(_arxiv(withdrawn_by="admin"), tmp_path, imported_at="t")
-        rec = _arxiv_records(sidecar_path(result.path))[0].to_dict()
+        rec = _arxiv_records(sidecar_path(result.path, tmp_path))[0].to_dict()
         assert rec == writer._provenance_record(_arxiv(withdrawn_by="admin"), "t").to_dict()
 
 
@@ -130,7 +130,7 @@ class TestReimportIsAByteIdenticalNoop:
         # The CLI stamps a fresh imported_at each run. A re-import is `skipped`
         # before any write, so the ledger must not be rewritten with the new clock.
         first = ArxivSourceWriter().write(_arxiv(), tmp_path, imported_at="2026-01-01T00:00:00Z")
-        sidecar = sidecar_path(first.path)
+        sidecar = sidecar_path(first.path, tmp_path)
         before = sidecar.read_bytes()
 
         again = ArxivSourceWriter().write(_arxiv(), tmp_path, imported_at="2026-09-09T00:00:00Z")
@@ -153,7 +153,7 @@ class TestSlugCollisionRisk1:
         assert first.path != second.path
         assert second.path.name.endswith("-2.md")  # the collision suffix
 
-        s1, s2 = sidecar_path(first.path), sidecar_path(second.path)
+        s1, s2 = sidecar_path(first.path, tmp_path), sidecar_path(second.path, tmp_path)
         assert s1 != s2
         assert s1.exists() and s2.exists()
         # Each sidecar holds its OWN paper's record, not the other's.
@@ -168,7 +168,7 @@ class TestSidecarFailureOrphansNoMdRisk2:
     forever."""
 
     def _sidecar_for(self, writer, parsed, kb):
-        return sidecar_path(kb / "sources" / writer.generate_slug(parsed))
+        return sidecar_path(kb / "sources" / writer.generate_slug(parsed), kb)
 
     def test_an_unusable_sidecar_directory_leaves_no_md(self, tmp_path):
         writer = ArxivSourceWriter()
@@ -225,14 +225,14 @@ class TestPreexistingSidecarRisk3:
         writer = ArxivSourceWriter()
         # Import a paper, then delete its .md, orphaning the sidecar.
         first = writer.write(_arxiv(arxiv_id="1111.11111"), tmp_path, imported_at="t")
-        stale = sidecar_path(first.path)
+        stale = sidecar_path(first.path, tmp_path)
         first.path.unlink()
         assert stale.exists()
 
         # A DIFFERENT paper now reuses the freed base slug (no -2, the .md is gone).
         second = ArxivSourceWriter().write(_arxiv(arxiv_id="2222.22222"), tmp_path, imported_at="t")
         assert second.status == "imported"
-        assert sidecar_path(second.path) == stale  # same path, reused
+        assert sidecar_path(second.path, tmp_path) == stale  # same path, reused
         ids = sorted(r.id for r in _arxiv_records(stale))
         # Only the new paper. Keeping 1111.11111 would make this original's ledger
         # assert it came from a paper it has nothing to do with.
@@ -242,7 +242,7 @@ class TestPreexistingSidecarRisk3:
         # Models a prior run that wrote the sidecar then failed before the .md.
         writer = ArxivSourceWriter()
         parsed = _arxiv()
-        sidecar = sidecar_path(tmp_path / "sources" / writer.generate_slug(parsed))
+        sidecar = sidecar_path(tmp_path / "sources" / writer.generate_slug(parsed), tmp_path)
         record = writer._provenance_record(parsed, imported_at="t")
         write_provenance(sidecar, Provenance(records=[record]))
         before = sidecar.read_bytes()
@@ -263,7 +263,7 @@ class TestRecordingIsGatedByMergesCrossSource:
         result = OpenAlexSourceWriter().write(
             _openalex(openalex_id="W9", arxiv_id="9999.99999"), tmp_path, imported_at="t")
         assert result.status == "imported"
-        sidecar = sidecar_path(result.path)
+        sidecar = sidecar_path(result.path, tmp_path)
         assert sidecar.exists()
         recs = read_provenance(sidecar).records
         assert [r.type for r in recs] == ["openalex"]
@@ -279,7 +279,7 @@ class TestRecordingIsGatedByMergesCrossSource:
 
     def test_base_record_hook_is_a_noop(self, tmp_path):
         decision = WriteResult(tmp_path / "sources" / "x.md", "imported", "")
-        out = BaseSourceWriter()._record(object(), decision, "t")
+        out = BaseSourceWriter()._record(object(), decision, "t", tmp_path)
         assert out is decision
         assert not (tmp_path / "source-provenance").exists()
 
@@ -300,7 +300,7 @@ class TestMergeStillBehavesAsBefore:
         assert result.path == existing.path  # the existing original
         # No new .md; the merge folds into the existing original's sidecar.
         assert sorted(p.name for p in (tmp_path / "sources").glob("*.md")) == before_md
-        assert _arxiv_records(sidecar_path(existing.path))[0].id == "2311.09277"
+        assert _arxiv_records(sidecar_path(existing.path, tmp_path))[0].id == "2311.09277"
 
 
 class TestMixedBatch:
@@ -316,7 +316,7 @@ class TestMixedBatch:
         # `os.replace` cannot overwrite with a file.
         writer = ArxivSourceWriter()
         boom = _arxiv(arxiv_id="9000.00001", version=1, title="Boom")
-        bad = sidecar_path(tmp_path / "sources" / writer.generate_slug(boom))
+        bad = sidecar_path(tmp_path / "sources" / writer.generate_slug(boom), tmp_path)
         bad.mkdir(parents=True, exist_ok=True)
 
         report = import_works(
@@ -354,7 +354,7 @@ class TestAStaleSidecarNeverAttachesToANewPaper:
     def test_a_deleted_papers_ledger_is_not_inherited_by_its_slug_successor(self, tmp_path):
         (tmp_path / "sources").mkdir()
         first = ArxivSourceWriter().write(self._work("1706.03762"), tmp_path, imported_at="t1")
-        sidecar = sidecar_path(first.path)
+        sidecar = sidecar_path(first.path, tmp_path)
         assert sidecar.is_file()
 
         first.path.unlink()  # the user deletes the source; the ledger is left behind
@@ -364,7 +364,7 @@ class TestAStaleSidecarNeverAttachesToANewPaper:
         assert second.status == "imported"
         assert second.path.name == first.path.name  # the slug really is reused
 
-        ids = [r.id for r in read_provenance(sidecar_path(second.path)).records]
+        ids = [r.id for r in read_provenance(sidecar_path(second.path, tmp_path)).records]
         assert ids == ["2401.09999"], (
             "the new original's ledger claims it also came from the deleted paper"
         )
@@ -376,12 +376,12 @@ class TestAStaleSidecarNeverAttachesToANewPaper:
         work = self._work("1706.03762")
         writer = ArxivSourceWriter()
         decision = writer._resolve(work, tmp_path, "write")
-        writer._record(work, decision, "t1")
-        before = sidecar_path(decision.path).read_bytes()
+        writer._record(work, decision, "t1", tmp_path)
+        before = sidecar_path(decision.path, tmp_path).read_bytes()
 
         result = ArxivSourceWriter().write(work, tmp_path, imported_at="t1")
         assert result.status == "imported"
-        assert sidecar_path(result.path).read_bytes() == before
+        assert sidecar_path(result.path, tmp_path).read_bytes() == before
 
 
 class TestAFailedRecordDoesNotFreeItsSlug:
@@ -400,7 +400,7 @@ class TestAFailedRecordDoesNotFreeItsSlug:
         assert writer.generate_slug(first) == writer.generate_slug(second)
 
         # Make the first paper's sidecar write fail: occupy its path with a dir.
-        doomed = sidecar_path(tmp_path / "sources" / writer.generate_slug(first))
+        doomed = sidecar_path(tmp_path / "sources" / writer.generate_slug(first), tmp_path)
         doomed.mkdir(parents=True, exist_ok=True)
 
         a = writer.write(first, tmp_path, imported_at="t")
@@ -411,4 +411,4 @@ class TestAFailedRecordDoesNotFreeItsSlug:
         # `-2`, exactly as if the first import had succeeded. The suffix does not
         # depend on whether an unrelated write happened to fail.
         assert b.path.name.endswith("-2.md")
-        assert [r.id for r in _arxiv_records(sidecar_path(b.path))] == ["2222.22222"]
+        assert [r.id for r in _arxiv_records(sidecar_path(b.path, tmp_path))] == ["2222.22222"]

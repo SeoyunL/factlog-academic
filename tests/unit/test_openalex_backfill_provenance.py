@@ -125,7 +125,7 @@ def _md_snapshot(kb):
 
 
 def _records(md):
-    return {r.type: r.to_dict() for r in read_provenance(sidecar_path(md)).records}
+    return {r.type: r.to_dict() for r in read_provenance(sidecar_path(md, md.parent.parent)).records}
 
 
 def _backfill(kb, *extra):
@@ -214,7 +214,8 @@ class TestTheBackfilledRecordIsTheImportsRecord:
         assert backfilled["openalex"]["journal"] == "The Lancet"
         assert backfilled["openalex"]["is_retracted"] is True
         # ...and the bytes, not just the parse.
-        assert sidecar_path(backfilled_md).read_bytes() == sidecar_path(imported_md).read_bytes()
+        assert (sidecar_path(backfilled_md, kb).read_bytes()
+                == sidecar_path(imported_md, imported_kb).read_bytes())
 
     def test_auto_update_still_never_writes_is_retracted_after_a_backfill(self, kb, fake, capsys):
         """PR #97's guarantee. A backfill does not weaken it: --auto-update learns the new
@@ -246,8 +247,8 @@ class TestWhatItRefusesAndWhatItLeavesAlone:
 
         assert "✗ W1" in out and "imported_at" in out
         assert "✎ W2" in out
-        assert not sidecar_path(kb / "sources" / "W1.md").exists()
-        assert sidecar_path(kb / "sources" / "W2.md").exists()
+        assert not sidecar_path(kb / "sources" / "W1.md", kb).exists()
+        assert sidecar_path(kb / "sources" / "W2.md", kb).exists()
 
     @pytest.mark.parametrize("literal", ["1", "yes", "on"])
     def test_an_uninterpretable_retraction_flag_is_refused_per_id(self, kb, capsys, literal):
@@ -261,8 +262,8 @@ class TestWhatItRefusesAndWhatItLeavesAlone:
         assert "✗ W2" in out and "is_retracted" in out
         assert f"{literal!r}" in out               # the offending value, named verbatim
         # Neither dropped nor coerced: W2 gets no ledger at all.
-        assert sidecar_path(kb / "sources" / "W1.md").exists()
-        assert not sidecar_path(kb / "sources" / "W2.md").exists()
+        assert sidecar_path(kb / "sources" / "W1.md", kb).exists()
+        assert not sidecar_path(kb / "sources" / "W2.md", kb).exists()
 
     def test_the_refusal_agrees_between_preview_and_run(self, kb, capsys):
         _front_matter_only(kb, "W1")
@@ -305,7 +306,7 @@ class TestWhatItRefusesAndWhatItLeavesAlone:
     def test_a_re_run_is_a_byte_and_mtime_identical_no_op(self, kb, capsys):
         md = _front_matter_only(kb, "W1", is_retracted=True, journal="The Lancet")
         assert _backfill(kb) == 0
-        sidecar = sidecar_path(md)
+        sidecar = sidecar_path(md, kb)
         before = (sidecar.read_bytes(), sidecar.stat().st_mtime_ns)
         md_before = _md_snapshot(kb)
         capsys.readouterr()
@@ -420,6 +421,6 @@ class TestVocabulary:
     def test_the_ledger_records_a_real_bool_that_read_provenance_accepts(self, kb):
         md = _front_matter_only(kb, "W1", retraction_literal='"true"')
         assert _backfill(kb) == 0
-        raw = json.loads(sidecar_path(md).read_text(encoding="utf-8"))
+        raw = json.loads(sidecar_path(md, kb).read_text(encoding="utf-8"))
         # Never the string "true": a reader that validates the type must accept it.
         assert raw["records"][0]["is_retracted"] is True

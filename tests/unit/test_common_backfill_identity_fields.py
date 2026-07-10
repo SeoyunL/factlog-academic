@@ -129,7 +129,7 @@ class TestARefusedRecordIsWhatKeepsALaterMergeClean:
         # signal-field value space (#109) or a missing `imported_at` instead, and the
         # measurement below would then prove nothing about `required`.
         assert "identifying field(s) version" in result.reason
-        assert "version" not in read_provenance(sidecar_path(original)).records[0].fields
+        assert "version" not in read_provenance(sidecar_path(original, original.parent.parent)).records[0].fields
 
         merged = ArxivSourceWriter().write(_arxiv_work(version=7), root, imported_at="t")
         assert merged.status == "merged"
@@ -140,7 +140,7 @@ class TestARefusedRecordIsWhatKeepsALaterMergeClean:
         # {"version": None}, and the import sees None != 7 -> a divergence it did not
         # cause. The false conflict is the reason to refuse.
         root, original = _kb_with_openalex_original()
-        sidecar = sidecar_path(original)
+        sidecar = sidecar_path(original, original.parent.parent)
         provenance = read_provenance(sidecar)
         provenance.records.append(
             SourceRecord(

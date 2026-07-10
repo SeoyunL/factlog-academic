@@ -58,7 +58,7 @@ def _run(kb: Path, dry_run: bool = False) -> dict[str, bf.BackfillResult]:
 
 
 def _records(kb: Path, md_name: str) -> list[dict]:
-    sidecar = sidecar_path(kb / "sources" / md_name)
+    sidecar = sidecar_path(kb / "sources" / md_name, kb)
     return [r.to_dict() for r in read_provenance(sidecar).records]
 
 
@@ -167,8 +167,8 @@ class TestTheRetractionFlagIsNeverCoerced:
 
         assert results["W1"].status == bf.BACKFILL_WRITTEN
         assert results["W2"].status == bf.BACKFILL_REFUSED
-        assert sidecar_path(kb / "sources" / "clean.md").exists()
-        assert not sidecar_path(kb / "sources" / "dirty.md").exists()
+        assert sidecar_path(kb / "sources" / "clean.md", kb).exists()
+        assert not sidecar_path(kb / "sources" / "dirty.md", kb).exists()
 
     def test_a_ledger_backed_papers_flag_is_not_inspected(self, kb: Path):
         """Only a front-matter-only paper's flag can reach a ledger through a backfill. A
@@ -178,7 +178,7 @@ class TestTheRetractionFlagIsNeverCoerced:
             kb, "has-ledger.md",
             f'openalex_id: "W1"\nimported_at: "{_STAMP}"\nopenalex_is_retracted: yes\n',
         )
-        sidecar = sidecar_path(kb / "sources" / "has-ledger.md")
+        sidecar = sidecar_path(kb / "sources" / "has-ledger.md", kb)
         sidecar.parent.mkdir()
         sidecar.write_text(
             '{"schema_version": 1, "records": [{"type": "openalex", "id": "W1", '
@@ -204,7 +204,7 @@ class TestRefusalsAndNoOps:
     def test_a_second_backfill_is_a_byte_and_mtime_identical_no_op(self, kb: Path):
         _source(kb, "a.md", f'openalex_id: "W1"\ntype: "article"\nimported_at: "{_STAMP}"\n')
         _run(kb)
-        sidecar = sidecar_path(kb / "sources" / "a.md")
+        sidecar = sidecar_path(kb / "sources" / "a.md", kb)
         before_bytes, before_mtime = sidecar.read_bytes(), os.stat(sidecar).st_mtime_ns
 
         second = _run(kb)
@@ -219,7 +219,7 @@ class TestRefusalsAndNoOps:
             kb, "a.md",
             f'openalex_id: "W1"\narxiv_id: "2301.00001"\ntype: "article"\nimported_at: "{_STAMP}"\n',
         )
-        sidecar = sidecar_path(kb / "sources" / "a.md")
+        sidecar = sidecar_path(kb / "sources" / "a.md", kb)
         sidecar.parent.mkdir()
         sidecar.write_text(
             '{"schema_version": 1, "records": [{"type": "arxiv", "id": "2301.00001", '
@@ -390,7 +390,7 @@ class TestPreviewAgreesWithTheRun:
             "openalex_is_retracted: true\n",
         )
         _source(kb, "d_has_ledger.md", f'openalex_id: "W4"\nimported_at: "{_STAMP}"\n')
-        sidecar = sidecar_path(kb / "sources" / "d_has_ledger.md")
+        sidecar = sidecar_path(kb / "sources" / "d_has_ledger.md", kb)
         sidecar.parent.mkdir()
         sidecar.write_text(
             '{"schema_version": 1, "records": [{"type": "openalex", "id": "W4", '

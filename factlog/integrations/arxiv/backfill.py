@@ -67,6 +67,7 @@ def backfill_schema() -> BackfillSchema:
     """
     return BackfillSchema(
         type="arxiv",
+        id_key="arxiv_id",
         collect_entries=check_versions.collect_ledger_entries,
         provenance_of=check_versions.provenance_of,
         id_of=lambda entry: entry.arxiv_id,

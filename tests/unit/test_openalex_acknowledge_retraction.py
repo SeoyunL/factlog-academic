@@ -84,7 +84,7 @@ def _seed(kb, oid="W123", *, is_retracted=False, work_type="article", doi=None,
     }
     records = [SourceRecord(type="openalex", id=oid, imported_at=IMPORTED_AT, fields=fields),
                *extra_records]
-    write_provenance(sidecar_path(md), Provenance(records=records))
+    write_provenance(sidecar_path(md, kb), Provenance(records=records))
     return md
 
 

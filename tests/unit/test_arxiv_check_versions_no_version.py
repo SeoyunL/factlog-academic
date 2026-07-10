@@ -107,7 +107,7 @@ def _seed(kb, arxiv_id, version, *, name=None):
         encoding="utf-8",
     )
     write_provenance(
-        sidecar_path(md),
+        sidecar_path(md, kb),
         Provenance(
             records=[
                 SourceRecord(
@@ -137,7 +137,7 @@ def _seed_versionless(kb, arxiv_id=ID, *, name=None, withdrawn_by=None):
     if withdrawn_by is not None:
         fields["withdrawn_by"] = withdrawn_by
     write_provenance(
-        sidecar_path(md),
+        sidecar_path(md, kb),
         Provenance(
             records=[
                 SourceRecord(
@@ -178,7 +178,7 @@ def _seed_openalex_original(kb, arxiv_id=ID):
 
 
 def _record(md):
-    return next(r for r in read_provenance(sidecar_path(md)).records if r.type == "arxiv")
+    return next(r for r in read_provenance(sidecar_path(md, md.parent.parent)).records if r.type == "arxiv")
 
 
 def _plain(kb):
@@ -243,7 +243,7 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
         # DOES exist; it simply holds no arXiv record. Measured: `arxiv-import` merges
         # one in. So the report may name it — but not the reason "there is no ledger".
         original = _seed_openalex_original(tmp_path)
-        assert sidecar_path(original).is_file()
+        assert sidecar_path(original, tmp_path).is_file()
         fake(FakeClient([_work(ID, version=7)]))
 
         run(_plain(tmp_path))
@@ -270,7 +270,7 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
         (tmp_path / "sources" / "p.md").write_text(
             f"---\narxiv_id: {ID}\n---\n# p\n", encoding="utf-8"
         )
-        assert not sidecar_path(tmp_path / "sources" / "p.md").is_file()
+        assert not sidecar_path(tmp_path / "sources" / "p.md", tmp_path).is_file()
         fake(FakeClient([_work(ID, version=7)]))
 
         run(_plain(tmp_path))
@@ -288,7 +288,7 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
     def test_a_paper_whose_sidecar_will_not_parse_asserts_nothing_and_prescribes_nothing(
         self, tmp_path, fake, capsys
     ):
-        # The fourth UPDATE_NO_LEDGER case. `sidecar_path(md).is_file()` is True for an
+        # The fourth UPDATE_NO_LEDGER case. `sidecar_path(md, tmp_path).is_file()` is True for an
         # unparseable ledger, so a bool made this paper indistinguishable from the
         # OpenAlex-primary one: the report asserted the contents of a file it never read
         # ("holds no arXiv record") and prescribed `arxiv-import`, which measurably fails.
@@ -331,7 +331,7 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
 
         (entry,), errors = cv.collect_ledger_entries(tmp_path)
         assert entry.sidecar_state == cv.SIDECAR_UNREADABLE
-        assert sidecar_path(tmp_path / "sources" / "p.md").is_file()  # the bool said True
+        assert sidecar_path(tmp_path / "sources" / "p.md", tmp_path).is_file()  # the bool said True
         assert [e.status for e in errors] == [cv.STATUS_ERROR]
 
     def test_the_two_front_matter_papers_get_different_notes(self, tmp_path, fake, capsys):

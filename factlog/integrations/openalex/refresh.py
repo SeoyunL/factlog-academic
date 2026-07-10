@@ -82,6 +82,9 @@ from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
     SourceRecord,
+    excluded_reason,
+    excluded_source_refs,
+    provenance_sources,
     read_provenance,
     update_source,
     write_provenance,
@@ -112,6 +115,7 @@ __all__ = [
     "COMPARED_FIELDS",
     "RETRACTION_KEY",
     "collect_ledger_entries",
+    "excluded_checks",
     "parse_retraction_flag",
     "provenance_of",
     "partition_by_freshness",
@@ -313,8 +317,11 @@ def collect_ledger_entries(
     # wrong about all of its input. The front matter carries `openalex_id`, `type`
     # (the work type), `doi`, `journal` and `openalex_is_retracted`, which is what a
     # compare needs, and reading it writes nothing.
-    sources_dir = root / "sources"
-    for path in sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else ():
+    # The KB's own enumeration (`rglob` under `sources/`, hidden paths excluded), not a
+    # flat `glob` that would leave a nested paper out of this command's denominator while
+    # `factlog sources` lists it (#112). A source outside the provenance root is reported
+    # by `excluded_checks`, never dropped.
+    for path in provenance_sources(root):
         scalars = read_scalars(
             path, ("openalex_id", "type", "doi", "journal", RETRACTION_KEY)
         )
@@ -349,6 +356,24 @@ def collect_ledger_entries(
     entries.sort(key=lambda e: e.openalex_id)
     errors.sort(key=lambda e: e.openalex_id)
     return entries, errors
+
+
+def excluded_checks(kb_root: Path | str) -> list[RefreshCheck]:
+    """One ``error`` :class:`RefreshCheck` per source that names an OpenAlex work but lies
+    outside the provenance root, so no ledger can exist for it (#112).
+
+    Deliberately a separate channel from :func:`collect_ledger_entries`' errors, which
+    ``common/backfill.py`` treats as a poison that stops every write (#111): an unreadable
+    ledger contaminates the front-matter-only classification, while an excluded source
+    contaminates nothing. It is an *error* rather than a note because a retraction on this
+    work will never be reported, and a command that exits 0 while that is true is the
+    silent direction #112 closes. The arXiv twin is ``check_versions.excluded_checks``.
+    """
+    root = Path(kb_root)
+    return [
+        RefreshCheck(openalex_id=ref, status=STATUS_ERROR, reason=excluded_reason(ref))
+        for ref in excluded_source_refs(root, "openalex_id")
+    ]
 
 
 def _empty_slot() -> dict:
