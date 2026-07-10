@@ -232,9 +232,47 @@ class ArxivSourceWriter(BaseSourceWriter):
         messages name it. This text names arXiv commands and so must never reach a
         non-arXiv error — which it cannot, because a writer keeping the empty
         :attr:`_IDENTIFYING_FIELDS` default never reaches :meth:`_divergence`.
+
+        **A version-less ledger record is not a version drift.** ``was`` is
+        ``existing.fields.get("version")``; a hand-edited or externally-produced
+        ledger (since #113 no importer writes one) can carry no ``version``, in which
+        case ``was`` is ``None``. Interpolating it as ``v{was}`` printed ``vNone`` — a
+        Python value, not a version (#116). That case now gets its own message and
+        never emits a bare ``None``.
+
+        Its remedy is stated by *provenance*, not by naming a command. The
+        version-drift branch prescribes ``arxiv-check-versions`` because a drift is a
+        refresh's job (#58). A record that never carried a version is a different thing:
+        :func:`check_versions._diff` computes
+        ``changed = recorded is not None and current != recorded``, so a version-less
+        record is reported ``unchanged`` — the plain "run arxiv-check-versions to record
+        the new version" instruction would not surface it as a drift at all. And since
+        #113 no importer writes such a record, so it was hand-edited or produced outside
+        factlog; giving a record its *first* version is an import's authority, not a
+        refresh's (#58). The honest message therefore names no command and points at the
+        ledger's origin. (Whether ``--auto-update`` happens to overwrite the field is a
+        check_versions concern, not one this text may promise across that boundary.)
+
+        ``now`` is ``incoming.fields.get("version")``, sourced from
+        :class:`ParsedArxivWork`'s ``version: int`` — always a live-parsed integer,
+        never ``None`` — so the withdrawal branches below, which interpolate only
+        ``now``, cannot print ``vNone``. Only ``was`` (the ledger's recorded value)
+        can be absent, and only the version-drift branch reads it.
         """
         was, now = existing.fields.get("version"), incoming.fields.get("version")
         if was != now:
+            if was is None:
+                # The ledger holds no version to have drifted from, so this is not the
+                # refresh's version-bump case. #113 means no importer wrote this record;
+                # name no command, state what is true, and point at the ledger's origin.
+                return (
+                    f"ledger records no version for this paper, arXiv now serves v{now}; "
+                    "a record that never carried a version is not a version that drifted, "
+                    "so arxiv-check-versions reports it as unchanged rather than as the "
+                    "bump this error would otherwise name. Since #113 an importer never "
+                    "writes a version-less arxiv record, so this ledger entry was "
+                    "hand-edited or produced outside factlog and must be corrected there"
+                )
             return (
                 f"ledger records v{was}, arXiv now serves v{now}; run "
                 "arxiv-check-versions to record the new version"
