@@ -77,6 +77,7 @@ from factlog.integrations.common.provenance import (
     ProvenanceError,
     SourceRecord,
     read_provenance,
+    sidecar_path,
     update_source,
     write_provenance,
 )
@@ -103,6 +104,7 @@ __all__ = [
     "summarize",
     "apply_auto_update",
     "no_version_note",
+    "no_ledger_remedy",
 ]
 
 #: A provenance record's ``type`` for an arXiv contribution.
@@ -146,12 +148,20 @@ class LedgerEntry:
     as withdrawn — this is what a *newly* withdrawn paper is measured against.
     ``sources`` are the ledger-relative paths that reference the paper (one paper
     can be cited by several sources), for the report only.
+
+    ``sidecar_exists`` only speaks for a paper whose ``sources`` are front matter: it
+    says whether that ``.md`` nonetheless *has* a provenance sidecar — one that simply
+    holds no arXiv record (an OpenAlex-primary import echoing ``arxiv_id``). "The ledger
+    holds no arXiv record" and "there is no ledger" are two different papers with two
+    different remedies, and collapsing them is how a report ends up prescribing a command
+    that does nothing (#116, #121). For a ledger-backed paper it is trivially ``True``.
     """
 
     arxiv_id: str
     recorded_version: int | None
     recorded_withdrawn_by: str | None
     sources: tuple[str, ...] = ()
+    sidecar_exists: bool = True
 
 
 @dataclass(frozen=True)
@@ -197,6 +207,9 @@ class VersionCheck:
     recorded_from: str = "ledger"
     reason: str = ""
     sources: tuple[str, ...] = ()
+    #: See :class:`LedgerEntry`. Discriminates "the ledger holds no arXiv record" from
+    #: "there is no ledger" for a ``recorded_from="front-matter"`` paper.
+    sidecar_exists: bool = True
 
 
 def _relative(path: Path, kb_root: Path) -> str:
@@ -292,10 +305,16 @@ def collect_ledger_entries(
         # value (not "author"/"admin") is kept verbatim: like the ledger path above
         # (`withdrawn_by`), any non-empty string means "a withdrawal was recorded",
         # which is all the presence test needs; the batch never crashes over it.
+        # A sidecar may exist and simply hold no arXiv record — an OpenAlex-primary
+        # import that echoed `arxiv_id` into the front matter. That paper's remedy
+        # (`arxiv-import`, which merges into the existing ledger) is not the remedy of a
+        # paper with no sidecar at all (for which, version-less, there is none). Record
+        # which one this is rather than making the report guess.
         slots[arxiv_id] = {
             "version": version,
             "withdrawn_by": scalars.get("arxiv_withdrawn_by") or None,
             "sources": {_relative(path, root)},
+            "sidecar_exists": sidecar_path(path).is_file(),
         }
 
     entries = [
@@ -304,6 +323,7 @@ def collect_ledger_entries(
             recorded_version=slot["version"],
             recorded_withdrawn_by=slot["withdrawn_by"],
             sources=tuple(sorted(slot["sources"])),
+            sidecar_exists=slot.get("sidecar_exists", True),
         )
         for arxiv_id, slot in slots.items()
     ]
@@ -409,6 +429,7 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
         withdrawn_by=upstream_by,
         recorded_withdrawn_by=recorded_by,
         sources=entry.sources,
+        sidecar_exists=entry.sidecar_exists,
     )
 
 
@@ -544,6 +565,50 @@ class LedgerUpdate:
     recorded_version: int | None = None
     current_version: int | None = None
     reason: str = ""
+    #: See :class:`LedgerEntry`. Decides which :data:`UPDATE_NO_LEDGER` remedy is true.
+    sidecar_exists: bool = True
+
+
+def no_ledger_remedy(
+    arxiv_id: str, *, sidecar_exists: bool, has_recorded_version: bool
+) -> str:
+    """What actually repairs a paper ``--auto-update`` cannot write a ledger for.
+
+    Three different papers reach :data:`UPDATE_NO_LEDGER`, and they have three different
+    remedies. Naming one remedy for all three is how a report prescribes a command that
+    does nothing — the failure #116 named and this issue repeats one layer up. Each
+    branch below was measured, not reasoned:
+
+    * **A sidecar exists but holds no arXiv record** (an OpenAlex-primary import that
+      echoed ``arxiv_id`` into the front matter). ``arxiv-import`` merges an arXiv record
+      into that existing ledger: measured ``merged``.
+    * **No sidecar, and the front matter records a version.** ``arxiv-backfill-provenance``
+      builds a ledger from that front matter: measured ``backfilled``.
+    * **No sidecar, and the front matter records no version.** *Nothing currently repairs
+      this paper.* ``arxiv-import`` answers ``skipped: already imported (arxiv_id match)``
+      and ``arxiv-backfill-provenance`` answers ``refused`` (``required=("version",)``,
+      #113). Saying so is the honest answer #116 asked for; naming a command here would
+      be the same lie in a new place.
+    """
+    if sidecar_exists:
+        return (
+            "Its provenance ledger holds no arXiv record for this paper (another "
+            "integration wrote the ledger and only echoed the id), so --auto-update has "
+            f"no record to fill. Run `factlog arxiv-import --id {arxiv_id}` to add one."
+        )
+    if has_recorded_version:
+        return (
+            "This paper has no provenance ledger (imported before #82), so --auto-update "
+            "has none to fill. Run `factlog arxiv-backfill-provenance` to build one from "
+            "its front matter."
+        )
+    return (
+        "This paper has no provenance ledger (imported before #82), and no command "
+        "currently records a version for it: --auto-update has no ledger to write into, "
+        "`factlog arxiv-import` answers `already imported (arxiv_id match)`, and "
+        "`factlog arxiv-backfill-provenance` refuses a paper whose front matter carries "
+        "no arxiv_version (#113). Backfilling a ledger for it is tracked in #105."
+    )
 
 
 def _refreshed_fields(existing: SourceRecord, result: VersionCheck) -> dict:
@@ -631,11 +696,14 @@ def apply_auto_update(
                     status=UPDATE_NO_LEDGER,
                     recorded_version=result.recorded_version,
                     current_version=result.current_version,
-                    reason=(
-                        "imported before #82: front matter only, no provenance "
-                        "ledger to update. Run `factlog arxiv-import --id "
-                        "<arxiv_id>` to create one; --auto-update "
-                        "will not fabricate an import record."
+                    sidecar_exists=result.sidecar_exists,
+                    # `--auto-update` will not fabricate an import record whatever the
+                    # remedy is; which remedy is true depends on whether a sidecar exists
+                    # and whether the front matter carries a version.
+                    reason=no_ledger_remedy(
+                        result.arxiv_id,
+                        sidecar_exists=result.sidecar_exists,
+                        has_recorded_version=result.recorded_version is not None,
                     ),
                 )
             )
@@ -830,38 +898,47 @@ def un_withdrawal_note(result: VersionCheck) -> str:
     )
 
 
-def no_version_note(result: VersionCheck, *, filled: bool = False) -> str:
+def no_version_note(result: VersionCheck, *, outcome: str | None = None) -> str:
     """The line for a record that carries no ``version`` at all (:data:`STATUS_NO_VERSION`).
 
     It never interpolates the recorded value — there is none, and ``v{None}`` is the
     ``vNone`` #116 removed. It says what is true (the record holds no version, arXiv
-    serves vN) and it names the *working* remedy, the same discipline
-    ``ArxivSourceWriter._divergence`` follows: for a ledger-backed paper
-    ``arxiv-check-versions --auto-update`` measurably records the version, and the
-    cross-source merge that errored on the version-less record then succeeds.
+    serves vN) and it names the remedy that *works*, which is not the same command for
+    every such paper:
 
-    For a **front-matter**-only paper (imported before #82, #98) ``--auto-update`` has
-    no ledger to write into and reports :data:`UPDATE_NO_LEDGER`, so naming it would be
-    the same lie in a new place. That branch names ``arxiv-import`` instead, exactly as
-    the :data:`UPDATE_NO_LEDGER` reason does.
+    * A **ledger**-backed record is what ``--auto-update`` repairs: measured, it writes
+      the version and the cross-source merge that errored then succeeds.
+    * A **front-matter** paper has no arXiv ledger record for ``--auto-update`` to fill,
+      so :func:`no_ledger_remedy` decides between ``arxiv-import``,
+      ``arxiv-backfill-provenance``, and the honest admission that nothing repairs it.
 
-    ``filled`` is set when this same run's ``--auto-update`` already wrote the version.
-    The report then says so rather than prescribing a command that has just run: the
-    report and the write must agree, which is the whole of #121.
+    ``outcome`` is this paper's :class:`LedgerUpdate` status when ``--auto-update`` ran
+    this very run, and ``None`` when it did not. A report that prescribes
+    ``--auto-update`` inside the output of ``--auto-update`` is the report and the write
+    disagreeing again, inverted — including for a paper whose write *failed*, which must
+    point at the error rather than at the command that just produced it.
     """
     where = "front matter" if result.recorded_from == "front-matter" else "ledger"
     serves = f"arXiv now serves v{result.current_version}"
     head = f"{result.arxiv_id}: the {where} records no version, {serves}."
-    if filled:
+
+    if outcome == UPDATE_WRITTEN:
+        return f"{head} --auto-update recorded it this run (see 'Ledger updated' below)."
+    if outcome == UPDATE_ERROR:
         return (
-            f"{head} --auto-update recorded it this run (see 'Ledger updated' below)."
+            f"{head} --auto-update could not record it this run (see 'Could not "
+            "auto-update' below); the version is still missing."
         )
+
     if result.recorded_from == "front-matter":
+        remedy = no_ledger_remedy(
+            result.arxiv_id,
+            sidecar_exists=result.sidecar_exists,
+            has_recorded_version=False,
+        )
         return (
-            f"{head} Version drift cannot be detected for this paper until a version "
-            "is recorded. It has no provenance ledger (imported before #82), so "
-            "--auto-update has nothing to write into; run "
-            f"`factlog arxiv-import --id {result.arxiv_id}` to create one."
+            f"{head} Version drift cannot be detected for this paper until a version is "
+            f"recorded. {remedy}"
         )
     return (
         f"{head} Version drift cannot be detected for this paper until a version is "
@@ -928,12 +1005,18 @@ def report_lines(
         for r in results
         if r.status == STATUS_CHANGED and not r.newly_withdrawn and not r.un_withdrawn
     ]
+    # Unlike `changed`, a no-version result is NOT filtered out when the paper is also
+    # newly withdrawn. The withdrawal note absorbs a version change ("Its version also
+    # changed: ...") so listing it twice would repeat one fact; it says nothing about a
+    # *missing* version, and that paper's remedy is its own. A distinct state keeps its
+    # distinct signal even when a louder one fires alongside it.
     no_version = [r for r in results if r.status == STATUS_NO_VERSION]
     errors = [r for r in results if r.status == STATUS_ERROR]
-    # Which papers this run's --auto-update actually filled. The no-version note reads
-    # differently once the write has happened: prescribing `--auto-update` underneath a
-    # line that says it just ran would be the report and the write disagreeing again.
-    filled = {u.arxiv_id for u in updates if u.status == UPDATE_WRITTEN}
+    # What this run's --auto-update did to each paper. The no-version note reads
+    # differently once the write has happened — or failed: prescribing `--auto-update`
+    # underneath a line that says it just ran, or just errored, would be the report and
+    # the write disagreeing again.
+    outcomes = {u.arxiv_id: u.status for u in updates}
 
     if withdrawn:
         lines.append("\nWithdrawn since import (not a version change):")
@@ -969,7 +1052,7 @@ def report_lines(
             "version checking until a version exists):"
         )
         for result in no_version:
-            note = no_version_note(result, filled=result.arxiv_id in filled)
+            note = no_version_note(result, outcome=outcomes.get(result.arxiv_id))
             lines.append(f"  ? {note}{_sources_suffix(result)}")
 
     if errors:
@@ -1023,12 +1106,18 @@ def _auto_update_lines(updates: Sequence[LedgerUpdate]) -> list[str]:
                 f"  ✎ {u.arxiv_id}: recorded v{u.current_version} ({was}){ledgers}"
             )
     if no_ledger:
+        # The header prescribed `arxiv-import` for every paper here. That is true for a
+        # paper whose sidecar simply holds no arXiv record, false for one with no sidecar
+        # at all (`already imported (arxiv_id match)`). The remedy is per-paper, so it is
+        # printed per-paper (#121); the header only states the shared fact.
         lines.append(
-            "\nNot auto-updated (no ledger; front matter only, imported before #82 — "
-            "run `factlog arxiv-import --id <arxiv_id>` to create one):"
+            "\nNot auto-updated (no arXiv record in a provenance ledger to update; "
+            "--auto-update never fabricates an import record):"
         )
         for u in no_ledger:
-            lines.append(f"  · {u.arxiv_id}: arXiv now serves v{u.current_version}")
+            lines.append(
+                f"  · {u.arxiv_id}: arXiv now serves v{u.current_version}. {u.reason}"
+            )
     if errors:
         lines.append("\nCould not auto-update:")
         for u in errors:
@@ -1064,8 +1153,11 @@ def porcelain_lines(
     one of ``updated``/``unchanged``/``no-ledger``/``error`` and ``ledgers`` is a
     comma-joined list (empty unless ``updated``). They are absent when the flag is
     off, so an existing #78 parser is unaffected. The tally footer gains one row,
-    ``no_version\t<n>``, appended after ``skipped`` so no existing row moves. The
-    progress/ETA is stderr only.
+    ``no_version\t<n>``, after ``skipped``: rows ``checked``…``skipped`` keep their
+    index, while ``updated`` and ``target`` shift down by one — as ``updated``'s
+    conditional presence (it appears only under ``--auto-update``) already made
+    positional tally parsing unsound. Parse the footer by its first field, as the rows
+    above. The progress/ETA is stderr only.
     """
     rows: list[str] = []
     for result in sorted([*results, *skipped], key=lambda r: r.arxiv_id):
@@ -1102,9 +1194,10 @@ def porcelain_lines(
     rows.append(f"un_withdrawn\t{summary.un_withdrawn}")
     rows.append(f"errors\t{summary.errors}")
     rows.append(f"skipped\t{summary.skipped}")
-    # Appended after the #78/#100 tallies rather than slotted next to `changed`, for the
-    # same reason `un_withdrawn` was: the footer is keyed by its first field, and a
-    # parser that reads it positionally must not have its existing rows shifted.
+    # Appended after the #78/#100 tallies rather than slotted next to `changed`: that
+    # keeps every pre-existing row at its own index, which is the most a footer can
+    # promise. `updated` and `target` do move down by one — `updated` is conditional, so
+    # nothing could have parsed this footer positionally to begin with. Key by field.
     rows.append(f"no_version\t{summary.no_version}")
     if updates:
         rows.append(f"updated\t{sum(1 for u in updates if u.status == UPDATE_WRITTEN)}")

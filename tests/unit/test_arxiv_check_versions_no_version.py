@@ -16,6 +16,13 @@ having filled it*.
 
 The invariant these tests pin: **the command never writes a field the report did not
 name.**
+
+And the remedy each paper is given must be the one that *works* for it. Three papers
+reach "no version recorded", and `provenance_of` calls two of them "front-matter" while
+they need different commands — a sidecar that holds no arXiv record is repaired by
+`arxiv-import`, and a paper with no sidecar at all, version-less, is repaired by nothing
+that exists. Naming a command for that last one is #116 recreated at the prose layer, so
+the report says plainly that none records a version for it.
 """
 from __future__ import annotations
 
@@ -36,6 +43,8 @@ from factlog.integrations.common.provenance import (
     sidecar_path,
     write_provenance,
 )
+from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
+from factlog.integrations.openalex.work_parser import ParsedWork
 
 ID = "2311.09277"
 
@@ -142,6 +151,31 @@ def _seed_versionless(kb, arxiv_id=ID, *, name=None, withdrawn_by=None):
     return md
 
 
+def _seed_openalex_original(kb, arxiv_id=ID):
+    """An OpenAlex-primary source whose front matter echoes ``arxiv_id``.
+
+    Its sidecar exists and holds only an ``openalex`` record — so `provenance_of` calls
+    the paper "front-matter", but "there is no ledger" is false for it.
+    """
+    written = OpenAlexSourceWriter().write(
+        ParsedWork(
+            openalex_id="W1",
+            title="A Paper",
+            authors=("Ada Lovelace",),
+            year=2023,
+            journal="Journal of Foo",
+            doi=None,
+            pmid=None,
+            arxiv_id=arxiv_id,
+            work_type="article",
+        ),
+        kb,
+        imported_at="2026-01-01T00:00:00Z",
+    )
+    assert written.status == "imported"
+    return written.path
+
+
 def _record(md):
     return next(r for r in read_provenance(sidecar_path(md)).records if r.type == "arxiv")
 
@@ -201,24 +235,71 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
             assert ID in body
             assert f"v{version}" in body
 
-    def test_a_front_matter_only_paper_is_not_told_to_run_auto_update(
+    def test_a_paper_whose_sidecar_holds_no_arxiv_record_is_sent_to_arxiv_import(
         self, tmp_path, fake, capsys
     ):
-        # A pre-#82 paper has no ledger, so `--auto-update` reports `no-ledger` and
-        # writes nothing. Naming it would be the same lie in a new place (#98).
-        (tmp_path / "sources").mkdir()
-        (tmp_path / "sources" / "p.md").write_text(
-            f"---\narxiv_id: {ID}\n---\n# p\n", encoding="utf-8"
-        )
+        # An OpenAlex-primary import echoed `arxiv_id` into the front matter. A sidecar
+        # DOES exist; it simply holds no arXiv record. Measured: `arxiv-import` merges
+        # one in. So the report may name it — but not the reason "there is no ledger".
+        original = _seed_openalex_original(tmp_path)
+        assert sidecar_path(original).is_file()
         fake(FakeClient([_work(ID, version=7)]))
 
         run(_plain(tmp_path))
         out = capsys.readouterr().out
         assert "No version recorded: 1" in out
         assert "front matter records no version" in out
-        assert "arxiv-check-versions --auto-update" not in out
+        assert "ledger holds no arXiv record for this paper" in out
         assert f"factlog arxiv-import --id {ID}" in out
+        # --auto-update has no arXiv record to fill, so it must not be prescribed.
+        assert "arxiv-check-versions --auto-update" not in out
+        # And it must not claim the paper has no ledger — it has one.
+        assert "has no provenance ledger" not in out
         assert "None" not in out
+
+    def test_a_paper_with_no_sidecar_at_all_is_told_no_command_repairs_it(
+        self, tmp_path, fake, capsys
+    ):
+        # The honest case #116 asked for. Measured, this paper has NO working remedy:
+        #   ArxivSourceWriter().write(...) -> skipped, "already imported (arxiv_id match)"
+        #   backfill(...)                  -> refused (required=("version",))
+        # So the report must name none. Prescribing `arxiv-import` here — as the
+        # UPDATE_NO_LEDGER reason did — is #116 recreated at the prose layer.
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / "p.md").write_text(
+            f"---\narxiv_id: {ID}\n---\n# p\n", encoding="utf-8"
+        )
+        assert not sidecar_path(tmp_path / "sources" / "p.md").is_file()
+        fake(FakeClient([_work(ID, version=7)]))
+
+        run(_plain(tmp_path))
+        out = capsys.readouterr().out
+        assert "No version recorded: 1" in out
+        assert "no command currently records a version for it" in out
+        assert "already imported (arxiv_id match)" in out
+        assert "refuses a paper whose front matter carries no arxiv_version" in out
+        # Not one of these is a working remedy for this paper, so not one is prescribed
+        # as an imperative.
+        assert "arxiv-check-versions --auto-update" not in out
+        assert f"Run `factlog arxiv-import --id {ID}`" not in out
+        assert "None" not in out
+
+    def test_the_two_front_matter_papers_get_different_notes(self, tmp_path, fake, capsys):
+        # The collapse this fixes: `provenance_of` says "front-matter" for both, and one
+        # note for both is false for at least one of them. Same absent version, same
+        # arXiv v7, different remedies — the absent-vs-normal-value distinction of
+        # `개념-커버리지-힌트-사일런트미스-vs-부재`, applied to prose.
+        with_sidecar = cv.VersionCheck(
+            arxiv_id=ID, status=cv.STATUS_NO_VERSION, current_version=7,
+            recorded_from="front-matter", sidecar_exists=True,
+        )
+        without = cv.VersionCheck(
+            arxiv_id=ID, status=cv.STATUS_NO_VERSION, current_version=7,
+            recorded_from="front-matter", sidecar_exists=False,
+        )
+        assert cv.no_version_note(with_sidecar) != cv.no_version_note(without)
+        assert "arxiv-import" in cv.no_version_note(with_sidecar)
+        assert "no command currently records a version" in cv.no_version_note(without)
 
 
 class TestAutoUpdateFillsItAndSaysSo:
@@ -253,6 +334,28 @@ class TestAutoUpdateFillsItAndSaysSo:
         out = capsys.readouterr().out
         assert "--auto-update recorded it this run" in out
         assert "Run `factlog arxiv-check-versions --auto-update`" not in out
+
+    def test_a_failed_write_points_at_the_error_not_at_the_command_that_just_ran(
+        self, tmp_path, fake, capsys
+    ):
+        # An UPDATE_ERROR paper was told "Run `factlog arxiv-check-versions
+        # --auto-update`" during a run of that very command. Point at the failure.
+        _seed_versionless(tmp_path)
+        fake(FakeClient([_work(ID, version=7)]))
+        sidecar = tmp_path / "source-provenance" / f"{ID}.json"
+        sidecar.chmod(0o400)
+        (tmp_path / "source-provenance").chmod(0o500)
+        try:
+            code = run([*_plain(tmp_path), "--auto-update"])
+        finally:
+            (tmp_path / "source-provenance").chmod(0o700)
+            sidecar.chmod(0o600)
+
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "--auto-update could not record it this run" in out
+        assert "Run `factlog arxiv-check-versions --auto-update`" not in out
+        assert "None" not in out
 
 
 class TestTheExistingChangedSemanticsDoNotMove:
@@ -291,7 +394,13 @@ class TestTheExistingChangedSemanticsDoNotMove:
 
 class TestThePorcelainContract:
     """Porcelain is a machine contract: a new state must appear deterministically, as a
-    new *value* in an existing column, never a bare `None` and never a shifted column."""
+    new *value* in an existing column, never a bare `None` and never a shifted column.
+
+    The tally footer is keyed by its first field. `no_version` lands after `skipped`, so
+    every row that existed before it keeps its index, but `updated` and `target` move
+    down one. Both orders are pinned below, because the docstring now *claims* that and a
+    claim about a contract must be tested.
+    """
 
     def test_the_check_row_for_a_version_less_record_is_verbatim(
         self, tmp_path, fake, capsys
@@ -310,7 +419,7 @@ class TestThePorcelainContract:
         assert "unchanged\t0" in lines
         assert "None" not in "\n".join(lines)
 
-    def test_the_tally_row_is_appended_after_skipped_so_no_existing_row_moves(
+    def test_the_tally_row_lands_after_skipped_on_a_plain_run(
         self, tmp_path, fake, capsys
     ):
         _seed(tmp_path, "1706.03762", 5)
@@ -331,6 +440,34 @@ class TestThePorcelainContract:
             f"target\t{tmp_path}",
         ]
 
+    def test_the_tally_order_under_auto_update_is_pinned_too(self, tmp_path, fake, capsys):
+        # `no_version` lands at index 7, pushing `updated` and `target` down by one. The
+        # contract says so rather than claiming nothing moves. Pinned so the claim and
+        # the output cannot drift apart.
+        _seed_versionless(tmp_path)
+        fake(FakeClient([_work(ID, version=7)]))
+
+        run([*_plain(tmp_path), "--porcelain", "--auto-update"])
+        lines = capsys.readouterr().out.splitlines()
+        tally = [line for line in lines if not line.startswith(("check\t", "update\t"))]
+        assert tally == [
+            "checked\t1",
+            "unchanged\t0",
+            "changed\t0",
+            "withdrawn\t0",
+            "un_withdrawn\t0",
+            "errors\t0",
+            "skipped\t0",
+            "no_version\t1",
+            "updated\t1",
+            f"target\t{tmp_path}",
+        ]
+        # Every row before `updated` keeps the index it had before #121.
+        assert tally[:7] == [
+            "checked\t1", "unchanged\t0", "changed\t0", "withdrawn\t0",
+            "un_withdrawn\t0", "errors\t0", "skipped\t0",
+        ]
+
     def test_the_update_row_carries_an_empty_recorded_column(self, tmp_path, fake, capsys):
         _seed_versionless(tmp_path)
         fake(FakeClient([_work(ID, version=7)]))
@@ -343,7 +480,17 @@ class TestThePorcelainContract:
 
 class TestTheReportedSetEqualsTheWrittenSet:
     """The general invariant #121 states: the command must not write a field the report
-    did not name — nor a paper the report did not name."""
+    did not name — nor a paper the report did not name.
+
+    Scope note, so this class is not mistaken for the regression guard it is not: the two
+    set-equality tests below **also pass on `main`**. The `✎` section listed version-less
+    papers there too (that is where `was vNone` printed from), so
+    ``written == reported`` held while the bug was live. What was silent on `main` was the
+    *plain*, no-flag report, which listed nothing — and that is pinned by
+    `test_the_plain_run_names_the_version_less_paper_auto_update_would_write` and by the
+    `TestThePlainCheckSurfacesTheVersionLessRecord` class. These tests pin the invariant
+    so a future change cannot break it; they do not detect the original bug.
+    """
 
     def _ledger_fields(self, kb):
         out = {}
@@ -356,6 +503,21 @@ class TestTheReportedSetEqualsTheWrittenSet:
                     }
         return out
 
+    def _fields_written(self, before, after):
+        """Field names whose value moved, in either direction.
+
+        Walking only `after` would never see a field the write *removed* — and
+        `_refreshed_fields` writes `None` for a comment arXiv dropped, which `to_dict`
+        then omits. A deletion is a write.
+        """
+        moved = set()
+        for arxiv_id, fields in after.items():
+            was = before.get(arxiv_id, {})
+            for key in set(fields) | set(was):
+                if was.get(key) != fields.get(key):
+                    moved.add(key)
+        return moved
+
     def test_every_field_written_is_a_field_the_report_named(self, tmp_path, fake, capsys):
         # `version-less` + `drifted` in one run: two papers, one report.
         _seed_versionless(tmp_path, name="none")
@@ -367,11 +529,7 @@ class TestTheReportedSetEqualsTheWrittenSet:
         after = self._ledger_fields(tmp_path)
         out = capsys.readouterr().out
 
-        written_fields = set()
-        for arxiv_id, fields in after.items():
-            for key, value in fields.items():
-                if before[arxiv_id].get(key) != value:
-                    written_fields.add(key)
+        written_fields = self._fields_written(before, after)
         assert written_fields, "the run must actually write something to test this"
 
         # The "Ledger updated" section header is where the report names them. Match the
@@ -379,13 +537,16 @@ class TestTheReportedSetEqualsTheWrittenSet:
         header = out.split("\nLedger updated (")[1].split("✎")[0]
         named = {f for f in cv.AUTO_UPDATE_FIELDS if f in header}
         assert named == set(cv.AUTO_UPDATE_FIELDS)
-        assert written_fields <= named
+        # Containment, deliberately: the report names all three version-tracking fields
+        # whether or not each one moved. What must never happen is a field written that
+        # the header does not name — `written_fields - named` must be empty.
+        assert not (written_fields - named)
 
     def test_every_paper_written_is_a_paper_the_report_named(self, tmp_path, fake, capsys):
-        # The pre-#121 failure exactly: the version-less paper's ledger was rewritten
-        # while the report listed nothing. The two sets must be equal, not merely
-        # overlapping — a write the report omits and a report entry with no write are
-        # the same lie in opposite directions.
+        # The two sets must be equal, not merely overlapping — a write the report omits
+        # and a report entry with no write are the same lie in opposite directions.
+        # (This held on `main` too: the `✎` section did list the version-less paper. It
+        # was the *plain* report that listed nothing. See the class docstring.)
         _seed_versionless(tmp_path, name="none")
         _seed(tmp_path, "1706.03762", 5, name="drift")
         _seed(tmp_path, "1810.04805", 7, name="fresh")
