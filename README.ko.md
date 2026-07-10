@@ -3,12 +3,15 @@
 > 🌐 [English](README.md) | **한국어**
 
 > facts + logic — 마크다운 소스를 **검증 가능하고 출처로 뒷받침되는 사실(fact)**로
-> 바꿔 주는 도구입니다. LLM이 추출하고, 결정론적 Datalog/wirelog 엔진이 검증합니다.
+> 바꿔 주는 Claude Code 플러그인입니다. LLM이 추출하고, 결정론적 Datalog/wirelog 엔진이
+> 검증합니다.
 >
-> factlog는 [Claude Code](https://code.claude.com) **플러그인**입니다. 세션 안에서는
-> `/factlog ...` slash command로 쓰고, 검토·승인 같은 사람의 게이트는 터미널에서
-> Python CLI(`python3 -m factlog ...`)로 직접 실행합니다. 두 입구 모두 같은 결정론
-> 엔진을 호출합니다 — slash command · Python CLI · 검증 엔진, 이 셋이 한 도구입니다.
+> factlog-academic은 [Claude Code](https://code.claude.com) **플러그인**이며, `/factlog`
+> **스킬**을 설치합니다. 이 문서에서 설치하는 대상은 "플러그인", 그 플러그인이 실행하는
+> 프롬프트는 "스킬"입니다. 세션 안에서는 `/factlog ...` slash command로 쓰고, 검토·승인
+> 같은 사람의 게이트는 터미널에서 Python CLI(`python3 -m factlog ...`)로 직접 실행합니다.
+> 두 입구 모두 같은 결정론 엔진을 호출합니다 — slash command · Python CLI · 검증 엔진,
+> 이 셋이 한 도구입니다.
 
 **factlog-academic** 은 [factlog](https://github.com/semantic-reasoning/factlog) 의
 학술 연구용 배포판입니다. factlog의 모든 기능에 더해, 학술 서지를 지식베이스로 바로
