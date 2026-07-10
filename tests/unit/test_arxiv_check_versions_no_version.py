@@ -279,14 +279,23 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
         assert "no command currently records a version for it" in out
         assert "already imported (arxiv_id match)" in out
         assert "refuses a paper whose front matter carries no arxiv_version" in out
-        # The remedy for this paper really is unbuilt, and its tracking issue moved from
-        # the now-closed #105 to #135 (#132). Point at the live one, never the closed one.
-        assert "#135" in out
+        # No command repairs this paper as it stands; the report names the human step
+        # instead — the file, the field, and where the value is read — and stays honest
+        # that factlog does not fetch it. No user-facing issue pointer, and #105 stays
+        # closed.
+        assert "No command fixes this" in out
+        assert "a human must" in out
+        assert "add `arxiv_version: <N>` to this paper's `sources/*.md` front matter" in out
+        assert f"https://arxiv.org/abs/{ID}" in out
+        assert "factlog does not fetch it" in out
+        assert "#135" not in out
         assert "#105" not in out
-        # Not one of these is a working remedy for this paper, so not one is prescribed
-        # as an imperative.
+        # The two commands that do NOT work on this paper as it stands are not prescribed
+        # as imperatives. The backfill IS named — but only as the step after the human adds
+        # the field, never as a fix for the paper as it stands.
         assert "arxiv-check-versions --auto-update" not in out
         assert f"Run `factlog arxiv-import --id {ID}`" not in out
+        assert "then run `factlog arxiv-backfill-provenance` to build the ledger" in out
         assert "None" not in out
 
     def test_a_paper_whose_sidecar_will_not_parse_asserts_nothing_and_prescribes_nothing(

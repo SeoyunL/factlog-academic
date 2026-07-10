@@ -908,7 +908,7 @@ class LedgerUpdate:
 LEDGER_FIX_REPAIR_BY_HAND = "repair-by-hand"  #: SIDECAR_UNREADABLE — no command; repair the file
 LEDGER_FIX_IMPORT = "import"  #: SIDECAR_READABLE, holds no arXiv record — `arxiv-import` merges one
 LEDGER_FIX_BACKFILL = "backfill"  #: SIDECAR_ABSENT, front matter has a version — backfill builds it
-LEDGER_FIX_NONE = "none"  #: SIDECAR_ABSENT, no version — nothing repairs it (#135)
+LEDGER_FIX_NONE = "none"  #: SIDECAR_ABSENT, no version — no command repairs it; a human adds arxiv_version (#135)
 
 
 def ledger_fix(sidecar_state: str, *, has_recorded_version: bool) -> str:
@@ -927,6 +927,22 @@ def ledger_fix(sidecar_state: str, *, has_recorded_version: bool) -> str:
     if has_recorded_version:
         return LEDGER_FIX_BACKFILL
     return LEDGER_FIX_NONE
+
+
+def _version_less_human_step(arxiv_id: str) -> str:
+    """The step that gives a version-less front-matter paper a ledger — a human's, not a
+    command's. ``arxiv-backfill-provenance`` refuses front matter with no ``arxiv_version``
+    (#113), and reading the version off arXiv would turn the backfill into the network
+    refresh the default path forbids, so no command does this. A person adds the field by
+    hand; factlog does not fetch the value. Named once here so every version-less message
+    prescribes the same step (#116) and stops pointing at an issue as though a command were
+    coming (#135)."""
+    return (
+        "add `arxiv_version: <N>` to this paper's `sources/*.md` front matter — <N> is "
+        f"its arXiv version, which you read from https://arxiv.org/abs/{arxiv_id} "
+        "(factlog does not fetch it) — then run `factlog arxiv-backfill-provenance` to "
+        "build the ledger"
+    )
 
 
 def no_ledger_remedy(
@@ -951,11 +967,12 @@ def no_ledger_remedy(
       into that existing ledger: measured ``merged``.
     * **No sidecar, and the front matter records a version.** ``arxiv-backfill-provenance``
       builds a ledger from that front matter: measured ``backfilled``.
-    * **No sidecar, and the front matter records no version.** *Nothing currently repairs
-      this paper.* ``arxiv-import`` answers ``skipped: already imported (arxiv_id match)``
-      and ``arxiv-backfill-provenance`` answers ``refused`` (``required=("version",)``,
-      #113). Saying so is the honest answer #116 asked for; naming a command here would
-      be the same lie in a new place.
+    * **No sidecar, and the front matter records no version.** *No command repairs this
+      paper.* ``arxiv-import`` answers ``skipped: already imported (arxiv_id match)`` and
+      ``arxiv-backfill-provenance`` answers ``refused`` (``required=("version",)``, #113).
+      Naming a command here would be the same lie in a new place (#116); instead the note
+      names the one thing that works — a human adding ``arxiv_version`` by hand, after
+      which the backfill can build the ledger (:func:`_version_less_human_step`, #135).
     """
     fix = ledger_fix(sidecar_state, has_recorded_version=has_recorded_version)
     if fix == LEDGER_FIX_REPAIR_BY_HAND:
@@ -983,7 +1000,8 @@ def no_ledger_remedy(
         "currently records a version for it: --auto-update has no ledger to write into, "
         "`factlog arxiv-import` answers `already imported (arxiv_id match)`, and "
         "`factlog arxiv-backfill-provenance` refuses a paper whose front matter carries "
-        "no arxiv_version (#113). Backfilling a ledger for it is tracked in #135."
+        f"no arxiv_version (#113). No command fixes this; a human must "
+        f"{_version_less_human_step(arxiv_id)}."
     )
 
 
@@ -997,7 +1015,8 @@ def front_matter_acknowledge_refusal(
     The UNREADABLE case is unreachable through the CLI (the command's ``ledger_errors``
     guard refuses before this branch, for zero API requests), but it is classified here so
     the one function answering this question answers it for all four papers, and a future
-    caller that reaches it is not handed the #135 lie meant for a version-less paper.
+    caller that reaches it is not handed the version-less answer meant for a paper with
+    no arxiv_version.
     """
     fix = ledger_fix(sidecar_state, has_recorded_version=has_recorded_version)
     if fix == LEDGER_FIX_REPAIR_BY_HAND:
@@ -1026,7 +1045,8 @@ def front_matter_acknowledge_refusal(
         f"{arxiv_id!r} is known only from front matter (imported before #82), so it has "
         "no provenance ledger to record a decision in, and its front matter carries no "
         "arxiv_version, so `arxiv-backfill-provenance` refuses it (#113); no command can "
-        "build a ledger for it, so this signal cannot be acknowledged here (#135)."
+        f"build a ledger for it. A human must {_version_less_human_step(arxiv_id)}, then "
+        "re-run this command to acknowledge."
     )
 
 
@@ -1057,9 +1077,10 @@ def _withdrawal_ledger_suffix(result: VersionCheck) -> str:
         )
     return (
         "This paper has no provenance ledger (imported before #82) and its front matter "
-        "carries no arxiv_version, so `arxiv-backfill-provenance` refuses it (#113) and the "
-        "withdrawal cannot be acknowledged and will keep surfacing until a ledger exists "
-        "(#135)."
+        "carries no arxiv_version, so `arxiv-backfill-provenance` refuses it (#113); the "
+        "withdrawal cannot be acknowledged and will keep surfacing until a ledger exists. "
+        f"No command builds it; a human must {_version_less_human_step(result.arxiv_id)}, "
+        "then re-run the acknowledge command."
     )
 
 
@@ -1090,7 +1111,8 @@ def _un_withdrawal_ledger_suffix(result: VersionCheck) -> str:
         )
     return (
         "Its front matter carries no arxiv_version, so `arxiv-backfill-provenance` refuses "
-        "it (#113) and no command can give it a ledger to acknowledge this in (#135)."
+        f"it (#113) and no command can give it a ledger. A human must "
+        f"{_version_less_human_step(result.arxiv_id)}, then acknowledge to clear this."
     )
 
 
@@ -1330,8 +1352,9 @@ def withdrawal_note(result: VersionCheck) -> str:
     ``arxiv_version`` alone: :func:`ledger_fix` reads ``sidecar_state`` first. A readable
     sidecar that holds no arXiv record is repaired by ``arxiv-import`` (measured ``merged``),
     an unreadable one by nothing but a hand repair, an absent one by ``arxiv-backfill-
-    provenance`` when the front matter has a version (#114) and by nothing when it does not
-    (#113, tracked in #135). Branching on the version alone denied ``arxiv-import`` to the
+    provenance`` when the front matter has a version (#114) and by no command when it does
+    not — a human must add ``arxiv_version`` first (#113, #135). Branching on the version
+    alone denied ``arxiv-import`` to the
     paper it fixes and prescribed a backfill that errors on a corrupt ledger — the #132
     defect. :func:`_withdrawal_ledger_suffix` names the one command that actually works.
     """
@@ -1378,7 +1401,8 @@ def un_withdrawal_note(result: VersionCheck) -> str:
     plainly that the front-matter note is now stale, then names the working next step from
     :func:`ledger_fix` — ``arxiv-import`` for a readable sidecar with no arXiv record,
     ``arxiv-backfill-provenance`` for an absent sidecar with a version (#114), a hand repair
-    for an unreadable one, and #135 for a version-less absent one. Branching on the version
+    for an unreadable one, and a human adding ``arxiv_version`` (no command does) for a
+    version-less absent one (#135). Branching on the version
     alone prescribed a backfill that errors on a corrupt ledger — the #132 defect.
     :func:`_un_withdrawal_ledger_suffix` names the one command that actually works.
     """
