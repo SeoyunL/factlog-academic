@@ -321,23 +321,31 @@ def sidecar_path(source_path: Path | str, kb_root: Path | str) -> Path:
     ``/home/sources/kb/sources/x.md``'s sidecar out of the KB entirely. With the root
     given, ``relative_to`` decides, and neither path is reachable.
 
-    Raises :class:`ValueError` when *source_path* is not under ``<kb_root>/sources/``.
+    Raises :class:`ProvenanceError` when *source_path* is not under ``<kb_root>/sources/``.
     ``runs/sources/`` is the case that matters (#112): it has no sidecar, by construction,
     because it would collide with ``sources/`` on one — see the module docstring, and
     :func:`excluded_sources_by_id` for how a caller reports such a paper instead of
     dropping it. Over the ``.md`` sources :func:`provenance_sources` yields, this map is injective,
     so two papers can never share a ledger.
+
+    The refusal is a :class:`ProvenanceError` — "this ledger cannot exist as asked" — and
+    **not** a bare :class:`ValueError` (#142). Every caller that writes a sidecar already
+    degrades a per-id fault with ``except (ProvenanceError, OSError)``; a bare ``ValueError``
+    slipped past that guard (``ProvenanceError`` is a *subclass*, and catching a subclass does
+    not catch its parent), so a refusal escaped as a traceback that aborts the whole batch —
+    the #65/#71/#94 shape. ``ProvenanceError`` is still a ``ValueError`` subclass, so any
+    caller catching the broader type is unaffected.
     """
     src, root = Path(source_path), Path(kb_root)
     try:
         rel = src.relative_to(root)
     except ValueError as exc:
-        raise ValueError(
+        raise ProvenanceError(
             f"{src} is not under the KB root {root}; there is no sidecar for it."
         ) from exc
     parts = rel.parts
     if len(parts) < 2 or parts[0] != PROVENANCE_SOURCE_ROOT:
-        raise ValueError(excluded_reason(rel.as_posix()))
+        raise ProvenanceError(excluded_reason(rel.as_posix()))
     # The path *below* sources/ is preserved, so nested sources cannot collide.
     relative = Path(*parts[1:]).with_suffix(SIDECAR_SUFFIX)
     return root / SIDECAR_DIR / relative

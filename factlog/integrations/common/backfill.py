@@ -331,7 +331,15 @@ def _backfill_source(
             ),
         )
 
-    sidecar = sidecar_path(source_path, kb_root)
+    # `source_rel` is under `sources/` for every caller today (the backfill enumerates
+    # `provenance_sources`), so this refusal is unreachable — but sidecar_path raises for a
+    # path outside `sources/`, and an unreachable refusal that escapes as a traceback would
+    # abort the batch (the #65/#71/#94 shape). Degrade it to this paper's per-id error, the
+    # same fate as the guarded read below (#142).
+    try:
+        sidecar = sidecar_path(source_path, kb_root)
+    except ProvenanceError as exc:
+        return BackfillResult(entry_id, BACKFILL_ERROR, reason=f"{source_rel}: {exc}")
     rel = _relative(sidecar, kb_root)
 
     # The READ is guarded: a corrupt or unreadable sidecar (a partially-populated one that

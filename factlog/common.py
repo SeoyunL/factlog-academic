@@ -385,6 +385,39 @@ def is_hidden_source(path: Path, source_root: Path) -> bool:
     return any(part.startswith(".") for part in path.relative_to(source_root).parts)
 
 
+def walk_source_dir(
+    base: Path, *, include_hidden: bool, suffix: str | None = None
+) -> list[Path]:
+    """Every file under one source directory *base*, sorted; the KB's single directory walk.
+
+    This is the one ``rglob`` over a ``sources/`` tree, shared so the two questions a source
+    walk can ask cannot silently diverge (#142). *include_hidden* is the explicit answer to
+    which question the caller is asking — the one axis on which the two legitimately differ:
+
+    * ``include_hidden=False`` answers *"is this a source?"* (``source_files``, and through it
+      ``provenance_sources`` / coverage / status). A dot-prefixed component below the source
+      root is **not** a source (#67, :func:`is_hidden_source`): nothing syncs it, nothing
+      gives it a ledger.
+    * ``include_hidden=True`` answers *"does a file on disk already claim this name/identity?"*
+      (the importer index, ``BaseSourceWriter._index``). A hidden ``.md`` can be duplicated
+      whether or not ``sync`` counts it, so skipping it makes a re-import write a *second*
+      ``.md`` and breaks P3 idempotence in silence (#112).
+
+    Making the difference a *parameter* rather than a second hand-rolled ``rglob`` is the
+    point: a future change to either question moves this one function or fails, so the walks
+    can never quietly diverge again. *suffix* (e.g. ``".md"``) restricts to one extension;
+    ``None`` yields every file. Directories are always excluded (``is_file``), so a directory
+    whose name happens to end in *suffix* is never mistaken for a source.
+    """
+    if not base.is_dir():
+        return []
+    pattern = f"*{suffix}" if suffix else "*"
+    return sorted(
+        path for path in base.rglob(pattern)
+        if path.is_file() and (include_hidden or not is_hidden_source(path, base))
+    )
+
+
 def source_files(root: Path) -> list[Path]:
     """Every real source file under the KB's SOURCE_ROOTS, hidden paths excluded.
 
@@ -394,12 +427,7 @@ def source_files(root: Path) -> list[Path]:
     """
     files: list[Path] = []
     for rel in SOURCE_ROOTS:
-        base = root / rel
-        if base.is_dir():
-            files.extend(
-                path for path in base.rglob("*")
-                if path.is_file() and not is_hidden_source(path, base)
-            )
+        files.extend(walk_source_dir(root / rel, include_hidden=False))
     return sorted(files)
 
 

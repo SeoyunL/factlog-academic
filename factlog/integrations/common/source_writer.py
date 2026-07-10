@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from factlog.common import slugify
+from factlog.common import slugify, walk_source_dir
 from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
 from factlog.integrations.common._textio import atomic_write_text
 from factlog.integrations.common.front_matter import read_first_author, read_scalars
@@ -415,22 +415,23 @@ class BaseSourceWriter:
         if cached is None:
             cached = _DirIndex()
             if sources_dir.is_dir():
-                # `rglob`, because `ingest` mirrors an original's subtree and a nested
-                # original is a real source (#112). A flat walk left `sources/sub/x.md`
-                # out of `by_identity`, so re-importing that paper wrote a *second* `.md`
-                # for it and broke P3 idempotence in silence.
+                # One shared walk (`common.walk_source_dir`), because `ingest` mirrors an
+                # original's subtree and a nested original is a real source (#112). A flat
+                # walk left `sources/sub/x.md` out of `by_identity`, so re-importing that
+                # paper wrote a *second* `.md` for it and broke P3 idempotence in silence.
                 #
-                # Hidden paths are NOT filtered here, and this index is the one sources/
-                # walk that must not filter them. `provenance_sources` excludes them
-                # because they are not *sources* (#67) — nothing syncs them, nothing gives
-                # them a ledger. This index answers a different question: does a file on
-                # disk already claim this identity, or this name? A `.md` that exists can
-                # be duplicated whether or not `sync` counts it. Skipping `sources/.h/x.md`
-                # here makes a re-import of that paper write a *second* `.md` — measured,
-                # and the same silent P3 break #112 fixes for nested files. Indexing it
-                # instead yields a `skipped`, which the report names. A skip the operator
-                # can see beats a duplicate they cannot.
-                for path in sorted(sources_dir.rglob("*.md")):
+                # `include_hidden=True`, and this index is the one sources/ walk that passes
+                # it. `source_files` / `provenance_sources` exclude hidden paths because they
+                # are not *sources* (#67) — nothing syncs them, nothing gives them a ledger.
+                # This index answers a different question: does a file on disk already claim
+                # this identity, or this name? A `.md` that exists can be duplicated whether or
+                # not `sync` counts it. Skipping `sources/.h/x.md` here makes a re-import of
+                # that paper write a *second* `.md` — measured, the same silent P3 break #112
+                # fixes for nested files. Indexing it instead yields a `skipped`, which the
+                # report names. A skip the operator can see beats a duplicate they cannot. The
+                # difference from the source walk is now that one `include_hidden` argument,
+                # not a second hand-rolled `rglob`, so neither walk can drift from the other.
+                for path in walk_source_dir(sources_dir, include_hidden=True, suffix=".md"):
                     # `claimed` stays flat on purpose: it exists to keep `_unique_path`
                     # from overwriting a file, and this writer only ever creates files
                     # directly under `sources/`. Adding a nested file's bare name would
@@ -747,7 +748,14 @@ class BaseSourceWriter:
         fault — is a per-id ``error``, never a batch crash: one paper's problem
         does not stop the imports queued behind it.
         """
-        sidecar = sidecar_path(decision.path, target)
+        try:
+            sidecar = sidecar_path(decision.path, target)
+        except ProvenanceError as exc:
+            # `decision.path` is under `sources/` for every call today, so this refusal is
+            # unreachable — but an unreachable refusal that escapes as a traceback is exactly
+            # the batch-aborting shape these guards exist to close (#65/#71/#94, #142). Degrade
+            # it to this one paper's per-id error like every other sidecar fault below.
+            return WriteResult(decision.path, "error", str(exc))
         record = self._provenance_record(parsed, imported_at)
         try:
             provenance = read_provenance(sidecar)
@@ -831,7 +839,12 @@ class BaseSourceWriter:
         if not self.merges_cross_source:
             return decision
         record = self._provenance_record(parsed, imported_at)
-        sidecar = sidecar_path(decision.path, target)
+        try:
+            sidecar = sidecar_path(decision.path, target)
+        except ProvenanceError as exc:
+            # See `_upsert_sidecar`: a sidecar_path refusal is this paper's per-id error, never
+            # a batch-aborting traceback (#142).
+            return WriteResult(decision.path, "error", str(exc))
         fresh = Provenance()
         add_source(fresh, record)
         try:
