@@ -1,6 +1,6 @@
 # factlog
 
-> 🌐 **English** | [한국어](README.md)
+> 🌐 **English** | [한국어](README.ko.md)
 
 > facts + logic — a Claude Code skill that turns markdown sources into **verifiable, source-backed facts**.
 > The LLM extracts; a deterministic Datalog/wirelog engine verifies.

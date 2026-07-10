@@ -1,6 +1,6 @@
 # factlog
 
-> 🌐 [English](README.en.md) | **한국어**
+> 🌐 [English](README.md) | **한국어**
 
 > facts + logic — 마크다운 소스를 **검증 가능하고 출처로 뒷받침되는 사실(fact)**로
 > 바꿔 주는 도구입니다. LLM이 추출하고, 결정론적 Datalog/wirelog 엔진이 검증합니다.
