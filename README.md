@@ -2,7 +2,7 @@
 
 > 🌐 **English** | [한국어](README.ko.md)
 
-> facts + logic — a Claude Code skill that turns markdown sources into **verifiable, source-backed facts**.
+> facts + logic — a Claude Code plugin that turns markdown sources into **verifiable, source-backed facts**.
 > The LLM extracts; a deterministic Datalog/wirelog engine verifies.
 
 **factlog-academic** is the academic-research distribution of
@@ -14,7 +14,10 @@ base: [Zotero](#importing-zotero-bibliography-factlog-zotero-import),
 
 ## What it is
 
-factlog-academic is a [Claude Code](https://code.claude.com) **skill** for keeping a markdown knowledge base honest. It follows one rule:
+factlog-academic is a [Claude Code](https://code.claude.com) **plugin** that installs the
+`/factlog` **skill** — a prompt that keeps a markdown knowledge base honest. Throughout
+this README, "the plugin" is what you install and "the skill" is what it runs. It follows
+one rule:
 
 > The agent does not draw conclusions. The agent produces files and calls a CLI. The CLI returns a verifiable report.
 
