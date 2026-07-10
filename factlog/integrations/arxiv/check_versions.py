@@ -95,6 +95,7 @@ __all__ = [
     "STATUS_UNCHANGED",
     "STATUS_CHANGED",
     "STATUS_NO_VERSION",
+    "STATUS_VERSION_CONFLICT",
     "STATUS_ERROR",
     "STATUS_SKIPPED",
     "SIDECAR_ABSENT",
@@ -113,6 +114,7 @@ __all__ = [
     "summarize",
     "apply_auto_update",
     "no_version_note",
+    "version_conflict_note",
     "no_ledger_remedy",
 ]
 
@@ -141,6 +143,30 @@ STATUS_CHANGED = "changed"
 #: not a version the ledger ever recorded. An absent value gets a distinct signal
 #: rather than being collapsed into a normal one.
 STATUS_NO_VERSION = "no-version"
+#: A paper's own sources disagree about the version they recorded (one sidecar or front
+#: matter records v3, another v7). This is a state of its own, never folded into a single
+#: number by ``max`` or by first-wins (#137).
+#:
+#: Two records claiming a *different* ``arxiv_version`` for one paper is a **conflict**, not
+#: an input to a maximum. Everywhere else this repo reports or refuses a conflict rather
+#: than resolve it: ``add_source`` raises :class:`ProvenanceConflict` rather than overwrite,
+#: ``_divergence`` errors rather than guess, and a backfill refuses an unreadable identifying
+#: field (#113/#121) rather than write one. Folding the disagreement with ``max`` silently
+#: dropped the lower record and, when arXiv served the higher value, reported ``unchanged``
+#: for a paper three versions behind — the exact inverse of the one signal this command
+#: exists to produce. So the disagreement is surfaced on its own line, naming each source
+#: and the value it holds, and no command resolves it (choosing one value over the other is
+#: the guess ``max`` was): a human reconciles the sources.
+#:
+#: The conflict test spans **both** consumers at once — the sidecar fold and the
+#: front-matter fold (#117) — *and the mix of the two*. A sidecar-less ``.md`` records its
+#: version only in front matter, and that version joins the fold even when another source's
+#: ledger already covers the id (``a.json`` v3 beside a front-matter-only ``b.md`` v7 —
+#: #137's "one of each"). So the three states of a paper mid-migration read the same: two
+#: front matters, one backfilled and one still front-matter-only, and two sidecars are all a
+#: conflict. A paper's meaning does not flip from ``changed``/``unchanged`` to conflicting as
+#: ``arxiv-backfill-provenance`` turns its ``.md`` into sidecars one at a time.
+STATUS_VERSION_CONFLICT = "version-conflict"
 STATUS_ERROR = "error"
 STATUS_SKIPPED = "skipped"
 
@@ -193,6 +219,15 @@ class LedgerEntry:
     sort. Adding the per-source detail beside the aggregate — rather than folding the
     aggregate, or deriving it by a second walk — is what fixes the backfill while leaving
     every byte of the check's report where it was.
+
+    ``version_disagreement`` names each source and the version it recorded when a paper's
+    sources disagree about ``arxiv_version`` — ``(("source-provenance/a.json", 3),
+    ("source-provenance/b.json", 7))``. It is empty when they agree (the ordinary case),
+    and non-empty only when two or more sources recorded two or more *distinct* versions.
+    When it is non-empty ``recorded_version`` is ``None``: there is no single recorded
+    value to compare, and the paper is :data:`STATUS_VERSION_CONFLICT` (#137). A source
+    that recorded *no* version does not participate — it is not claiming a version, so it
+    does not disagree; its absence is the separate :data:`STATUS_NO_VERSION` concern.
     """
 
     arxiv_id: str
@@ -201,6 +236,7 @@ class LedgerEntry:
     sources: tuple[str, ...] = ()
     sidecar_state: str = SIDECAR_READABLE
     per_source: tuple["LedgerEntry", ...] = ()
+    version_disagreement: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -250,6 +286,10 @@ class VersionCheck:
     #: "there is no ledger" and from "the ledger would not parse", for a
     #: ``recorded_from="front-matter"`` paper.
     sidecar_state: str = SIDECAR_READABLE
+    #: See :class:`LedgerEntry`. Carried through so the report and the porcelain ``reason``
+    #: column can name each source and the version it holds when ``status`` is
+    #: :data:`STATUS_VERSION_CONFLICT` (#137). Empty for every other status.
+    version_disagreement: tuple[tuple[str, int], ...] = ()
 
 
 def _relative(path: Path, kb_root: Path) -> str:
@@ -257,6 +297,61 @@ def _relative(path: Path, kb_root: Path) -> str:
         return str(path.relative_to(kb_root))
     except ValueError:
         return str(path)
+
+
+_DERIVE_SINGLE = object()
+
+
+def _fold_recorded(
+    recorded: Sequence[tuple[str, int]],
+    *,
+    single=_DERIVE_SINGLE,
+) -> tuple[int | None, tuple[tuple[str, int], ...]]:
+    """Fold a paper's per-source recorded versions into (single version, disagreement).
+
+    *recorded* is every ``(source, version)`` a paper's sources recorded, with the absent
+    versions already dropped by the caller (a source that recorded no version is not
+    *claiming* a version, so it cannot *disagree* about one — its absence is the separate
+    :data:`STATUS_NO_VERSION` concern, #121, and it is only #137's business when two
+    **present** versions differ). Returns:
+
+    * ``(None, pairs)`` when two or more **distinct** versions were recorded — a conflict.
+      ``pairs`` is *every* recorded ``(source, version)`` in sorted order (both the v3 and
+      the v7 sources, so the report can name each), and the single value is ``None`` because
+      no one number is what the KB recorded (#137). Never ``max``/first-wins here: a fold
+      silently drops the losing record, and choosing between two disagreeing values is the
+      guess this repo refuses everywhere else (``add_source`` raises, #113/#121 refuse);
+    * otherwise (zero or one distinct recorded version) the caller's own non-conflict
+      answer, unchanged from before #137. Pass ``single`` to keep a loop's existing fold:
+      the front-matter loop's *first source in sorted order* (which may be ``None`` when a
+      version-less ``.md`` sorts first — deliberate, #117/#121 — and is why this is not
+      collapsed to "the one present value"). Left at :data:`_DERIVE_SINGLE`, the answer is
+      the one recorded value (the sidecar loop's ``max`` over a single distinct value) or
+      ``None`` when nothing recorded one.
+
+    So the two loops answer the *version-less-beside-versioned* shape differently, on purpose.
+    A version-*less* arXiv **ledger** slot carries no ``single`` key, so a versioned
+    front-matter-only ``.md`` that joins its fold (see the sidecar-less-``.md`` branch of
+    :func:`collect_ledger_entries`) leaves ``recorded`` with that one present version and no
+    ``single`` override — the :data:`_DERIVE_SINGLE` branch returns it, and the paper reads
+    ``unchanged``/``changed`` against it, not :data:`STATUS_NO_VERSION`. Two pure front
+    matters take the ``single`` branch and a version-less first source holds them at
+    ``no-version`` instead. This is #117, not an accident: a ledger already covered that id,
+    so folding to its neighbour's present version reads the same before a backfill materializes
+    more sidecars and after, whereas matching it to the version-less-``.md`` ``no-version``
+    would flip the paper's meaning as ledgers come and go.
+
+    The conflict test is identical for both loops; only the non-conflict answer differs, so
+    a genuine disagreement is reported the same whether it lives in sidecars or front matter,
+    while every non-conflicting KB folds exactly as it did before."""
+    distinct = {version for _, version in recorded}
+    if len(distinct) > 1:
+        return None, tuple(sorted(recorded))
+    if single is not _DERIVE_SINGLE:
+        return single, ()
+    if distinct:
+        return next(iter(distinct)), ()
+    return None, ()
 
 
 def collect_ledger_entries(
@@ -270,8 +365,13 @@ def collect_ledger_entries(
 
     One arXiv paper may be referenced by several ledgers (an arXiv-primary original
     and an OpenAlex-primary one that cites the same preprint). They collapse to one
-    entry keyed by ``arxiv_id``; the highest recorded version wins, any recorded
-    withdrawal agent is kept, and every referencing source path is retained.
+    entry keyed by ``arxiv_id``. When every ledger that records a version agrees, that
+    version is the entry's ``recorded_version``; a version-less arXiv record beside a
+    versioned one does not disagree, so the versioned value stands. But two ledgers
+    recording two *different* versions is a **conflict**, not an input to ``max``: the
+    entry's ``recorded_version`` is ``None``, ``version_disagreement`` names each source
+    and the value it holds, and the paper becomes :data:`STATUS_VERSION_CONFLICT` (#137).
+    Any recorded withdrawal agent is kept, and every referencing source path is retained.
 
     The front-matter fallback walks the KB's own enumeration (``provenance_sources``:
     ``rglob`` under ``sources/``), so a nested paper is seen exactly as a top-level one is.
@@ -280,13 +380,19 @@ def collect_ledger_entries(
     ``checked N/N`` and its withdrawal never reported (#112). A source outside the
     provenance root is reported by :func:`excluded_checks`, never dropped.
 
-    Several ``sources/**/*.md`` may likewise carry one ``arxiv_id``. The entry a check reads is
-    the **first in sorted-path order**, unchanged by #117 and unfolded — a paper is checked
-    once, and no value is invented for it that no single source recorded. Each source's own
-    front matter is kept *beside* that answer, verbatim, in :attr:`LedgerEntry.per_source`,
-    which is what a backfill reads. Dedup and source aggregation are separate concerns
-    (#117), and keeping them separate is what lets the backfill stop depending on a
-    filename without the check's report moving at all.
+    Several ``sources/**/*.md`` may likewise carry one ``arxiv_id``. A paper is checked
+    once: the withdrawal agent, sidecar state, and recorded *version* a check reads are the
+    **first source in sorted-path order**, verbatim and unchanged by #117 — including a
+    ``None`` version when a version-less ``.md`` sorts first (#121). The one exception is a
+    genuine disagreement: when two front matters record two *different* versions, the same
+    conflict test the sidecar loop applies fires here too, so the paper becomes a
+    :data:`STATUS_VERSION_CONFLICT` naming each source rather than folding one away — and it
+    reads the same before ``arxiv-backfill-provenance`` writes its sidecars and after (#137).
+    Each source's own front matter is kept *beside* that answer, verbatim, in
+    :attr:`LedgerEntry.per_source`, which is what a backfill reads (it materializes each
+    ``.md``'s own version into its own sidecar, never the folded aggregate). Dedup and
+    source aggregation are separate concerns (#117), and keeping them separate is what lets
+    the backfill stop depending on a filename without the check's report moving at all.
     """
     root = Path(kb_root)
     slots: dict[str, dict] = {}
@@ -295,6 +401,12 @@ def collect_ledger_entries(
     #: is in here falls through to the front-matter loop below, and must not be described
     #: as though the file had been read.
     unreadable: set[str] = set()
+    #: Sidecar rel-paths that hold an arXiv record. A `.md` whose *own* sidecar is in here
+    #: already contributed its version through the sidecar loop, so the front-matter loop
+    #: must not count it again; a `.md` whose sidecar is *not* here records its version only
+    #: in front matter, and that version joins the fold even when another source's sidecar
+    #: already put the id in `slots` (#137's "one of each").
+    arxiv_sidecar_paths: set[str] = set()
 
     sidecar_root = root / SIDECAR_DIR
     for path in sorted(sidecar_root.rglob("*.json")) if sidecar_root.is_dir() else ():
@@ -316,6 +428,7 @@ def collect_ledger_entries(
         for record in provenance.records:
             if record.type != _ARXIV_TYPE:
                 continue
+            arxiv_sidecar_paths.add(rel)
             version = record.fields.get("version")
             if not isinstance(version, int) or isinstance(version, bool):
                 version = None
@@ -324,12 +437,15 @@ def collect_ledger_entries(
                 withdrawn_by = None
             slot = slots.setdefault(
                 record.id,
-                {"version": None, "withdrawn_by": None, "sources": set()},
+                {"recorded": [], "withdrawn_by": None, "sources": set()},
             )
-            if version is not None and (
-                slot["version"] is None or version > slot["version"]
-            ):
-                slot["version"] = version
+            # Keep every (source, version) a sidecar recorded rather than folding to a
+            # `max` here. `_fold_recorded` below turns a genuine agreement into one value
+            # and a disagreement into a conflict; a `max` at this point would silently drop
+            # the lower record and could not tell the two apart (#137). A version-less
+            # arXiv record contributes nothing — it is not claiming a version.
+            if version is not None:
+                slot["recorded"].append((rel, version))
             if withdrawn_by and not slot["withdrawn_by"]:
                 slot["withdrawn_by"] = withdrawn_by
             slot["sources"].add(rel)
@@ -355,15 +471,32 @@ def collect_ledger_entries(
     for path in provenance_sources(root):
         scalars = read_scalars(path, ("arxiv_id", "arxiv_version", "arxiv_withdrawn_by"))
         arxiv_id = scalars.get("arxiv_id", "")
-        # A ledger, when one exists, is authoritative — it is what a refresh
-        # updates, and its `sources` name the ledgers a reader should open. Front
-        # matter only speaks for a paper no ledger covers.
-        if not arxiv_id or arxiv_id in slots:
+        if not arxiv_id:
             continue
         try:
             version = int(scalars.get("arxiv_version", ""))
         except ValueError:
             version = None
+        # A ledger, when one exists, is authoritative — it is what a refresh updates, and
+        # its `sources` name the ledgers a reader should open. So a ledger-backed paper's
+        # entry is built from the sidecar loop, not rebuilt from front matter here.
+        #
+        # But "authoritative" is per-`.md`, not per-id. A `.md` whose OWN sidecar holds the
+        # arXiv record already contributed its version through the sidecar loop
+        # (`arxiv_sidecar_paths`), so it is skipped to avoid double-counting. A *sidecar-less*
+        # `.md` that carries the same id records its version ONLY in front matter, and that
+        # is a real claim that can disagree with the ledger's — a.json v3 beside a
+        # front-matter-only b.md v7 (#137's "one of each"). Dropping it whole, as this loop
+        # did before, silenced exactly the disagreement this issue closes and made the
+        # report flip meaning as a backfill turned one `.md` into a sidecar. So its present
+        # version joins the ledger slot's `recorded` set for the same conflict test the two
+        # halves share; the entry's first-source-wins fields (withdrawal agent, sidecar
+        # state, `per_source`) are left exactly as the sidecar loop set them.
+        if arxiv_id in slots:
+            own_sidecar = _relative(sidecar_path(path, root), root)
+            if own_sidecar not in arxiv_sidecar_paths and version is not None:
+                slots[arxiv_id]["recorded"].append((_relative(path, root), version))
+            continue
         # A paper imported while already withdrawn recorded the agent in its front
         # matter; reading it back is what keeps `_diff` from re-reporting that
         # withdrawal as new on every run (#98). `read_scalars` strips and omits an
@@ -412,46 +545,61 @@ def collect_ledger_entries(
         )
 
     for arxiv_id, views in per_source.items():
-        # The check's answer is the FIRST source in sorted-path order, exactly as before
-        # #117 — every field of it, unfolded. This *is* first-wins dedup, and #117 says it
-        # is correct for a check: a paper is checked once. `per_source` is added beside it,
-        # never folded into it.
+        # A paper is checked once, so the withdrawal agent and sidecar state a check reads
+        # are the FIRST source in sorted-path order, exactly as before #117 — first-wins
+        # dedup, which #117 says is correct for a check. `per_source` is added beside that
+        # answer, never folded into it, and a backfill reads it.
         #
-        # It is tempting to fold the views instead (the highest version wins, as the ledger
-        # loop above folds its sidecars). MEASURED, that silences the one signal this
-        # command exists to produce: `a.md` recording v3 beside `b.md` recording v7, arXiv
-        # serving v7, reports `unchanged` — the paper three versions behind vanishes from
-        # the report. `max` is a guess, not a reading.
+        # The recorded *version* is where a disagreement is caught. When two front matters
+        # record two *different* versions, taking the first (or a `max`) silently drops the
+        # other: `a.md` recording v3 beside `b.md` recording v7, arXiv serving v7, would
+        # read as a plain v3->v7 change (or, with a `max`, as `unchanged`), and the
+        # disagreement between the KB's own sources would vanish from the report. So the
+        # present versions are collected and `_fold_recorded` below turns a genuine
+        # disagreement into a `STATUS_VERSION_CONFLICT` naming each source (#137) — the same
+        # test the sidecar loop applies, so a paper reads the same before
+        # `arxiv-backfill-provenance` writes its sidecars and after (#117's constraint).
         #
-        # Two sources disagreeing about a paper's `arxiv_version` is a *conflict*, and this
-        # repo reports or refuses a conflict rather than resolve it silently (`add_source`
-        # raises rather than overwrite; #113/#121 refuse rather than write a field they
-        # cannot read). Making it a reportable state is right, and it is NOT this issue: the
-        # ledger loop above folds the identical disagreement between two *sidecars* with the
-        # same `max`, pinned by a test. Fixing only this loop would mean a paper reported as
-        # conflicting before `arxiv-backfill-provenance` runs, and silently folded after —
-        # the report's meaning changing because a ledger was created. It must move across
-        # both consumers at once, like #112.
+        # When there is *no* disagreement (zero or one present version), the answer is the
+        # first source's own `recorded_version`, verbatim and unfolded — exactly as before
+        # #137, including a `None` when a version-less `.md` sorts first (#117/#121). Passing
+        # it as `single` keeps that behaviour untouched; only a real conflict overrides it.
         first = views[0]
+        recorded = [
+            (view.sources[0], view.recorded_version)
+            for view in views
+            if view.recorded_version is not None
+        ]
         slots[arxiv_id] = {
-            "version": first.recorded_version,
+            "recorded": recorded,
+            "single": first.recorded_version,
             "withdrawn_by": first.recorded_withdrawn_by,
             "sources": {first.sources[0]},
             "sidecar_state": first.sidecar_state,
             "per_source": tuple(views),
         }
 
-    entries = [
-        LedgerEntry(
-            arxiv_id=arxiv_id,
-            recorded_version=slot["version"],
-            recorded_withdrawn_by=slot["withdrawn_by"],
-            sources=tuple(sorted(slot["sources"])),
-            sidecar_state=slot.get("sidecar_state", SIDECAR_READABLE),
-            per_source=slot.get("per_source", ()),
+    entries = []
+    for arxiv_id, slot in slots.items():
+        # A front-matter slot carries `single` (its first-wins answer); a sidecar slot does
+        # not, so the fold derives the sidecar loop's `max`-over-one-distinct-value answer.
+        if "single" in slot:
+            version, disagreement = _fold_recorded(
+                slot["recorded"], single=slot["single"]
+            )
+        else:
+            version, disagreement = _fold_recorded(slot["recorded"])
+        entries.append(
+            LedgerEntry(
+                arxiv_id=arxiv_id,
+                recorded_version=version,
+                recorded_withdrawn_by=slot["withdrawn_by"],
+                sources=tuple(sorted(slot["sources"])),
+                sidecar_state=slot.get("sidecar_state", SIDECAR_READABLE),
+                per_source=slot.get("per_source", ()),
+                version_disagreement=disagreement,
+            )
         )
-        for arxiv_id, slot in slots.items()
-    ]
     entries.sort(key=lambda e: e.arxiv_id)
     errors.sort(key=lambda e: e.arxiv_id)
     return entries, errors
@@ -564,18 +712,35 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
     # produces, while `--auto-update` rewrote its `version` anyway: the report and
     # the write disagreed. Folding it into `changed` instead would print "ledger
     # records vNone" — #116.
-    if recorded is None:
+    # A paper whose own sources disagree about the recorded version has no single value to
+    # compare, so it is neither `changed` nor `unchanged` nor `no-version` — it is
+    # :data:`STATUS_VERSION_CONFLICT`, decided at collection (`recorded` is None then, and
+    # `version_disagreement` names each side). This is checked first: whatever arXiv now
+    # serves, the KB contradicting itself is the signal, and folding it into a neighbour
+    # would silence exactly the drift this command exists to surface (#137). The
+    # disagreement is carried into `reason` too, so the porcelain `reason` column names each
+    # source and value for a machine.
+    if entry.version_disagreement:
+        status = STATUS_VERSION_CONFLICT
+    elif recorded is None:
         status = STATUS_NO_VERSION
     elif current != recorded:
         status = STATUS_CHANGED
     else:
         status = STATUS_UNCHANGED
+    reason = (
+        "; ".join(f"{src}=v{ver}" for src, ver in entry.version_disagreement)
+        if entry.version_disagreement
+        else ""
+    )
     return VersionCheck(
         arxiv_id=entry.arxiv_id,
         status=status,
         recorded_version=recorded,
         current_version=current,
         recorded_from=provenance_of(entry.sources),
+        reason=reason,
+        version_disagreement=entry.version_disagreement,
         # The two other version-tracking values --auto-update writes. Dates are
         # serialized to ISO strings here (the ledger stores strings, not `date`,
         # for the same reason the arXiv writer does: `json` cannot serialize a
@@ -646,6 +811,7 @@ class Summary:
     unchanged: int = 0
     changed: int = 0
     no_version: int = 0
+    version_conflict: int = 0
     withdrawn: int = 0
     un_withdrawn: int = 0
     errors: int = 0
@@ -661,7 +827,9 @@ def summarize(
 
     ``no_version`` is its own tally, disjoint from ``unchanged`` and ``changed``: a
     record with no recorded version was never compared, so counting it as "up to date"
-    is the report lying about what it looked at (#121)."""
+    is the report lying about what it looked at (#121). ``version_conflict`` is likewise
+    disjoint: a paper whose sources disagree about the version has no single value to
+    compare, and folding it into any neighbour silences the drift (#137)."""
     summary = Summary(skipped=len(skipped))
     for result in results:
         if result.status == STATUS_ERROR:
@@ -672,6 +840,8 @@ def summarize(
             summary.changed += 1
         elif result.status == STATUS_NO_VERSION:
             summary.no_version += 1
+        elif result.status == STATUS_VERSION_CONFLICT:
+            summary.version_conflict += 1
         elif result.status == STATUS_UNCHANGED:
             summary.unchanged += 1
         if result.newly_withdrawn:
@@ -995,7 +1165,18 @@ def apply_auto_update(
     for result in results:
         # Only a paper the API actually answered has a version to record. Errors,
         # skips and missing ids carry no current version and are never written.
-        if result.status == STATUS_ERROR or result.current_version is None:
+        #
+        # A version conflict is never written either, even though the API answered it: the
+        # paper's own sources disagree about what they recorded, and writing arXiv's current
+        # value would *resolve* the conflict silently — picking a winner is the guess this
+        # repo refuses (#137). Unlike a version-less record (which --auto-update fills
+        # because a refresh legitimately learned the one missing value), a conflict has two
+        # recorded values and choosing between them is not a refresh's authority. It keeps
+        # surfacing in the report on every run until a human reconciles the sources.
+        if (
+            result.status in (STATUS_ERROR, STATUS_VERSION_CONFLICT)
+            or result.current_version is None
+        ):
             continue
 
         # A paper spoken for only by `sources/*.md` has no ledger (imported before
@@ -1268,6 +1449,35 @@ def no_version_note(result: VersionCheck, *, outcome: str | None = None) -> str:
     )
 
 
+def version_conflict_note(result: VersionCheck) -> str:
+    """The line for a paper whose own sources disagree about the recorded version
+    (:data:`STATUS_VERSION_CONFLICT`, #137).
+
+    It names *each* source and the version it holds — the shape #121 established for a
+    version-less record: a distinct state gets a distinct signal that names what it found,
+    never a fold into a neighbour. It never prescribes a command, because none resolves a
+    conflict: choosing one recorded value over the other is the guess ``max`` was, and this
+    repo refuses that guess everywhere (``add_source`` raises rather than overwrite a
+    diverging entry). The remedy is a human reconciling the sources, so the note says that
+    rather than pointing at a command that would silently pick a winner.
+    """
+    pairs = ", ".join(
+        f"{src} records v{ver}" for src, ver in result.version_disagreement
+    )
+    serves = (
+        f"arXiv now serves v{result.current_version}"
+        if result.current_version
+        else "arXiv's current version could not be read"
+    )
+    return (
+        f"{result.arxiv_id}: this KB's own sources disagree about the recorded version "
+        f"({pairs}), so there is no single recorded version to compare against arXiv "
+        f"({serves}). No command resolves this — picking one recorded value over the "
+        "other would be a guess, the same guess `add_source` refuses. Reconcile the "
+        "sources by hand so they record one version."
+    )
+
+
 def _sources_suffix(result: VersionCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
@@ -1337,6 +1547,9 @@ def report_lines(
     # *missing* version, and that paper's remedy is its own. A distinct state keeps its
     # distinct signal even when a louder one fires alongside it.
     no_version = [r for r in results if r.status == STATUS_NO_VERSION]
+    # Like `no_version`, a conflict keeps its own signal even when the paper is also
+    # withdrawn: the withdrawal note says nothing about the KB's sources disagreeing.
+    conflict = [r for r in results if r.status == STATUS_VERSION_CONFLICT]
     errors = [r for r in results if r.status == STATUS_ERROR]
     # What this run's --auto-update did to each paper. The no-version note reads
     # differently once the write has happened — or failed: prescribing `--auto-update`
@@ -1381,6 +1594,18 @@ def report_lines(
             note = no_version_note(result, outcome=outcomes.get(result.arxiv_id))
             lines.append(f"  ? {note}{_sources_suffix(result)}")
 
+    if conflict:
+        lines.append(
+            "\nVersion conflict (this KB's own sources disagree — reconcile by hand; no "
+            "command resolves it):"
+        )
+        for result in conflict:
+            # The note already names every source and its version, so no `_sources_suffix`:
+            # it would repeat the same paths less usefully (and, for a front-matter paper,
+            # `result.sources` is only the first source anyway — the full naming lives in
+            # `version_disagreement`).
+            lines.append(f"  ⚠ {version_conflict_note(result)}")
+
     if errors:
         lines.append("\nCould not check:")
         for result in errors:
@@ -1399,6 +1624,10 @@ def report_lines(
     lines.append(f"  {'No longer withdrawn:':<21}{summary.un_withdrawn}")
     lines.append(f"  {'Errors:':<21}{summary.errors}")
     lines.append(f"  {'Skipped:':<21}{summary.skipped}")
+    # Conditional, so a KB with no conflicting id prints a summary byte-identical to before
+    # #137. Placed after the pre-existing counts so none of them moves when it does appear.
+    if summary.version_conflict:
+        lines.append(f"  {'Version conflict:':<21}{summary.version_conflict}")
     if updates:
         updated = sum(1 for u in updates if u.status == UPDATE_WRITTEN)
         lines.append(f"  {'Ledgers updated:':<21}{updated}")
@@ -1466,12 +1695,15 @@ def porcelain_lines(
     ``check\t<id>\t<status>\t<recorded>\t<current>\t<withdrawn_by>\t<newly_withdrawn>\t<reason>\t<un_withdrawn>``
     with empty fields for absent values, ``newly_withdrawn``/``un_withdrawn`` as
     ``0``/``1``, and versions as bare integers. ``status`` is one of
-    ``unchanged``/``changed``/``no-version``/``error``/``skipped``: ``no-version`` is
-    the record that carries no ``version`` (#121), whose ``<recorded>`` column is
-    therefore empty. It is a *new value in an existing column*, never a new column and
-    never the bare string ``None``, so a #78 parser keeping its column offsets keeps
-    working; one that switched on ``status`` sees a value it must now handle rather
-    than a version-less record mislabelled ``unchanged``. ``un_withdrawn`` distinguishes a paper
+    ``unchanged``/``changed``/``no-version``/``version-conflict``/``error``/``skipped``:
+    ``no-version`` is the record that carries no ``version`` (#121), whose ``<recorded>``
+    column is therefore empty. ``version-conflict`` is a paper whose sources recorded two
+    different versions (#137); its ``<recorded>`` column is likewise empty (there is no one
+    recorded value) and its ``<reason>`` column carries ``src=vN; src=vM`` naming each
+    source and the value it holds. Both are a *new value in an existing column*, never a new
+    column and never the bare string ``None``, so a #78 parser keeping its column offsets
+    keeps working; one that switched on ``status`` sees a value it must now handle rather
+    than a version-less or conflicting record mislabelled ``unchanged``. ``un_withdrawn`` distinguishes a paper
     arXiv no longer reports as withdrawn (but a record still does) from an unchanged one,
     whose row is otherwise byte-identical; it is appended last so a #78 parser keying on
     the earlier fixed columns is unaffected. The ``update`` rows are
@@ -1482,7 +1714,10 @@ def porcelain_lines(
     ``no_version\t<n>``, after ``skipped``: rows ``checked``…``skipped`` keep their
     index, while ``updated`` and ``target`` shift down by one — as ``updated``'s
     conditional presence (it appears only under ``--auto-update``) already made
-    positional tally parsing unsound. Parse the footer by its first field, as the rows
+    positional tally parsing unsound. A ``version_conflict\t<n>`` row follows
+    ``no_version`` but only when at least one paper conflicts (#137), exactly as
+    ``updated`` appears only under ``--auto-update``: a KB with no duplicate id emits a
+    footer byte-identical to before. Parse the footer by its first field, as the rows
     above. The progress/ETA is stderr only.
     """
     rows: list[str] = []
@@ -1525,6 +1760,11 @@ def porcelain_lines(
     # promise. `updated` and `target` do move down by one — `updated` is conditional, so
     # nothing could have parsed this footer positionally to begin with. Key by field.
     rows.append(f"no_version\t{summary.no_version}")
+    # Conditional, like `updated`: emitted only when at least one paper's sources conflict,
+    # so a KB with no duplicate id prints a footer byte-identical to before #137. Appended
+    # after `no_version` so every pre-existing row keeps its index; key by the first field.
+    if summary.version_conflict:
+        rows.append(f"version_conflict\t{summary.version_conflict}")
     if updates:
         rows.append(f"updated\t{sum(1 for u in updates if u.status == UPDATE_WRITTEN)}")
     rows.append(f"target\t{target}")
