@@ -376,6 +376,58 @@ factlog openalex-acknowledge-retraction --id W2741809807
 `web_api_key` 는 사용자 레벨 파일에서만 읽습니다). 자세한 옵션·크레딧 예산·provenance
 front matter 는 [docs/openalex.md](docs/openalex.md) 를 참고하세요.
 
+#### arXiv 프리프린트 가져오기 (`factlog arxiv-*`)
+
+프리프린트 저장소 [arXiv](https://arxiv.org) 에서 논문을 id로 임포트하거나 검색해 가져오고,
+가져온 레코드가 최신 버전인지 확인할 수 있습니다. 임포트된 항목은 여전히 **후보**이며
+`sync → review → accept` 게이트를 거칩니다. `pip install 'factlog[arxiv]'` 가 필요하고,
+arXiv API는 **인증이 없어** API 키나 계정이 필요 없습니다. 크레딧 예산도 없습니다 — 대신
+arXiv가 권고하는 요청 간 3초 지연을 factlog가 스스로 지킵니다(강제되지 않는 예의입니다).
+
+```bash
+factlog arxiv-import --id 2311.09277v2        # 버전은 id 에 인라인으로 핀. --version 플래그는 없음
+factlog arxiv-search --query "chain of thought" --category cs.CL --year 2020-2025
+factlog arxiv-check-versions                  # 보고만. --auto-update 로 원장 기록
+factlog arxiv-acknowledge-withdrawal --id 2311.09277
+factlog arxiv-backfill-provenance             # front matter만 있는 논문에 원장을 만들어 줌
+```
+
+`--id` 는 반복 가능하며 한 실행에 최대 100개입니다.
+
+**검색 쿼리가 조용히 거짓말하는 지점.** 여러 단어를 그냥 넘기면 arXiv는 그것을 구(phrase)로
+읽지 않고 느슨하게 매칭합니다. 실측으로 `chain of thought` 는 87,029건, 구로 검색한
+`all:"chain of thought"` 는 5,669건입니다 — 감싸지 않은 쪽은 `chain` 한 단어의 결과(71,394건)와
+대체로 같습니다. 그래서 factlog가 대신 감싸 `all:"your words"` 로 보내고, 감쌌다는 사실을
+알립니다. 느슨한 매칭이 필요하면 필드 프리픽스(`ti:`, `au:`, `abs:`), 불리언
+(`AND`/`OR`/`ANDNOT`), 또는 직접 넣은 큰따옴표로 끄면 됩니다. `--show-query` 는 요청을 보내지
+않고 실제 전송될 쿼리만 출력합니다(`--dry-run` 은 검색은 하되 파일을 쓰지 않습니다).
+arXiv는 존재하지 않는 카테고리·필드·연도에도 `200 OK` + "0건"으로 답하므로 — 운영자는 이걸
+"그런 논문은 없다"로 읽습니다 — factlog는 요청을 보내기 전에 값을 검증합니다.
+
+**결정론 경계** — 이걸 모르면 `--auto-update` 가 무엇을 고쳤는지 오해합니다.
+
+1. 임포트는 원장(ledger)을 고쳐 쓸 권한이 없습니다.
+2. `arxiv-check-versions --auto-update` 는 `version` / `last_updated` / `comment` 만 원장에
+   적습니다. `sources/*.md` 는 절대 열지 않습니다.
+3. **철회(`withdrawn_by`)는 두 모드 모두에서 자동 흡수되지 않습니다.** 사람에게 보고되고
+   `factlog arxiv-acknowledge-withdrawal --id <id>` 로만 종결됩니다. `--yes` 는 철회를
+   *기록*할 수는 있어도 *해제*할 수는 없습니다 — arXiv가 철회를 보고하지 않는다는 사실은
+   "철회가 취소됐다"일 수도 "철회 문장을 읽지 못했다"일 수도 있고, 코드는 둘을 구별하지
+   못합니다. 해제는 사람이 프롬프트에서 노트를 보고 확인해야 합니다. 원장이 없는 논문은 먼저
+   `arxiv-backfill-provenance` 가 필요합니다.
+4. 버전이 없는 원장 레코드는 `unchanged` 가 아니라 **`no-version`** 이라는 자기 자신의
+   상태로 보고됩니다. 비교된 것이 없으니 "변하지 않았다"고 말할 수 없습니다.
+5. 임포트된 항목은 여전히 후보이며 사람의 `accept` 게이트를 지나야 사실이 됩니다.
+
+> arXiv의 **철회(withdrawn)** 는 저널의 **철회(retraction, OpenAlex의 `is_retracted`)** 와
+> 같은 것이 아닙니다. 전자는 프리프린트에 대한 저자 또는 arXiv 관리자의 행위이고, 후자는
+> 저널이 게재 논문을 취소하는 절차입니다. 기록되는 agent는 `author` 아니면 `admin` 입니다.
+
+설정은 `<KB>/policy/arxiv-config.toml` > `~/.config/factlog/arxiv.toml` > 내장 기본값 순으로
+해석됩니다. OpenAlex와 마찬가지로 **secrets 경계가 없습니다**: `email` 은 인증이 아니라
+User-Agent 에 실리는 신원 표기용 예의입니다. 자세한 옵션·쿼리 문법·provenance front matter 는
+[docs/arxiv.md](docs/arxiv.md) 를 참고하세요.
+
 #### 어휘 살펴보기 (`factlog vocab`)
 
 `ask` 와 `provenance` 는 정확한 엔티티/관계 이름을 필요로 합니다. `factlog vocab`
