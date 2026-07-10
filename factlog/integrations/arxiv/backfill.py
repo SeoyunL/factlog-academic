@@ -14,17 +14,19 @@ how #64, #98 and the empty-tuple divergence fixed in #111 all happened.
 
 ## Why ``required`` is exactly ``("version",)``
 
-``check_versions._diff`` computes ``changed = recorded is not None and current !=
-recorded``. So:
+``check_versions._diff`` compares versions, and a record carrying none has nothing to
+compare. So:
 
-* an **absent** ``version`` silently excludes the record from version checking: with
-  ``recorded is None``, ``changed`` is false regardless of what arXiv serves, so the
-  paper's drift is **never reported at all**. Measured, same paper with arXiv serving v7:
-  a ledger recording ``version: 3`` prints ``Version changed: 1``; a ledger recording no
-  version prints ``Version changed: 0``. A backfill that wrote a version-less record would
-  drop a previously-healthy paper out of the one signal ``arxiv-check-versions`` exists to
-  produce, so it refuses (an OpenAlex-authored ``.md`` echoes ``arxiv_id`` but never emits
-  ``arxiv_version``: it reads ``None`` here). See #121;
+* an **absent** ``version`` excludes the record from version *checking*: with
+  ``recorded is None`` no drift can be measured, whatever arXiv serves. Since #121 the
+  paper is at least no longer silent — it is reported under its own
+  ``check_versions.STATUS_NO_VERSION`` state, with ``Version changed: 0`` and
+  ``No version recorded: 1``, and ``--auto-update`` fills it and says so. But the paper
+  still needs a second, human-initiated pass before its version means anything, and a
+  backfill has no version to write. A backfill that wrote a version-less record would
+  manufacture that repair debt for a paper that had none, so it refuses (an
+  OpenAlex-authored ``.md`` echoes ``arxiv_id`` but never emits ``arxiv_version``: it
+  reads ``None`` here). See #121;
 * a merely **wrong** ``version`` (``0``, ``-1``) is ``changed``, gets rewritten by the
   first ``--auto-update`` (which writes ``current_version`` unconditionally, not gated on
   ``_diff``), and is meanwhile still reported — recordable, so *not* refused;
