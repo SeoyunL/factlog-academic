@@ -4996,7 +4996,9 @@ def build_parser() -> argparse.ArgumentParser:
     ax_backfill.add_argument(
         "--dry-run", action="store_true",
         help="name the ids that would get a ledger and the ids refused (missing "
-             "imported_at, or an unreadable arxiv_version) without writing anything",
+             "imported_at, or an unreadable arxiv_version) without writing anything. "
+             "A preview cannot report a write that would fail — an unwritable "
+             "source-provenance/ shows up only on the real run",
     )
     ax_backfill.add_argument(
         "--porcelain", action="store_true",

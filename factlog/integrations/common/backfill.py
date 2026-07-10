@@ -290,6 +290,13 @@ def _backfill_source(
     # A dry run stops here: it has classified this paper as writable (past every refusal
     # and the no-op guard) without opening the sidecar for write, so nothing is written and
     # every .md and sidecar stays byte- and mtime_ns-identical. The ledger it *would* write.
+    #
+    # What a preview therefore cannot know: whether the write would succeed. An unwritable
+    # `source-provenance/` makes the real run report this paper as an error, while the
+    # preview reports it as writable. Measured. That is the price of not writing: the only
+    # way to learn a write fails is to attempt it. Every *classification* is shared with
+    # the real run, so the preview never disagrees about a refusal or a no-op — only about
+    # a filesystem failure it declined to trigger.
     if dry_run:
         return BackfillResult(entry_id, BACKFILL_WRITTEN, ledger=rel)
 
