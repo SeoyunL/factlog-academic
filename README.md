@@ -1,9 +1,16 @@
-# factlog
+# factlog-academic
 
 > 🌐 **English** | [한국어](README.ko.md)
 
 > facts + logic — a Claude Code skill that turns markdown sources into **verifiable, source-backed facts**.
 > The LLM extracts; a deterministic Datalog/wirelog engine verifies.
+
+**factlog-academic** is the academic-research distribution of
+[factlog](https://github.com/semantic-reasoning/factlog). It does everything factlog
+does, and adds commands that pull scholarly bibliography directly into your knowledge
+base: [Zotero](#importing-zotero-bibliography-factlog-zotero-import),
+[OpenAlex](#importing-openalex-bibliography-factlog-openalex-), and
+[arXiv](#importing-arxiv-preprints-factlog-arxiv-).
 
 ## What it is
 
