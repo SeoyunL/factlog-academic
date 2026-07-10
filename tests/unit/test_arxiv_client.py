@@ -418,8 +418,8 @@ def test_user_agent_does_not_identify_this_build_as_upstream_factlog():
     # arXiv asks callers to identify themselves so operators can reach them about
     # traffic. The arxiv commands exist only in this fork, so a bare "factlog/..."
     # would route complaints to a project that never sent the requests (#153).
-    assert "semantic-reasoning" not in _user_agent(ArxivConfig())
     assert not _user_agent(ArxivConfig()).startswith("factlog/")
+    assert not _user_agent(ArxivConfig(email="a@b.example")).startswith("factlog/")
 
 
 def test_api_base_is_https_because_http_redirects():

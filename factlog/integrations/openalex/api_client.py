@@ -125,6 +125,17 @@ class SearchPage:
     next_cursor: str | None = None
 
 
+def _user_agent(config) -> str:
+    """Identify this fork, not upstream factlog, to OpenAlex operators (#153).
+
+    Kept a module-level function rather than inlined in the transport so the
+    identity can be asserted without mocking httpx.
+    """
+    if config.email:
+        return f"factlog-academic (mailto:{config.email})"
+    return "factlog-academic"
+
+
 def normalize_work_id(value: str) -> str:
     """Return the bare ``W...`` id for a work id or an ``openalex.org`` URL.
 
@@ -276,9 +287,7 @@ class OpenAlexClient:
                 "pip install 'factlog[openalex]'"
             ) from exc
 
-        user_agent = "factlog-academic"
-        if self._config.email:
-            user_agent = f"factlog-academic (mailto:{self._config.email})"
+        user_agent = _user_agent(self._config)
 
         def _send(path: str, params: dict) -> _Response:
             try:
