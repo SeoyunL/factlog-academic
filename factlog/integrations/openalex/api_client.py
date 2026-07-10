@@ -276,9 +276,9 @@ class OpenAlexClient:
                 "pip install 'factlog[openalex]'"
             ) from exc
 
-        user_agent = "factlog"
+        user_agent = "factlog-academic"
         if self._config.email:
-            user_agent = f"factlog (mailto:{self._config.email})"
+            user_agent = f"factlog-academic (mailto:{self._config.email})"
 
         def _send(path: str, params: dict) -> _Response:
             try:
