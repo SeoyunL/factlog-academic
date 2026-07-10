@@ -956,7 +956,12 @@ class TestAutoUpdateCli:
         fake(FakeClient([_full_work(version=7)]))
         code = run(["arxiv-check-versions", "--target", str(tmp_path), "--auto-update"])
         assert code == 0
-        assert "no ledger" in capsys.readouterr().out.lower()
+        out = capsys.readouterr().out
+        assert "no arXiv record in a provenance ledger to update" in out
+        # This paper's front matter carries a version, so a backfill CAN build its
+        # ledger. The remedy is per-paper (#121): naming `arxiv-import` for every
+        # no-ledger paper was false for the ones it does not repair.
+        assert "arxiv-backfill-provenance" in out
         assert not (tmp_path / "source-provenance").exists()
 
     def test_porcelain_emits_update_rows(self, tmp_path, fake, capsys):
