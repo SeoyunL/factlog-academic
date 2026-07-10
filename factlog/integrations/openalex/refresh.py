@@ -82,8 +82,9 @@ from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
     SourceRecord,
+    backfill_remedy,
     excluded_reason,
-    excluded_source_refs,
+    excluded_sources_by_id,
     provenance_sources,
     read_provenance,
     update_source,
@@ -359,8 +360,12 @@ def collect_ledger_entries(
 
 
 def excluded_checks(kb_root: Path | str) -> list[RefreshCheck]:
-    """One ``error`` :class:`RefreshCheck` per source that names an OpenAlex work but lies
-    outside the provenance root, so no ledger can exist for it (#112).
+    """One ``error`` :class:`RefreshCheck` per OpenAlex work named only by a source outside
+    the provenance root, so no ledger can exist for it (#112).
+
+    Keyed by **openalex_id**, not by path: the id is what every other row of this report and
+    of ``--porcelain`` carries in that column, and what ``openalex-acknowledge-retraction
+    --id`` takes. The paths go to the ``sources`` column and the reason.
 
     Deliberately a separate channel from :func:`collect_ledger_entries`' errors, which
     ``common/backfill.py`` treats as a poison that stops every write (#111): an unreadable
@@ -370,9 +375,15 @@ def excluded_checks(kb_root: Path | str) -> list[RefreshCheck]:
     silent direction #112 closes. The arXiv twin is ``check_versions.excluded_checks``.
     """
     root = Path(kb_root)
+    remedy = backfill_remedy("openalex-backfill-provenance")
     return [
-        RefreshCheck(openalex_id=ref, status=STATUS_ERROR, reason=excluded_reason(ref))
-        for ref in excluded_source_refs(root, "openalex_id")
+        RefreshCheck(
+            openalex_id=openalex_id,
+            status=STATUS_ERROR,
+            reason=excluded_reason(", ".join(refs), remedy),
+            sources=refs,
+        )
+        for openalex_id, refs in sorted(excluded_sources_by_id(root, "openalex_id").items())
     ]
 
 
@@ -920,7 +931,12 @@ def report_lines(
     field outcome; then id supersedes; then field divergences; then per-id errors; then,
     under ``--auto-update``, what was written; then the tally."""
     total = len(results) + len(skipped)
-    header = f"Checked {len(results)} of {total} OpenAlex record(s) in KB: {target}"
+    # `summary.checked`, not `len(results)`: `results` carries the per-file errors
+    # (a corrupt ledger, a source outside the provenance root), and a paper this run
+    # could not check has not been checked. `Checked 4 of 4` above `Errors: 1` was a
+    # false statement about the run. The denominator keeps every record considered,
+    # so the excluded paper is still counted, never dropped (#112).
+    header = f"Checked {summary.checked} of {total} OpenAlex record(s) in KB: {target}"
     if skipped:
         header += (
             f"\n  ({len(skipped)} skipped: checked within the last "

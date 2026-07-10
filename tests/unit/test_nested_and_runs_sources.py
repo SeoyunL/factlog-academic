@@ -25,17 +25,22 @@ from factlog.common import source_files
 from factlog.integrations.arxiv import check_versions as cv
 from factlog.integrations.arxiv.client import BatchResult
 from factlog.integrations.arxiv.id_normalizer import ArxivId
+from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common import acknowledge as ack
+from factlog.integrations.common.front_matter import front_matter_block, read_scalars
 from factlog.integrations.common.provenance import (
     Provenance,
     SourceRecord,
+    excluded_sources_by_id,
     provenance_sources,
     read_provenance,
     sidecar_path,
     write_provenance,
 )
 from factlog.integrations.openalex import refresh as rf
+from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
+from factlog.integrations.openalex.work_parser import ParsedWork
 
 IMPORTED_AT = "2026-01-01T00:00:00+00:00"
 
@@ -147,7 +152,9 @@ class TestOneEnumeration:
         excluded = cv.excluded_checks(kb)
 
         checked_refs = {ref for e in entries for ref in e.sources}
-        excluded_refs = {e.arxiv_id for e in excluded}
+        # The excluded check is keyed by arxiv_id (the id column is an id); the paths it
+        # speaks for are in `sources`, which is what this partition is about.
+        excluded_refs = {ref for e in excluded for ref in e.sources}
         every_md = {
             p.relative_to(kb).as_posix() for p in source_files(kb) if p.suffix == ".md"
         }
@@ -297,8 +304,11 @@ class TestRunsSourcesIsReportedNotSkipped:
         assert "runs/sources/z.md" in out
         assert "Could not check:" in out
         assert "Errors:              1" in out
-        # It is in the denominator, not dropped from it.
-        assert "Checked 2 of 2 arXiv record(s)" in out
+        # It is in the DENOMINATOR (2), and it was not checked (1). `Checked 2 of 2` beside
+        # `Errors: 1` was a false statement about the run.
+        assert "Checked 1 of 2 arXiv record(s)" in out
+        # The paper is addressed by id, exactly as acknowledge addresses it.
+        assert "✗ 2301.00003:" in out
         # The excluded paper was never sent to arXiv.
         assert client.calls == [["2301.00001"]]
 
@@ -311,9 +321,14 @@ class TestRunsSourcesIsReportedNotSkipped:
         code = run(["arxiv-check-versions", "--target", str(kb), "--porcelain"])
         out = capsys.readouterr().out
         assert code == 1
+        # The id column carries an id — the value `--id` takes — never a source path.
         assert any(
-            line.startswith("check\truns/sources/z.md\terror") for line in out.splitlines()
+            line.startswith("check\t2301.00003\terror") for line in out.splitlines()
         ), out
+        assert "runs/sources/z.md" in out  # the path is in the reason column
+        assert not any(
+            line.startswith("check\truns/") for line in out.splitlines()
+        ), "a source path must never occupy the id column"
         assert "errors\t1" in out
 
     def test_auto_update_never_writes_a_ledger_for_it(self, tmp_path, fake, capsys):
@@ -429,7 +444,8 @@ class TestBackfillWidensWithItsConsumers:
 
         statuses = {entry_id: status for entry_id, status, _ in real}
         # All three classifications are exercised, so the equality above is not vacuous.
-        assert statuses["runs/sources/excluded.md"] == "error"
+        excluded_id = "W3" if command == "openalex" else "2301.00003"
+        assert statuses[excluded_id] == "error"
         assert statuses[no_stamp_id] == "refused"
         assert statuses["W2" if command == "openalex" else "2301.00002"] == "backfilled"
 
@@ -449,3 +465,208 @@ class TestBackfillWidensWithItsConsumers:
         assert "Backfilled:       1" in out
         assert "Errors:           1" in out
         assert "runs/sources/excluded.md" in out
+
+
+# --------------------------------------------------------------------------- #
+# the importer's index: the P3 half of #112, and the hidden-file trap it opened
+# --------------------------------------------------------------------------- #
+def _parsed_arxiv(arxiv_id="2311.09277", version=2) -> ParsedArxivWork:
+    return ParsedArxivWork(
+        arxiv_id=arxiv_id, version=version, title="A Paper", authors=("Ada Lovelace",),
+        abstract="An abstract.", primary_category="cs.CL", categories=("cs.CL",),
+        submitted=date(2023, 11, 15), last_updated=date(2023, 11, 20),
+        withdrawn_by=None, abs_url="https://arxiv.org/abs/x", pdf_url="https://arxiv.org/pdf/x",
+    )
+
+
+def _parsed_openalex(openalex_id="W1", arxiv_id="2311.09277") -> ParsedWork:
+    return ParsedWork(
+        openalex_id=openalex_id, title="A Paper", authors=("Ada Lovelace",), year=2023,
+        journal="Journal of Foo", doi=None, pmid=None, arxiv_id=arxiv_id, work_type="article",
+    )
+
+
+def _plant(kb, rel, work=None):
+    """Put a real, writer-rendered arXiv original at *rel* — as `ingest`'s subtree mirroring
+    or a human's `mv` would. Nothing else in the KB."""
+    work = work or _parsed_arxiv()
+    path = kb / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(ArxivSourceWriter().render(work, IMPORTED_AT), encoding="utf-8")
+    return path
+
+
+def _md_count(kb):
+    return len(list((kb / "sources").rglob("*.md")))
+
+
+class TestTheImporterIndexSeesEveryMdOnDisk:
+    """`BaseSourceWriter._index` is a duplicate guard over files that exist, not the KB's
+    source enumeration. A `.md` it cannot see is a `.md` a re-import will write a second
+    copy of — the silent P3 break #112 fixes for nested files, and the one it must not
+    newly create for hidden ones."""
+
+    def test_a_nested_original_is_reimported_as_skipped_not_duplicated(self, tmp_path):
+        kb = _kb(tmp_path)
+        _plant(kb, "sources/sub/x.md")
+        result = ArxivSourceWriter().write(_parsed_arxiv(), kb, imported_at="2026-02-02T00:00:00Z")
+        assert result.status == "skipped"
+        assert _md_count(kb) == 1  # never a second .md for one paper
+
+    def test_a_new_import_is_not_pushed_to_a_suffix_by_a_nested_namesake(self, tmp_path):
+        """The counter-example that justifies keeping `claimed` flat. `sources/sub/x.md`
+        occupies no name at the top level, so a genuinely new paper must land at its own
+        slug, not at `<slug>-2.md`."""
+        kb = _kb(tmp_path)
+        other = _parsed_arxiv(arxiv_id="1706.03762")
+        slug = ArxivSourceWriter().generate_slug(other)
+        _plant(kb, f"sources/sub/{slug}", work=_parsed_arxiv(arxiv_id="2311.09277"))
+
+        result = ArxivSourceWriter().write(other, kb, imported_at="2026-02-02T00:00:00Z")
+        assert result.status == "imported"
+        # Its own slug, not the `<stem>-2.md` a nested namesake would force if `claimed`
+        # collected bare names from the whole subtree.
+        assert result.path == kb / "sources" / slug
+        assert not (kb / "sources" / f"{slug[:-3]}-2.md").exists()
+
+    def test_a_merge_writes_the_nested_originals_sidecar_beside_it(self, tmp_path):
+        """A cross-source merge must find the nested original AND land its ledger at the
+        path every walker reads: `source-provenance/sub/x.json`."""
+        kb = _kb(tmp_path)
+        existing = _plant(kb, "sources/sub/x.md")
+
+        result = OpenAlexSourceWriter().write(
+            _parsed_openalex(), kb, imported_at="2026-02-02T00:00:00Z"
+        )
+        assert result.status == "merged"
+        assert result.path == existing
+        assert _md_count(kb) == 1
+
+        sidecar = kb / "source-provenance" / "sub" / "x.json"
+        assert sidecar.is_file()
+        assert sidecar_path(existing, kb) == sidecar
+        assert [r.type for r in read_provenance(sidecar).records] == ["openalex"]
+
+    @pytest.mark.parametrize("rel", ["sources/.hidden-x.md", "sources/.h/x.md"])
+    def test_a_hidden_original_still_claims_its_identity(self, tmp_path, rel):
+        """`provenance_sources` excludes hidden paths because they are not *sources* (#67).
+        The index must not: a hidden `.md` that already carries this arxiv_id is a file that
+        would be duplicated. Filtering it here re-created, for hidden files, the exact silent
+        P3 break #112 fixes for nested ones — measured: `imported`, two `.md` for one paper.
+        A `skipped` the report names beats a duplicate nobody sees."""
+        kb = _kb(tmp_path)
+        _plant(kb, rel)
+        result = ArxivSourceWriter().write(_parsed_arxiv(), kb, imported_at="2026-02-02T00:00:00Z")
+        assert result.status == "skipped"
+        assert _md_count(kb) == 1
+
+    def test_a_hidden_original_is_still_not_a_source(self, tmp_path):
+        """The two walks disagree on purpose, and this pins the disagreement: the index sees
+        it, the ledger enumeration does not."""
+        kb = _kb(tmp_path)
+        _plant(kb, "sources/.hidden-x.md")
+        assert provenance_sources(kb) == []
+        assert cv.collect_ledger_entries(kb) == ([], [])
+
+
+# --------------------------------------------------------------------------- #
+# the remedy must be the one that works
+# --------------------------------------------------------------------------- #
+class TestTheRemedyIsMeasuredNotPlausible:
+    def test_a_re_import_after_the_move_writes_no_ledger(self, tmp_path):
+        """Why the message may not say "re-import". The identity match returns before the
+        sidecar writer, so the re-import is a no-op that spends an API request."""
+        kb = _kb(tmp_path)
+        _plant(kb, "sources/x.md")  # already "moved" here
+        result = ArxivSourceWriter().write(_parsed_arxiv(), kb, imported_at="2026-02-02T00:00:00Z")
+        assert result.status == "skipped"
+        assert not (kb / "source-provenance").exists()  # no ledger, ever
+
+    def test_move_then_backfill_then_acknowledge_is_the_path_that_works(
+        self, tmp_path, fake, capsys
+    ):
+        """End-to-end, the sequence the message prescribes. If this breaks, the message is
+        a lie and the operator is sent nowhere."""
+        kb = _kb(tmp_path)
+        _arxiv_md(kb, "runs/sources/z.md", "2301.00003", version=1)
+
+        # 1. the command names the working remedy, and never prescribes a re-import
+        code = run(["arxiv-backfill-provenance", "--target", str(kb)])
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "re-import" in out and "no-op" in out  # named as what does NOT work
+        assert "Move it under sources/" in out
+
+        # 2. the move
+        (kb / "sources").mkdir(exist_ok=True)
+        (kb / "runs" / "sources" / "z.md").rename(kb / "sources" / "z.md")
+
+        # 3. backfill (no network: a client would raise)
+        assert run(["arxiv-backfill-provenance", "--target", str(kb)]) == 0
+        capsys.readouterr()
+        assert (kb / "source-provenance" / "z.json").is_file()
+
+        # 4. acknowledge now succeeds
+        fake(FakeClient([_work("2301.00003", version=1, withdrawn_by="author")]))
+        assert run([
+            "arxiv-acknowledge-withdrawal", "--id", "2301.00003",
+            "--target", str(kb), "--yes",
+        ]) == 0
+        record = read_provenance(kb / "source-provenance" / "z.json").records[0]
+        assert record.fields["withdrawn_by"] == "author"
+
+    def test_backfill_does_not_tell_you_to_run_backfill(self, tmp_path, capsys):
+        """The message prints inside this command's own output. Naming it as the fix sends
+        the operator to the thing they have just run."""
+        kb = _kb(tmp_path)
+        _arxiv_md(kb, "runs/sources/z.md", "2301.00003", version=1)
+        run(["arxiv-backfill-provenance", "--target", str(kb)])
+        out = capsys.readouterr().out
+        assert "re-run `factlog arxiv-backfill-provenance`" in out
+        assert "and run `factlog arxiv-backfill-provenance`" not in out
+
+    @pytest.mark.parametrize(
+        "argv, command",
+        [
+            (["arxiv-check-versions"], "arxiv-backfill-provenance"),
+            (["openalex-refresh"], "openalex-backfill-provenance"),
+        ],
+    )
+    def test_a_check_command_names_the_backfill_command(
+        self, tmp_path, capsys, monkeypatch, argv, command
+    ):
+        kb = _kb(tmp_path)
+        _arxiv_md(kb, "runs/sources/z.md", "2301.00003", version=1)
+        _openalex_md(kb, "runs/sources/w.md", "W3")
+        monkeypatch.setattr(cli, "_make_arxiv_client", lambda c: pytest.fail("no request"))
+        monkeypatch.setattr(cli, "_make_openalex_client", lambda c: pytest.fail("no request"))
+
+        assert run(argv + ["--target", str(kb)]) == 1
+        out = capsys.readouterr().out
+        assert f"run `factlog {command}` (no network)" in out
+        assert "no-op" in out
+
+
+# --------------------------------------------------------------------------- #
+# why an ingest conversion names no paper
+# --------------------------------------------------------------------------- #
+class TestAConversionCarriesNoFrontMatter:
+    def test_the_header_not_the_extension_is_what_silences_a_conversion(self, tmp_path):
+        """`SOURCE_SUFFIX` is `.md` and pandoc's `out_suffix` is `.md` too (cli.py:2121), so
+        the extension filter is NOT what keeps a conversion quiet. `ingest` writes its
+        provenance header on line 1, so `front_matter_block` (which requires the file to
+        *start* with `---`) returns None and the conversion names no paper."""
+        kb = _kb(tmp_path)
+        conv = kb / "runs" / "sources"
+        conv.mkdir(parents=True)
+        # A conversion of a paper whose text happens to open with a front-matter block.
+        conv_md = conv / "report.pdf.md"
+        conv_md.write_text(
+            "<!-- ingested-by-factlog | source: report.pdf | converter: pandoc -->\n\n"
+            "---\narxiv_id: 2301.00099\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        assert conv_md.suffix == ".md"  # the filter does not exclude it
+        assert front_matter_block(conv_md) is None  # the header does
+        assert read_scalars(conv_md, ("arxiv_id",)) == {}
+        assert excluded_sources_by_id(kb, "arxiv_id") == {}

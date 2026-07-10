@@ -106,8 +106,9 @@ from factlog.integrations.common.provenance import (
     SourceRecord,
     add_source,
     excluded_reason,
-    excluded_source_refs,
+    excluded_sources_by_id,
     read_provenance,
+    rerun_remedy,
     sidecar_path,
     signal_field_error,
     write_provenance,
@@ -154,7 +155,7 @@ class BackfillSchema:
     ``id_key`` is the integration's *front-matter* identity key (``arxiv_id`` /
     ``openalex_id``) — the word a ``.md`` uses to name a paper, which is not always the
     record type. It exists so a source outside the provenance root that names one of this
-    integration's papers can be reported (``excluded_source_refs``) instead of dropped. It
+    integration's papers can be reported (``excluded_sources_by_id``) instead of dropped. It
     has no default: an integration that forgets it would silently skip such a paper, and a
     silent skip is the defect (#112).
 
@@ -451,12 +452,21 @@ def backfill(
     # a command whose whole job is to give that paper a ledger, and it cannot. Reported in
     # `dry_run` and in a real run identically — nothing about it depends on writing.
     #
+    # The remedy is `rerun_remedy`, not `backfill_remedy`: this text prints inside *this*
+    # command's own output, so naming this command as the fix would tell the operator to run
+    # the thing they have just run. The move is the only step they have not taken.
+    #
     # It does not poison the write below, unlike an unreadable ledger: an unread ledger
     # makes the front-matter-only classification of *other* papers untrustworthy (#111),
     # while an excluded source tells us nothing about any paper but itself.
+    remedy = rerun_remedy(f"{schema.type}-backfill-provenance")
     results.extend(
-        BackfillResult(entry_id=ref, status=BACKFILL_ERROR, reason=excluded_reason(ref))
-        for ref in excluded_source_refs(root, schema.id_key)
+        BackfillResult(
+            entry_id=entry_id,
+            status=BACKFILL_ERROR,
+            reason=excluded_reason(", ".join(refs), remedy),
+        )
+        for entry_id, refs in excluded_sources_by_id(root, schema.id_key).items()
     )
 
     # An unreadable ledger contaminates the "front-matter-only" set (see the docstring):

@@ -3704,6 +3704,7 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
         acknowledge,
     )
     from factlog.integrations.common.provenance import (
+        backfill_remedy,
         excluded_reason,
         excluded_sources_by_id,
     )
@@ -3795,7 +3796,10 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
                     f"{arxiv_id!r} is named by {', '.join(excluded)}, which "
                     f"{'is' if len(excluded) == 1 else 'are'} outside the provenance root, "
                     "so no ledger can record a decision about it. "
-                    + excluded_reason(excluded[0])
+                    + excluded_reason(
+                        ", ".join(excluded),
+                        backfill_remedy("arxiv-backfill-provenance"),
+                    )
                 )
             else:
                 reason = (
@@ -4231,6 +4235,7 @@ def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
         acknowledge,
     )
     from factlog.integrations.common.provenance import (
+        backfill_remedy,
         excluded_reason,
         excluded_sources_by_id,
     )
@@ -4318,7 +4323,10 @@ def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
                     f"{openalex_id!r} is named by {', '.join(excluded)}, which "
                     f"{'is' if len(excluded) == 1 else 'are'} outside the provenance root, "
                     "so no ledger can record a decision about it. "
-                    + excluded_reason(excluded[0])
+                    + excluded_reason(
+                        ", ".join(excluded),
+                        backfill_remedy("openalex-backfill-provenance"),
+                    )
                 )
             else:
                 reason = (

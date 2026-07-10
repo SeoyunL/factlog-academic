@@ -76,8 +76,9 @@ from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
     ProvenanceError,
     SourceRecord,
+    backfill_remedy,
     excluded_reason,
-    excluded_source_refs,
+    excluded_sources_by_id,
     provenance_sources,
     read_provenance,
     sidecar_path,
@@ -442,8 +443,14 @@ def collect_ledger_entries(
 
 
 def excluded_checks(kb_root: Path | str) -> list[VersionCheck]:
-    """One ``error`` :class:`VersionCheck` per source that names an arXiv paper but lies
-    outside the provenance root, so no ledger can exist for it (#112).
+    """One ``error`` :class:`VersionCheck` per arXiv paper named only by a source outside
+    the provenance root, so no ledger can exist for it (#112).
+
+    Keyed by **arxiv_id**, not by path: the id is what every other row of this report and
+    of ``--porcelain`` carries in that column, and it is what ``arxiv-acknowledge-withdrawal
+    --id`` takes. A path in the id column would silently change the machine contract and
+    hand a parser a value it cannot feed back to any command. The paths go where paths go —
+    the ``sources`` column, and the reason.
 
     These are **not** returned by :func:`collect_ledger_entries`. Its second channel is the
     unreadable-ledger errors, and ``common/backfill.py`` treats any of those as a poison
@@ -456,9 +463,15 @@ def excluded_checks(kb_root: Path | str) -> list[VersionCheck]:
     that is true is the silent direction #112 exists to close.
     """
     root = Path(kb_root)
+    remedy = backfill_remedy("arxiv-backfill-provenance")
     return [
-        VersionCheck(arxiv_id=ref, status=STATUS_ERROR, reason=excluded_reason(ref))
-        for ref in excluded_source_refs(root, "arxiv_id")
+        VersionCheck(
+            arxiv_id=arxiv_id,
+            status=STATUS_ERROR,
+            reason=excluded_reason(", ".join(refs), remedy),
+            sources=refs,
+        )
+        for arxiv_id, refs in sorted(excluded_sources_by_id(root, "arxiv_id").items())
     ]
 
 
@@ -1133,7 +1146,12 @@ def report_lines(
     then per-id errors; then, under ``--auto-update``, what was written to the ledgers;
     then the tally."""
     total = len(results) + len(skipped)
-    header = f"Checked {len(results)} of {total} arXiv record(s) in KB: {target}"
+    # `summary.checked`, not `len(results)`: `results` carries the per-file errors
+    # (a corrupt ledger, a source outside the provenance root), and a paper this run
+    # could not check has not been checked. `Checked 4 of 4` above `Errors: 1` was a
+    # false statement about the run. The denominator keeps every record considered,
+    # so the excluded paper is still counted, never dropped (#112).
+    header = f"Checked {summary.checked} of {total} arXiv record(s) in KB: {target}"
     if skipped:
         header += (
             f"\n  ({len(skipped)} skipped: checked within the last "

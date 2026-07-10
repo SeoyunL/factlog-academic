@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from factlog.common import is_hidden_source, slugify
+from factlog.common import slugify
 from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
 from factlog.integrations.common._textio import atomic_write_text
 from factlog.integrations.common.front_matter import read_first_author, read_scalars
@@ -419,6 +419,17 @@ class BaseSourceWriter:
                 # original is a real source (#112). A flat walk left `sources/sub/x.md`
                 # out of `by_identity`, so re-importing that paper wrote a *second* `.md`
                 # for it and broke P3 idempotence in silence.
+                #
+                # Hidden paths are NOT filtered here, and this index is the one sources/
+                # walk that must not filter them. `provenance_sources` excludes them
+                # because they are not *sources* (#67) — nothing syncs them, nothing gives
+                # them a ledger. This index answers a different question: does a file on
+                # disk already claim this identity, or this name? A `.md` that exists can
+                # be duplicated whether or not `sync` counts it. Skipping `sources/.h/x.md`
+                # here makes a re-import of that paper write a *second* `.md` — measured,
+                # and the same silent P3 break #112 fixes for nested files. Indexing it
+                # instead yields a `skipped`, which the report names. A skip the operator
+                # can see beats a duplicate they cannot.
                 for path in sorted(sources_dir.rglob("*.md")):
                     # `claimed` stays flat on purpose: it exists to keep `_unique_path`
                     # from overwriting a file, and this writer only ever creates files
@@ -426,10 +437,6 @@ class BaseSourceWriter:
                     # push a new import to `x-2.md` because an unrelated `sub/x.md` exists.
                     if path.parent == sources_dir:
                         cached.claimed.add(path.name)
-                    # A dot-prefixed component below sources/ is not a source (#67), and
-                    # rglob is the first walk here that can descend into one.
-                    if is_hidden_source(path, sources_dir):
-                        continue
                     scalars = read_scalars(path, self._scan_keys(), self.ignore_re)
                     identity = scalars.get(self.identity_key, "")
                     # Registration is unconditional, and provenance rides along.

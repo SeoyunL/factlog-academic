@@ -76,11 +76,10 @@ import: its origin is the original beside it, recorded in its own first-line
 provenance header (``common.conversion_origin``). Giving it a sidecar would file a
 second ledger for one paper.
 
-The exclusion is **reported, never silent**. :func:`excluded_source_refs` names every
-``.md`` outside the provenance root whose front matter carries an integration's id
-key, so ``arxiv-check-versions`` / ``openalex-refresh`` / both backfills surface it as
-a per-file error instead of dropping it from the denominator. Skipping such a paper
-quietly is the failure #112 exists to remove.
+The exclusion is **reported, never silent**. :func:`excluded_sources_by_id` names every
+paper whose only ``.md`` lies outside the provenance root, so ``arxiv-check-versions`` /
+``openalex-refresh`` / both backfills surface it as a per-id error instead of dropping it
+from the denominator. Skipping such a paper quietly is the failure #112 exists to remove.
 
 ## Determinism contract
 
@@ -152,8 +151,17 @@ SIDECAR_DIR = "source-provenance"
 PROVENANCE_SOURCE_ROOT = "sources"
 
 #: The extension a source must have to carry front matter, and so to have provenance.
-#: Every importer writes ``.md`` (``source_writer.py`` renders one); ``runs/sources/``'s
-#: ``.txt`` conversions and ``sources/``'s binary originals carry none.
+#: Every importer writes ``.md`` (``source_writer.py`` renders one), and a binary original
+#: under ``sources/`` carries no front matter to read.
+#:
+#: This filter is **not** what keeps ``ingest``'s conversions quiet, and it must not be
+#: read as if it were: pandoc's ``out_suffix`` *is* ``.md`` (``cli.py:2121``), so a
+#: conversion is a ``.md`` like any other. What keeps it quiet is that ``ingest`` writes its
+#: provenance header on line 1, so ``front_matter_block`` — which requires the file to
+#: *start* with ``---`` — returns ``None`` and the conversion names no paper. (``ingest``
+#: also refuses a ``.md`` original outright, so no conversion can inherit one's front
+#: matter.) Stating a false reason for a true conclusion is the #134 shape; the conclusion
+#: here rests on the header, and a test pins it.
 SOURCE_SUFFIX = ".md"
 
 #: File extension of a sidecar. A sidecar is a ``.json`` file directly inside a
@@ -234,21 +242,61 @@ def is_sidecar(path: Path | str) -> bool:
     return p.suffix == SIDECAR_SUFFIX and SIDECAR_DIR in p.parts[:-1]
 
 
-def excluded_reason(ref: str) -> str:
+#: Why "move it and re-import" is not the remedy, stated once. An import short-circuits on
+#: the front-matter identity match *before* it reaches the sidecar writer, so a re-import of
+#: a paper the KB already holds is ``skipped`` and no ledger is created — measured, and the
+#: reason ``*-backfill-provenance`` (#105) had to exist at all. Prescribing a re-import
+#: sends the operator to a command that spends an API request and changes nothing.
+_REIMPORT_IS_A_NO_OP = (
+    "A re-import after the move is a no-op: the identity match returns before the sidecar "
+    "writer, so it is reported as `skipped` and still no ledger is written (#105)."
+)
+
+
+def backfill_remedy(command: str) -> str:
+    """The remedy for a caller that is **not** the backfill command: move, then backfill."""
+    return (
+        f"Move it under {PROVENANCE_SOURCE_ROOT}/ and run `factlog {command}` (no network). "
+        + _REIMPORT_IS_A_NO_OP
+    )
+
+
+def rerun_remedy(command: str) -> str:
+    """The remedy for the backfill command itself. It must not tell the operator to run the
+    command whose output they are reading; the move is the only step they have not taken."""
+    return (
+        f"Move it under {PROVENANCE_SOURCE_ROOT}/ and re-run `factlog {command}`. "
+        + _REIMPORT_IS_A_NO_OP
+    )
+
+
+def excluded_reason(ref: str, remedy: str = "") -> str:
     """Why *ref* — a KB-relative source path outside the provenance root — has no ledger.
 
-    One sentence per fact a reader needs: what cannot happen, why it cannot, and what to
-    do. Written once here so all four consuming commands say the same thing.
+    One sentence per fact a reader needs: what cannot happen, why it cannot, and what to do.
+    Written once here so every consuming command says the same thing.
+
+    *remedy* is the caller's, because the working next step depends on who is speaking:
+    :func:`backfill_remedy` for a check or an acknowledge, :func:`rerun_remedy` for the
+    backfill command itself. The default names no command, for the callers (``sidecar_path``)
+    that do not know the integration. Whichever is chosen, it must name a command that has
+    been *measured* to fix the paper — naming a plausible one is the #7ad3412 defect, and it
+    is why the remedy is not hardcoded here where the integration is unknown.
     """
+    if not remedy:
+        remedy = (
+            f"Move it under {PROVENANCE_SOURCE_ROOT}/ and run the integration's "
+            "`*-backfill-provenance` command (no network). " + _REIMPORT_IS_A_NO_OP
+        )
     return (
         f"{ref} is not under '{PROVENANCE_SOURCE_ROOT}/', so it can have no provenance "
         f"ledger: a sidecar's path is the source's path below {PROVENANCE_SOURCE_ROOT}/, "
         "and one sidecar directory cannot hold two source roots without mapping two "
         "different papers onto one ledger. runs/sources/ holds `factlog ingest`'s derived "
         "conversions, whose origin is the original beside them in sources/ and is recorded "
-        "in the conversion's own header, not in a ledger. Move this paper under sources/ "
-        "and re-import it. It is reported rather than skipped because a paper this command "
-        "cannot act on must never vanish from its report."
+        f"in the conversion's own header, not in a ledger. {remedy} It is reported rather "
+        "than skipped because a paper this command cannot act on must never vanish from "
+        "its report."
     )
 
 
@@ -276,8 +324,8 @@ def sidecar_path(source_path: Path | str, kb_root: Path | str) -> Path:
     Raises :class:`ValueError` when *source_path* is not under ``<kb_root>/sources/``.
     ``runs/sources/`` is the case that matters (#112): it has no sidecar, by construction,
     because it would collide with ``sources/`` on one — see the module docstring, and
-    :func:`excluded_source_refs` for how a caller reports such a paper instead of dropping
-    it. Over the ``.md`` sources :func:`provenance_sources` yields, this map is injective,
+    :func:`excluded_sources_by_id` for how a caller reports such a paper instead of
+    dropping it. Over the ``.md`` sources :func:`provenance_sources` yields, this map is injective,
     so two papers can never share a ledger.
     """
     src, root = Path(source_path), Path(kb_root)
@@ -353,16 +401,6 @@ def excluded_sources_by_id(kb_root: Path | str, id_key: str) -> dict[str, tuple[
             by_id.setdefault(entry_id, []).append(path.relative_to(root).as_posix())
     return {entry_id: tuple(sorted(refs)) for entry_id, refs in by_id.items()}
 
-
-def excluded_source_refs(kb_root: Path | str, id_key: str) -> tuple[str, ...]:
-    """Every path :func:`excluded_sources_by_id` names, sorted. One error line per source."""
-    return tuple(
-        sorted(
-            ref
-            for refs in excluded_sources_by_id(kb_root, id_key).values()
-            for ref in refs
-        )
-    )
 
 
 @dataclass(frozen=True)
