@@ -250,14 +250,15 @@ class ArxivSourceWriter(BaseSourceWriter):
         reasoned. ``arxiv-check-versions --auto-update`` **does** record the missing
         version and the merge then succeeds: ``apply_auto_update`` is not gated on the
         ``changed`` flag — it writes ``version = current_version`` for any result with a
-        live version (``check_versions._refreshed_fields``), version-less or not. But the
-        *plain* check does not surface the paper: :func:`check_versions._diff` computes
-        ``changed = recorded is not None and current != recorded``, so a version-less
-        record is reported ``unchanged`` and nothing in that report tells the operator to
-        act. The message names the flag that works and warns of that trap. #113 (no
-        importer writes a version-less record, so it came from a hand-edit or an external
-        tool) is kept as context, not offered as the remedy — an earlier draft told the
-        operator to "correct it there", which is false, because the command repairs it.
+        live version (``check_versions._refreshed_fields``), version-less or not. The
+        *plain* check surfaces the paper too, since #121: a version-less record is
+        ``check_versions.STATUS_NO_VERSION``, its own reportable state with its own
+        count, distinct from ``changed`` (which would have printed ``vNone`` again) and
+        from ``unchanged`` (which said nothing and let ``--auto-update`` rewrite the
+        record silently). The message names the flag that works. #113 (no importer writes
+        a version-less record, so it came from a hand-edit or an external tool) is kept as
+        context, not offered as the remedy — an earlier draft told the operator to
+        "correct it there", which is false, because the command repairs it.
 
         ``now`` is ``incoming.fields.get("version")``, sourced from
         :class:`ParsedArxivWork`'s ``version: int`` — always a live-parsed integer,
@@ -268,19 +269,17 @@ class ArxivSourceWriter(BaseSourceWriter):
         was, now = existing.fields.get("version"), incoming.fields.get("version")
         if was != now:
             if was is None:
-                # The ledger holds no version to have drifted from. --auto-update
-                # DOES record it (measured: version written, re-merge succeeds), but
-                # the plain check reports this paper `unchanged`, so the report never
-                # tells the operator to act — name the flag that works AND that trap.
+                # The ledger holds no version to have drifted from. --auto-update DOES
+                # record it (measured: version written, re-merge succeeds), and since
+                # #121 the plain check lists the paper too, under "No version recorded"
+                # — name the flag that works, and where the plain report shows it.
                 return (
                     f"ledger records no version for this paper, arXiv now serves v{now}; "
                     "run arxiv-check-versions --auto-update to record it, after which "
-                    "the merge succeeds. Plain arxiv-check-versions will not list this "
-                    "paper: a record with no recorded version is reported unchanged (the "
-                    "check needs a recorded version to compare against), so nothing in "
-                    "that report tells you to act. Since #113 an importer never writes a "
-                    "version-less arxiv record, so this entry came from a hand-edit or an "
-                    "external tool"
+                    "the merge succeeds. Plain arxiv-check-versions lists this paper "
+                    "under 'No version recorded' and prescribes the same flag. Since "
+                    "#113 an importer never writes a version-less arxiv record, so this "
+                    "entry came from a hand-edit or an external tool"
                 )
             return (
                 f"ledger records v{was}, arXiv now serves v{now}; run "

@@ -3533,7 +3533,8 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
 def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     """Is any arXiv record in the KB behind arXiv's latest? (#78/#79, §11 Step 6).
     Reads the provenance ledgers and a KB-level check-log, queries arXiv, and
-    reports version divergences and newly-withdrawn papers.
+    reports version divergences, records that carry no version at all (#121), and
+    newly-withdrawn papers.
 
     Without ``--auto-update`` this is report-only: it never writes to sources/ or a
     ledger; only the check-log's last-checked timestamps advance (#78).

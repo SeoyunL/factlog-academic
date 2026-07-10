@@ -14,17 +14,26 @@ how #64, #98 and the empty-tuple divergence fixed in #111 all happened.
 
 ## Why ``required`` is exactly ``("version",)``
 
-``check_versions._diff`` computes ``changed = recorded is not None and current !=
-recorded``. So:
+``version`` is an **identifying** field (``ArxivSourceWriter._IDENTIFYING_FIELDS``), and a
+backfill never populates an identifying field it cannot read. So:
 
-* an **absent** ``version`` silently excludes the record from version checking: with
-  ``recorded is None``, ``changed`` is false regardless of what arXiv serves, so the
-  paper's drift is **never reported at all**. Measured, same paper with arXiv serving v7:
-  a ledger recording ``version: 3`` prints ``Version changed: 1``; a ledger recording no
-  version prints ``Version changed: 0``. A backfill that wrote a version-less record would
-  drop a previously-healthy paper out of the one signal ``arxiv-check-versions`` exists to
-  produce, so it refuses (an OpenAlex-authored ``.md`` echoes ``arxiv_id`` but never emits
-  ``arxiv_version``: it reads ``None`` here). See #121;
+* an **absent** ``version`` cannot be written as absent. ``_record_fields`` omits a
+  ``None``, and ``_identity_fields`` reads an omitted field back as ``{"version": None}``,
+  so a later import carrying the real value sees ``None != 7``, calls it a divergence, and
+  errors — a *false* conflict the backfill itself manufactured, on a paper that had none.
+  Measured, same paper, arXiv serving v7::
+
+      backfill refuses           -> later ArxivSourceWriter().write(v7) == "merged"
+      backfill writes no version -> later ArxivSourceWriter().write(v7) == "error"
+
+  That is the whole difference between writing and refusing, and it is why ``version`` is
+  ``required`` (an OpenAlex-authored ``.md`` echoes ``arxiv_id`` but never emits
+  ``arxiv_version``: it reads ``None`` here). Note what is *not* the argument: "an absent
+  version excludes the paper from version checking" is true but does not discriminate —
+  a refused paper is read from front matter and lands in
+  ``check_versions.STATUS_NO_VERSION`` just the same (#121), and unlike the written record
+  it has no ledger for ``--auto-update`` to fill. Exclusion argues against refusing, not
+  for it;
 * a merely **wrong** ``version`` (``0``, ``-1``) is ``changed``, gets rewritten by the
   first ``--auto-update`` (which writes ``current_version`` unconditionally, not gated on
   ``_diff``), and is meanwhile still reported — recordable, so *not* refused;
@@ -32,7 +41,8 @@ recorded``. So:
   majority; requiring it would refuse almost the whole library. Its ``None`` is a
   legitimate recordable value, not an unreadable identity, so it is **not** required.
 
-``tests/unit/test_common_backfill_unhealable.py`` pins this boundary.
+``tests/unit/test_common_backfill_identity_fields.py`` pins this boundary, including the
+merged/error contrast above.
 """
 from __future__ import annotations
 

@@ -77,6 +77,7 @@ from factlog.integrations.common.provenance import (
     ProvenanceError,
     SourceRecord,
     read_provenance,
+    sidecar_path,
     update_source,
     write_provenance,
 )
@@ -88,8 +89,12 @@ __all__ = [
     "LedgerUpdate",
     "STATUS_UNCHANGED",
     "STATUS_CHANGED",
+    "STATUS_NO_VERSION",
     "STATUS_ERROR",
     "STATUS_SKIPPED",
+    "SIDECAR_ABSENT",
+    "SIDECAR_READABLE",
+    "SIDECAR_UNREADABLE",
     "UPDATE_WRITTEN",
     "UPDATE_UNCHANGED",
     "UPDATE_NO_LEDGER",
@@ -101,6 +106,8 @@ __all__ = [
     "check_entries",
     "summarize",
     "apply_auto_update",
+    "no_version_note",
+    "no_ledger_remedy",
 ]
 
 #: A provenance record's ``type`` for an arXiv contribution.
@@ -115,26 +122,61 @@ BATCH_SIZE = MAX_ID_LIST
 #: with or without a version change.
 STATUS_UNCHANGED = "unchanged"
 STATUS_CHANGED = "changed"
+#: The ledger (or front matter) carries **no** ``version`` at all. This is a state of
+#: its own, not a flavour of ``unchanged`` and not a flavour of ``changed`` (#121).
+#:
+#: It is not ``unchanged``, because nothing was compared: whatever arXiv now serves,
+#: the paper was silently excluded from the one signal this command exists to produce,
+#: and an operator reading ``Version changed: 0`` had no way to learn either that the
+#: paper needed repair or that ``--auto-update`` would repair it.
+#:
+#: It is not ``changed`` either, and must never be made so: "version changed from None
+#: to 7" is the ``vNone`` of #116 wearing a new costume — ``None`` is a Python value,
+#: not a version the ledger ever recorded. An absent value gets a distinct signal
+#: rather than being collapsed into a normal one.
+STATUS_NO_VERSION = "no-version"
 STATUS_ERROR = "error"
 STATUS_SKIPPED = "skipped"
+
+#: What a front-matter paper's provenance sidecar is. Three states, not a bool: a file
+#: that exists but will not parse is **not** a file whose contents we may describe. The
+#: bool this replaced said ``True`` for it, and the report went on to assert what the
+#: unparsed ledger held ("it holds no arXiv record") and to prescribe a command that
+#: measurably fails on it. #128 made this newly reachable, by teaching ``read_provenance``
+#: to raise on a non-bool ``is_retracted`` and an out-of-vocabulary ``withdrawn_by``.
+SIDECAR_ABSENT = "absent"
+SIDECAR_READABLE = "readable"
+SIDECAR_UNREADABLE = "unreadable"
 
 
 @dataclass(frozen=True)
 class LedgerEntry:
     """One arXiv paper the KB records, gathered from its provenance ledger(s).
 
-    ``recorded_version`` is the version the ledger holds (an ``int``; ``None`` only
-    if a ledger somehow carries an arXiv record without one). ``recorded_withdrawn_by``
+    ``recorded_version`` is the version the ledger holds (an ``int``; ``None`` when a
+    ledger carries an arXiv record without one — a hand-edit or an externally produced
+    ledger, since #113 no importer writes one). A ``None`` here is not a version and is
+    never compared as one: it produces :data:`STATUS_NO_VERSION`. ``recorded_withdrawn_by``
     is the withdrawal agent the ledger recorded, or ``None`` if it was not recorded
     as withdrawn — this is what a *newly* withdrawn paper is measured against.
     ``sources`` are the ledger-relative paths that reference the paper (one paper
     can be cited by several sources), for the report only.
+
+    ``sidecar_state`` only speaks for a paper whose ``sources`` are front matter: one of
+    :data:`SIDECAR_ABSENT`, :data:`SIDECAR_READABLE` (it exists and holds no arXiv record
+    — an OpenAlex-primary import echoing ``arxiv_id``) or :data:`SIDECAR_UNREADABLE` (it
+    exists and will not parse). "The ledger holds no arXiv record", "there is no ledger"
+    and "the ledger could not be read" are three different papers with three different
+    remedies, and collapsing any of them is how a report ends up asserting the contents
+    of a file it never parsed, or prescribing a command that does nothing (#116, #121).
+    For a ledger-backed paper it is trivially :data:`SIDECAR_READABLE`.
     """
 
     arxiv_id: str
     recorded_version: int | None
     recorded_withdrawn_by: str | None
     sources: tuple[str, ...] = ()
+    sidecar_state: str = SIDECAR_READABLE
 
 
 @dataclass(frozen=True)
@@ -180,6 +222,10 @@ class VersionCheck:
     recorded_from: str = "ledger"
     reason: str = ""
     sources: tuple[str, ...] = ()
+    #: See :class:`LedgerEntry`. Discriminates "the ledger holds no arXiv record" from
+    #: "there is no ledger" and from "the ledger would not parse", for a
+    #: ``recorded_from="front-matter"`` paper.
+    sidecar_state: str = SIDECAR_READABLE
 
 
 def _relative(path: Path, kb_root: Path) -> str:
@@ -206,6 +252,10 @@ def collect_ledger_entries(
     root = Path(kb_root)
     slots: dict[str, dict] = {}
     errors: list[VersionCheck] = []
+    #: Ledger-relative paths of the sidecars that would not parse. A `.md` whose sidecar
+    #: is in here falls through to the front-matter loop below, and must not be described
+    #: as though the file had been read.
+    unreadable: set[str] = set()
 
     sidecar_root = root / SIDECAR_DIR
     for path in sorted(sidecar_root.rglob("*.json")) if sidecar_root.is_dir() else ():
@@ -221,6 +271,7 @@ def collect_ledger_entries(
                     reason=f"corrupt provenance ledger: {exc}",
                 )
             )
+            unreadable.add(_relative(path, root))
             continue
         rel = _relative(path, root)
         for record in provenance.records:
@@ -275,10 +326,25 @@ def collect_ledger_entries(
         # value (not "author"/"admin") is kept verbatim: like the ledger path above
         # (`withdrawn_by`), any non-empty string means "a withdrawal was recorded",
         # which is all the presence test needs; the batch never crashes over it.
+        # A sidecar may exist and simply hold no arXiv record — an OpenAlex-primary
+        # import that echoed `arxiv_id` into the front matter. That paper's remedy
+        # (`arxiv-import`, which merges into the existing ledger) is not the remedy of a
+        # paper with no sidecar at all (for which, version-less, there is none), nor of
+        # one whose sidecar will not parse (about which nothing may be said at all: it
+        # is in `errors` above, and we never read what it holds). Record which of the
+        # three this is rather than making the report guess.
+        sidecar = sidecar_path(path)
+        if _relative(sidecar, root) in unreadable:
+            sidecar_state = SIDECAR_UNREADABLE
+        elif sidecar.is_file():
+            sidecar_state = SIDECAR_READABLE
+        else:
+            sidecar_state = SIDECAR_ABSENT
         slots[arxiv_id] = {
             "version": version,
             "withdrawn_by": scalars.get("arxiv_withdrawn_by") or None,
             "sources": {_relative(path, root)},
+            "sidecar_state": sidecar_state,
         }
 
     entries = [
@@ -287,6 +353,7 @@ def collect_ledger_entries(
             recorded_version=slot["version"],
             recorded_withdrawn_by=slot["withdrawn_by"],
             sources=tuple(sorted(slot["sources"])),
+            sidecar_state=slot.get("sidecar_state", SIDECAR_READABLE),
         )
         for arxiv_id, slot in slots.items()
     ]
@@ -361,10 +428,23 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
     upstream_by = work.withdrawn_by
     newly_withdrawn = upstream_by is not None and upstream_by != recorded_by
     un_withdrawn = upstream_by is None and recorded_by is not None
-    changed = recorded is not None and current != recorded
+    # Three states, not two (#121). A record carrying no version has nothing to
+    # compare, so it is neither `changed` nor `unchanged` — it is
+    # :data:`STATUS_NO_VERSION`, which the report surfaces on its own line with its
+    # own count and its own remedy. Folding it into `unchanged` (the pre-#121
+    # behaviour) silently excluded the paper from the only signal this command
+    # produces, while `--auto-update` rewrote its `version` anyway: the report and
+    # the write disagreed. Folding it into `changed` instead would print "ledger
+    # records vNone" — #116.
+    if recorded is None:
+        status = STATUS_NO_VERSION
+    elif current != recorded:
+        status = STATUS_CHANGED
+    else:
+        status = STATUS_UNCHANGED
     return VersionCheck(
         arxiv_id=entry.arxiv_id,
-        status=STATUS_CHANGED if changed else STATUS_UNCHANGED,
+        status=status,
         recorded_version=recorded,
         current_version=current,
         recorded_from=provenance_of(entry.sources),
@@ -379,6 +459,7 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
         withdrawn_by=upstream_by,
         recorded_withdrawn_by=recorded_by,
         sources=entry.sources,
+        sidecar_state=entry.sidecar_state,
     )
 
 
@@ -436,6 +517,7 @@ class Summary:
     checked: int = 0
     unchanged: int = 0
     changed: int = 0
+    no_version: int = 0
     withdrawn: int = 0
     un_withdrawn: int = 0
     errors: int = 0
@@ -447,7 +529,11 @@ def summarize(
 ) -> Summary:
     """Count outcomes. ``withdrawn`` counts newly-withdrawn papers and ``un_withdrawn``
     counts papers arXiv no longer reports as withdrawn but the ledger still does, across
-    every checked result whatever their version status. ``checked`` excludes skipped."""
+    every checked result whatever their version status. ``checked`` excludes skipped.
+
+    ``no_version`` is its own tally, disjoint from ``unchanged`` and ``changed``: a
+    record with no recorded version was never compared, so counting it as "up to date"
+    is the report lying about what it looked at (#121)."""
     summary = Summary(skipped=len(skipped))
     for result in results:
         if result.status == STATUS_ERROR:
@@ -456,6 +542,8 @@ def summarize(
         summary.checked += 1
         if result.status == STATUS_CHANGED:
             summary.changed += 1
+        elif result.status == STATUS_NO_VERSION:
+            summary.no_version += 1
         elif result.status == STATUS_UNCHANGED:
             summary.unchanged += 1
         if result.newly_withdrawn:
@@ -507,6 +595,65 @@ class LedgerUpdate:
     recorded_version: int | None = None
     current_version: int | None = None
     reason: str = ""
+    #: See :class:`LedgerEntry`. Decides which :data:`UPDATE_NO_LEDGER` answer is true.
+    sidecar_state: str = SIDECAR_READABLE
+
+
+def no_ledger_remedy(
+    arxiv_id: str, *, sidecar_state: str, has_recorded_version: bool
+) -> str:
+    """What actually repairs a paper ``--auto-update`` cannot write a ledger for.
+
+    **Four** different papers reach :data:`UPDATE_NO_LEDGER`, and they have four different
+    answers. Naming one remedy for all of them is how a report prescribes a command that
+    does nothing — the failure #116 named and this issue repeats one layer up. Each branch
+    below was measured, not reasoned:
+
+    * **The sidecar will not parse** (:data:`SIDECAR_UNREADABLE`). We never read it, so
+      nothing may be *asserted* about what it holds, and no command repairs it:
+      ``arxiv-import`` answers ``error``, or — for a hand-written ``arxiv_id``-only
+      ``.md`` — a silent ``skipped: already imported (arxiv_id match)``. The ledger is
+      already reported under ``Could not check:``; the note points there and stops. #128
+      made this branch newly reachable by teaching ``read_provenance`` to raise on a
+      non-bool ``is_retracted`` and an out-of-vocabulary ``withdrawn_by``.
+    * **A sidecar exists and holds no arXiv record** (an OpenAlex-primary import that
+      echoed ``arxiv_id`` into the front matter). ``arxiv-import`` merges an arXiv record
+      into that existing ledger: measured ``merged``.
+    * **No sidecar, and the front matter records a version.** ``arxiv-backfill-provenance``
+      builds a ledger from that front matter: measured ``backfilled``.
+    * **No sidecar, and the front matter records no version.** *Nothing currently repairs
+      this paper.* ``arxiv-import`` answers ``skipped: already imported (arxiv_id match)``
+      and ``arxiv-backfill-provenance`` answers ``refused`` (``required=("version",)``,
+      #113). Saying so is the honest answer #116 asked for; naming a command here would
+      be the same lie in a new place.
+    """
+    if sidecar_state == SIDECAR_UNREADABLE:
+        # Say nothing about the contents of a file that never parsed, and prescribe
+        # nothing: every command that touches it fails or silently no-ops.
+        return (
+            "Its provenance ledger could not be read (see `Could not check:`), so what it "
+            "holds is unknown and no command can record a version for this paper until "
+            "the ledger is repaired by hand."
+        )
+    if sidecar_state == SIDECAR_READABLE:
+        return (
+            "Its provenance ledger holds no arXiv record for this paper (another "
+            "integration wrote the ledger and only echoed the id), so --auto-update has "
+            f"no record to fill. Run `factlog arxiv-import --id {arxiv_id}` to add one."
+        )
+    if has_recorded_version:
+        return (
+            "This paper has no provenance ledger (imported before #82), so --auto-update "
+            "has none to fill. Run `factlog arxiv-backfill-provenance` to build one from "
+            "its front matter."
+        )
+    return (
+        "This paper has no provenance ledger (imported before #82), and no command "
+        "currently records a version for it: --auto-update has no ledger to write into, "
+        "`factlog arxiv-import` answers `already imported (arxiv_id match)`, and "
+        "`factlog arxiv-backfill-provenance` refuses a paper whose front matter carries "
+        "no arxiv_version (#113). Backfilling a ledger for it is tracked in #105."
+    )
 
 
 def _refreshed_fields(existing: SourceRecord, result: VersionCheck) -> dict:
@@ -563,6 +710,14 @@ def apply_auto_update(
     * A ledger that will not read is that paper's problem — a per-id
       :data:`UPDATE_ERROR`, never a batch crash (#65/#71).
 
+    **The command never writes a field the report did not name** (#121). This function
+    is deliberately *not* gated on :data:`STATUS_CHANGED`: a record carrying no
+    ``version`` is missing a value a refresh legitimately learned, and filling it is a
+    refresh's authority. What was wrong was doing it silently — the plain check called
+    such a paper ``unchanged`` and ``--auto-update`` rewrote it anyway. The paper is now
+    :data:`STATUS_NO_VERSION`, which both the plain report and the ``--auto-update``
+    report surface, so the reported set and the written set are the same set.
+
     Results with no observed version (skipped, missing, corrupt at collection) are
     ignored: there is nothing to write. Returns one :class:`LedgerUpdate` per paper
     acted on, in ``arxiv_id`` order.
@@ -586,11 +741,14 @@ def apply_auto_update(
                     status=UPDATE_NO_LEDGER,
                     recorded_version=result.recorded_version,
                     current_version=result.current_version,
-                    reason=(
-                        "imported before #82: front matter only, no provenance "
-                        "ledger to update. Run `factlog arxiv-import --id "
-                        "<arxiv_id>` to create one; --auto-update "
-                        "will not fabricate an import record."
+                    sidecar_state=result.sidecar_state,
+                    # `--auto-update` will not fabricate an import record whatever the
+                    # answer is; which answer is true depends on the sidecar's state and
+                    # on whether the front matter carries a version.
+                    reason=no_ledger_remedy(
+                        result.arxiv_id,
+                        sidecar_state=result.sidecar_state,
+                        has_recorded_version=result.recorded_version is not None,
                     ),
                 )
             )
@@ -785,6 +943,55 @@ def un_withdrawal_note(result: VersionCheck) -> str:
     )
 
 
+def no_version_note(result: VersionCheck, *, outcome: str | None = None) -> str:
+    """The line for a record that carries no ``version`` at all (:data:`STATUS_NO_VERSION`).
+
+    It never interpolates the recorded value — there is none, and ``v{None}`` is the
+    ``vNone`` #116 removed. It says what is true (the record holds no version, arXiv
+    serves vN) and it names the remedy that *works*, which is not the same command for
+    every such paper:
+
+    * A **ledger**-backed record is what ``--auto-update`` repairs: measured, it writes
+      the version and the cross-source merge that errored then succeeds.
+    * A **front-matter** paper has no arXiv ledger record for ``--auto-update`` to fill,
+      so :func:`no_ledger_remedy` decides between ``arxiv-import``,
+      ``arxiv-backfill-provenance``, and the honest admission that nothing repairs it.
+
+    ``outcome`` is this paper's :class:`LedgerUpdate` status when ``--auto-update`` ran
+    this very run, and ``None`` when it did not. A report that prescribes
+    ``--auto-update`` inside the output of ``--auto-update`` is the report and the write
+    disagreeing again, inverted — including for a paper whose write *failed*, which must
+    point at the error rather than at the command that just produced it.
+    """
+    where = "front matter" if result.recorded_from == "front-matter" else "ledger"
+    serves = f"arXiv now serves v{result.current_version}"
+    head = f"{result.arxiv_id}: the {where} records no version, {serves}."
+
+    if outcome == UPDATE_WRITTEN:
+        return f"{head} --auto-update recorded it this run (see 'Ledger updated' below)."
+    if outcome == UPDATE_ERROR:
+        return (
+            f"{head} --auto-update could not record it this run (see 'Could not "
+            "auto-update' below); the version is still missing."
+        )
+
+    if result.recorded_from == "front-matter":
+        remedy = no_ledger_remedy(
+            result.arxiv_id,
+            sidecar_state=result.sidecar_state,
+            has_recorded_version=False,
+        )
+        return (
+            f"{head} Version drift cannot be detected for this paper until a version is "
+            f"recorded. {remedy}"
+        )
+    return (
+        f"{head} Version drift cannot be detected for this paper until a version is "
+        "recorded, and a cross-source merge import errors on the record until then "
+        "(#116). Run `factlog arxiv-check-versions --auto-update` to record it."
+    )
+
+
 def _sources_suffix(result: VersionCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
@@ -822,8 +1029,9 @@ def report_lines(
     updates: Sequence[LedgerUpdate] = (),
 ) -> list[str]:
     """The human-readable stdout report. Withdrawals lead, prominently, whatever the
-    version outcome; then version divergences; then per-id errors; then, under
-    ``--auto-update``, what was written to the ledgers; then the tally."""
+    version outcome; then version divergences; then records carrying no version at all;
+    then per-id errors; then, under ``--auto-update``, what was written to the ledgers;
+    then the tally."""
     total = len(results) + len(skipped)
     header = f"Checked {len(results)} of {total} arXiv record(s) in KB: {target}"
     if skipped:
@@ -842,7 +1050,18 @@ def report_lines(
         for r in results
         if r.status == STATUS_CHANGED and not r.newly_withdrawn and not r.un_withdrawn
     ]
+    # Unlike `changed`, a no-version result is NOT filtered out when the paper is also
+    # newly withdrawn. The withdrawal note absorbs a version change ("Its version also
+    # changed: ...") so listing it twice would repeat one fact; it says nothing about a
+    # *missing* version, and that paper's remedy is its own. A distinct state keeps its
+    # distinct signal even when a louder one fires alongside it.
+    no_version = [r for r in results if r.status == STATUS_NO_VERSION]
     errors = [r for r in results if r.status == STATUS_ERROR]
+    # What this run's --auto-update did to each paper. The no-version note reads
+    # differently once the write has happened — or failed: prescribing `--auto-update`
+    # underneath a line that says it just ran, or just errored, would be the report and
+    # the write disagreeing again.
+    outcomes = {u.arxiv_id: u.status for u in updates}
 
     if withdrawn:
         lines.append("\nWithdrawn since import (not a version change):")
@@ -872,6 +1091,15 @@ def report_lines(
                 f"v{result.current_version}{_sources_suffix(result)}"
             )
 
+    if no_version:
+        lines.append(
+            "\nNo version recorded (nothing to compare — this paper is excluded from "
+            "version checking until a version exists):"
+        )
+        for result in no_version:
+            note = no_version_note(result, outcome=outcomes.get(result.arxiv_id))
+            lines.append(f"  ? {note}{_sources_suffix(result)}")
+
     if errors:
         lines.append("\nCould not check:")
         for result in errors:
@@ -885,6 +1113,7 @@ def report_lines(
     lines.append(f"  {'Checked:':<21}{summary.checked}")
     lines.append(f"  {'Up to date:':<21}{summary.unchanged}")
     lines.append(f"  {'Version changed:':<21}{summary.changed}")
+    lines.append(f"  {'No version recorded:':<21}{summary.no_version}")
     lines.append(f"  {'Newly withdrawn:':<21}{summary.withdrawn}")
     lines.append(f"  {'No longer withdrawn:':<21}{summary.un_withdrawn}")
     lines.append(f"  {'Errors:':<21}{summary.errors}")
@@ -911,17 +1140,29 @@ def _auto_update_lines(updates: Sequence[LedgerUpdate]) -> list[str]:
         )
         for u in written:
             ledgers = f"  ({', '.join(u.ledgers)})" if u.ledgers else ""
+            # `recorded_version` is None for the version-less record --auto-update just
+            # filled. `v{None}` is the `vNone` of #116; say what was actually there.
+            was = (
+                "no version was recorded"
+                if u.recorded_version is None
+                else f"was v{u.recorded_version}"
+            )
             lines.append(
-                f"  ✎ {u.arxiv_id}: recorded v{u.current_version} "
-                f"(was v{u.recorded_version}){ledgers}"
+                f"  ✎ {u.arxiv_id}: recorded v{u.current_version} ({was}){ledgers}"
             )
     if no_ledger:
+        # The header prescribed `arxiv-import` for every paper here. That is true for a
+        # paper whose sidecar simply holds no arXiv record, false for one with no sidecar
+        # at all (`already imported (arxiv_id match)`). The remedy is per-paper, so it is
+        # printed per-paper (#121); the header only states the shared fact.
         lines.append(
-            "\nNot auto-updated (no ledger; front matter only, imported before #82 — "
-            "run `factlog arxiv-import --id <arxiv_id>` to create one):"
+            "\nNot auto-updated (no arXiv record in a provenance ledger to update; "
+            "--auto-update never fabricates an import record):"
         )
         for u in no_ledger:
-            lines.append(f"  · {u.arxiv_id}: arXiv now serves v{u.current_version}")
+            lines.append(
+                f"  · {u.arxiv_id}: arXiv now serves v{u.current_version}. {u.reason}"
+            )
     if errors:
         lines.append("\nCould not auto-update:")
         for u in errors:
@@ -943,14 +1184,25 @@ def porcelain_lines(
 
     ``check\t<id>\t<status>\t<recorded>\t<current>\t<withdrawn_by>\t<newly_withdrawn>\t<reason>\t<un_withdrawn>``
     with empty fields for absent values, ``newly_withdrawn``/``un_withdrawn`` as
-    ``0``/``1``, and versions as bare integers. ``un_withdrawn`` distinguishes a paper
+    ``0``/``1``, and versions as bare integers. ``status`` is one of
+    ``unchanged``/``changed``/``no-version``/``error``/``skipped``: ``no-version`` is
+    the record that carries no ``version`` (#121), whose ``<recorded>`` column is
+    therefore empty. It is a *new value in an existing column*, never a new column and
+    never the bare string ``None``, so a #78 parser keeping its column offsets keeps
+    working; one that switched on ``status`` sees a value it must now handle rather
+    than a version-less record mislabelled ``unchanged``. ``un_withdrawn`` distinguishes a paper
     arXiv no longer reports as withdrawn (but a record still does) from an unchanged one,
     whose row is otherwise byte-identical; it is appended last so a #78 parser keying on
     the earlier fixed columns is unaffected. The ``update`` rows are
     ``update\t<id>\t<status>\t<recorded>\t<current>\t<ledgers>`` where ``status`` is
     one of ``updated``/``unchanged``/``no-ledger``/``error`` and ``ledgers`` is a
     comma-joined list (empty unless ``updated``). They are absent when the flag is
-    off, so an existing #78 parser is unaffected. The progress/ETA is stderr only.
+    off, so an existing #78 parser is unaffected. The tally footer gains one row,
+    ``no_version\t<n>``, after ``skipped``: rows ``checked``…``skipped`` keep their
+    index, while ``updated`` and ``target`` shift down by one — as ``updated``'s
+    conditional presence (it appears only under ``--auto-update``) already made
+    positional tally parsing unsound. Parse the footer by its first field, as the rows
+    above. The progress/ETA is stderr only.
     """
     rows: list[str] = []
     for result in sorted([*results, *skipped], key=lambda r: r.arxiv_id):
@@ -987,6 +1239,11 @@ def porcelain_lines(
     rows.append(f"un_withdrawn\t{summary.un_withdrawn}")
     rows.append(f"errors\t{summary.errors}")
     rows.append(f"skipped\t{summary.skipped}")
+    # Appended after the #78/#100 tallies rather than slotted next to `changed`: that
+    # keeps every pre-existing row at its own index, which is the most a footer can
+    # promise. `updated` and `target` do move down by one — `updated` is conditional, so
+    # nothing could have parsed this footer positionally to begin with. Key by field.
+    rows.append(f"no_version\t{summary.no_version}")
     if updates:
         rows.append(f"updated\t{sum(1 for u in updates if u.status == UPDATE_WRITTEN)}")
     rows.append(f"target\t{target}")
