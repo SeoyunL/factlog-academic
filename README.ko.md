@@ -1,4 +1,4 @@
-# factlog
+# factlog-academic
 
 > 🌐 [English](README.md) | **한국어**
 
@@ -9,6 +9,12 @@
 > `/factlog ...` slash command로 쓰고, 검토·승인 같은 사람의 게이트는 터미널에서
 > Python CLI(`python3 -m factlog ...`)로 직접 실행합니다. 두 입구 모두 같은 결정론
 > 엔진을 호출합니다 — slash command · Python CLI · 검증 엔진, 이 셋이 한 도구입니다.
+
+**factlog-academic** 은 [factlog](https://github.com/semantic-reasoning/factlog) 의
+학술 연구용 배포판입니다. factlog의 모든 기능에 더해, 학술 서지를 지식베이스로 바로
+가져오는 명령어를 제공합니다 — [Zotero](#zotero-서지-가져오기-factlog-zotero-import) ·
+[OpenAlex](#openalex-서지-가져오기-factlog-openalex-) ·
+[arXiv](#arxiv-프리프린트-가져오기-factlog-arxiv-).
 
 ## 처음 읽는 사람을 위한 안내
 
