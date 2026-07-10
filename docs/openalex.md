@@ -1,8 +1,8 @@
 # OpenAlex 가져오기 (`factlog openalex-*`)
 
 [OpenAlex](https://openalex.org)는 학술 저작(work)을 담은 공개 서지 데이터베이스입니다.
-factlog는 검색·단건 임포트·인용 그래프 탐색·메타데이터 갱신을 다섯 개의 명령으로
-제공합니다.
+factlog는 검색·단건 임포트·인용 그래프 탐색·메타데이터 갱신·원장 백필을 여섯 개의
+명령으로 제공합니다.
 
 가져온 항목은 `sources/<slug>.md` 원본 하나가 되고, 여전히 **후보**입니다 —
 `sync → review → accept` 게이트를 거쳐야 사실이 됩니다(P1/P2). OpenAlex는 factlog의
@@ -25,12 +25,14 @@ httpx 하나만 추가됩니다. OpenAlex API는 **인증이 없어** API 키나
 | `openalex-cite --for <slug>` | 인용 그래프 한 단계 탐색 | 방향당 1 |
 | `openalex-refresh` | 원장의 OpenAlex 레코드 재조회·비교 | 레코드당 0 |
 | `openalex-acknowledge-retraction --id <id>` | 철회 신호를 사람이 종결 | 0 |
+| `openalex-backfill-provenance` | front matter만 있는 저작에 원장을 만들어 줌 | 0 |
 
 모든 명령은 `--target <KB>`(없으면 활성 KB)를 받고, `acknowledge-retraction` 을 뺀
 나머지는 `--porcelain`(스크립트용 탭 구분 출력)을 받습니다. `search` / `import` /
-`cite` 는 `--dry-run`(파일을 만들지 않음)을 받습니다.
+`cite` / `backfill-provenance` 는 `--dry-run`(파일을 만들지 않음)을 받습니다.
 
-> `--dry-run` 만으로 계획이 출력되는 명령은 `openalex-import` 뿐입니다. `search` 는
+> `--dry-run` 만으로 계획이 출력되는 명령은 `openalex-import` 와
+> `openalex-backfill-provenance` 입니다. `search` 는
 > `--dry-run` 이 대화형 선택을 끄기 때문에 아무것도 선택되지 않으므로 `--dry-run --all`
 > 이 필요하고, `cite` 는 `--auto-import` 없이는 `--dry-run` 을 보기도 전에 반환하므로
 > `--dry-run --auto-import` 가 필요합니다.
@@ -139,6 +141,53 @@ factlog openalex-acknowledge-retraction --id W2741809807 --yes   # 확인 프롬
 
 OpenAlex가 철회를 되돌린 경우 이 명령이 원장의 키를 **제거**해 신호를 멈춥니다.
 원본 `.md` 는 열지 않습니다 — 종결 이후로는 원장이 유일한 감사 기록입니다.
+
+### `openalex-backfill-provenance`
+
+`sources/*.md` 의 front matter에만 존재하는 OpenAlex 저작(#84 이전 임포트)에, 그 front
+matter가 함의하는 provenance 원장을 만들어 줍니다. **네트워크를 쓰지 않고**,
+`sources/*.md` 는 건드리지 않습니다.
+
+```bash
+factlog openalex-backfill-provenance --dry-run   # 원장을 받을 id와 거부될 id를 나열
+factlog openalex-backfill-provenance
+```
+
+이 명령이 필요한 이유는 종결에 있습니다. #84 이전에 임포트된 저작은 front matter만 있고
+원장이 없어 재임포트해도 원장이 생기지 않습니다(front matter의 정체 일치에서 sidecar writer
+전에 멈춥니다). 원장이 없으면 결정을 적을 곳이 없으므로 `openalex-acknowledge-retraction`
+이 그 저작을 **거부**하고(front matter만 있어 결정을 적을 원장이 없다며) 바로 이 명령을
+가리킵니다. 백필은 front
+matter가 이미 주장하는 값으로 원장을 세워 그 종결을 가능하게 합니다 — 새 주장을 만드는 것이
+아니라 믿음이 저장되는 위치만 바꾸므로, acknowledge와 달리 **확인 프롬프트도 `--yes` 도 TTY
+게이트도 없습니다.** API 클라이언트를 만들지 않고 front matter를 **읽기만** 합니다(P4: 모든
+`.md` 는 바이트도 `mtime_ns` 도 동일하게 유지).
+
+- `--dry-run` — 무엇이 쓰일지 미리 봅니다. 다만 **미리보기는 실패할 쓰기를 보고할 수
+  없습니다** — 쓸 수 없는 `source-provenance/` 는 실제 실행에서만 드러납니다.
+
+**arXiv와 달리 잃는 값이 없습니다.** 원장이 담는 필드 `doi` / `work_type` / `journal` /
+`is_retracted` 는 모두 writer가 이미 내보내는 front matter 키(`doi` / `type` / `journal` /
+`openalex_is_retracted`)를 가지므로, 백필된 원장은 임포트가 썼을 레코드와 필드 하나까지
+같습니다. `submitted` 처럼 복원 불가능한 필드가 있는 arXiv와의 이 비대칭은 두 writer의
+성질이지 이 명령의 사정이 아닙니다.
+
+**OpenAlex는 식별(identifying) 필드를 선언하지 않습니다**(#73). 그래서 arXiv의
+`version` 처럼 "읽을 수 없으면 거부"할 식별 필드가 없고, 백필이 읽을 수 없는 식별 필드를
+써서 가짜 충돌을 만드는 위험 자체가 생기지 않습니다. 대신 front matter가 진실한 원장을
+줄 수 없는 저작은 두 경우에 거부됩니다.
+
+- `imported_at` 이 없는 저작.
+- `openalex_is_retracted` 가 원장의 값 공간 밖(YAML 불리언 `true`/`false` 가 아닌 `1`,
+  `yes`, `on` 등)인 저작. 이 값은 공유 writer로 **그대로** 넘겨져 거부되며, 결코 추측으로
+  보정되지 않습니다 — 값을 버리면 "OpenAlex가 이 저작을 철회로 표시하지 않았다"고
+  주장하게 되어 `.md` 가 말하려던 철회를 침묵시키고, `1` 을 참으로 읽으면 어떤 소스도 하지
+  않은 철회를 주장하게 되기 때문입니다. 이 거부는 그저 신호를 미루는 것이 아니라 그 자체가
+  신호입니다(`openalex-refresh` 는 같은 값을 비교용 불리언으로 좁혀 아무것도 떠올리지
+  않으므로, 백필이 거부하지 않으면 그 저작의 철회는 어디에도 드러나지 않습니다).
+
+다시 실행하면 바이트도 `mtime_ns` 도 동일한 no-op 입니다(이미 있는 레코드는 다시 쓰지
+않습니다). 한 id의 읽기/쓰기 오류는 그 저작에 대해서만 보고되며 배치 전체를 죽이지 않습니다.
 
 ## 결정론 경계
 
