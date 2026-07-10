@@ -22,8 +22,11 @@ never a second copy of the predicate.
 from __future__ import annotations
 
 import ast
+from datetime import date
 
 from factlog.integrations.arxiv import check_versions
+from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
+from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common import backfill as bf
 from factlog.integrations.common.backfill import (
     BACKFILL_ERROR,
@@ -43,6 +46,8 @@ from factlog.integrations.common.provenance import (
     write_provenance,
 )
 from factlog.integrations.openalex import refresh
+from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
+from factlog.integrations.openalex.work_parser import ParsedWork
 
 # The two real integration seams. The field readers pull the value the integration's own
 # `collect_ledger_entries` already parsed from front matter — so a ledger field can only
@@ -56,6 +61,10 @@ ARXIV = BackfillSchema(
         "version": lambda e: e.recorded_version,
         "withdrawn_by": lambda e: e.recorded_withdrawn_by,
     },
+    # `version` is identifying and unreadable-when-None (an OpenAlex-authored .md echoes
+    # arxiv_id but never emits arxiv_version); `withdrawn_by` is identifying too but its
+    # None legitimately means "not withdrawn", so it is not required.
+    required=("version",),
 )
 OPENALEX = BackfillSchema(
     type="openalex",
@@ -69,6 +78,9 @@ OPENALEX = BackfillSchema(
         # An import emits is_retracted only as True (else dropped), so mirror it.
         "is_retracted": lambda e: True if e.recorded_is_retracted else None,
     },
+    # OpenAlex's writer has no identifying fields, and openalex_id is emitted only by its
+    # own writer, so nothing is required.
+    required=(),
 )
 
 IMPORTED_AT = "2026-01-01T00:00:00Z"
@@ -265,6 +277,87 @@ class TestIdentifyingFields:
 
 
 # --------------------------------------------------------------------------- #
+# 4b. THE regression: an OpenAlex-authored .md echoes arxiv_id but carries no
+#     arxiv_version. Backfilling an arXiv ledger from it once wrote a version-less
+#     record whose identifying field diverged from a later merge import -> a false
+#     conflict that broke re-import (#73/#84 in a new costume). It must refuse.
+# --------------------------------------------------------------------------- #
+def _parsed_arxiv(arxiv_id="2311.09277", version=7, withdrawn_by=None):
+    return ParsedArxivWork(
+        arxiv_id=arxiv_id, version=version, title="A Paper",
+        authors=("Ada Lovelace",), abstract="An abstract.", primary_category="cs.CL",
+        categories=("cs.CL",), submitted=date(2023, 11, 15),
+        last_updated=date(2023, 11, 20), withdrawn_by=withdrawn_by,
+        abs_url=f"https://arxiv.org/abs/{arxiv_id}v{version}",
+    )
+
+
+def _kb_with_openalex_authored_md(kb):
+    """A KB whose sole source is an OpenAlex-primary .md that echoes arxiv_id but, like
+    every OpenAlex-authored file, carries no arxiv_version. Uses the REAL writer."""
+    result = OpenAlexSourceWriter().write(
+        ParsedWork(openalex_id="W1", arxiv_id="2311.09277", doi="10.1/x",
+                   work_type="article", journal="Nature", title="A Paper"),
+        kb, imported_at="2025-01-01T00:00:00Z",
+    )
+    assert result.status == "imported"
+    return result.path
+
+
+class TestManufacturedConflictRegression:
+    def test_backfill_refuses_the_openalex_authored_md_and_writes_no_arxiv_record(self, tmp_path):
+        existing = _kb_with_openalex_authored_md(tmp_path)
+        side = sidecar_path(existing)
+        before = _stat(side)  # the sidecar OpenAlex wrote, with its own record
+
+        results = backfill(tmp_path, ARXIV)
+        assert [(r.entry_id, r.status) for r in results] == [
+            ("2311.09277", BACKFILL_REFUSED)
+        ]
+        assert results[0].reason  # reported, not silent
+        # No arXiv record was written; the OpenAlex sidecar is byte- and mtime_ns-identical.
+        assert ("arxiv", "2311.09277") not in _ledger(side)
+        assert _stat(side) == before
+
+    def test_later_merge_import_behaves_identically_to_the_no_backfill_control(self, tmp_path):
+        # CONTROL: no backfill. A fresh arXiv import of the same paper merges into the
+        # OpenAlex original's sidecar.
+        control = tmp_path / "control"
+        control.mkdir()
+        _kb_with_openalex_authored_md(control)
+        ctrl = ArxivSourceWriter().write(
+            _parsed_arxiv(), control, imported_at="2026-02-02T00:00:00Z")
+        assert ctrl.status == "merged"
+
+        # WITH backfill first: it must refuse, so the later import behaves IDENTICALLY —
+        # merged, not the permanent "ledger records vNone, arXiv now serves v7" error the
+        # version-less record used to manufacture.
+        treated = tmp_path / "treated"
+        treated.mkdir()
+        _kb_with_openalex_authored_md(treated)
+        assert [r.status for r in backfill(treated, ARXIV)] == [BACKFILL_REFUSED]
+        after = ArxivSourceWriter().write(
+            _parsed_arxiv(), treated, imported_at="2026-02-02T00:00:00Z")
+        assert after.status == ctrl.status == "merged"
+
+    def test_arxiv_authored_paper_still_backfills_and_reimports_cleanly(self, tmp_path):
+        # The common case must still work: an arXiv-written .md always carries
+        # arxiv_version, so it is NOT refused, and a later re-import stays a clean no-op.
+        _arxiv_md(tmp_path, "p", "2401.00001", 2)
+        assert [r.status for r in backfill(tmp_path, ARXIV)] == [BACKFILL_WRITTEN]
+        side = tmp_path / "source-provenance" / "p.json"
+        # A re-import of the same deposit is an idempotent no-op against the backfilled
+        # ledger: identifying fields (version, withdrawn_by) match exactly.
+        stored = read_provenance(side).records[0]
+        fresh = ArxivSourceWriter()._provenance_record(
+            _parsed_arxiv(arxiv_id="2401.00001", version=2), "later")
+        ident = ("version", "withdrawn_by")
+        assert {k: stored.fields.get(k) for k in ident} == {
+            k: fresh.fields.get(k) for k in ident
+        }
+
+
+# --------------------------------------------------------------------------- #
 # 5. byte- and mtime_ns-identical no-op (requirement 5)
 # --------------------------------------------------------------------------- #
 class TestNoOp:
@@ -278,7 +371,7 @@ class TestNoOp:
         ]))
         before = _stat(side)
         result = _backfill_source(
-            tmp_path, "2301.00001", "sources/p.md", {"version": 3}, ARXIV
+            tmp_path, "2301.00001", "sources/p.md", {"version": 3}, (), ARXIV
         )
         assert result.status == BACKFILL_UNCHANGED
         assert result.ledger == ""
@@ -293,7 +386,7 @@ class TestNoOp:
             SourceRecord("arxiv", "2301.00001", IMPORTED_AT, {"version": 9}),
         ]))
         result = _backfill_source(
-            tmp_path, "2301.00001", "sources/p.md", {"version": 3}, ARXIV
+            tmp_path, "2301.00001", "sources/p.md", {"version": 3}, (), ARXIV
         )
         assert result.status == BACKFILL_ERROR
         assert "refusing to overwrite" in result.reason

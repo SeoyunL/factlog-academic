@@ -133,8 +133,28 @@ class BackfillSchema:
     ``openalex_id``). ``fields`` maps each ledger field name to a callable that reads its
     already-parsed value off the entry. A callable that returns ``None`` (the front matter
     did not carry the field) contributes nothing to the record — so a ledger field can
-    only ever be populated from a value the entry actually holds, which is what makes it
-    impossible to null out an identifying field the front matter never had.
+    only ever be populated from a value the entry actually holds.
+
+    ``required`` names the ``fields`` a truthful ledger cannot be built without: the
+    *identifying* fields whose absence from front matter is not a legitimate value but a
+    sign the front matter cannot express this integration's identity at all. If any of them
+    reads ``None``, the paper is refused per-id and no sidecar is written — the same honesty
+    as a missing ``imported_at``.
+
+    This is the #73/#84 identifying-field trap, and a schema-*shape* guard cannot catch it:
+    the reader for arXiv's ``version`` *exists* on the entry, it just holds ``None`` when an
+    OpenAlex-authored ``.md`` (which echoes ``arxiv_id`` but never emits ``arxiv_version``)
+    is collected front-matter-only. Writing that record leaves ``version`` absent, and a
+    later arXiv merge import then reads it as ``{version: None}``, diverges from the live
+    ``{version: N}`` and errors permanently — a false conflict the backfill manufactured.
+    ``required`` refuses to build such a record.
+
+    ``required`` is only the identifying fields whose ``None`` means *unreadable*, never
+    those whose ``None`` is a legitimate value an import would record too. For arXiv it is
+    ``("version",)`` — an authentic deposit ``.md`` always carries ``arxiv_version`` —
+    while arXiv's other identifying field is optional in front matter and its absence is a
+    real, recordable state, so it is *not* required. For OpenAlex, whose writer declares no
+    identifying fields and whose id key is emitted only by its own writer, it is ``()``.
     """
 
     type: str
@@ -142,6 +162,7 @@ class BackfillSchema:
     provenance_of: Callable[[Sequence[str]], str]
     id_of: Callable[[Any], str]
     fields: Mapping[str, Callable[[Any], Any]]
+    required: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -186,16 +207,33 @@ def _backfill_source(
     entry_id: str,
     source_rel: str,
     fields: Mapping[str, Any],
+    missing_required: Sequence[str],
     schema: BackfillSchema,
 ) -> BackfillResult:
     """Materialize one front-matter-only paper's ledger into its sidecar.
 
-    Reads ``imported_at`` from the source's front matter (refusing per-id if absent),
-    builds the record, and ``add_source``s it into ``sidecar_path(source)``. Both the read
-    and the write are guarded with ``(ProvenanceError, OSError)`` so one paper's failure is
-    that paper's problem, and a record already present identically is a byte- and
-    ``mtime_ns``-identical no-op.
+    Refuses per-id, writing nothing, when an identifying field the ledger's identity turns
+    on cannot be read from front matter (*missing_required*) — the front matter cannot
+    supply this integration's identity, so a ledger built from it would manufacture a false
+    divergence against a later import (the #73/#84 trap). Otherwise reads ``imported_at``
+    from the source's front matter (refusing per-id if absent), builds the record, and
+    ``add_source``s it into ``sidecar_path(source)``. Both the read and the write are
+    guarded with ``(ProvenanceError, OSError)`` so one paper's failure is that paper's
+    problem, and a record already present identically is a byte- and ``mtime_ns``-identical
+    no-op.
     """
+    if missing_required:
+        return BackfillResult(
+            entry_id=entry_id,
+            status=BACKFILL_REFUSED,
+            reason=(
+                f"{source_rel} front matter cannot supply the {schema.type} identifying "
+                f"field(s) {', '.join(missing_required)} (this looks like another "
+                "integration's record echoing the id, not this integration's own deposit); "
+                "a backfill will not build a ledger whose identity it cannot read, so this "
+                "paper is left for a re-import."
+            ),
+        )
     source_path = kb_root / source_rel
     # Only read: read_scalars opens the .md read-only (P4), and swallows an OSError into an
     # empty mapping, so an unreadable source reads as "no imported_at" — a refusal, below.
@@ -282,9 +320,18 @@ def backfill(kb_root: Path | str, schema: BackfillSchema) -> list[BackfillResult
             continue
         entry_id = schema.id_of(entry)
         fields = _record_fields(entry, schema)
+        # An identifying field whose reader returns None is unreadable from this front
+        # matter (e.g. an OpenAlex-authored .md echoing arxiv_id but carrying no
+        # arxiv_version). Refuse rather than write a record with an absent identifying
+        # field, which a later import would call a divergence and error on (#73/#84).
+        missing_required = tuple(
+            name for name in schema.required if schema.fields[name](entry) is None
+        )
         for source_rel in sources:
             results.append(
-                _backfill_source(root, entry_id, source_rel, fields, schema)
+                _backfill_source(
+                    root, entry_id, source_rel, fields, missing_required, schema
+                )
             )
 
     results.sort(key=lambda r: (r.entry_id, r.ledger))
