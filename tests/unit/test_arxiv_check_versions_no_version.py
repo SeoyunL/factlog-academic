@@ -17,12 +17,13 @@ having filled it*.
 The invariant these tests pin: **the command never writes a field the report did not
 name.**
 
-And the remedy each paper is given must be the one that *works* for it. Three papers
-reach "no version recorded", and `provenance_of` calls two of them "front-matter" while
-they need different commands — a sidecar that holds no arXiv record is repaired by
-`arxiv-import`, and a paper with no sidecar at all, version-less, is repaired by nothing
-that exists. Naming a command for that last one is #116 recreated at the prose layer, so
-the report says plainly that none records a version for it.
+And the remedy each paper is given must be the one that *works* for it. `provenance_of`
+calls several different papers "front-matter", and they need different commands: a sidecar
+that exists and holds no arXiv record is repaired by `arxiv-import`; a paper with no
+sidecar at all, version-less, is repaired by nothing that exists; and a sidecar that will
+not parse may not even be *described*, let alone prescribed for. Naming a command for
+those last two is #116 recreated at the prose layer, so the report says plainly that none
+records a version for them.
 """
 from __future__ import annotations
 
@@ -284,22 +285,73 @@ class TestThePlainCheckSurfacesTheVersionLessRecord:
         assert f"Run `factlog arxiv-import --id {ID}`" not in out
         assert "None" not in out
 
+    def test_a_paper_whose_sidecar_will_not_parse_asserts_nothing_and_prescribes_nothing(
+        self, tmp_path, fake, capsys
+    ):
+        # The fourth UPDATE_NO_LEDGER case. `sidecar_path(md).is_file()` is True for an
+        # unparseable ledger, so a bool made this paper indistinguishable from the
+        # OpenAlex-primary one: the report asserted the contents of a file it never read
+        # ("holds no arXiv record") and prescribed `arxiv-import`, which measurably fails.
+        # #128 made this newly reachable (read_provenance now raises on a non-bool
+        # `is_retracted` and an out-of-vocabulary `withdrawn_by`).
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / "p.md").write_text(
+            f"---\narxiv_id: {ID}\n---\n# p\n", encoding="utf-8"
+        )
+        (tmp_path / "source-provenance").mkdir()
+        (tmp_path / "source-provenance" / "p.json").write_text("{ not json", encoding="utf-8")
+        fake(FakeClient([_work(ID, version=7)]))
+
+        code = run(_plain(tmp_path))
+        out = capsys.readouterr().out
+
+        assert code == 1  # the corrupt ledger reaches the exit code
+        assert "No version recorded: 1" in out
+        assert "could not be read" in out
+        assert "repaired by hand" in out
+        # Never assert what an unparsed file holds.
+        assert "holds no arXiv record" not in out
+        # Never prescribe a command that fails or silently no-ops on this paper.
+        assert "arxiv-import" not in out
+        assert "arxiv-backfill-provenance" not in out
+        assert "arxiv-check-versions --auto-update" not in out
+        # The adjacent error line still names the broken ledger.
+        assert "corrupt provenance ledger" in out
+        assert "None" not in out
+
+    def test_the_unreadable_sidecar_is_a_distinct_state_not_a_readable_one(self, tmp_path):
+        # The bool this replaced answered True here. Pin the discrimination at the seam
+        # that produces it, so a future refactor cannot quietly collapse the two again.
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / "p.md").write_text(
+            f"---\narxiv_id: {ID}\n---\n# p\n", encoding="utf-8"
+        )
+        (tmp_path / "source-provenance").mkdir()
+        (tmp_path / "source-provenance" / "p.json").write_text("{ not json", encoding="utf-8")
+
+        (entry,), errors = cv.collect_ledger_entries(tmp_path)
+        assert entry.sidecar_state == cv.SIDECAR_UNREADABLE
+        assert sidecar_path(tmp_path / "sources" / "p.md").is_file()  # the bool said True
+        assert [e.status for e in errors] == [cv.STATUS_ERROR]
+
     def test_the_two_front_matter_papers_get_different_notes(self, tmp_path, fake, capsys):
         # The collapse this fixes: `provenance_of` says "front-matter" for both, and one
         # note for both is false for at least one of them. Same absent version, same
         # arXiv v7, different remedies — the absent-vs-normal-value distinction of
         # `개념-커버리지-힌트-사일런트미스-vs-부재`, applied to prose.
-        with_sidecar = cv.VersionCheck(
-            arxiv_id=ID, status=cv.STATUS_NO_VERSION, current_version=7,
-            recorded_from="front-matter", sidecar_exists=True,
-        )
-        without = cv.VersionCheck(
-            arxiv_id=ID, status=cv.STATUS_NO_VERSION, current_version=7,
-            recorded_from="front-matter", sidecar_exists=False,
-        )
-        assert cv.no_version_note(with_sidecar) != cv.no_version_note(without)
-        assert "arxiv-import" in cv.no_version_note(with_sidecar)
-        assert "no command currently records a version" in cv.no_version_note(without)
+        def check(state):
+            return cv.VersionCheck(
+                arxiv_id=ID, status=cv.STATUS_NO_VERSION, current_version=7,
+                recorded_from="front-matter", sidecar_state=state,
+            )
+
+        readable = cv.no_version_note(check(cv.SIDECAR_READABLE))
+        absent = cv.no_version_note(check(cv.SIDECAR_ABSENT))
+        unreadable = cv.no_version_note(check(cv.SIDECAR_UNREADABLE))
+        assert len({readable, absent, unreadable}) == 3
+        assert "arxiv-import" in readable
+        assert "no command currently records a version" in absent
+        assert "could not be read" in unreadable
 
 
 class TestAutoUpdateFillsItAndSaysSo:

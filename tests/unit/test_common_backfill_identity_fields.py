@@ -29,6 +29,14 @@ reports as `changed` and the first `--auto-update` rewrites it. So it is recorde
 refused. These tests pin that boundary: they fail if `version` leaves `required`, they
 fail if `withdrawn_by` joins it, and they fail if a version-less record stops making a
 later merge error.
+
+That first claim is only true because every test below calls the **production**
+`arxiv.backfill.backfill_schema()`. An earlier version of this file built its own
+`BackfillSchema` with `required=("version",)` hardcoded, so deleting `required` from
+production left it green — it pinned its own copy. That is exactly the second copy of a
+predicate `arxiv/backfill.py`'s docstring forbids ("never a second copy … which is how
+#64, #98 and the empty-tuple divergence fixed in #111 all happened"). Verified by
+deleting `required` from `backfill_schema()` and watching this file go red.
 """
 from __future__ import annotations
 
@@ -39,6 +47,7 @@ from pathlib import Path
 
 import factlog.integrations.arxiv.check_versions as cv
 import factlog.integrations.common.backfill as bf
+from factlog.integrations.arxiv.backfill import backfill_schema
 from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common.provenance import (
@@ -51,20 +60,6 @@ from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
 from factlog.integrations.openalex.work_parser import ParsedWork
 
 
-def _schema() -> bf.BackfillSchema:
-    return bf.BackfillSchema(
-        type="arxiv",
-        collect_entries=cv.collect_ledger_entries,
-        provenance_of=cv.provenance_of,
-        id_of=lambda entry: entry.arxiv_id,
-        fields={
-            "version": lambda entry: entry.recorded_version,
-            "withdrawn_by": lambda entry: entry.recorded_withdrawn_by,
-        },
-        required=("version",),
-    )
-
-
 def _backfill(front_matter: str) -> tuple[list, dict | None]:
     root = Path(tempfile.mkdtemp())
     (root / "sources").mkdir()
@@ -72,7 +67,7 @@ def _backfill(front_matter: str) -> tuple[list, dict | None]:
         "---\n" + front_matter + 'imported_at: "2025-01-01T00:00:00Z"\n---\n# P\n',
         encoding="utf-8",
     )
-    results = bf.backfill(root, _schema())
+    results = bf.backfill(root, backfill_schema())
     sidecar = root / "source-provenance" / "p.json"
     record = json.loads(sidecar.read_text())["records"][0] if sidecar.is_file() else None
     return results, record
@@ -126,7 +121,7 @@ class TestARefusedRecordIsWhatKeepsALaterMergeClean:
 
     def test_refusing_leaves_a_later_merge_able_to_succeed(self):
         root, original = _kb_with_openalex_original()
-        (result,) = bf.backfill(root, _schema())
+        (result,) = bf.backfill(root, backfill_schema())
         assert result.status == bf.BACKFILL_REFUSED
         # Pin *which* refusal. `backfill` has several, and #113's unreadable-identity
         # refusal is the only one this contrast is about: a test that merely saw
@@ -221,5 +216,5 @@ class TestALegitimateNoneIsNotRequired:
         assert record["withdrawn_by"] == "author"
 
     def test_withdrawn_by_is_not_declared_required(self):
-        assert "withdrawn_by" not in _schema().required
-        assert "version" in _schema().required
+        assert "withdrawn_by" not in backfill_schema().required
+        assert "version" in backfill_schema().required

@@ -92,6 +92,9 @@ __all__ = [
     "STATUS_NO_VERSION",
     "STATUS_ERROR",
     "STATUS_SKIPPED",
+    "SIDECAR_ABSENT",
+    "SIDECAR_READABLE",
+    "SIDECAR_UNREADABLE",
     "UPDATE_WRITTEN",
     "UPDATE_UNCHANGED",
     "UPDATE_NO_LEDGER",
@@ -135,6 +138,16 @@ STATUS_NO_VERSION = "no-version"
 STATUS_ERROR = "error"
 STATUS_SKIPPED = "skipped"
 
+#: What a front-matter paper's provenance sidecar is. Three states, not a bool: a file
+#: that exists but will not parse is **not** a file whose contents we may describe. The
+#: bool this replaced said ``True`` for it, and the report went on to assert what the
+#: unparsed ledger held ("it holds no arXiv record") and to prescribe a command that
+#: measurably fails on it. #128 made this newly reachable, by teaching ``read_provenance``
+#: to raise on a non-bool ``is_retracted`` and an out-of-vocabulary ``withdrawn_by``.
+SIDECAR_ABSENT = "absent"
+SIDECAR_READABLE = "readable"
+SIDECAR_UNREADABLE = "unreadable"
+
 
 @dataclass(frozen=True)
 class LedgerEntry:
@@ -149,19 +162,21 @@ class LedgerEntry:
     ``sources`` are the ledger-relative paths that reference the paper (one paper
     can be cited by several sources), for the report only.
 
-    ``sidecar_exists`` only speaks for a paper whose ``sources`` are front matter: it
-    says whether that ``.md`` nonetheless *has* a provenance sidecar — one that simply
-    holds no arXiv record (an OpenAlex-primary import echoing ``arxiv_id``). "The ledger
-    holds no arXiv record" and "there is no ledger" are two different papers with two
-    different remedies, and collapsing them is how a report ends up prescribing a command
-    that does nothing (#116, #121). For a ledger-backed paper it is trivially ``True``.
+    ``sidecar_state`` only speaks for a paper whose ``sources`` are front matter: one of
+    :data:`SIDECAR_ABSENT`, :data:`SIDECAR_READABLE` (it exists and holds no arXiv record
+    — an OpenAlex-primary import echoing ``arxiv_id``) or :data:`SIDECAR_UNREADABLE` (it
+    exists and will not parse). "The ledger holds no arXiv record", "there is no ledger"
+    and "the ledger could not be read" are three different papers with three different
+    remedies, and collapsing any of them is how a report ends up asserting the contents
+    of a file it never parsed, or prescribing a command that does nothing (#116, #121).
+    For a ledger-backed paper it is trivially :data:`SIDECAR_READABLE`.
     """
 
     arxiv_id: str
     recorded_version: int | None
     recorded_withdrawn_by: str | None
     sources: tuple[str, ...] = ()
-    sidecar_exists: bool = True
+    sidecar_state: str = SIDECAR_READABLE
 
 
 @dataclass(frozen=True)
@@ -208,8 +223,9 @@ class VersionCheck:
     reason: str = ""
     sources: tuple[str, ...] = ()
     #: See :class:`LedgerEntry`. Discriminates "the ledger holds no arXiv record" from
-    #: "there is no ledger" for a ``recorded_from="front-matter"`` paper.
-    sidecar_exists: bool = True
+    #: "there is no ledger" and from "the ledger would not parse", for a
+    #: ``recorded_from="front-matter"`` paper.
+    sidecar_state: str = SIDECAR_READABLE
 
 
 def _relative(path: Path, kb_root: Path) -> str:
@@ -236,6 +252,10 @@ def collect_ledger_entries(
     root = Path(kb_root)
     slots: dict[str, dict] = {}
     errors: list[VersionCheck] = []
+    #: Ledger-relative paths of the sidecars that would not parse. A `.md` whose sidecar
+    #: is in here falls through to the front-matter loop below, and must not be described
+    #: as though the file had been read.
+    unreadable: set[str] = set()
 
     sidecar_root = root / SIDECAR_DIR
     for path in sorted(sidecar_root.rglob("*.json")) if sidecar_root.is_dir() else ():
@@ -251,6 +271,7 @@ def collect_ledger_entries(
                     reason=f"corrupt provenance ledger: {exc}",
                 )
             )
+            unreadable.add(_relative(path, root))
             continue
         rel = _relative(path, root)
         for record in provenance.records:
@@ -308,13 +329,22 @@ def collect_ledger_entries(
         # A sidecar may exist and simply hold no arXiv record — an OpenAlex-primary
         # import that echoed `arxiv_id` into the front matter. That paper's remedy
         # (`arxiv-import`, which merges into the existing ledger) is not the remedy of a
-        # paper with no sidecar at all (for which, version-less, there is none). Record
-        # which one this is rather than making the report guess.
+        # paper with no sidecar at all (for which, version-less, there is none), nor of
+        # one whose sidecar will not parse (about which nothing may be said at all: it
+        # is in `errors` above, and we never read what it holds). Record which of the
+        # three this is rather than making the report guess.
+        sidecar = sidecar_path(path)
+        if _relative(sidecar, root) in unreadable:
+            sidecar_state = SIDECAR_UNREADABLE
+        elif sidecar.is_file():
+            sidecar_state = SIDECAR_READABLE
+        else:
+            sidecar_state = SIDECAR_ABSENT
         slots[arxiv_id] = {
             "version": version,
             "withdrawn_by": scalars.get("arxiv_withdrawn_by") or None,
             "sources": {_relative(path, root)},
-            "sidecar_exists": sidecar_path(path).is_file(),
+            "sidecar_state": sidecar_state,
         }
 
     entries = [
@@ -323,7 +353,7 @@ def collect_ledger_entries(
             recorded_version=slot["version"],
             recorded_withdrawn_by=slot["withdrawn_by"],
             sources=tuple(sorted(slot["sources"])),
-            sidecar_exists=slot.get("sidecar_exists", True),
+            sidecar_state=slot.get("sidecar_state", SIDECAR_READABLE),
         )
         for arxiv_id, slot in slots.items()
     ]
@@ -429,7 +459,7 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
         withdrawn_by=upstream_by,
         recorded_withdrawn_by=recorded_by,
         sources=entry.sources,
-        sidecar_exists=entry.sidecar_exists,
+        sidecar_state=entry.sidecar_state,
     )
 
 
@@ -565,21 +595,28 @@ class LedgerUpdate:
     recorded_version: int | None = None
     current_version: int | None = None
     reason: str = ""
-    #: See :class:`LedgerEntry`. Decides which :data:`UPDATE_NO_LEDGER` remedy is true.
-    sidecar_exists: bool = True
+    #: See :class:`LedgerEntry`. Decides which :data:`UPDATE_NO_LEDGER` answer is true.
+    sidecar_state: str = SIDECAR_READABLE
 
 
 def no_ledger_remedy(
-    arxiv_id: str, *, sidecar_exists: bool, has_recorded_version: bool
+    arxiv_id: str, *, sidecar_state: str, has_recorded_version: bool
 ) -> str:
     """What actually repairs a paper ``--auto-update`` cannot write a ledger for.
 
-    Three different papers reach :data:`UPDATE_NO_LEDGER`, and they have three different
-    remedies. Naming one remedy for all three is how a report prescribes a command that
-    does nothing — the failure #116 named and this issue repeats one layer up. Each
-    branch below was measured, not reasoned:
+    **Four** different papers reach :data:`UPDATE_NO_LEDGER`, and they have four different
+    answers. Naming one remedy for all of them is how a report prescribes a command that
+    does nothing — the failure #116 named and this issue repeats one layer up. Each branch
+    below was measured, not reasoned:
 
-    * **A sidecar exists but holds no arXiv record** (an OpenAlex-primary import that
+    * **The sidecar will not parse** (:data:`SIDECAR_UNREADABLE`). We never read it, so
+      nothing may be *asserted* about what it holds, and no command repairs it:
+      ``arxiv-import`` answers ``error``, or — for a hand-written ``arxiv_id``-only
+      ``.md`` — a silent ``skipped: already imported (arxiv_id match)``. The ledger is
+      already reported under ``Could not check:``; the note points there and stops. #128
+      made this branch newly reachable by teaching ``read_provenance`` to raise on a
+      non-bool ``is_retracted`` and an out-of-vocabulary ``withdrawn_by``.
+    * **A sidecar exists and holds no arXiv record** (an OpenAlex-primary import that
       echoed ``arxiv_id`` into the front matter). ``arxiv-import`` merges an arXiv record
       into that existing ledger: measured ``merged``.
     * **No sidecar, and the front matter records a version.** ``arxiv-backfill-provenance``
@@ -590,7 +627,15 @@ def no_ledger_remedy(
       #113). Saying so is the honest answer #116 asked for; naming a command here would
       be the same lie in a new place.
     """
-    if sidecar_exists:
+    if sidecar_state == SIDECAR_UNREADABLE:
+        # Say nothing about the contents of a file that never parsed, and prescribe
+        # nothing: every command that touches it fails or silently no-ops.
+        return (
+            "Its provenance ledger could not be read (see `Could not check:`), so what it "
+            "holds is unknown and no command can record a version for this paper until "
+            "the ledger is repaired by hand."
+        )
+    if sidecar_state == SIDECAR_READABLE:
         return (
             "Its provenance ledger holds no arXiv record for this paper (another "
             "integration wrote the ledger and only echoed the id), so --auto-update has "
@@ -696,13 +741,13 @@ def apply_auto_update(
                     status=UPDATE_NO_LEDGER,
                     recorded_version=result.recorded_version,
                     current_version=result.current_version,
-                    sidecar_exists=result.sidecar_exists,
+                    sidecar_state=result.sidecar_state,
                     # `--auto-update` will not fabricate an import record whatever the
-                    # remedy is; which remedy is true depends on whether a sidecar exists
-                    # and whether the front matter carries a version.
+                    # answer is; which answer is true depends on the sidecar's state and
+                    # on whether the front matter carries a version.
                     reason=no_ledger_remedy(
                         result.arxiv_id,
-                        sidecar_exists=result.sidecar_exists,
+                        sidecar_state=result.sidecar_state,
                         has_recorded_version=result.recorded_version is not None,
                     ),
                 )
@@ -933,7 +978,7 @@ def no_version_note(result: VersionCheck, *, outcome: str | None = None) -> str:
     if result.recorded_from == "front-matter":
         remedy = no_ledger_remedy(
             result.arxiv_id,
-            sidecar_exists=result.sidecar_exists,
+            sidecar_state=result.sidecar_state,
             has_recorded_version=False,
         )
         return (
