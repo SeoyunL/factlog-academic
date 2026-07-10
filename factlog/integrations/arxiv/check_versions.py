@@ -96,6 +96,7 @@ __all__ = [
     "UPDATE_ERROR",
     "AUTO_UPDATE_FIELDS",
     "collect_ledger_entries",
+    "provenance_of",
     "partition_by_freshness",
     "check_entries",
     "summarize",
@@ -366,7 +367,7 @@ def _diff(entry: LedgerEntry, work) -> VersionCheck:
         status=STATUS_CHANGED if changed else STATUS_UNCHANGED,
         recorded_version=recorded,
         current_version=current,
-        recorded_from=_provenance_of(entry.sources),
+        recorded_from=provenance_of(entry.sources),
         # The two other version-tracking values --auto-update writes. Dates are
         # serialized to ISO strings here (the ledger stores strings, not `date`,
         # for the same reason the arXiv writer does: `json` cannot serialize a
@@ -768,7 +769,7 @@ def _sources_suffix(result: VersionCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
 
-def _provenance_of(sources) -> str:
+def provenance_of(sources) -> str:
     """``"front-matter"`` if *sources* are all ``sources/*.md`` (a pre-#82 paper with
     no ledger, #98), else ``"ledger"``. One paper's sources are never mixed:
     ``collect_ledger_entries`` fills a slot from the ledger *or*, only if no ledger
@@ -786,7 +787,7 @@ def _recorded_in(result) -> str:
     names a file that does not exist. Ledger sources live under
     ``source-provenance/``; front-matter ones are the ``sources/*.md`` themselves.
     """
-    if _provenance_of(getattr(result, "sources", ())) == "front-matter":
+    if provenance_of(getattr(result, "sources", ())) == "front-matter":
         return "front matter records"
     return "ledger records"
 

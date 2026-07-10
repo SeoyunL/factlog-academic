@@ -111,6 +111,7 @@ __all__ = [
     "AUTO_UPDATE_FIELDS",
     "COMPARED_FIELDS",
     "collect_ledger_entries",
+    "provenance_of",
     "partition_by_freshness",
     "check_entries",
     "summarize",
@@ -377,7 +378,7 @@ def _diff(entry: LedgerEntry, parsed) -> RefreshCheck:
     # This is a *value* comparison, not a presence test (mirrors arXiv #100). The old
     # `current and not recorded` form still names a fresh retraction, but on its own it
     # silently loses the *reverse*: an *un-retraction* (recorded True, upstream now False)
-    # never surfaced, so a retraction OpenAlex has withdrawn stayed recorded forever with
+    # never surfaced, so a retraction OpenAlex has since reversed stayed recorded forever with
     # no way to learn it. Comparing the values surfaces both directions: a retraction the
     # record did not carry is `newly_retracted`, and a retraction the record holds that
     # OpenAlex no longer flags is `un_retracted`.
@@ -400,7 +401,7 @@ def _diff(entry: LedgerEntry, parsed) -> RefreshCheck:
         un_retracted=un_retracted,
         id_superseded=id_superseded,
         changed_fields=changed_fields,
-        recorded_from=_provenance_of(entry.sources),
+        recorded_from=provenance_of(entry.sources),
         sources=entry.sources,
     )
 
@@ -730,7 +731,7 @@ def retraction_note(result: RefreshCheck) -> str:
     )
 
 
-def un_retraction_note(result: RefreshCheck) -> str:
+def un_retraction_note(result: RefreshCheck, *, prescribe: bool = True) -> str:
     """The line for a work OpenAlex no longer flags as retracted but the record still does.
 
     This is **not** a retraction warning: a retraction being reversed is its own news, and
@@ -752,12 +753,19 @@ def un_retraction_note(result: RefreshCheck) -> str:
             "diverges and a re-import does not error — the front-matter flag is simply "
             "stale. Backfilling a ledger so this can be acknowledged is tracked in #105."
         )
-    return (
+    note = (
         f"OpenAlex no longer flags {result.openalex_id} as retracted, but the ledger still "
         "records a retraction. `is_retracted` is not an identifying field, so nothing "
         "diverges and a re-import does not error — but a reversed retraction should not "
-        "keep surfacing, and the ledger should record that it was reversed. Run "
-        f"`factlog openalex-acknowledge-retraction --id {result.openalex_id}` to clear it."
+        "keep surfacing, and the ledger should record that it was reversed."
+    )
+    if not prescribe:
+        # The acknowledge command prints this note itself; telling the operator to run the
+        # command they are already running is noise (#107 item 7).
+        return note
+    return (
+        f"{note} Run `factlog openalex-acknowledge-retraction "
+        f"--id {result.openalex_id}` to clear it."
     )
 
 
@@ -765,7 +773,7 @@ def _sources_suffix(result: RefreshCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
 
-def _provenance_of(sources) -> str:
+def provenance_of(sources) -> str:
     """``"front-matter"`` if *sources* are all ``sources/*.md`` (a pre-#84 work with no
     ledger), else ``"ledger"``. One work's sources are never mixed:
     ``collect_ledger_entries`` fills a slot from the ledger *or*, only if no ledger covered
@@ -778,7 +786,7 @@ def _provenance_of(sources) -> str:
 
 def _recorded_in(result: RefreshCheck) -> str:
     """Where the recorded values came from: a ledger, or a source's front matter."""
-    return "front matter" if _provenance_of(result.sources) == "front-matter" else "ledger"
+    return "front matter" if provenance_of(result.sources) == "front-matter" else "ledger"
 
 
 def _field_change(name: str, recorded: str | None, current: str | None) -> str:
@@ -933,6 +941,16 @@ def _auto_update_lines(updates: Sequence[LedgerRefresh]) -> list[str]:
     return lines
 
 
+def _porcelain_field(text: str) -> str:
+    """Neutralize a free-text field so it cannot shift the columns after it.
+
+    ``reason`` interpolates an exception string, and an ``OSError``'s message carries a
+    path — a path may contain a tab. ``un_retracted`` is appended after ``reason``, so an
+    unescaped tab there silently moves the last column. Newlines would break the row.
+    """
+    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
 def porcelain_lines(
     results: Sequence[RefreshCheck],
     skipped: Sequence[RefreshCheck],
@@ -963,7 +981,7 @@ def porcelain_lines(
                 changed=",".join(result.changed_fields),
                 retracted="1" if result.newly_retracted else "0",
                 superseded="1" if result.id_superseded else "0",
-                reason=result.reason,
+                reason=_porcelain_field(result.reason),
                 un="1" if result.un_retracted else "0",
             )
         )
