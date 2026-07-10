@@ -713,6 +713,14 @@ def withdrawal_note(result: VersionCheck) -> str:
     value — #100). It attributes the recorded value to its true source — a ledger, or a
     pre-#82 paper's front matter (#98) — so it never says "the ledger recorded" a value
     that came from front matter. It never uses the word "retracted".
+
+    For a **front-matter**-only paper (imported before #82, #98) there is no provenance
+    ledger, so ``arxiv-acknowledge-withdrawal`` — which writes a sidecar — cannot record
+    the operator's decision and would exit 1. The warning must stay loud (a withdrawal
+    the KB never recorded is real news), but a loud warning that prescribes nothing is
+    the exact wallpaper #93 exists to remove, so the note adds that the ledger is missing,
+    that the withdrawal cannot be acknowledged until one exists, and points at #105 (the
+    backfill), not at a command that would exit 1.
     """
     agent = withdrawal_agent(result.withdrawn_by)
     version = f"v{result.current_version}" if result.current_version else "the current version"
@@ -722,6 +730,15 @@ def withdrawal_note(result: VersionCheck) -> str:
         provenance = f"which the {where} did not record"
     else:
         provenance = f"where the {where} recorded {_recorded_phrase(recorded)}"
+    if result.recorded_from == "front-matter":
+        return (
+            f"arXiv now reports {result.arxiv_id} ({version}) as WITHDRAWN by {agent}, "
+            f"{provenance}. Withdrawal is not retraction; this unverified signal flags "
+            "the paper for human review before any claim from it is trusted. This paper "
+            "has no provenance ledger (imported before #82), so the withdrawal cannot be "
+            "acknowledged and will keep surfacing until one exists; backfilling a ledger "
+            "is tracked in #105."
+        )
     return (
         f"arXiv now reports {result.arxiv_id} ({version}) as WITHDRAWN by {agent}, "
         f"{provenance}. Withdrawal is not retraction; this "
