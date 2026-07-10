@@ -1,11 +1,11 @@
 {
   "name": "factlog",
-  "displayName": "factlog",
+  "displayName": "factlog-academic",
   "version": "0.7.0",
-  "description": "Keep a markdown knowledge base honest: the LLM extracts source-backed facts, a deterministic Datalog/wirelog engine verifies them.",
+  "description": "Keep a markdown knowledge base honest: the LLM extracts source-backed facts, a deterministic Datalog/wirelog engine verifies them. Adds Zotero, OpenAlex, and arXiv bibliography import.",
   "author": { "name": "Justin Kim" },
-  "homepage": "https://github.com/semantic-reasoning/factlog",
-  "repository": "https://github.com/semantic-reasoning/factlog",
+  "homepage": "https://github.com/SeoyunL/factlog-academic",
+  "repository": "https://github.com/SeoyunL/factlog-academic",
   "license": "Apache-2.0",
   "keywords": ["knowledge-base", "datalog", "wirelog", "fact-extraction", "neurosymbolic", "verification", "claude-code"]
 }

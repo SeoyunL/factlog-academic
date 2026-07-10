@@ -1,12 +1,12 @@
 {
-  "name": "semantic-reasoning",
-  "owner": { "name": "Justin Kim" },
-  "description": "Semantic Reasoning Claude Code plugins.",
+  "name": "seoyunl",
+  "owner": { "name": "SeoyunL" },
+  "description": "factlog-academic — factlog with scholarly bibliography integrations.",
   "plugins": [
     {
       "name": "factlog",
       "source": ".",
-      "description": "Keep a markdown knowledge base honest: the LLM extracts source-backed facts, a deterministic Datalog/wirelog engine verifies them.",
+      "description": "Keep a markdown knowledge base honest: the LLM extracts source-backed facts, a deterministic Datalog/wirelog engine verifies them. Adds Zotero, OpenAlex, and arXiv bibliography import.",
       "version": "0.7.0"
     }
   ]

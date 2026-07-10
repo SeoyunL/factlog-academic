@@ -20,7 +20,7 @@
 
 ### 개요
 
-factlog는 **프로젝트별 지식베이스(KB) 폴더**를 만들어, 그 안의 문서에서 뽑아낸
+factlog-academic은 **프로젝트별 지식베이스(KB) 폴더**를 만들어, 그 안의 문서에서 뽑아낸
 주장들을 검증 가능하고 출처로 뒷받침되는 사실로 유지해 주는 도구입니다. 위키 한 종류만을
 위한 것이 아니라, 사람이 검토할 가치가 있는 문서라면 어디서든 KB 폴더를 만들 수 있습니다.
 
@@ -185,17 +185,21 @@ review_required  →  Claude repairs (gated)  →  decisions/correction_trace.md
 
 ### 설치
 
-factlog는 **Claude Code 플러그인**입니다. Claude Code 세션에서 이 저장소의
+factlog-academic은 **Claude Code 플러그인**입니다. Claude Code 세션에서 이 저장소의
 마켓플레이스로부터 설치합니다.
 
 *Claude Code에서 실행:*
 
 ```
-/plugin marketplace add https://github.com/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add https://github.com/SeoyunL/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup                     # one-shot: deps + doctor + init, in-session
 ```
+
+> 업스트림 `semantic-reasoning/factlog` 가 아니라 **이 저장소**에서 설치하십시오.
+> 업스트림 플러그인에는 서지 수집 명령이 하나도 없습니다 — `factlog zotero-import`,
+> `factlog openalex-*`, `factlog arxiv-*` 는 여기에만 있습니다.
 
 위 명령은 **한 줄씩 실행**하십시오. 여러 줄을 한 번에 붙여 넣으면 Claude Code가
 마켓플레이스 등록과 설치를 순서대로 처리하지 못할 수 있습니다.
@@ -220,8 +224,8 @@ Windows에서 `python` / `python3` 실행 파일 문제로 `setup` 이 실패하
 *Claude Code에서 실행:*
 
 ```
-/plugin marketplace add ~/git/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add ~/git/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup
 ```
@@ -234,7 +238,7 @@ Windows에서 `python` / `python3` 실행 파일 문제로 `setup` 이 실패하
 *터미널에서 실행:*
 
 ```bash
-pip install -r ~/git/semantic-reasoning/factlog/requirements.txt   # pyrewire>=1.0.3,<2.0
+pip install -r ~/git/factlog-academic/requirements.txt   # pyrewire>=1.0.3,<2.0
 python3 -m factlog doctor          # checks Python 3.11+ and pyrewire
 python3 -m factlog init --target ~/wiki   # scaffold the KB layout
 ```
