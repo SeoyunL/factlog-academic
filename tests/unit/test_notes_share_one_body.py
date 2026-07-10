@@ -52,8 +52,11 @@ class TestWithdrawalNoteSharesOneBody:
         assert front_matter.startswith(ledger.replace("the ledger", "the front matter"))
 
     def test_only_the_front_matter_note_carries_the_backfill_pointer(self):
-        assert "#105" in cv.withdrawal_note(_arxiv("front-matter"))
-        assert "#105" not in cv.withdrawal_note(_arxiv("ledger"))
+        # `_arxiv` carries `arxiv_version` (`recorded_version=7`), so the note names the
+        # command that builds the ledger (#114), never the closed issue #105 that tracked it.
+        assert "arxiv-backfill-provenance" in cv.withdrawal_note(_arxiv("front-matter"))
+        assert "#105" not in cv.withdrawal_note(_arxiv("front-matter"))
+        assert "arxiv-backfill-provenance" not in cv.withdrawal_note(_arxiv("ledger"))
 
     def test_the_suffix_is_the_only_difference(self):
         ledger = cv.withdrawal_note(_arxiv("ledger"))

@@ -780,7 +780,7 @@ def no_ledger_remedy(
         "currently records a version for it: --auto-update has no ledger to write into, "
         "`factlog arxiv-import` answers `already imported (arxiv_id match)`, and "
         "`factlog arxiv-backfill-provenance` refuses a paper whose front matter carries "
-        "no arxiv_version (#113). Backfilling a ledger for it is tracked in #105."
+        "no arxiv_version (#113). Backfilling a ledger for it is tracked in #135."
     )
 
 
@@ -1004,9 +1004,14 @@ def withdrawal_note(result: VersionCheck) -> str:
     ledger, so ``arxiv-acknowledge-withdrawal`` — which writes a sidecar — cannot record
     the operator's decision and would exit 1. The warning must stay loud (a withdrawal
     the KB never recorded is real news), but a loud warning that prescribes nothing is
-    the exact wallpaper #93 exists to remove, so the note adds that the ledger is missing,
-    that the withdrawal cannot be acknowledged until one exists, and points at #105 (the
-    backfill), not at a command that would exit 1.
+    the exact wallpaper #93 exists to remove, so the note adds that the ledger is missing
+    and names the working next step — which depends on whether the front matter can supply
+    the ledger. When it carries ``arxiv_version`` (``recorded_version is not None``),
+    ``arxiv-backfill-provenance`` builds the ledger from it (#114) and the note prescribes
+    that command — measured in ``test_arxiv_backfill_provenance``: refused before backfill,
+    acknowledgeable after. When it carries no ``arxiv_version``, backfill refuses the paper
+    (#113) and no command can build a ledger for it, so the note says so and points at #135,
+    never at a command that would exit 1 or refuse.
     """
     agent = withdrawal_agent(result.withdrawn_by)
     version = f"v{result.current_version}" if result.current_version else "the current version"
@@ -1028,10 +1033,21 @@ def withdrawal_note(result: VersionCheck) -> str:
         "it is trusted."
     )
     if result.recorded_from == "front-matter":
+        if result.recorded_version is not None:
+            # Front matter carries `arxiv_version`, so `arxiv-backfill-provenance` builds
+            # the ledger from it (#114) and the withdrawal becomes acknowledgeable.
+            return (
+                f"{body} This paper has no provenance ledger (imported before #82), so the "
+                "withdrawal cannot be acknowledged until one exists; run `factlog "
+                "arxiv-backfill-provenance` to build one from its front matter."
+            )
+        # No `arxiv_version`: backfill refuses such a paper (#113), so no command can
+        # build a ledger — the withdrawal stays unacknowledgeable, tracked in #135.
         return (
-            f"{body} This paper has no provenance ledger (imported before #82), so the "
-            "withdrawal cannot be acknowledged and will keep surfacing until one exists; "
-            "backfilling a ledger is tracked in #105."
+            f"{body} This paper has no provenance ledger (imported before #82) and its "
+            "front matter carries no arxiv_version, so `arxiv-backfill-provenance` refuses "
+            "it (#113) and the withdrawal cannot be acknowledged and will keep surfacing "
+            "until a ledger exists (#135)."
         )
     return body
 
@@ -1050,17 +1066,30 @@ def un_withdrawal_note(result: VersionCheck) -> str:
     For a **front-matter**-only paper (imported before #82, #98) there is no provenance
     record to diverge, so a re-import does *not* error and
     ``arxiv-acknowledge-withdrawal`` — which writes sidecars — cannot help. The note
-    must not claim either, so it states plainly that the front-matter note is now stale
-    and points at #105 (backfilling a ledger), not at a command that would exit 1.
+    must not claim either, so it states plainly that the front-matter note is now stale,
+    then names the working next step by whether the front matter can supply a ledger:
+    with ``arxiv_version`` (``recorded_version is not None``), ``arxiv-backfill-provenance``
+    builds one (#114) and the note prescribes it; with none, backfill refuses the paper
+    (#113) and no command can, so it says so and points at #135 — never at a command that
+    would exit 1 or refuse.
     """
     recorded = result.recorded_withdrawn_by or ""
     if result.recorded_from == "front-matter":
-        return (
+        stale = (
             f"arXiv no longer reports {result.arxiv_id} as withdrawn, but its front "
             f"matter still records {_recorded_phrase(recorded)}. This paper has no "
             "provenance ledger (imported before #82), so nothing diverges and a "
-            "re-import does not error; the front-matter note is simply stale. "
-            "Backfilling a ledger so this can be acknowledged is tracked in #105."
+            "re-import does not error; the front-matter note is simply stale."
+        )
+        if result.recorded_version is not None:
+            return (
+                f"{stale} Run `factlog arxiv-backfill-provenance` to give it a ledger, "
+                "after which this can be acknowledged."
+            )
+        return (
+            f"{stale} Its front matter carries no arxiv_version, so "
+            "`arxiv-backfill-provenance` refuses it (#113) and no command can give it a "
+            "ledger to acknowledge this in (#135)."
         )
     return (
         f"arXiv no longer reports {result.arxiv_id} as withdrawn, but the ledger still "

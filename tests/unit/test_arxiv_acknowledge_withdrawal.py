@@ -531,7 +531,10 @@ class TestNoteProvenance:
         assert "re-import will error" not in out
         assert "diverges from a fresh import" not in out
         assert "arxiv-acknowledge-withdrawal --id" not in out
-        assert "#105" in out
+        # Front matter carries `arxiv_version`, so it names the command that builds the
+        # ledger (#114), not the closed #105 that once denied it (#132).
+        assert "arxiv-backfill-provenance" in out
+        assert "#105" not in out
 
 
 # --------------------------------------------------------------------------- #
@@ -541,9 +544,11 @@ class TestRefusesBeforeQuery:
     def test_front_matter_only_refuses_before_query_zero_api(
         self, tmp_path, fake, capsys
     ):
-        # A pre-#82 paper: front matter carries the withdrawal, no sidecar. acknowledge()
-        # writes only sidecars, so this can never be written; the command must refuse
-        # before the fetch (not after spending a request and prompting) and point at #105.
+        # A pre-#82 paper: front matter carries the withdrawal (and `arxiv_version`), no
+        # sidecar. acknowledge() writes only sidecars, so this cannot be written yet; the
+        # command must refuse before the fetch (not after spending a request and prompting)
+        # and name the backfill that builds the ledger from front matter (#114), not the
+        # closed #105 that once denied it (#132).
         _seed_front_matter_only(tmp_path, "1706.03762", 7, withdrawn_by="author")
         before = _kb_snapshot(tmp_path)
         client = fake(FakeClient([_work("1706.03762", version=7, withdrawn_by="admin")]))
@@ -553,10 +558,44 @@ class TestRefusesBeforeQuery:
         ])
         assert code == 1
         err = capsys.readouterr().err
-        assert "front matter" in err and "#105" in err
+        assert "front matter" in err and "arxiv-backfill-provenance" in err
+        assert "#105" not in err
         assert client.calls == []  # ZERO API requests
         assert not (tmp_path / "source-provenance").exists()  # no ledger fabricated
         assert _kb_snapshot(tmp_path) == before  # .md byte- and mtime_ns-identical
+
+    def test_version_less_front_matter_paper_points_at_135_not_the_backfill(
+        self, tmp_path, fake, capsys
+    ):
+        # A front-matter-only paper whose front matter carries the withdrawal but NO
+        # `arxiv_version`. `arxiv-backfill-provenance` genuinely refuses such a paper
+        # (#113), so no command can build the ledger this decision would live in — the
+        # message must say so and point at #135, never prescribe the backfill (#114 cannot
+        # help here) and never the closed #105 (#132).
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / "p.md").write_text(
+            "---\narxiv_id: 0704.0001\narxiv_withdrawn: true\n"
+            "arxiv_withdrawn_by: author\n---\n# p\n",
+            encoding="utf-8",
+        )
+        before = _kb_snapshot(tmp_path)
+        client = fake(FakeClient([_work("0704.0001", version=7, withdrawn_by="author")]))
+        code = run([
+            "arxiv-acknowledge-withdrawal", "--id", "0704.0001",
+            "--target", str(tmp_path), "--yes",
+        ])
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "no arxiv_version" in err
+        assert "#135" in err
+        assert "cannot be acknowledged here" in err
+        # The backfill cannot repair a version-less paper, so it must not be prescribed as
+        # an imperative, and #105 stays closed.
+        assert "Run `factlog arxiv-backfill-provenance`" not in err
+        assert "#105" not in err
+        assert client.calls == []  # refused before the fetch: ZERO API requests
+        assert not (tmp_path / "source-provenance").exists()
+        assert _kb_snapshot(tmp_path) == before
 
     def test_absent_id_refuses_before_query_zero_api(self, tmp_path, fake, capsys):
         _seed(tmp_path, "1706.03762", 7, withdrawn_by="author")  # a different paper
