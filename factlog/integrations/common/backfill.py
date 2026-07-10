@@ -60,6 +60,16 @@ is deliberately tied to the coverage of the commands that would consume it.
   dropped, exactly as an import drops it. This is what keeps a backfill from writing an
   identifying field as absent-then-``None`` and manufacturing a false divergence against a
   later re-import that carries the real value.
+* **A value front matter may hold but the ledger may not is refused, never coerced and
+  never dropped.** ``read_provenance`` fixes the value space of the signal fields each
+  integration owns (#109), while front matter keeps an unrecognised hand-typed value
+  verbatim on purpose (#98): that boundary is loud, not fatal. A backfill *promotes* one
+  medium's value into the other, so a value outside the ledger's space would write a file
+  the reader below refuses. The paper is refused per-id — ``signal_field_error`` names the
+  offending field, in the owning integration's words, not this module's — and its
+  front-matter signal keeps surfacing until the ``.md`` is repaired. Omitting the field
+  instead is not available: it may be an identifying one, and a ledger missing it
+  manufactures the #73/#84 false divergence this module already refuses to walk into.
 * **A no-op is byte- and ``mtime_ns``-identical.** A second backfill (or a paper whose
   fresh record equals one already in the sidecar) compares the serialized record and does
   not open the file, so the sidecar stays byte- and ``mtime_ns``-identical.
@@ -87,6 +97,7 @@ from factlog.integrations.common.provenance import (
     add_source,
     read_provenance,
     sidecar_path,
+    signal_field_error,
     write_provenance,
 )
 
@@ -258,6 +269,25 @@ def _backfill_source(
     record = SourceRecord(
         type=schema.type, id=entry_id, imported_at=imported_at, fields=fields
     )
+
+    # Front matter is a looser medium than the ledger. An unrecognised hand-typed value for
+    # a signal field is kept verbatim when front matter is *read* (#98: loud, not fatal),
+    # but the ledger's value space is fixed by the integration that owns the field (#109),
+    # and `write_provenance` would refuse this record anyway. Refuse here instead, so the
+    # reason names the `.md` that carries the bad value rather than a sidecar that was never
+    # written.
+    value_error = signal_field_error(record)
+    if value_error is not None:
+        return BackfillResult(
+            entry_id=entry_id,
+            status=BACKFILL_REFUSED,
+            reason=(
+                f"{source_rel} front matter carries a value the {schema.type} ledger "
+                f"cannot record: {value_error}. It is not coerced and it is not dropped; "
+                "repair the front matter and re-run."
+            ),
+        )
+
     sidecar = sidecar_path(source_path)
     rel = _relative(sidecar, kb_root)
 
