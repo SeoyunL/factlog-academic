@@ -3761,10 +3761,10 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     # command.
     # A ledger-backed paper's sources are `source-provenance/*.json`; a front-matter-only
     # paper's are the `sources/*.md` themselves (`collect_ledger_entries` never mixes the
-    # two for one id).
-    front_matter_only = entry is not None and all(
-        str(s).startswith("sources/") for s in entry.sources
-    )
+    # two for one id). Ask the module that builds `sources` rather than re-deriving the
+    # rule here: a second copy of one predicate is how #64 and #98 happened, and the two
+    # copies already disagreed on an empty tuple.
+    front_matter_only = entry is not None and cv.provenance_of(entry.sources) == "front-matter"
     if entry is None or front_matter_only:
         if entry is None:
             reason = (
@@ -4116,9 +4116,9 @@ def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
     # acknowledging it can only ever fail — and querying OpenAlex first would spend a
     # request and the operator's attention on a warning no human can turn off here (#107
     # item 1). Refuse before the fetch. Backfilling a ledger is #105, not this command.
-    front_matter_only = entry is not None and all(
-        str(s).startswith("sources/") for s in entry.sources
-    )
+    # Ask the module that builds `sources`; a second copy of the predicate is how #64 and
+    # #98 happened, and the two copies already disagreed on an empty tuple.
+    front_matter_only = entry is not None and rf.provenance_of(entry.sources) == "front-matter"
     if entry is None or front_matter_only:
         if entry is None:
             reason = (
@@ -4207,7 +4207,7 @@ def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
     if current_is_retracted:
         print(rf.retraction_note(note_source))
     else:
-        print(rf.un_retraction_note(note_source))
+        print(rf.un_retraction_note(note_source, prescribe=False))
 
     if not assume_yes:
         try:
