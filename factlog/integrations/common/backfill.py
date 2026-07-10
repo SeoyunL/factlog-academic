@@ -209,6 +209,7 @@ def _backfill_source(
     fields: Mapping[str, Any],
     missing_required: Sequence[str],
     schema: BackfillSchema,
+    dry_run: bool = False,
 ) -> BackfillResult:
     """Materialize one front-matter-only paper's ledger into its sidecar.
 
@@ -221,6 +222,11 @@ def _backfill_source(
     guarded with ``(ProvenanceError, OSError)`` so one paper's failure is that paper's
     problem, and a record already present identically is a byte- and ``mtime_ns``-identical
     no-op.
+
+    ``dry_run`` classifies without writing: it runs every read and every refusal exactly as
+    a real run would (so the previewed ids are the true ids), and reports what *would* be
+    written as :data:`BACKFILL_WRITTEN` without opening the sidecar for write. It shares this
+    function's single classification so a preview can never diverge from the run it previews.
     """
     if missing_required:
         return BackfillResult(
@@ -281,6 +287,19 @@ def _backfill_source(
             ),
         )
 
+    # A dry run stops here: it has classified this paper as writable (past every refusal
+    # and the no-op guard) without opening the sidecar for write, so nothing is written and
+    # every .md and sidecar stays byte- and mtime_ns-identical. The ledger it *would* write.
+    #
+    # What a preview therefore cannot know: whether the write would succeed. An unwritable
+    # `source-provenance/` makes the real run report this paper as an error, while the
+    # preview reports it as writable. Measured. That is the price of not writing: the only
+    # way to learn a write fails is to attempt it. Every *classification* is shared with
+    # the real run, so the preview never disagrees about a refusal or a no-op — only about
+    # a filesystem failure it declined to trigger.
+    if dry_run:
+        return BackfillResult(entry_id, BACKFILL_WRITTEN, ledger=rel)
+
     # The WRITE is guarded too: write_provenance re-raises OSError and its mkdir raises one
     # — guarding only the read is the crash shipped in #65, #71 and #94. add_source appends
     # this record beside any neighbour without disturbing it.
@@ -293,7 +312,9 @@ def _backfill_source(
     return BackfillResult(entry_id, BACKFILL_WRITTEN, ledger=rel)
 
 
-def backfill(kb_root: Path | str, schema: BackfillSchema) -> list[BackfillResult]:
+def backfill(
+    kb_root: Path | str, schema: BackfillSchema, dry_run: bool = False
+) -> list[BackfillResult]:
     """Give every front-matter-only paper a provenance ledger, returning one result each.
 
     Membership is decided by the integration's own ``collect_ledger_entries`` and exported
@@ -307,11 +328,44 @@ def backfill(kb_root: Path | str, schema: BackfillSchema) -> list[BackfillResult
     from the schema's fields, and it is ``add_source``d into a fresh sidecar. Both the read
     and write are guarded per id, so one paper's failure never aborts the rest. Results are
     returned in ``entry_id`` order for reproducibility.
+
+    ``dry_run`` previews without writing: every paper is classified exactly as a real run
+    would classify it (refusals, no-ops and per-id read errors are all reported the same),
+    but a writable paper is reported as :data:`BACKFILL_WRITTEN` without its sidecar being
+    opened for write. The preview and the run share one classifier, so they can never
+    disagree about which ids are eligible and which are refused.
+
+    A corrupt or unreadable ledger is **not** silently ignored. ``collect_entries`` returns
+    a per-file error for each ledger that would not parse; each becomes a
+    :data:`BACKFILL_ERROR` result so the caller counts it, names it, and exits non-zero. It
+    also *poisons the front-matter classification*: the paper whose arXiv record lives in
+    the unreadable file falls out of the ledger scan and reappears as "front-matter-only",
+    so backfilling it would materialize a sidecar from an incomplete view of what the KB
+    already believes (#111 — never assert about the ledger while a ledger went unread). The
+    file will not parse, so *which* paper that is cannot be known; therefore while **any**
+    ledger is unreadable, no front-matter-only paper is backfilled at all — the errors are
+    surfaced and nothing is written. A clean re-run after the ledger is repaired proceeds
+    normally.
     """
     root = Path(kb_root)
-    entries, _errors = schema.collect_entries(root)
+    entries, collect_errors = schema.collect_entries(root)
 
-    results: list[BackfillResult] = []
+    results: list[BackfillResult] = [
+        BackfillResult(
+            entry_id=str(schema.id_of(err)),
+            status=BACKFILL_ERROR,
+            reason=str(getattr(err, "reason", "") or err),
+        )
+        for err in collect_errors
+    ]
+
+    # An unreadable ledger contaminates the "front-matter-only" set (see the docstring):
+    # any candidate might be the paper whose record is in the file that would not parse, and
+    # we cannot tell which. Refuse to write any of them until the ledgers all read cleanly.
+    if collect_errors:
+        results.sort(key=lambda r: (r.entry_id, r.ledger))
+        return results
+
     for entry in entries:
         # The integration's own predicate: a paper whose sources are all `sources/*.md` is
         # front-matter-only; anything the ledgers cover is left untouched.
@@ -330,7 +384,8 @@ def backfill(kb_root: Path | str, schema: BackfillSchema) -> list[BackfillResult
         for source_rel in sources:
             results.append(
                 _backfill_source(
-                    root, entry_id, source_rel, fields, missing_required, schema
+                    root, entry_id, source_rel, fields, missing_required, schema,
+                    dry_run=dry_run,
                 )
             )
 
