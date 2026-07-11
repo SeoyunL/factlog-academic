@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from common import (
+    attribute_relation_forms,
     FACTS_DIR,
     KNOWN_STATUSES,
     canonical_value,
@@ -215,7 +216,9 @@ def evaluate_queries(
             rows = path_query_rows(args, facts, inferred["path"])
             if all(is_quoted_string(a) for a in args) and len(args) == 2:
                 start, target = arg_value(args[0]), arg_value(args[1])
-                route = dependency_path(facts, start, target)
+                # Explicit attr_forms, matching first_dependency_path: the route must be
+                # drawn over the same graph the engine used, not an ambient default.
+                route = dependency_path(facts, start, target, attribute_relation_forms())
                 if not rows:
                     value = "(not found)"
                 elif route:

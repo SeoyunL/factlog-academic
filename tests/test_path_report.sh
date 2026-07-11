@@ -66,8 +66,8 @@ printf '%s' "$R" | grep -q "A -> B" && printf '%s' "$R" | grep -q "A -> C" \
 printf 'edge(S, T) :- relation(T, "uses", S).\n' > "$KB/policy/logic-policy.extra.dl"
 ERR="$(FACTLOG_ROOT="$KB" "$PY" tools/run_logic_check.py 2>&1 >/dev/null || true)"
 printf '%s' "$ERR" | grep -q "edge is a reserved engine EDB predicate" \
-  && echo "  ok: (i) a policy heading edge is rejected, keeping the engine path authoritative" \
-  || { echo "FAIL: (i) a policy was allowed to redefine edge"; fails=$((fails+1)); }
+  && echo "  ok: (j) a policy heading edge is rejected, keeping the engine path authoritative" \
+  || { echo "FAIL: (j) a policy was allowed to redefine edge"; fails=$((fails+1)); }
 rm -f "$KB/policy/logic-policy.extra.dl"
 
 # The file exists but holds nothing evaluable — say that, not "not found".
