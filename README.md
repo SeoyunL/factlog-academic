@@ -122,12 +122,12 @@ are still pending.)
 
 `factlog setup` (or `factlog use <kb>`) records the chosen KB as the **active
 KB**, so the `factlog` subcommands (`ingest`/`sync`/`status`/…) target it from any
-working directory — no `--target` needed. (Most bundled `tools/*.py` scripts follow the
-same precedence via `--wiki`/`$FACTLOG_ROOT`/config, but a few — `compile_facts.py`,
-`run_logic_check.py` — read only `$FACTLOG_ROOT` (or the cwd), so a session exports it
-once from `factlog where --porcelain`; the slash-command workflow does this for you.)
-
-Then, from anywhere:
+working directory — no `--target` needed. (The bundled `tools/*.py` scripts are split: some resolve the KB the same way, via
+`--wiki`/`$FACTLOG_ROOT`/config, while several — the engine-compile/finalize/validate
+family, e.g. `compile_facts.py`, `run_logic_check.py`, `finalize.py` — read only
+`$FACTLOG_ROOT` or the cwd. A session exports `$FACTLOG_ROOT` once from
+`factlog where --porcelain` so every tool agrees; the slash-command workflow does this
+for you.)
 
 `factlog init` records it too, but **only when no usable active KB is set yet**.
 Once you have one, `init` scaffolds the new KB and leaves the active KB alone —
