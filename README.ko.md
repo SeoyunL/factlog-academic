@@ -245,7 +245,12 @@ Windows에서 `python` / `python3` 실행 파일 문제로 `setup` 이 실패하
 pip install -r ~/git/factlog-academic/requirements.txt   # pyrewire>=1.0.3,<2.0
 python3 -m factlog doctor          # checks Python 3.11+ and pyrewire
 python3 -m factlog init --target ~/wiki   # scaffold the KB layout
+python3 -m factlog use ~/wiki      # 활성 KB로 지정
 ```
+
+`use` 줄이 중요합니다. `init`은 활성 KB가 아직 없을 때만 새 KB를 채택합니다. 이미
+활성 KB가 있는데 `use`를 빠뜨리면, 옛 KB가 활성인 채로 남고 새 KB는 만들어지기만
+합니다. (`init --target ~/wiki --activate` 로 한 번에 처리할 수도 있습니다.)
 
 ## 상세 레퍼런스
 
@@ -297,9 +302,15 @@ factlog ingest --scan --target ~/wiki        # auto-convert every binary under s
 
 #### 활성 KB (설정해 둔 KB를 어디서든 대상으로)
 
-`factlog init`/`setup`(또는 `factlog use <kb>`) 이후, 선택한 KB가 **활성 KB**로
-기록됩니다. 그래서 `ingest`/`ask`/`sync` 및 도구들이 어느 작업 디렉터리에서든
-그 KB를 대상으로 동작합니다 — `--target`/`--wiki` 가 필요 없습니다.
+`factlog setup`(또는 `factlog use <kb>`)은 선택한 KB를 **활성 KB**로 기록합니다.
+그래서 `ingest`/`ask`/`sync` 및 도구들이 어느 작업 디렉터리에서든 그 KB를 대상으로
+동작합니다 — `--target`/`--wiki` 가 필요 없습니다.
+
+`factlog init`도 기록하지만, **쓸 수 있는 활성 KB가 아직 없을 때만** 그렇습니다.
+이미 활성 KB가 있으면 `init`은 새 KB를 만들되 활성 KB는 건드리지 않습니다. 그러지
+않으면 다른 셸·테스트·에이전트가 스크래치 KB를 만드는 순간
+`accept`/`reject`/`amend`/`sync`가 조용히 그쪽을 향하게 됩니다. 전환은
+`factlog use <kb>`로 명시적으로 하거나, 처음부터 `init --activate`로 요청하십시오.
 
 *터미널에서 실행:*
 

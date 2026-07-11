@@ -161,12 +161,32 @@ In order, `setup`:
    `"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m pip install -r <requirements.txt>` (located via
    `$CLAUDE_PLUGIN_ROOT` if set, else the package root). If pyrewire already
    satisfies the floor, the install is skipped.
-3. Runs the KB `init` for `--target` (scaffolds `sources/`, `facts/`,
-   `policy/`, etc.).
+3. Scaffolds `--target` (`sources/`, `facts/`, `policy/`, etc.) **and makes it the
+   active KB** — replacing the previous one if a different KB was active.
 4. Re-runs `doctor` and prints a concise summary of what was done and what (if
    anything) the user must do next.
 
-`setup` is idempotent and safe to re-run.
+`setup` is idempotent when re-run on the **same** `--target`. Re-running it on a
+**different** `--target` is not a no-op: it moves the active KB, and every later
+`ingest`/`sync`/`accept`/`reject`/`amend` follows it. Note `--target` defaults to
+`~/wiki`, so a bare `factlog setup` in a session where the user works in another
+KB will retarget them.
+
+**Active-KB contract (do not skip).** The active KB decides which KB every
+mutating command writes to, so a silent move is a correctness bug, not a cosmetic
+one (#210):
+
+- If `setup`'s summary contains **`CHANGED active KB: <old> -> <new>`**, you MUST
+  relay that line to the user verbatim. It is also printed to stderr. Do not bury
+  it in a "setup complete" message — the user's `accept`/`reject`/`sync` now go
+  somewhere else than before.
+- `init` does **not** move an existing active KB. It scaffolds the target and
+  leaves the active KB alone (saying so on stdout and stderr). To switch, run
+  `factlog use <kb>` — or `init --activate`, which adopts the target and likewise
+  announces what it displaced.
+- Never create a scratch or example KB in a user's session without checking
+  `factlog where` afterwards. Scaffolding a KB must not silently retarget their
+  work.
 
 **venv fallback (PEP 668):** if the active Python is externally managed, pip
 will refuse to install into it. `setup` does **not** override this with

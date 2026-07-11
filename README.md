@@ -86,9 +86,15 @@ factlog ingest --scan --target ~/wiki        # auto-convert every binary under s
 
 ### Active KB (target the set-up KB from anywhere)
 
-After `factlog init`/`setup` (or `factlog use <kb>`), the chosen KB is recorded
-as the **active KB**, so `ingest`/`ask`/`sync` and the tools target it from any
-working directory — no `--target`/`--wiki` needed:
+`factlog setup` (or `factlog use <kb>`) records the chosen KB as the **active
+KB**, so `ingest`/`ask`/`sync` and the tools target it from any working
+directory — no `--target`/`--wiki` needed:
+
+`factlog init` records it too, but **only when no usable active KB is set yet**.
+Once you have one, `init` scaffolds the new KB and leaves the active KB alone —
+otherwise creating a scratch KB in another shell, a test, or an agent would
+silently repoint `accept`/`reject`/`amend`/`sync` at it. Switch deliberately with
+`factlog use <kb>`, or ask for it up front with `init --activate`.
 
 ```bash
 factlog use ~/wiki        # make ~/wiki the active KB (recorded in config)
@@ -562,7 +568,12 @@ To develop against a local clone, register the working tree as the marketplace i
 pip install -r ~/git/factlog-academic/requirements.txt   # pyrewire>=1.0.3,<2.0
 python3 -m factlog doctor          # checks Python 3.11+ and pyrewire
 python3 -m factlog init --target ~/wiki   # scaffold the KB layout
+python3 -m factlog use ~/wiki      # make it the active KB
 ```
+
+The `use` line matters: `init` only adopts the new KB when you have no active KB
+yet. If you already had one, skipping `use` leaves the old KB active and the new
+one merely scaffolded. (`init --target ~/wiki --activate` does both in one step.)
 
 ### Windows Python executable
 
