@@ -54,6 +54,16 @@ class TestFieldTagValidation:
     def test_an_unfielded_query_passes_untouched(self):
         assert validate_field_tags("chain of thought") == "chain of thought"
 
+    @pytest.mark.parametrize("tag", [
+        "Date - Publication", "Date - Create", "Date - Completion",
+        "Date - Entry", "Date - Entrez", "Date - MeSH", "Date - Modification",
+        "crdt", "dcom", "edat", "mhda", "lr", "dp",
+    ])
+    def test_date_field_full_names_and_abbrevs_pass(self, tag):
+        # A query copied out of PubMed's Advanced Search builder uses the "Date - X"
+        # full names; each must pass alongside its abbreviation or it false-rejects.
+        assert validate_field_tags(f"2020[{tag}]")
+
     def test_empty_query_is_rejected(self):
         with pytest.raises(PubMedSearchValidationError):
             validate_field_tags("   ")
