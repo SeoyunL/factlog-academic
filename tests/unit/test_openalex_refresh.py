@@ -415,6 +415,53 @@ class TestApplyAutoUpdate:
         assert outcomes["W1"].status == rf.UPDATE_WRITTEN
         assert _ledger(good)[("openalex", "W1")]["work_type"] == "article"
 
+    def test_divergent_multi_sidecar_unchanged_is_a_noop_for_both(self, tmp_path):
+        # #203: two ledgers cite W1; A recorded the DOI, B never did (imported before the
+        # DOI existed). Upstream still matches A, the collapsed representative, so the report
+        # is `unchanged` — and the writer must NOT rewrite B to A's value. Report `unchanged`
+        # ⇒ writer no-op, byte-identical, for EVERY sidecar (#121).
+        a = _seed(tmp_path, "W1", doi="10.1234/a", work_type="article", journal="J", name="a")
+        b = _seed(tmp_path, "W1", doi=None, work_type="article", journal="J", name="b")
+        a_path, b_path = sidecar_path(a, tmp_path), sidecar_path(b, tmp_path)
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (a_path, b_path)}
+
+        results = _run_check(tmp_path, {
+            "W1": _raw_work("W1", doi="10.1234/a", work_type="article", journal="J")})
+        (result,) = results
+        assert result.status == rf.STATUS_UNCHANGED
+        assert result.changed_fields == ()
+
+        (update,) = rf.apply_auto_update(results, tmp_path)
+        assert update.status == rf.UPDATE_UNCHANGED
+        assert update.ledgers == ()
+        assert update.fields == ()
+        # B is NOT re-keyed to A's DOI; both sidecars are byte- and mtime_ns-identical.
+        assert "doi" not in _ledger(b)[("openalex", "W1")]
+        for p in (a_path, b_path):
+            assert (p.read_bytes(), p.stat().st_mtime_ns) == before[p]
+
+    def test_divergent_multi_sidecar_genuine_drift_writes_every_stale_sidecar(self, tmp_path):
+        # The mirror of the no-op case: when upstream has genuinely moved off the collapsed
+        # representative, the report says `changed` and the writer writes the moved field to
+        # every sidecar that does not already carry it — A (had the old DOI) and B (had none).
+        a = _seed(tmp_path, "W1", doi="10.1234/a", work_type="article", journal="J", name="a")
+        b = _seed(tmp_path, "W1", doi=None, work_type="article", journal="J", name="b")
+        results = _run_check(tmp_path, {
+            "W1": _raw_work("W1", doi="10.1234/new", work_type="article", journal="J")})
+        (result,) = results
+        assert result.status == rf.STATUS_CHANGED
+        assert result.changed_fields == ("doi",)
+
+        (update,) = rf.apply_auto_update(results, tmp_path)
+        assert update.status == rf.UPDATE_WRITTEN
+        assert update.fields == ("doi",)
+        assert set(update.ledgers) == {
+            str(sidecar_path(a, tmp_path).relative_to(tmp_path)),
+            str(sidecar_path(b, tmp_path).relative_to(tmp_path)),
+        }
+        assert _ledger(a)[("openalex", "W1")]["doi"] == "10.1234/new"
+        assert _ledger(b)[("openalex", "W1")]["doi"] == "10.1234/new"
+
 
 # --------------------------------------------------------------------------- #
 # CLI

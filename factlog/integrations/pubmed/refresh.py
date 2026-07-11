@@ -755,19 +755,36 @@ class LedgerRefresh:
 
 
 def _refreshed_fields(existing: SourceRecord, result: RefreshCheck) -> dict:
-    """The record's fields with *only* :data:`AUTO_UPDATE_FIELDS` replaced.
+    """The record's fields with **only the :data:`AUTO_UPDATE_FIELDS` the report judged
+    changed** replaced.
+
+    Only the names in ``result.changed_fields`` are rewritten, and each to the live
+    ``current_*`` value. A field the report deemed unchanged is left exactly as *this
+    sidecar* recorded it — never overwritten with the live value — so the writer honours
+    the same collapsed representative decision the report published (#121, #203).
+
+    That gating closes #203: ``collect_ledger_entries`` collapses several ledgers for one
+    PMID to a single entry (first non-empty per field), so a field this sidecar lacks but a
+    *sibling* sidecar recorded is compared — and reported — against the sibling's value.
+    Rewriting every :data:`AUTO_UPDATE_FIELDS` unconditionally made ``--auto-update`` re-key
+    a divergent sibling to the live value even when the report, judging against the
+    representative, said ``unchanged`` — the writer contradicting the report #121 forbids.
+    Touching only ``changed_fields`` means a run the report calls ``unchanged``
+    (``changed_fields == ()``) leaves every sidecar byte-identical, and a genuine drift
+    still writes the field that moved to every sidecar that does not already carry it.
 
     ``retracted`` (and its ``retraction_notice_pmid`` / ``retraction_verified_at``
     companions) and the ``pubmed_mesh_*`` topic fields are copied through **verbatim**: a
     refresh never writes the retraction human-gate signal, so it keeps surfacing until a
     human records it via ``pubmed-acknowledge-retraction``, and MeSH is not an identifier.
-    A ``None`` incoming value (the DOI/journal disappeared upstream) is written as ``None``
-    and dropped on serialization by :meth:`SourceRecord.to_dict`, so the ledger reflects the
-    current upstream state rather than freezing a stale one. Everything else — ``imported_at``
-    (top level, untouched) and any co-resident non-PubMed record — is left alone.
+    A ``None`` incoming value (a changed field whose DOI/journal disappeared upstream) is
+    written as ``None`` and dropped on serialization by :meth:`SourceRecord.to_dict`, so the
+    ledger reflects the current upstream state rather than freezing a stale one. Everything
+    else — ``imported_at`` (top level, untouched) and any co-resident non-PubMed record — is
+    left alone.
     """
     fields = dict(existing.fields)
-    for key in AUTO_UPDATE_FIELDS:
+    for key in result.changed_fields:
         fields[key] = getattr(result, f"current_{key}")
     return fields
 

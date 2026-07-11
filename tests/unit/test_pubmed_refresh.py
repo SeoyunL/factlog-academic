@@ -698,6 +698,57 @@ class TestUnchangedIsByteIdentical:
         assert rec.fields["journal"] == "New" and rec.fields["doi"] == DOI
 
 
+class TestDivergentMultiSidecar:
+    """#203: two ledgers cite one PMID with divergent narrow fields (A has the DOI, B does
+    not). The report judges drift against the collapsed representative; --auto-update must
+    honour that same decision so the writer never contradicts an `unchanged` report (#121).
+    """
+
+    def test_unchanged_representative_is_a_noop_for_the_divergent_sibling(self, tmp_path):
+        # A recorded the DOI at import; B (a later import into a second doc) never did.
+        # Upstream still matches A, the representative, so the report is `unchanged` — the
+        # writer must NOT rewrite B to A's DOI. Report `unchanged` ⇒ every sidecar untouched.
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=DOI)
+        _add_paper(kb, "b", "111", journal="J", doi=None)
+        entries, _ = rf.collect_ledger_entries(kb)
+        results = rf.check_entries(entries, FakeClient({
+            "111": _set(_record_xml("111", journal="J", doi=DOI))}))
+        (result,) = results
+        assert result.status == rf.STATUS_UNCHANGED
+        assert result.changed_fields == ()
+
+        before = _snapshot(kb)
+        (update,) = rf.apply_auto_update(results, kb)
+        assert update.status == rf.UPDATE_UNCHANGED
+        assert update.ledgers == () and update.fields == ()
+        # B is NOT re-keyed to A's DOI; both sidecars stay byte- and mtime_ns-identical.
+        b_rec = read_provenance(sidecar_path(kb / "sources" / "b.md", kb)).records[0]
+        assert "doi" not in b_rec.fields
+        assert _snapshot(kb) == before
+
+    def test_genuine_drift_writes_every_stale_sidecar(self, tmp_path):
+        # The mirror: upstream moved off the representative, so the report says `changed` and
+        # the writer records the moved field in every sidecar that lacks it — A and B alike.
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=DOI)
+        _add_paper(kb, "b", "111", journal="J", doi=None)
+        entries, _ = rf.collect_ledger_entries(kb)
+        results = rf.check_entries(entries, FakeClient({
+            "111": _set(_record_xml("111", journal="J", doi=OTHER_DOI))}))
+        (result,) = results
+        assert result.status == rf.STATUS_CHANGED
+        assert result.changed_fields == ("doi",)
+
+        (update,) = rf.apply_auto_update(results, kb)
+        assert update.status == rf.UPDATE_WRITTEN
+        assert update.fields == ("doi",)
+        assert len(update.ledgers) == 2
+        for name in ("a", "b"):
+            rec = read_provenance(sidecar_path(kb / "sources" / f"{name}.md", kb)).records[0]
+            assert rec.fields["doi"] == OTHER_DOI
+
+
 class TestAutoUpdateWrites:
     def test_writes_doi_and_journal_into_the_ledger(self, tmp_path, fake):
         kb = _kb(tmp_path)

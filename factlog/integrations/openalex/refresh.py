@@ -646,19 +646,35 @@ class LedgerRefresh:
 
 
 def _refreshed_fields(existing: SourceRecord, result: RefreshCheck) -> dict:
-    """The record's fields with *only* the three venue/id values replaced.
+    """The record's fields with **only the venue/id values the report judged changed**
+    replaced.
+
+    Only the names in ``result.changed_fields`` are rewritten, and each to the live
+    ``current_*`` value. A field the report deemed unchanged is left exactly as *this
+    sidecar* recorded it — never overwritten with the live value — so the writer honours
+    the same collapsed representative decision the report published (#121, #203).
+
+    That gating is what closes #203: ``collect_ledger_entries`` collapses several ledgers
+    for one work to a single entry (first non-empty per field), so a field this sidecar
+    lacks but a *sibling* sidecar recorded is compared — and reported — against the
+    sibling's value. Rewriting all three fields unconditionally made ``--auto-update``
+    re-key a divergent sibling to the live value even when the report, judging against the
+    representative, said ``unchanged`` — the writer contradicting the report #121 forbids.
+    Touching only ``changed_fields`` means a run the report calls ``unchanged``
+    (``changed_fields == ()``) leaves every sidecar byte-identical, and a genuine drift
+    still writes the field that moved to every sidecar that does not already carry it.
 
     ``is_retracted`` is copied through **verbatim** (H1): a refresh never writes it, so
     a retraction keeps surfacing until a human records it. A ``None`` incoming value
-    (the DOI/journal disappeared upstream) is written as ``None`` and dropped on
-    serialization by :meth:`SourceRecord.to_dict`, so the ledger reflects the current
-    upstream state rather than freezing a stale one. Everything else — ``imported_at``
-    (top level, untouched) and any co-resident non-OpenAlex record — is left alone.
+    (a changed field whose DOI/journal disappeared upstream) is written as ``None`` and
+    dropped on serialization by :meth:`SourceRecord.to_dict`, so the ledger reflects the
+    current upstream state rather than freezing a stale one. Everything else —
+    ``imported_at`` (top level, untouched) and any co-resident non-OpenAlex record — is
+    left alone.
     """
     fields = dict(existing.fields)
-    fields["doi"] = result.current_doi
-    fields["work_type"] = result.current_work_type
-    fields["journal"] = result.current_journal
+    for name in result.changed_fields:
+        fields[name] = getattr(result, f"current_{name}")
     return fields
 
 
