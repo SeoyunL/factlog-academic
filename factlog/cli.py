@@ -3687,6 +3687,283 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
     return 1 if summary.errors else 0
 
 
+def cmd_pubmed_acknowledge_retraction(args: argparse.Namespace) -> int:
+    """Record a human's decision about one PubMed record's retraction signal (#171).
+
+    The PubMed sibling of ``arxiv-acknowledge-withdrawal`` / ``openalex-acknowledge-
+    retraction`` on the shared acknowledge primitive, in PubMed's own vocabulary — its own
+    identity command, never a unified verb. A ``pubmed-refresh`` surfaces a retraction that
+    appears between imports on every run until a human records it; this is the verb that
+    records it — the same human gate (P1) as ``accept`` / ``reject``: one explicit ``--id``,
+    never a sweep, no ``--all`` and no wildcard. Running it *is* the decision. Retraction is
+    a **source-scoped signal**, not a fact: this writes the ledger's ``retracted`` field
+    under a ``pubmed`` record, never the merged top-level ``retracted:`` claim (§6.4/§7.2).
+
+    A **live** efetch of the one PMID is mandatory: the value to write lives only upstream,
+    and an acknowledgement from a stale cache would be a lie (PubMed may already have
+    reversed the retraction). On a connection failure or a missing/merged/deleted record:
+    non-zero exit, nothing written.
+
+    Two lessons are load-bearing here:
+
+    * **#107 — verify before the request.** The TTY/``--yes`` gate, the presence of a
+      writable ledger, and the readability of every ledger are all checked *before* the
+      efetch, via the read-only :func:`acknowledge.lookup`. A paper with no ``pubmed``
+      ledger record (imported before the ledger existed, or never imported) is refused for
+      **zero** requests and pointed at ``pubmed-backfill-provenance``; ``acknowledge()``
+      never fabricates a ledger. An unreadable ledger is refused rather than have its
+      recorded value asserted from an incomplete view.
+    * **#106 — ``--yes`` may record a retraction, never clear one.** Setting ``retracted``
+      is the loud direction; clearing it (writing ``None`` when the live record no longer
+      reads as retracted) is the silencing direction, and a "no longer retracted" reading
+      can also be a curation lag or a marker PubMed has not yet emitted — the code cannot
+      tell an honest reversal from a miss. Under ``--yes`` no human sees the note, so a
+      clear is refused: re-run in a terminal and confirm at the prompt. A reversed
+      retraction is a human's call, never a silent un-retraction.
+
+    It never opens the ``.md`` (P4): after acknowledgement the ledger is the sole audit
+    record; the source page is byte- and ``mtime_ns``-identical.
+    """
+    from factlog.integrations.common.acknowledge import (
+        ACK_ERROR,
+        ACK_UNCHANGED,
+        ACK_WRITTEN,
+        AcknowledgeSchema,
+        acknowledge,
+        lookup,
+    )
+    from factlog.integrations.common.provenance import (
+        backfill_remedy,
+        excluded_reason,
+        excluded_sources_by_id,
+    )
+    from factlog.integrations.pubmed.client import (
+        PubMedConnectionError,
+        PubMedError,
+        normalize_pmid,
+    )
+    from factlog.integrations.pubmed.source_writer import retraction_warning
+    from factlog.integrations.pubmed.work_parser import (
+        PubMedParseError,
+        parse_efetch_response,
+    )
+
+    command = "pubmed-acknowledge-retraction"
+    backfill = "pubmed-backfill-provenance"
+
+    # Identity is the bare PMID. `normalize_pmid` accepts a `pmid:` prefix and rejects
+    # zero-padding — the same validation the import path uses, so the id keyed here matches
+    # the ledger's. A single id: no --all, no wildcard.
+    try:
+        pmid = normalize_pmid(args.id)
+    except PubMedError as exc:
+        print(f"factlog {command}: {exc}", file=sys.stderr)
+        return 1
+
+    prepared = _pubmed_prepare(args, command)
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    schema = AcknowledgeSchema(type="pubmed", field="retracted")
+
+    # A command that cannot ask must not guess. Without a terminal — a pipe, a script —
+    # there is no one to confirm to, and silencing a signal is exactly the write that must
+    # never be guessed. `--yes` (only ever paired with the required, explicit `--id`) is the
+    # deliberate act that stands in for the prompt; without it a non-interactive run refuses
+    # and writes nothing. This refuses BEFORE any request is spent.
+    assume_yes = getattr(args, "yes", False)
+    if not assume_yes and not sys.stdin.isatty():
+        print(
+            f"factlog {command}: refusing to acknowledge without a terminal to confirm "
+            "at. This silences PubMed's retraction signal for one id. Re-run in a "
+            "terminal, or pass --yes with --id to confirm non-interactively. Nothing "
+            "written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve ledger presence BEFORE the live query (#107), so a paper this command cannot
+    # write is refused for ZERO efetch requests and with no prompt. `lookup` reads only
+    # source-provenance/ sidecars; nothing under sources/ is opened for writing (P4).
+    found = lookup(target, pmid, schema)
+
+    # An unreadable ledger might be the one that carries this id — its `retracted` value
+    # cannot be read, so the recorded value is unknown. Refuse rather than assert "the
+    # ledger did not record" on an incomplete view, and do it before spending a request.
+    if found.unreadable:
+        bad = ", ".join(found.unreadable)
+        print(
+            f"factlog {command}: cannot read every provenance ledger ({bad}); one of them "
+            "may carry this id, so its recorded value is unknown. Repair or remove the "
+            "unreadable ledger(s) and retry. No request was made; nothing written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # `acknowledge()` writes only provenance sidecars and never fabricates a ledger. A
+    # paper with no `pubmed` record — imported before its ledger existed, or absent from the
+    # KB — has nothing to write, so querying PubMed first would burn a request and the
+    # operator's attention on a warning no human can turn off here. Refuse before the fetch
+    # and name the command that builds the ledger (never this one; that is an import's write).
+    if not found.found:
+        excluded = excluded_sources_by_id(target, "pmid").get(pmid, ())
+        if excluded:
+            reason = (
+                f"{pmid!r} is named by {', '.join(excluded)}, which "
+                f"{'is' if len(excluded) == 1 else 'are'} outside the provenance root, so "
+                "no ledger can record a decision about it. "
+                + excluded_reason(", ".join(excluded), backfill_remedy(backfill))
+            )
+        else:
+            reason = (
+                f"no PubMed provenance ledger carries id {pmid!r}. If the paper was "
+                f"imported before its ledger was written, run `factlog {backfill}` to "
+                "create one from its front matter, then acknowledge; if it was never "
+                "imported, import it first."
+            )
+        print(f"factlog {command}: {reason} No request was made; nothing written.",
+              file=sys.stderr)
+        return 1
+
+    # The recorded value comes from the ledger we just confirmed. Import writes
+    # `retracted: True` only when PubMed flagged a retraction (absent means not-retracted),
+    # so a truthy value in any covering ledger means the retraction is already recorded.
+    recorded_retracted = any(value is True for value in found.values)
+
+    # The live query is mandatory: the value to write lives only upstream.
+    client = _make_pubmed_client(config)
+    try:
+        xml = client.efetch([pmid])
+    except PubMedConnectionError as exc:
+        # Cannot reach PubMed: an acknowledgement from a stale cache would be a lie.
+        print(f"factlog {command}: {exc} Nothing written.", file=sys.stderr)
+        return 2
+    except PubMedError as exc:
+        print(f"factlog {command}: {exc} Nothing written.", file=sys.stderr)
+        return 1
+    try:
+        outcome = parse_efetch_response(xml, [pmid])
+    except PubMedParseError as exc:
+        print(f"factlog {command}: {exc} Nothing written.", file=sys.stderr)
+        return 1
+
+    present = next((r for r in outcome.present if r.requested_pmid == pmid), None)
+    if present is None:
+        # efetch returns by omission (deleted) or under a different id (merged); either way
+        # there is no live record for THIS pmid to acknowledge against.
+        if outcome.merged:
+            returned = outcome.merged[0].returned_pmid
+            reason = (
+                f"PubMed answered under a different PMID {returned!r} (the record was "
+                f"merged upstream). Refusing to acknowledge under {pmid!r}; re-import to "
+                "follow the new id."
+            )
+        elif pmid in outcome.deleted:
+            reason = f"PubMed has no record for {pmid!r} (deleted or withdrawn from the index)."
+        else:
+            reason = (
+                f"PubMed returned no record for {pmid!r} (nonexistent id, or a transient "
+                "empty response)."
+            )
+        print(f"factlog {command}: {reason} Nothing written.", file=sys.stderr)
+        return 1
+
+    work = present.work
+    # PubMed's live opinion — False when the record is not (or no longer) retracted.
+    current_retracted = bool(work.retracted)
+
+    # Nothing to acknowledge when the ledger already matches PubMed. Say so and exit 0
+    # without a note or a prompt — there is no divergence to record and no signal to silence.
+    if current_retracted == recorded_retracted:
+        if current_retracted:
+            print(
+                f"The ledger already records PubMed's retraction for {pmid}; nothing to "
+                "acknowledge."
+            )
+        else:
+            print(
+                f"PubMed does not flag {pmid} as retracted and the ledger records no "
+                "retraction; nothing to acknowledge."
+            )
+        return 0
+
+    # #106: a CLEAR (recorded retracted, PubMed no longer reads as retracted) may not be
+    # confirmed by `--yes`. Recording a retraction is the loud direction `--yes` may do;
+    # clearing one is the silencing direction, and a "no longer retracted" reading can be a
+    # curation lag or a marker not yet emitted, not a genuine reversal. Under `--yes` no
+    # human sees the note, so the clear is refused. The interactive path prints the note
+    # first so a human can catch exactly that. This is knowable only after the fetch.
+    is_clear = recorded_retracted and not current_retracted
+    if assume_yes and is_clear:
+        print(
+            f"factlog {command}: refusing to clear the retraction recorded for {pmid} with "
+            "--yes. PubMed no longer flags it as retracted, but that also happens when a "
+            "retraction marker has not been emitted yet (curation lag) — the code cannot "
+            "tell a genuine reversal from a miss, and --yes means no human sees the note. "
+            "Clearing silences a recorded signal, so it needs a human: re-run in a terminal "
+            "without --yes and confirm at the prompt. Nothing written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Show the operator exactly what they are about to record (or clear).
+    if current_retracted:
+        print(retraction_warning(work.retraction_notice_pmid))
+    else:
+        print(
+            f"PubMed no longer flags {pmid} as retracted, but the ledger records a "
+            "retraction. Confirming clears it (removing the field), so pubmed-refresh stops "
+            "repeating a retraction PubMed has reversed."
+        )
+
+    if not assume_yes:
+        try:
+            answer = input(
+                f"\nRecord PubMed's live retraction status for {pmid} in the ledger? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Aborted; nothing written.")
+            return 0
+
+    # Write the live value: `True` records a retraction, `None` clears one (removing the
+    # field — never a literal `False`, which would diverge from an import's
+    # absent-means-not-retracted convention and change the JSON bytes).
+    value = True if current_retracted else None
+    result = acknowledge(target, pmid, value, schema)
+
+    if result.status == ACK_WRITTEN:
+        if current_retracted:
+            print(
+                f"Recorded PubMed's retraction for {pmid} in {', '.join(result.ledgers)}."
+            )
+        else:
+            print(
+                f"Cleared the retraction recorded for {pmid} in "
+                f"{', '.join(result.ledgers)}."
+            )
+        print(
+            "pubmed-refresh will no longer repeat this signal. The ledger is the audit "
+            "record; the source .md is not rewritten (P4)."
+        )
+        return 0
+    if result.status == ACK_UNCHANGED:
+        print(
+            f"The ledger for {pmid} already holds PubMed's live retraction status; nothing "
+            "changed. pubmed-refresh will not repeat this signal."
+        )
+        return 0
+    if result.status == ACK_ERROR:
+        print(f"factlog {command}: {result.reason}", file=sys.stderr)
+        return 1
+    # ACK_NO_LEDGER cannot occur — ledger presence was confirmed before the fetch — but is
+    # handled defensively rather than mis-reported as success.
+    print(f"factlog {command}: {result.reason or result.status}", file=sys.stderr)
+    return 1
+
+
 def _arxiv_show_results(works, total: int, *, porcelain: bool) -> None:
     """Render arxiv-search results. Mirrors :func:`_openalex_show_results`.
 
@@ -6139,6 +6416,32 @@ def build_parser() -> argparse.ArgumentParser:
              "progress stay on stderr",
     )
     pm_refresh.set_defaults(func=cmd_pubmed_refresh)
+
+    pm_ack = sub.add_parser(
+        "pubmed-acknowledge-retraction",
+        help="record a human decision about one PubMed record's retraction, so "
+             "pubmed-refresh stops repeating it. Live-queries PubMed (efetch) for the one "
+             "--id and writes its current status (clearing it when PubMed no longer reads "
+             "as retracted); never touches sources/*.md",
+    )
+    pm_ack.add_argument(
+        "--target", default=None,
+        help="KB root (default: the active KB; see `factlog where`)",
+    )
+    pm_ack.add_argument(
+        "--id", required=True,
+        help="the single PMID to acknowledge (e.g. 32738937; a 'pmid:' prefix is "
+             "accepted). No --all, no wildcard: the blast radius is one id, chosen by a "
+             "human.",
+    )
+    pm_ack.add_argument(
+        "--yes", action="store_true",
+        help="skip the confirmation prompt (only ever paired with --id). Required to run "
+             "without a terminal; without it a non-interactive run refuses and writes "
+             "nothing. It may record a retraction, never clear one: clearing silences a "
+             "recorded signal and is refused unless a human confirms it interactively.",
+    )
+    pm_ack.set_defaults(func=cmd_pubmed_acknowledge_retraction)
 
     return parser
 

@@ -78,12 +78,14 @@ from factlog.integrations.common.provenance import (
 __all__ = [
     "AcknowledgeSchema",
     "AcknowledgeResult",
+    "AcknowledgeLookup",
     "ACK_WRITTEN",
     "ACK_UNCHANGED",
     "ACK_NO_LEDGER",
     "ACK_ERROR",
     "acknowledge",
     "acknowledge_all",
+    "lookup",
 ]
 
 #: The named field was set or cleared in at least one ledger (a value moved).
@@ -113,6 +115,34 @@ class AcknowledgeSchema:
 
     type: str
     field: str
+
+
+@dataclass(frozen=True)
+class AcknowledgeLookup:
+    """What a **read-only** scan found about one ``(type, id)`` across the KB's ledgers.
+
+    The read-only companion to :func:`acknowledge`, for a caller that must decide —
+    *before* spending an upstream request — whether a record can be acknowledged at all.
+    This is the shape #107 named: verify the ledger exists *before* writing the request
+    (never spend a request on a paper this command could only ever fail to write), and
+    never assert "the ledger did not record X" on a ledger that could not be read. It
+    shares :func:`acknowledge`'s scan (same ``rglob``, same match on the id and never on
+    position) so a pre-flight refusal and the write that follows can never drift about
+    which sidecars carry the id.
+
+    ``found`` is True iff at least one sidecar carries a ``(schema.type, entry_id)``
+    record. ``values`` are the distinct values the ``schema.field`` holds across those
+    records, in first-seen order, and only where the field is present — an absent field
+    contributes nothing, mirroring the write side where a dropped ``None`` *means* the
+    field is unset. ``unreadable`` names the sidecars that would not read (same
+    ``(ProvenanceError, OSError)`` guard as the write); one of them may carry the id, so a
+    caller with a non-empty ``unreadable`` must refuse rather than trust an incomplete view.
+    """
+
+    entry_id: str
+    found: bool
+    values: tuple[object, ...] = ()
+    unreadable: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -268,3 +298,59 @@ def acknowledge_all(
         acknowledge(kb_root, entry_id, value, schema)
         for entry_id in sorted(entry_ids)
     ]
+
+
+def lookup(
+    kb_root: Path | str,
+    entry_id: str,
+    schema: AcknowledgeSchema,
+) -> AcknowledgeLookup:
+    """Read-only scan for the ``(schema.type, entry_id)`` record across the KB's ledgers.
+
+    The pre-flight companion to :func:`acknowledge`: it answers whether the record exists
+    to be acknowledged, what value its field already holds, and which sidecars could not
+    be read — *without writing anything and without opening any ``.md`` (P4)*. A caller
+    uses it to refuse a paper it cannot write (or an unreadable ledger it cannot trust)
+    **before** spending an upstream request (#107), so the write that follows is never a
+    request-then-refuse. See :class:`AcknowledgeLookup` for the fields.
+
+    The scan is byte-for-byte the same shape as :func:`acknowledge`'s (same ``rglob``,
+    same ``(ProvenanceError, OSError)`` guard, same match on the id and never on position)
+    so the two never disagree about which sidecars carry the id.
+    """
+    root = Path(kb_root)
+    sidecar_root = root / SIDECAR_DIR
+
+    found = False
+    values: list[object] = []
+    unreadable: list[str] = []
+
+    paths = sorted(sidecar_root.rglob("*.json")) if sidecar_root.is_dir() else ()
+    for path in paths:
+        if not path.is_file():
+            continue
+        rel = _relative(path, root)
+        try:
+            provenance = read_provenance(path)
+        except (ProvenanceError, OSError):
+            # An unreadable sidecar might be the one that carries this id, so its recorded
+            # value is unknown. Name it; the caller refuses rather than assert absence.
+            unreadable.append(rel)
+            continue
+        for record in provenance.records:
+            if record.type != schema.type or record.id != entry_id:
+                continue
+            found = True
+            # An absent field contributes no value: absence is how the write side records
+            # "not set" (a dropped None), so a reader treats it the same way.
+            if schema.field in record.fields:
+                value = record.fields[schema.field]
+                if value not in values:
+                    values.append(value)
+
+    return AcknowledgeLookup(
+        entry_id=entry_id,
+        found=found,
+        values=tuple(values),
+        unreadable=tuple(sorted(unreadable)),
+    )

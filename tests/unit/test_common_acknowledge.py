@@ -26,6 +26,7 @@ from factlog.integrations.common.acknowledge import (
     AcknowledgeSchema,
     acknowledge,
     acknowledge_all,
+    lookup,
 )
 from factlog.integrations.common.provenance import (
     SIDECAR_DIR,
@@ -320,3 +321,62 @@ def test_field_name_comes_entirely_from_the_schema(tmp_path):
     side = _seed(tmp_path, "p", [SourceRecord("arxiv", "1", IMPORTED_AT, {})])
     acknowledge(tmp_path, "1", "a-value", made_up)
     assert _ledger(side)[("arxiv", "1")]["some_future_field"] == "a-value"
+
+
+PUBMED = AcknowledgeSchema(type="pubmed", field="retracted")
+
+
+class TestLookup:
+    """The read-only pre-flight companion (#107): verify before the request, never assert
+    a value on a ledger that could not be read, and never write or open an .md."""
+
+    def test_missing_record_is_not_found_and_writes_nothing(self, tmp_path):
+        _seed(tmp_path, "p", [SourceRecord("pubmed", "111", IMPORTED_AT, {})])
+        before = {p: _stat(p) for p in (tmp_path / SIDECAR_DIR).rglob("*.json")}
+        result = lookup(tmp_path, "999", PUBMED)
+        assert not result.found
+        assert result.values == ()
+        assert result.unreadable == ()
+        # A read-only scan leaves every sidecar byte- and mtime-identical.
+        assert {p: _stat(p) for p in (tmp_path / SIDECAR_DIR).rglob("*.json")} == before
+
+    def test_empty_kb_is_not_found_not_a_crash(self, tmp_path):
+        result = lookup(tmp_path, "999", PUBMED)
+        assert not result.found and result.values == () and result.unreadable == ()
+
+    def test_found_reports_the_recorded_field_value(self, tmp_path):
+        _seed(tmp_path, "p", [SourceRecord("pubmed", "111", IMPORTED_AT, {"retracted": True})])
+        result = lookup(tmp_path, "111", PUBMED)
+        assert result.found
+        assert result.values == (True,)
+
+    def test_absent_field_contributes_no_value_but_is_still_found(self, tmp_path):
+        # A record with no `retracted` key means "not retracted" — found, but no value.
+        _seed(tmp_path, "p", [SourceRecord("pubmed", "111", IMPORTED_AT, {"journal": "J"})])
+        result = lookup(tmp_path, "111", PUBMED)
+        assert result.found and result.values == ()
+
+    def test_distinct_values_across_ledgers_are_all_reported(self, tmp_path):
+        _seed(tmp_path, "a", [SourceRecord("pubmed", "111", IMPORTED_AT, {"retracted": True})])
+        _seed(tmp_path, "b", [SourceRecord("pubmed", "111", IMPORTED_AT, {"journal": "J"})])
+        result = lookup(tmp_path, "111", PUBMED)
+        assert result.found and result.values == (True,)
+
+    def test_matched_by_id_and_type_not_position(self, tmp_path):
+        _seed(tmp_path, "p", [
+            SourceRecord("openalex", "111", IMPORTED_AT, {"is_retracted": True}),
+            SourceRecord("pubmed", "111", IMPORTED_AT, {"retracted": True}),
+        ])
+        # Same id, wrong type is not this schema's record.
+        assert lookup(tmp_path, "111", AcknowledgeSchema(type="crossref", field="retracted")).found is False
+        assert lookup(tmp_path, "111", PUBMED).values == (True,)
+
+    def test_unreadable_sidecar_is_named_never_asserted_absent(self, tmp_path):
+        good = _seed(tmp_path, "ok", [SourceRecord("pubmed", "111", IMPORTED_AT, {})])
+        bad = _seed(tmp_path, "bad", [SourceRecord("pubmed", "222", IMPORTED_AT, {})])
+        bad.write_text("{ not json", encoding="utf-8")
+        result = lookup(tmp_path, "111", PUBMED)
+        # The good ledger still reports found; the corrupt one is surfaced, not swallowed.
+        assert result.found
+        assert len(result.unreadable) == 1 and "bad" in result.unreadable[0]
+        assert good.exists()  # untouched
