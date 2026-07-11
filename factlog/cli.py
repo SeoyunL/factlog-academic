@@ -2152,10 +2152,21 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             if is_hidden_source(path, scan_root):
                 continue
             ref = unicodedata.normalize("NFC", path.relative_to(target).as_posix())
-            if not _looks_binary(path):
-                # Only a recognized *conversion target* (a binary-format
-                # extension) is worth flagging: a plain .txt/.md source is read
-                # directly by sync as text and is correctly not a conversion job.
+            if not _looks_binary(path) and path.suffix.lower() not in ingest.TEXT_CONTAINER_EXTS:
+                # The sniff guards formats that MUST be binary (.pdf, .docx, ...):
+                # a mislabelled plain-text file with such an extension is read as
+                # text, not fed to a converter that would choke on it.
+                #
+                # RTF and HTML are TEXT-based containers — their bytes look like
+                # text, so they always tripped this branch and were never converted
+                # by --scan. /factlog sync runs --scan as its first step, so their
+                # markup went into extraction as prose, and no warning fired
+                # because they were not classified as binary either (#222). They
+                # are exempt: the extension alone decides.
+                #
+                # Only a recognized *conversion target* is worth flagging: a plain
+                # .txt/.md source is read directly by sync as text and is correctly
+                # not a conversion job.
                 if path.suffix.lower() not in ingest.INGEST_CONVERTERS:
                     continue
                 if is_sync_ignored(ref, patterns):

@@ -176,6 +176,15 @@ BUILTIN_CONVERTERS: frozenset[str] = frozenset({"factlog-hwpx", "factlog-hwp", "
 # (on PATH, or always for a built-in). Each entry: (tool_name, output_suffix,
 # builder) where builder is an argv-list builder for PATH tools, or a
 # (src, dst) -> bool callable for built-ins.
+# Formats whose BYTES are text but whose text is not the document: RTF control
+# words, HTML tags. `--scan` sniffs content to avoid converting a mislabelled .pdf
+# that is really plain text, and these tripped that sniff — so `--scan` skipped
+# them forever. Since /factlog sync's first step IS --scan, their markup went into
+# extraction as if it were prose, and the "no conversion" warning never fired
+# because they were not classified as binary (#222). The sniff exists for formats
+# that MUST be binary; these are not among them.
+TEXT_CONTAINER_EXTS: frozenset[str] = frozenset({".html", ".htm", ".rtf"})
+
 INGEST_CONVERTERS: dict[str, list[tuple]] = {
     ".docx": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".odt": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],

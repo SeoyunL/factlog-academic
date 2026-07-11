@@ -76,6 +76,8 @@ import subprocess  # noqa: E402
 import unicodedata  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 
+from factlog.ingest import TEXT_CONTAINER_EXTS  # noqa: E402
+
 from common import (  # noqa: E402
     FACT_HEADER,
     ENGINE_STATUSES,
@@ -188,7 +190,11 @@ def unconverted_binary_sources(root: Path) -> list[str]:
     for path in sorted(p for p in base.rglob("*") if p.is_file()):
         if path.name.startswith("."):
             continue
-        if is_text_source(path):
+        # RTF/HTML decode as text, so the content sniff calls them "already
+        # ingestible" and they never reached this warning — the very silent
+        # non-ingestion it exists to surface. Their bytes are text; their content
+        # is markup, and extraction would read control words as prose (#222).
+        if is_text_source(path) and path.suffix.lower() not in TEXT_CONTAINER_EXTS:
             continue
         orig_ref = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
         if paired_conversion(orig_ref, conv_by_key, lambda ref: conv_paths[ref]) is not None:

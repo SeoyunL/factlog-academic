@@ -278,7 +278,8 @@ python3 -m factlog use ~/wiki      # 활성 KB로 지정
 |--------|--------|-------|
 | `.md`, `.markdown`, `.txt` | **직접 지원** | UTF-8 텍스트, 있는 그대로 읽음. 모든 추출 기준이 전제하는 형식입니다. |
 | 그 밖의 UTF-8 텍스트 (`.rst`, `.org`, `.csv`, 소스 코드) | 평문으로 지원 | 별도 파싱 없이 원시 텍스트로 취급. |
-| `.docx`, 바이너리 `.pdf`, `.odt`, `.epub`, `.html`, `.rtf` | **자동 변환** | `factlog ingest` 가 pandoc / textutil / pdftotext 로 텍스트 변환. |
+| `.docx`, 바이너리 `.pdf`, `.odt`, `.epub` | **자동 변환** | `factlog ingest` 가 pandoc / textutil / pdftotext 로 텍스트로 변환합니다. |
+| `.html`, `.htm`, `.rtf` | **자동 변환** | 텍스트 기반 컨테이너입니다. 바이트는 텍스트지만 내용은 마크업이므로, 원문 그대로 읽지 않고 변환합니다. `.rtf` 는 `textutil` 이 필요합니다(**macOS 전용**). |
 | `.hwpx` (한컴 OWPML) | **자동 변환** | 내장 추출기(외부 도구 불필요) — zip 내부 `Contents/section*.xml` 텍스트를 읽음. |
 | `.hwp` (구형 한컴, HWP 5.x) | **자동 변환** | `hwp5html`(pyhwp) → pandoc → markdown 경로, 표 보존. `pip install pyhwp` + pandoc 필요. 없으면 안내 메시지와 함께 보고. |
 | `.pptx` (PowerPoint) | **자동 변환** | 내장 추출기(외부 도구 불필요) — zip 내부 `ppt/slides/slideN.xml` 의 슬라이드 텍스트를 순서대로 읽고, 슬라이드당 한 블록으로 변환. 발표자 노트는 제외, 표 셀은 셀당 한 줄로 펼쳐짐(행/열 그룹 구조는 보존 안 됨). |
