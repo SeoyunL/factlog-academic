@@ -120,3 +120,59 @@ class TestPlainQueriesUnchanged:
         facts = [_row("A", "born_in", "Paris, France")]
         report, ask = _both('relation("A", "born_in", "Paris, France")?', facts)
         assert report == ask == [("A", "born_in", "Paris, France")]
+
+
+class TestCountParity:
+    """The count branch sat right beside the one that was fixed, and diverged too.
+
+    In an aliased KB the report answered "0 distinct objects" to a question ask
+    answered "2" — on the same facts. A count is a relation query with a free
+    object, so it now goes through the same shared predicate.
+    """
+
+    @staticmethod
+    def _count(query, facts):
+        # The report's count branch and ask's both reduce to the shared predicate
+        # with a free object; drive it the same way and compare.
+        import common
+
+        aliases, hierarchy = common.relation_aliases(), common.value_hierarchy()
+        args = common._query_args(query)
+        report_objects = {
+            row["object"]
+            for row in facts
+            if common.relation_row_matches([args[0], args[1], "O"], row, aliases, hierarchy)
+        }
+        ask = ask_router.evaluate(query, facts)
+        return len(report_objects), ask["count"]
+
+    def test_count_agrees_in_an_aliased_kb(self, kb):
+        (kb / "policy" / "relation-aliases.md").write_text(
+            "- `연구 유형` -> `연구유형`\n", encoding="utf-8"
+        )
+        facts = [
+            _row("P1", "연구 유형", "관찰연구"),
+            _row("P1", "연구 유형", "코호트연구"),
+        ]
+        report, ask = self._count('count("P1", "연구유형")?', facts)
+        assert report == ask == 2
+
+    def test_count_agrees_without_aliases(self, kb):
+        facts = [_row("P1", "knows", "B"), _row("P1", "knows", "C")]
+        report, ask = self._count('count("P1", "knows")?', facts)
+        assert report == ask == 2
+
+
+class TestVariableRelationWithAlias:
+    def test_a_variable_relation_keeps_subsumption_in_an_aliased_kb(self, kb):
+        # The alias fallback for a variable-relation query was uncovered: reverting
+        # it left every test green.
+        (kb / "policy" / "relation-aliases.md").write_text(
+            "- `연구 유형` -> `연구유형`\n", encoding="utf-8"
+        )
+        (kb / "policy" / "value-hierarchy.md").write_text(
+            "- 연구유형: 코호트연구 ⊂ 관찰연구\n", encoding="utf-8"
+        )
+        facts = [_row("P2", "연구 유형", "코호트연구")]
+        report, ask = _both('relation(P, R, "관찰연구")?', facts)
+        assert report == ask == [("P2", "연구 유형", "코호트연구")]

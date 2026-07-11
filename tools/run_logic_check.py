@@ -8,13 +8,13 @@ from common import (
     FACTS_DIR,
     KNOWN_STATUSES,
     canonical_value,
-    canonical_variants_of,
+    declared_ancestors,
     is_quoted_string,
     is_variable,
     relation_aliases,
+    relation_row_matches,
     QUERY_PREDICATES,
     allowed_relations,
-    object_matches,
     value_hierarchy,
     value_hierarchy_warnings,
     dependency_path,
@@ -73,58 +73,46 @@ def relation_results(
 ) -> list[tuple[str, str, str]]:
     """Rows of `accepted.dl` satisfying a `relation(...)` query.
 
-    Matching goes through the SAME canonicalisation ask_router uses (#213). It
-    used to compare all three positions as raw strings, so the report and
-    `/factlog ask` answered the same question differently:
-
-    * a relation ALIAS — rows store a surface variant (`연구 유형`), the query
-      names the canonical (`연구유형`) — returned rows in ask and nothing in the
-      report, so declaring an alias made facts vanish from the verification report.
-    * an `amount` literal — `amount(100,억)` vs the stored `amount(100,"억")` —
-      likewise matched in ask and not in the report.
-
-    Two verification paths disagreeing about a verified answer is worse than
-    either being wrong: you cannot tell which one to believe.
+    Delegates to `common.relation_row_matches` — the ONE matching predicate the
+    report, the router and the gate all share. Three near-copies used to drift, and
+    the report's copy compared raw strings: declaring a relation alias made facts
+    vanish from the verification report while `/factlog ask` still found them
+    (#213).
     """
     args = query_args(line)
     if len(args) != 3:
         return []
-    # Read the hierarchy here when a caller does not supply it, exactly as
-    # ask_router does. Requiring every caller to thread it through was a footgun:
-    # forget it once and the report silently drops subsumption again while ask
-    # keeps it — the divergence this function is supposed to be free of. Pass {}
-    # to mean "no hierarchy" explicitly.
     if hierarchy is None:
         hierarchy = value_hierarchy()
-    s_arg, r_arg, o_arg = args
     aliases = relation_aliases()
-    # Surface variants of a quoted canonical relation, so a canonical query also
-    # matches the variant-spelled rows the KB actually stores.
-    rel_variants = canonical_variants_of(arg_value(r_arg), aliases) if is_quoted_string(r_arg) else set()
+    return [
+        (row["subject"], row["relation"], row["object"])
+        for row in facts
+        if relation_row_matches(args, row, aliases, hierarchy)
+    ]
 
-    rows: list[tuple[str, str, str]] = []
-    for row in facts:
-        s_val, r_val, o_val = row["subject"], row["relation"], row["object"]
-        if not (is_variable(s_arg) or canonical_value(arg_value(s_arg)) == canonical_value(s_val)):
-            continue
-        if not (
-            is_variable(r_arg)
-            or canonical_value(arg_value(r_arg)) == canonical_value(r_val)
-            or r_val in rel_variants
-        ):
-            continue
-        # The object honours policy/value-hierarchy.md (#211). Look the declaration
-        # up under the relation the QUERY named — declarations are written on
-        # canonical names — falling back to the row's own name canonicalised, so a
-        # variable-relation query keeps subsumption in an aliased KB.
-        query_relation = arg_value(r_arg) if is_quoted_string(r_arg) else aliases.get(r_val, r_val)
-        if not (
-            is_variable(o_arg)
-            or object_matches(arg_value(o_arg), row, hierarchy, canonical_value, relation=query_relation)
-        ):
-            continue
-        rows.append((s_val, r_val, o_val))
-    return rows
+
+def known_constants(
+    facts: list[dict[str, str]],
+    hierarchy: dict[str, dict[str, set[str]]] | None = None,
+    aliases: dict[str, str] | None = None,
+) -> set[str]:
+    """Every constant a query may legitimately name, canonicalised.
+
+    Judging a query against the RAW accepted values made the report contradict
+    itself: it returned rows for `relation(P, "연구유형", ...)` in an aliased KB
+    (the rows store the surface variant) while warning, on the same page, that
+    `연구유형` is "not an engine relation" (#213). The vocabulary a query may use
+    is the vocabulary the matcher accepts — canonical names, their declared surface
+    variants, declared hierarchy ancestors, and amount literals in either quoting.
+    """
+    aliases = aliases if aliases is not None else relation_aliases()
+    known = {canonical_value(v) for v in value_set(facts)}
+    known |= {canonical_value(r) for r in allowed_relations(facts)}
+    known |= {canonical_value(raw) for raw in aliases}
+    known |= {canonical_value(canonical) for canonical in aliases.values()}
+    known |= declared_ancestors(hierarchy, None, canonical_value)
+    return known
 
 
 def validate_query(line: str, entities: set[str], policy_query_predicates: set[str]) -> tuple[list[str], list[str]]:
@@ -154,8 +142,19 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         if len(query_args(line)) != 2:
             errors.append(f"count query must have subject and relation arguments: {line}")
         return errors, warnings
+    if predicate == "relation":
+        args = query_args(line)
+        if len(args) != 3:
+            errors.append(f"relation query must have subject, relation, and object arguments: {line}")
+            return errors, warnings
+        # A bare token is neither a variable nor a quoted constant. The matcher used
+        # to treat it as a wildcard, so the report printed "0 rows" — a verified
+        # negative — for a query the gate calls malformed (#213). Say it is broken.
+        if not all(is_variable(a) or is_quoted_string(a) for a in args):
+            errors.append(f"relation arguments must be variables or quoted strings: {line}")
+            return errors, warnings
     for constant in quoted_constants(line):
-        if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
+        if constant and canonical_value(constant) not in entities and constant not in {"S", "R", "O", "X", "Q"}:
             warnings.append(f"query references non-engine entity or relation: {constant}")
     return errors, warnings
 
@@ -181,6 +180,9 @@ def evaluate_queries(
     hierarchy: dict[str, dict[str, set[str]]] | None = None,
 ) -> list[str]:
     results: list[str] = []
+    if hierarchy is None:
+        hierarchy = value_hierarchy()
+    aliases = relation_aliases()
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
@@ -210,15 +212,16 @@ def evaluate_queries(
             # Same semantics as ask_router.evaluate's count branch.
             args = query_args(line)
             if len(args) == 2:
+                # Same canonicalisation as the relation branch and as ask's count
+                # (#213). Comparing raw strings here made the report answer "0" to
+                # a question ask answered "2" — in an aliased KB, on the very same
+                # facts. A count query is a relation query with a free object, so
+                # it is matched by the shared predicate with a variable object.
                 subj_q, rel_q = args
-                subj, rel = arg_value(subj_q), arg_value(rel_q)
-                subj_const = subj_q.startswith('"') and subj_q.endswith('"')
-                rel_const = rel_q.startswith('"') and rel_q.endswith('"')
                 objects = {
-                    f["object"]
-                    for f in facts
-                    if (not subj_const or f["subject"] == subj)
-                    and (not rel_const or f["relation"] == rel)
+                    row["object"]
+                    for row in facts
+                    if relation_row_matches([subj_q, rel_q, "O"], row, aliases, hierarchy)
                 }
                 results.append(f"count results: {len(objects)} (distinct objects)")
         elif line.startswith("review_required"):
@@ -237,8 +240,9 @@ def main() -> None:
     policy_query_predicates = policy_predicates(policy_program)
     # value_set (entities + literal values) so a query naming a literal object of
     # an attribute relation is not falsely warned as a non-engine entity.
-    entities = value_set(facts)
-    relations = allowed_relations(facts)
+    hierarchy = value_hierarchy()
+    aliases = relation_aliases()
+    entities = known_constants(facts, hierarchy, aliases)
     errors: list[str] = []
     warnings: list[str] = []
     policy_findings: list[str] = []
@@ -259,7 +263,10 @@ def main() -> None:
     for line in query_lines():
         query_errors, query_warnings = validate_query(line, entities, policy_query_predicates)
         errors.extend(query_errors)
-        warnings.extend([item for item in query_warnings if item.rsplit(": ", 1)[-1] not in relations])
+        # No post-filter: known_constants() already admits relation names (and
+        # their aliases, and declared hierarchy ancestors), so a warning that
+        # survives validate_query is a genuinely unknown constant.
+        warnings.extend(query_warnings)
 
     report = [
         "Logic Check Report",

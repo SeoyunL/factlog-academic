@@ -965,6 +965,53 @@ def declared_ancestors(
     return found
 
 
+def relation_row_matches(
+    args: list[str],
+    row: dict[str, str],
+    aliases: dict[str, str] | None = None,
+    hierarchy: dict[str, dict[str, set[str]]] | None = None,
+) -> bool:
+    """Does `row` satisfy the three args of a `relation(...)` query?
+
+    THE single matching predicate. The report (run_logic_check), the router
+    (ask_router) and the gate (classify_query) each used to carry their own
+    near-copy, and they drifted: the report compared raw strings while the router
+    canonicalised, so declaring a relation alias made facts vanish from the
+    verification report while `/factlog ask` still found them (#213). Two
+    verification paths disagreeing is worse than either being wrong — you cannot
+    tell which to believe. One predicate, three callers, no room to drift.
+
+    * subject/object: compared through `_canonical_value` (an `amount` term matches
+      whether or not the author quoted its unit).
+    * relation: the canonical name OR any declared surface variant of it.
+    * object: also honours policy/value-hierarchy.md, so a query for a broad value
+      returns rows filed under a declared narrower one (#211).
+    """
+    if len(args) != 3:
+        return False
+    s_arg, r_arg, o_arg = args
+    aliases = aliases or {}
+
+    if not (_is_variable(s_arg) or _canonical_value(_arg_value(s_arg)) == _canonical_value(row["subject"])):
+        return False
+
+    if not _is_variable(r_arg):
+        variants = canonical_variants_of(_arg_value(r_arg), aliases)
+        if not (
+            _canonical_value(_arg_value(r_arg)) == _canonical_value(row["relation"])
+            or row["relation"] in variants
+        ):
+            return False
+
+    if _is_variable(o_arg):
+        return True
+    # Declarations are written on CANONICAL relation names; rows may store a
+    # surface variant. Look up under the name the QUERY used, falling back to the
+    # row's own canonicalised name for a variable-relation query.
+    query_relation = _arg_value(r_arg) if not _is_variable(r_arg) else aliases.get(row["relation"], row["relation"])
+    return object_matches(_arg_value(o_arg), row, hierarchy, _canonical_value, relation=query_relation)
+
+
 def object_matches(
     query_object: str,
     row: dict[str, str],
@@ -2032,49 +2079,15 @@ def _relation_match_count(
     aliases: dict[str, str] | None = None,
     hierarchy: dict[str, dict[str, set[str]]] | None = None,
 ) -> int:
-    if query.startswith("relation"):
-        args = _query_args(query)
-        if len(args) != 3:
-            return 0
-        # Pre-compute surface variants for the relation argument when it is a
-        # quoted canonical name (i.e. its surface_variants set is non-empty).
-        # This lets a canonical query count surface-variant rows so the validator
-        # returns QUERY_OK (not QUERY_FACT_ABSENT) when matching rows exist.
-        # *aliases* lets classify_query share the single relation_aliases() read
-        # it already performed for the canonical-acceptance check (#242); None
-        # keeps the original lazy per-call fetch, so the read (and its
-        # raise-on-malformed-file) stays gated to a quoted relation arg exactly
-        # as before — no new call path is exposed to that raise.
-        rel_arg = args[1]
-        canonical_variants: set[str] = set()
-        if _is_quoted_string(rel_arg):
-            _aliases = relation_aliases() if aliases is None else aliases
-            canonical_variants = canonical_variants_of(_arg_value(rel_arg), _aliases)
-        count = 0
-        for row in facts:
-            s_arg, r_arg, o_arg = args
-            s_val, r_val = row["subject"], row["relation"]
-            if not (_is_variable(s_arg) or _canonical_value(_arg_value(s_arg)) == _canonical_value(s_val)):
-                continue
-            # Relation: match exact canonical name OR any surface variant.
-            if not (_is_variable(r_arg) or
-                    _canonical_value(_arg_value(r_arg)) == _canonical_value(r_val) or
-                    r_val in canonical_variants):
-                continue
-            if not (
-                _is_variable(o_arg)
-                or object_matches(
-                    _arg_value(o_arg),
-                    row,
-                    hierarchy,
-                    _canonical_value,
-                    relation=_arg_value(r_arg) if _is_quoted_string(r_arg) else None,
-                )
-            ):
-                continue
-            count += 1
-        return count
-    return 0
+    """How many accepted facts satisfy a relation query — via the shared predicate."""
+    if not query.startswith("relation"):
+        return 0
+    args = _query_args(query)
+    if len(args) != 3:
+        return 0
+    if aliases is None and not _is_variable(args[1]):
+        aliases = relation_aliases()
+    return sum(1 for row in facts if relation_row_matches(args, row, aliases, hierarchy))
 
 
 # Stable structured outcome codes for query classification. Callers (e.g. the

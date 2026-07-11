@@ -81,7 +81,7 @@ from common import (  # noqa: E402
     load_facts,
     load_logic_policy,
     logic_policy_md_has_rules,
-    object_matches,
+    relation_row_matches,
     policy_predicates,
     relation_aliases,
     value_hierarchy,
@@ -224,53 +224,25 @@ def classify(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
 def evaluate_relation(draft: str, facts: list[dict[str, str]]) -> list[list[str]]:
     """Evaluate a single ``relation(...)`` query against accepted facts.
 
-    Quoted constants must match the corresponding field; variables bind freely.
-    When the relation argument is a quoted canonical name (one whose
-    surface_variants set is non-empty), a fact row matches if its relation
-    field equals the canonical name OR is in that variant set — so a canonical
-    query returns all surface-variant rows. Subject matching is unchanged.
+    Delegates to `common.relation_row_matches` — the ONE matching predicate shared
+    with the logic report and the query gate. Three near-copies of this logic used
+    to exist and they drifted, so the same question got different answers from
+    `/factlog check` and `/factlog ask` (#213).
 
-    The object honours policy/value-hierarchy.md: a query for a broad value also
-    returns rows filed under a declared narrower one (#211), so `/factlog ask`
-    and the logic report cannot disagree about what a question means.
-    Returns the matching [subject, relation, object] rows. Does not touch
-    facts/query.dl.
+    Quoted constants must match; variables bind freely. A canonical relation name
+    also matches its declared surface variants; the object honours
+    policy/value-hierarchy.md. Does not touch facts/query.dl.
     """
     args = query_args(draft)
     if len(args) != 3:
         return []
-    s_arg, r_arg, o_arg = args
     hierarchy = value_hierarchy()
-    _relation_alias_map = relation_aliases() if hierarchy else {}
-    # Pre-compute surface variants when the relation arg is a quoted canonical.
-    rel_variants: set[str] = set()
-    if is_quoted_string(r_arg):
-        rel_variants = canonical_variants_of(arg_value(r_arg), relation_aliases())
-    rows: list[list[str]] = []
-    for row in facts:
-        s_val, r_val = row["subject"], row["relation"]
-        if not (is_variable(s_arg) or canonical_value(arg_value(s_arg)) == canonical_value(s_val)):
-            continue
-        if not (is_variable(r_arg) or
-                canonical_value(arg_value(r_arg)) == canonical_value(r_val) or
-                r_val in rel_variants):
-            continue
-        # Declarations are written on CANONICAL relation names. When the query
-        # pins one, use it. When the relation is a variable, canonicalise the
-        # row's own (possibly surface-variant) name, so an aliased KB does not
-        # silently lose subsumption for variable-relation queries.
-        query_relation = (
-            arg_value(r_arg)
-            if is_quoted_string(r_arg)
-            else _relation_alias_map.get(r_val, r_val)
-        )
-        if not (
-            is_variable(o_arg)
-            or object_matches(arg_value(o_arg), row, hierarchy, canonical_value, relation=query_relation)
-        ):
-            continue
-        rows.append([row["subject"], row["relation"], row["object"]])
-    return rows
+    aliases = relation_aliases()
+    return [
+        [row["subject"], row["relation"], row["object"]]
+        for row in facts
+        if relation_row_matches(args, row, aliases, hierarchy)
+    ]
 
 
 def coverage_hint(
@@ -431,16 +403,13 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # accepted, bogus count (> 2 args) (#257).
         if len(args) != 2:
             raise NotImplementedError("count query must have subject and relation arguments")
-        subject, relation = arg_value(args[0]), arg_value(args[1])
-        rel_variants: set[str] = set()
-        if is_quoted_string(args[1]):
-            rel_variants = canonical_variants_of(relation, relation_aliases())
+        # A count is a relation query with a free object, so it goes through the
+        # SAME shared predicate as everything else (#213) — the report's count
+        # branch does too. Its own copy compared subjects raw and so could drift.
         objects = {
             row["object"]
             for row in facts
-            if (is_variable(args[0]) or row["subject"] == subject)
-            and (is_variable(args[1]) or row["relation"] == relation
-                 or row["relation"] in rel_variants)
+            if relation_row_matches([args[0], args[1], "O"], row, relation_aliases(), value_hierarchy())
         }
         return {"rows": [[str(len(objects))]], "count": len(objects)}
     if predicate == "path":
