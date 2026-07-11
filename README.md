@@ -80,9 +80,40 @@ extraction reads.
 > Top-level (non-nested) sources are unaffected.
 
 ```bash
-factlog ingest report.docx --target ~/wiki   # → ~/wiki/runs/sources/report.md (pandoc)
+factlog ingest report.docx --target ~/wiki   # → ~/wiki/runs/sources/report.docx.md (pandoc)
 factlog ingest --scan --target ~/wiki        # auto-convert every binary under sources/
 ```
+
+### `runs/*.json` is the source of truth — commit it
+
+A KB has **two** irreplaceable records, and they are not the same file:
+
+- **`runs/*.json` holds the facts.** `facts/candidates.csv` is rebuilt from it on
+  every merge, so losing `runs/` erases every fact that is not re-extracted.
+- **`facts/candidates.csv` holds the human decisions.** `factlog accept` / `reject`
+  write the `accepted` / `superseded` status **there and nowhere else**. Delete it
+  and a re-merge quietly demotes every accepted fact back to `candidate`.
+
+So if you version-control your KB:
+
+| Path | Commit it? | Why |
+|---|---|---|
+| `sources/` | **yes** | your originals |
+| `runs/*.json` | **yes** | the extracted facts themselves |
+| `facts/` | **yes — never regenerate** | the human accept/reject decisions live only here |
+| `policy/` | **yes** | the rules you wrote (logic policy, questions, typed relations, …) |
+| `pages/`, `decisions/` | optional | regenerated on every merge |
+| `runs/sources/` | no | text conversions, regenerable with `factlog ingest --scan` |
+
+`merge_candidates` now refuses any rebuild that would delete a fact a human has
+ruled on, so a lost `runs/` can no longer erase a KB silently — but the data still
+has to exist somewhere.
+
+This also changes one habit: **deleting a `runs/*.json` to undo an extraction no
+longer silently drops its accepted facts.** Retire them through the gate first —
+`factlog eject --fact SUBJECT RELATION OBJECT` — or pass `--allow-delete` if the
+loss is what you want. (`factlog reject` will not do it: it only retires rows that
+are still pending.)
 
 ### Active KB (target the set-up KB from anywhere)
 

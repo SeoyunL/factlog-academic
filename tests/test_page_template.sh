@@ -98,6 +98,11 @@ printf '[{"subject":"인젝션","relation":"인용","object":"대상","source":"
 "$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
 gen="$(grep -rl "# 인젝션" "$KB/pages/" | head -1)"
 [ -n "$gen" ] && grep -qF "sources/{{REVIEW}}.md" "$gen" && ok "value containing {{REVIEW}} not re-substituted (single-pass)" || bad "placeholder injection corrupted output"
+# Retire the fixture properly. Deleting the run file alone would strand an
+# `accepted` fact whose backing run has vanished, and merge now refuses that
+# rebuild rather than erasing a human ruling (#218) — the same protection a user
+# gets when they delete a runs/*.json to redo an extraction.
+"$PYTHON" -m factlog eject --fact "인젝션" "인용" "대상" --purge --target "$KB" >/dev/null 2>&1
 rm -f "$KB/runs/inject.json" "$KB/sources/{{REVIEW}}.md"
 
 # --- empty custom template falls back to default (with warning) ---------------
