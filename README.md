@@ -137,7 +137,15 @@ cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 factlog eject report.pdf  # inverse of ingest: remove the conversion + retire its facts
 factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
+factlog export --bibtex   # cite your sources: BibTeX (or --csl for CSL-JSON)
 ```
+
+`export` reads the YAML front matter of every `.md` under `sources/`, at any depth, and
+emits one entry per source that carries a `title` or a `zotero_key`. A source it cannot
+cite (no front matter, or front matter with neither field) is named on stderr rather
+than dropped quietly — a citation list that silently loses a work is the failure this
+KB exists to prevent. Two sources in different folders may share a filename; the second
+gets a suffixed citation key, and that is reported too.
 
 ### Optional integration dependencies
 

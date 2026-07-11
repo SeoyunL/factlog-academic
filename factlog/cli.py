@@ -3943,7 +3943,7 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
                 print(f"skipped\t{porcelain_field(check.pmid)}")
             print(f"would_check\t{len(to_check)}")
             print(f"skipped\t{len(skipped)}")
-            print(f"dry_run\t1")
+            print("dry_run\t1")
             print(f"target\t{target}")
         else:
             print(
@@ -6208,14 +6208,45 @@ def cmd_export(args: argparse.Namespace) -> int:
     if not _require_kb(target, "export"):
         return 1
 
+    from factlog import common as _c  # noqa: PLC0415
+
     sources = []
-    for path in sorted((target / "sources").glob("*.md")):
+    # walk_source_dir, not glob("*.md"): the glob saw only the TOP level, so a source in
+    # a subdirectory -- which `factlog sources` lists and `sync` extracts from -- was
+    # dropped from the citation list with exit 0 and no warning (#223).
+    skipped: list[str] = []
+    seen_keys: dict[str, str] = {}
+    for path in _c.walk_source_dir(target / "sources", include_hidden=False):
+        if path.suffix.lower() != ".md":
+            continue
+        rel = path.relative_to(target).as_posix()
         fm = read_front_matter(path)
-        if not fm or is_annotation_source(fm):
+        if not fm:
+            skipped.append(f"{rel} (no YAML front matter)")
+            continue
+        if is_annotation_source(fm):
             continue
         if not (fm.get("zotero_key") or fm.get("title")):
+            skipped.append(f"{rel} (front matter has neither title nor zotero_key)")
             continue
-        sources.append((path.stem, fm))
+        # Two sources in different folders can share a stem; a silently reused citation
+        # key would drop one entry from the bibliography just as quietly.
+        key = path.stem
+        if key in seen_keys:
+            n = 2
+            while f"{key}-{n}" in seen_keys:
+                n += 1
+            print(
+                f"factlog export: citation key {key!r} is used by {seen_keys[key]} and "
+                f"{rel}; the second is exported as {key}-{n}",
+                file=sys.stderr,
+            )
+            key = f"{key}-{n}"
+        seen_keys[key] = rel
+        sources.append((key, fm))
+
+    for note in skipped:
+        print(f"factlog export: skipped {note}", file=sys.stderr)
 
     if args.csl:
         text = json.dumps([to_csl(fm, stem) for stem, fm in sources], ensure_ascii=False, indent=2)

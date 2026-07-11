@@ -336,7 +336,14 @@ cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 factlog eject report.pdf  # inverse of ingest: remove the conversion + retire its facts
 factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
+factlog export --bibtex   # 소스를 인용: BibTeX (또는 --csl 로 CSL-JSON)
 ```
+
+`export` 는 `sources/` **아래 모든 깊이**의 `.md` 의 YAML front matter 를 읽어, `title`
+또는 `zotero_key` 를 가진 소스마다 한 항목을 낸다. 인용할 수 없는 소스(front matter 가
+없거나 두 필드가 다 없는 경우)는 조용히 빠지지 않고 stderr 에 이름이 찍힌다 — 인용 목록에서
+문헌이 소리 없이 사라지는 것이야말로 이 KB 가 막으려는 실패다. 다른 폴더의 두 소스가 같은
+파일명을 가질 수 있는데, 그때는 두 번째에 접미사가 붙은 인용 키가 부여되고 그 사실도 보고된다.
 
 > **슬래시 명령(`/factlog …`)도 활성 KB에서 동작합니다.** 다만 factlog **소스
 > 저장소 안에서** 실행하면 번들 `examples/sample-kb` 와 혼동될 수 있으니, KB
