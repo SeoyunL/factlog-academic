@@ -1603,7 +1603,25 @@ def _parse_amount_units(body: str) -> dict[str, int]:
     return units
 
 
-def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = frozenset()) -> dict[str, TypedRelSpec]:
+def _typed_warn(sink: list[str] | None, message: str) -> None:
+    """Append to *sink* (for the report) or print to stderr (streaming diagnostic).
+
+    A malformed typed-relations line drops a whole relation from its comparison
+    predicate -- broader than a single value's parse failure -- yet the report said
+    warnings: 0. Routing these through a sink lets run_logic_check surface them, the
+    same way typed_projection_warnings surfaces value drops (#244).
+    """
+    if sink is not None:
+        sink.append(message)
+    else:
+        print(message, file=sys.stderr)
+
+
+def _parse_typed_relations(
+    text: str,
+    reserved: frozenset[str] | set[str] = frozenset(),
+    warnings: list[str] | None = None,
+) -> dict[str, TypedRelSpec]:
     """Pure parser for typed-relations.md. *reserved* is the set of names the
     alias must not collide with (built-ins + existing relations/predicates).
 
@@ -1624,14 +1642,17 @@ def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = froz
             continue
         m = _TYPED_REL_RE.match(stripped)
         if not m:
-            print(f"typed-relations: skipping malformed line: {stripped!r}", file=sys.stderr)
+            _typed_warn(warnings, f"typed-relations: skipping malformed line {stripped!r} "
+                        "— its relation gets no type, so all its facts drop out of the "
+                        "comparison predicate")
             continue
         name = unicodedata.normalize("NFC", (m.group("qname") or m.group("name")).strip())
         type_tag = m.group("type")
         alias = m.group("alias")
         units_body = m.group("units")  # None if no clause, "" if empty `()`
         if type_tag not in literal_types.TYPES:
-            print(f"typed-relations: unknown type {type_tag!r} for {name!r}; skipping", file=sys.stderr)
+            _typed_warn(warnings, f"typed-relations: unknown type {type_tag!r} for {name!r}; "
+                        "skipping — its facts drop out of the comparison predicate")
             continue
         # A units clause is valid ONLY on an amount line (fail loudly otherwise).
         if units_body is not None and type_tag != "amount":
@@ -1652,6 +1673,7 @@ def _warn_typed_not_attribute(
     specs: dict[str, TypedRelSpec],
     attrs: set[str],
     aliases: dict[str, str] | None = None,
+    sink: list[str] | None = None,
 ) -> None:
     # Through the shared predicate: comparing raw declarations made this warn that a
     # relation was "not declared" when it WAS, just under its alias -- while the engine,
@@ -1660,10 +1682,10 @@ def _warn_typed_not_attribute(
     forms = attribute_relation_forms(attrs, aliases)
     for name in specs:
         if not is_attribute_relation(name, forms):
-            print(
+            _typed_warn(
+                sink,
                 f"typed-relations: {name!r} is typed but not declared in attribute-relations.md "
                 "(its object should be a literal, not an entity)",
-                file=sys.stderr,
             )
 
 
@@ -2426,6 +2448,27 @@ def decode_wirelog_value(session: EasySession, value: object) -> object:
     return value
 
 
+def _lookup_typed_spec(
+    relation: str,
+    specs: dict[str, TypedRelSpec],
+    aliases: dict[str, str] | None = None,
+) -> TypedRelSpec | None:
+    """The typed spec for a stored relation name, folding alias and NFC.
+
+    THE single lookup rule, so the projection and the report cannot find a spec
+    differently. specs is keyed by the NFC canonical name, but accepted.dl stores a
+    relation verbatim -- an alias surface form, or NFD -- so a raw `specs.get` missed it
+    and the fact vanished from the typed comparison with no warning: warnings: 0 while a
+    row silently dropped, the exact omission #227 set out to end (#244).
+    """
+    nfc = unicodedata.normalize("NFC", relation)
+    canonical = (aliases or {}).get(nfc, nfc)
+    spec = specs.get(canonical) or specs.get(nfc)
+    if spec is None or spec.type not in _TYPED_COL:
+        return None
+    return spec
+
+
 def typed_projection_outcome(
     row: dict[str, str],
     spec: TypedRelSpec,
@@ -2453,9 +2496,34 @@ def typed_projection_outcome(
     return scalar, None
 
 
+def typed_policy_warnings(root: Path | None = None) -> list[str]:
+    """Warnings from PARSING typed-relations.md, for the report.
+
+    A malformed or unknown-type line, or a typed relation not declared as an attribute,
+    drops facts from a comparison predicate -- broader than one value failing to parse --
+    but only ever reached stderr (#244). Pure: re-reads the policy file and collects
+    without side effects, so run_logic_check can add them to warnings.
+    """
+    base = (root / "policy") if root is not None else POLICY_DIR
+    path = base / "typed-relations.md"
+    if not path.is_file():
+        return []
+    sink: list[str] = []
+    reserved = _typed_reserved_names(
+        relations=_try(allowed_relations),
+        predicates=_try(policy_predicates),
+    )
+    specs = _parse_typed_relations(path.read_text(encoding="utf-8"), reserved, warnings=sink)
+    attrs = _relation_names_from(base / "attribute-relations.md")
+    aliases = relation_aliases(root)
+    _warn_typed_not_attribute(specs, attrs, aliases, sink=sink)
+    return sink
+
+
 def typed_projection_warnings(
     accepted: list[dict[str, str]],
     specs: dict[str, TypedRelSpec] | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> list[str]:
     """Facts whose object does not parse as its relation's declared type.
 
@@ -2472,10 +2540,11 @@ def typed_projection_warnings(
     specs = typed_relations() if specs is None else specs
     if not specs:
         return []
+    aliases = relation_aliases() if aliases is None else aliases
     warnings: list[str] = []
     for row in sorted(accepted, key=lambda r: (r["relation"], r["subject"], r["object"])):
-        spec = specs.get(row["relation"])
-        if spec is None or spec.type not in _TYPED_COL:
+        spec = _lookup_typed_spec(row["relation"], specs, aliases)
+        if spec is None:
             continue
         _, reason = typed_projection_outcome(row, spec)
         if reason is not None:
@@ -2487,7 +2556,7 @@ def typed_projection_warnings(
     return warnings
 
 
-def _project_typed_relations(session, specs, accepted) -> None:
+def _project_typed_relations(session, specs, accepted, aliases=None) -> None:
     """Insert each parseable typed-relation object into its int64 side-relation,
     deterministically ordered so the run is reproducible (#116 invariant 3). A
     non-parsing object warns and skips ONLY that row — the fact still loads
@@ -2506,9 +2575,10 @@ def _project_typed_relations(session, specs, accepted) -> None:
     """
     if not specs:
         return
+    aliases = relation_aliases() if aliases is None else aliases
     for row in sorted(accepted, key=lambda r: (r["relation"], r["subject"], r["object"])):
-        spec = specs.get(row["relation"])
-        if spec is None or spec.type not in _TYPED_COL:
+        spec = _lookup_typed_spec(row["relation"], specs, aliases)
+        if spec is None:
             continue
         scalar, reason = typed_projection_outcome(row, spec)
         if scalar is None:
@@ -2569,7 +2639,7 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
             session.intern(canon)
             session.intern(o)
 
-    _project_typed_relations(session, specs, accepted)
+    _project_typed_relations(session, specs, accepted, _c_aliases)
 
     inferred: dict[str, set[tuple[str, ...]]] = defaultdict(set)
     for relation_name, row, diff in session.step():

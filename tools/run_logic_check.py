@@ -16,6 +16,7 @@ from common import (
     dependency_path,
     is_quoted_string,
     path_query_rows,
+    typed_policy_warnings,
     typed_projection_warnings,
     QUERY_PREDICATES,
     allowed_relations,
@@ -301,7 +302,10 @@ def main() -> None:
     # That used to be announced on stderr only, so the report — the artifact the
     # gate makes you show verbatim — said warnings: 0 while a fact was quietly
     # missing from every typed query (#227).
-    warnings.extend(typed_projection_warnings(facts))
+    warnings.extend(typed_projection_warnings(facts, aliases=relation_aliases()))
+    # Policy-parse warnings: a malformed/unknown-type line, or a typed relation not
+    # declared attribute, drops facts from a comparison predicate but only hit stderr.
+    warnings.extend(typed_policy_warnings())
 
     for predicate in sorted(policy_query_predicates):
         for target, reason in sorted(inferred[predicate]):

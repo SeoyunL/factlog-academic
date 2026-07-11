@@ -46,5 +46,31 @@ grep -q '3rd' "$REPORT"; [ "$?" -ne 0 ]; check "(d) the parseable fact is not wa
 # (e) a pending row is not warned about -- it was never engine input
 grep -q 'rank 9' "$REPORT"; [ "$?" -ne 0 ]; check "(e) a pending row is not warned about" "$?" "0"
 
+# (f) a fact stored under a relation ALIAS still finds its spec, so a parse failure under
+# the alias is surfaced -- the lookup missed the alias before, dropping it with warnings:0.
+KB2="$(mktemp -d)/kb"
+"$PY" -m factlog init --target "$KB2" >/dev/null || { echo "SKIP"; exit 0; }
+printf 'a\n' > "$KB2/sources/a.md"
+printf 'subject,relation,object,source,status,confidence,note\n' > "$KB2/facts/candidates.csv"
+printf 'A,pub_year,not-a-date,sources/a.md,accepted,0.9,\n' >> "$KB2/facts/candidates.csv"
+printf 'published_year\n' > "$KB2/policy/attribute-relations.md"
+printf -- '- `pub_year` -> `published_year`\n' > "$KB2/policy/relation-aliases.md"
+printf -- '- `published_year` : date as pubdate\n' > "$KB2/policy/typed-relations.md"
+FACTLOG_ROOT="$KB2" "$PY" tools/compile_facts.py >/dev/null 2>&1
+FACTLOG_ROOT="$KB2" "$PY" tools/run_logic_check.py >/dev/null 2>&1
+grep -q 'pub_year' "$KB2/facts/logic_report.txt"; check "(f) an alias fact's parse failure is surfaced" "$?" "0"
+
+# (g) a malformed typed-relations line is surfaced -- it drops a whole relation from the
+# comparison predicate, broader than one value, yet only reached stderr before.
+KB3="$(mktemp -d)/kb"
+"$PY" -m factlog init --target "$KB3" >/dev/null
+printf 'a\n' > "$KB3/sources/a.md"
+printf 'subject,relation,object,source,status,confidence,note\nA,score,5,sources/a.md,accepted,0.9,\n' > "$KB3/facts/candidates.csv"
+printf 'score\n' > "$KB3/policy/attribute-relations.md"
+printf -- '- this line is malformed\n- `score` : number as scoreval\n' > "$KB3/policy/typed-relations.md"
+FACTLOG_ROOT="$KB3" "$PY" tools/compile_facts.py >/dev/null 2>&1
+FACTLOG_ROOT="$KB3" "$PY" tools/run_logic_check.py >/dev/null 2>&1
+grep -q 'malformed line' "$KB3/facts/logic_report.txt"; check "(g) a malformed typed-relations line is in the report" "$?" "0"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "typed-parse report: all passed"; else echo "typed-parse report: $fails failed"; exit 1; fi
