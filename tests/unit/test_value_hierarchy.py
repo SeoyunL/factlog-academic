@@ -153,7 +153,7 @@ class TestSubsumption:
     def test_without_the_declaration_the_query_leaks(self, kb):
         # This is the #211 bug: the same query, no hierarchy → the two subtype
         # rows vanish. Pinned so the fix cannot be quietly reverted.
-        rows = rlc.relation_results('relation(P, "연구유형", "관찰연구")?', FACTS, None)
+        rows = rlc.relation_results('relation(P, "연구유형", "관찰연구")?', FACTS, {})
         assert {r[0] for r in rows} == {"P1"}
 
     def test_subsumption_is_one_way(self, kb):

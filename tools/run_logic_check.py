@@ -7,6 +7,11 @@ from __future__ import annotations
 from common import (
     FACTS_DIR,
     KNOWN_STATUSES,
+    canonical_value,
+    canonical_variants_of,
+    is_quoted_string,
+    is_variable,
+    relation_aliases,
     QUERY_PREDICATES,
     allowed_relations,
     object_matches,
@@ -66,34 +71,59 @@ def relation_results(
     facts: list[dict[str, str]],
     hierarchy: dict[str, dict[str, set[str]]] | None = None,
 ) -> list[tuple[str, str, str]]:
+    """Rows of `accepted.dl` satisfying a `relation(...)` query.
+
+    Matching goes through the SAME canonicalisation ask_router uses (#213). It
+    used to compare all three positions as raw strings, so the report and
+    `/factlog ask` answered the same question differently:
+
+    * a relation ALIAS — rows store a surface variant (`연구 유형`), the query
+      names the canonical (`연구유형`) — returned rows in ask and nothing in the
+      report, so declaring an alias made facts vanish from the verification report.
+    * an `amount` literal — `amount(100,억)` vs the stored `amount(100,"억")` —
+      likewise matched in ask and not in the report.
+
+    Two verification paths disagreeing about a verified answer is worse than
+    either being wrong: you cannot tell which one to believe.
+    """
     args = query_args(line)
     if len(args) != 3:
         return []
-    fields = ["subject", "relation", "object"]
+    # Read the hierarchy here when a caller does not supply it, exactly as
+    # ask_router does. Requiring every caller to thread it through was a footgun:
+    # forget it once and the report silently drops subsumption again while ask
+    # keeps it — the divergence this function is supposed to be free of. Pass {}
+    # to mean "no hierarchy" explicitly.
+    if hierarchy is None:
+        hierarchy = value_hierarchy()
+    s_arg, r_arg, o_arg = args
+    aliases = relation_aliases()
+    # Surface variants of a quoted canonical relation, so a canonical query also
+    # matches the variant-spelled rows the KB actually stores.
+    rel_variants = canonical_variants_of(arg_value(r_arg), aliases) if is_quoted_string(r_arg) else set()
+
     rows: list[tuple[str, str, str]] = []
     for row in facts:
-        matched = True
-        for arg, field in zip(args, fields, strict=True):
-            if not (arg.startswith('"') and arg.endswith('"')):
-                continue  # a variable binds anything
-            want = arg_value(arg)
-            # The object position honours policy/value-hierarchy.md, so asking for
-            # a broad value also returns rows filed under a narrower one (#211).
-            # subject/relation are matched literally.
-            if field == "object":
-                # Look the declaration up under the relation the QUERY named, not
-                # the row's stored one: declarations are written on canonical
-                # relation names, and an aliased KB stores surface variants.
-                rel_arg = args[1]
-                query_relation = arg_value(rel_arg) if rel_arg.startswith('"') and rel_arg.endswith('"') else None
-                if not object_matches(want, row, hierarchy, relation=query_relation):
-                    matched = False
-                    break
-            elif want != row[field]:
-                matched = False
-                break
-        if matched:
-            rows.append((row["subject"], row["relation"], row["object"]))
+        s_val, r_val, o_val = row["subject"], row["relation"], row["object"]
+        if not (is_variable(s_arg) or canonical_value(arg_value(s_arg)) == canonical_value(s_val)):
+            continue
+        if not (
+            is_variable(r_arg)
+            or canonical_value(arg_value(r_arg)) == canonical_value(r_val)
+            or r_val in rel_variants
+        ):
+            continue
+        # The object honours policy/value-hierarchy.md (#211). Look the declaration
+        # up under the relation the QUERY named — declarations are written on
+        # canonical names — falling back to the row's own name canonicalised, so a
+        # variable-relation query keeps subsumption in an aliased KB.
+        query_relation = arg_value(r_arg) if is_quoted_string(r_arg) else aliases.get(r_val, r_val)
+        if not (
+            is_variable(o_arg)
+            or object_matches(arg_value(o_arg), row, hierarchy, canonical_value, relation=query_relation)
+        ):
+            continue
+        rows.append((s_val, r_val, o_val))
     return rows
 
 
