@@ -2388,7 +2388,8 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     # so a stem guess would let `eject report.docx` wrongly pull report.pptx's
     # conversion; the recorded origin name disambiguates. Falls back to a stem
     # match only when no header is present (a hand-made conversion).
-    conv_origin: dict[str, str] = {}
+    conv_origin: dict[str, str] = {}       # ref -> origin BASENAME
+    conv_origin_raw: dict[str, str] = {}   # ref -> origin as the header wrote it
     for ref, p in disk_refs.items():
         if not ref.startswith("runs/sources/"):
             continue
@@ -2412,7 +2413,56 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 # rebuilds sources/<subdir>/<origin> from the conversion's own
                 # mirrored subdir — stays correct for both header formats and no
                 # legacy basename header regresses.
+                # Keep BOTH: the basename (what pairing/--orphans want) and the
+                # header value as written. #214 headers may carry a sources/-
+                # relative path; discarding it forced conv_source_path to
+                # re-derive the subdir from the conversion's mirror, which only
+                # works for mirrored conversions and broke legacy flat ones (#221).
                 conv_origin[ref] = PurePosixPath(origin).name
+                conv_origin_raw[ref] = origin
+
+    def conv_source_path(ref: str) -> str | None:
+        """The KB-relative original a `runs/sources/` conversion was made from.
+
+        Returns None when it CANNOT be known, so the caller falls back rather than
+        inventing one:
+
+        * header carries a path (#214) -> `sources/<header>` verbatim;
+        * header is a bare name and the conversion is MIRRORED -> the mirrored
+          subdir supplies the missing part (`runs/sources/sub/report.docx.md` ->
+          `sources/sub/report.docx`);
+        * header is a bare name and the conversion is FLAT (a pre-mirroring KB) ->
+          **unknowable**. A flat conversion may well come from a nested original
+          (README documents exactly that upgrade state), so reconstructing
+          `sources/<name>` would be a guess. Deriving it anyway made `eject
+          sub/report.html` silently match nothing on such KBs (#221 review);
+        * no readable header -> the conversion's own mirrored path + stem.
+
+        Getting this right is the whole point: comparing BASENAMES let `eject
+        sub/report.docx` delete a top-level `report.docx`'s conversion — a source
+        the user never named (#221).
+        """
+        raw = conv_origin_raw.get(ref)
+        rel_parent = PurePosixPath(ref).relative_to("runs/sources").parent
+        if raw and "/" in raw:
+            return str(PurePosixPath("sources") / raw)
+        name_part = raw or PurePosixPath(ref).stem
+        candidate = str(PurePosixPath("sources") / rel_parent / name_part)
+        if candidate in disk_refs:
+            return candidate
+        if str(rel_parent) != ".":
+            # A mirrored conversion whose original is gone: the mirror still tells
+            # us where it WAS, and that is the honest answer (an orphan).
+            return candidate
+        # Flat conversion with no original of that name at the top level: this is a
+        # pre-mirroring KB whose original lives in a subdirectory the header never
+        # recorded. Reconstructing `sources/<name>` would name a file that does not
+        # exist, so say so and let the caller fall back.
+        return None
+
+    # Flat conversions whose origin cannot be attributed to a requested PATH.
+    # Reported instead of guessed at (see the path branch of matches()).
+    unattributable: set[str] = set()
 
     def matches(ref: str, name: str) -> bool:
         name = nfc(name)
@@ -2421,10 +2471,38 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             return True
         is_conv = ref.startswith("runs/sources/")
         if "/" in name:
-            # A path was given: the exact original is handled above; for a
-            # binary original also match the conversion it produced (by
-            # recorded origin). Same-basename files elsewhere are NOT matched.
-            return is_conv and conv_origin.get(ref) == np_.name
+            # A path was given. Match the original at that path, and the conversion
+            # whose ORIGIN IS THAT PATH — never a same-named file elsewhere (#221).
+            # Both sides go through PurePosixPath so `./sub/x` and `sub//x` compare
+            # equal to `sub/x` instead of missing.
+            wanted = str(PurePosixPath(name if name.startswith("sources/") else f"sources/{name}"))
+            if not is_conv:
+                return ref == wanted
+            origin = conv_source_path(ref)
+            if origin is not None:
+                return origin == wanted
+            # Origin unknowable: a FLAT conversion with a bare-name header. Falling
+            # back to a basename compare here re-created #221 — the very bug this
+            # branch exists to kill. A flat conversion's original may sit in a
+            # subdir the header never recorded (a pre-mirroring KB), but it may
+            # equally have been ingested from OUTSIDE sources/ (README documents
+            # exactly that: `factlog ingest report.docx --target ~/wiki`), or have
+            # been deleted. Those states are indistinguishable, so a basename match
+            # would delete the conversion of a document the user never named, with
+            # exit 0.
+            #
+            # So do not guess. Silent under-ejection beats silent over-ejection: the
+            # ref is reported afterwards (unattributable) so the user can eject it
+            # by its own name (ingest --scan --force does NOT migrate it -- it only adds
+            # a mirrored conversion beside the flat one and leaves the flat one).
+            # Warn for a HEADERLESS flat conversion too: conv_origin has no entry for
+            # it, so keying the warning on conv_origin left the commonest legacy shape
+            # silently un-ejected. Compare its own name (report.md -> report.docx.md
+            # both stem to the original's name under the two ingest namings).
+            own = conv_origin.get(ref) or PurePosixPath(PurePosixPath(ref).name).stem
+            if own == PurePosixPath(name).name or own == PurePosixPath(name).stem:
+                unattributable.add(ref)
+            return False
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
                 return rp.name == np_.name  # an original with that filename
@@ -2441,6 +2519,24 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             origin = conv_origin.get(ref)
             return Path(origin if origin else rp.name).stem == np_.stem
         return rp.stem == np_.stem
+
+    def _report_unattributable(refs: set[str]) -> None:
+        """Name each conversion a PATH request refused to guess about.
+
+        Silent under-ejection is just a quieter kind of wrong, so say which file was
+        left and how to remove it. Naming the ref directly is the one route measured
+        to work; `ingest --scan --force` only ADDS a mirrored conversion beside the
+        flat one, so advertising it as a migration sent the user back to this same
+        warning.
+        """
+        for ref in sorted(refs):
+            print(
+                f"factlog eject: NOT ejecting {ref} — its provenance cannot be tied to "
+                f"a path (a flat conversion records only a basename, and may have been "
+                f"made from a document outside sources/). Guessing here is what #221 "
+                f"reported. To remove it, name it directly: factlog eject {ref}",
+                file=sys.stderr,
+            )
 
     matched: set[str] = set()
     if args.orphans:
@@ -2501,6 +2597,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 matched |= hits
             else:
                 print(f"factlog eject: no source matches '{name}'", file=sys.stderr)
+        # Name what we deliberately did NOT match BEFORE any early return: when the
+        # path matched nothing else -- the commonest state on a legacy KB -- a
+        # warning printed after `return 1` is dead code, and the user gets a bare
+        # "nothing to eject" with no hint that a conversion is sitting right there.
+        _report_unattributable(unattributable - matched)
         if not matched:
             print("factlog eject: nothing to eject", file=sys.stderr)
             return 1
@@ -2516,6 +2617,35 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     conv_to_delete = [r for r in matched_sorted if r.startswith("runs/sources/") and r in disk_refs]
     orig_on_disk = [r for r in matched_sorted if not r.startswith("runs/sources/") and r in disk_refs]
     affected = [r for r in rows if match_row(r)]
+
+    # Refuse to do the IRREVERSIBLE half of a job whose reversible half we just
+    # declined. Deleting the original while leaving a conversion we could not
+    # attribute -- and the facts citing it -- would strand those facts in
+    # accepted.dl with their source file gone, and --purge would take the audit
+    # trail with it. main deleted both; this branch must not delete only the one
+    # the user cannot get back.
+    # On disk only: a conversion that is merely still CITED cannot be stranded by
+    # deleting the original -- its file is already gone, and its rows were retired
+    # by whatever removed it.
+    stranded = sorted(r for r in (unattributable - matched) if r in disk_refs)
+    # If the named original's OWN conversion was matched, this eject is complete and
+    # an unrelated flat conversion that merely shares the name is not this request's
+    # business -- blocking then would refuse a job that strands nothing.
+    if any(r.startswith("runs/sources/") for r in matched):
+        stranded = []
+    if args.delete_original and stranded and orig_on_disk:
+        print(
+            "factlog eject: refusing --delete-original — "
+            f"{len(stranded)} conversion(s) of this name cannot be attributed to the "
+            "path you gave. One of them MAY be this original's pre-mirroring "
+            "conversion, in which case deleting the original would strand its facts "
+            "with no source file; it may equally belong to another document, in which "
+            "case ejecting it retires THAT document's facts. Decide, then re-run:",
+            file=sys.stderr,
+        )
+        for ref in stranded:
+            print(f"    factlog eject {ref}", file=sys.stderr)
+        return 1
 
     action = "purge" if args.purge else "supersede"
     print(f"  candidates.csv: {len(affected)} row(s) to {action}")
