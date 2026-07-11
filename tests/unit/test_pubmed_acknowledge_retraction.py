@@ -101,18 +101,29 @@ def _set(*records):
     return "<PubmedArticleSet>" + "".join(records) + "</PubmedArticleSet>"
 
 
-def _seed(kb, pmid="32738937", *, retracted=False, name=None, extra_records=()):
-    """Write a source .md and its PubMed provenance ledger. Returns the .md path."""
+def _seed(kb, pmid="32738937", *, retracted=False, notice_pmid=None, name=None,
+         extra_records=()):
+    """Write a source .md and its PubMed provenance ledger. Returns the .md path.
+
+    ``notice_pmid`` seeds the second half of PubMed's retraction signal
+    (``retraction_notice_pmid``) alongside ``retracted``, reproducing the real import
+    ledger shape (``source_writer._provenance_record`` writes BOTH, #202) — the shape the
+    single-field seed did not, which is why the orphaned-notice bug went unseen.
+    """
     (kb / "sources").mkdir(exist_ok=True)
     name = name or pmid
     md = kb / "sources" / f"{name}.md"
     fm = [f"pmid: {pmid}", "imported_from: pubmed"]
     if retracted:
         fm.append("pubmed_retracted: true")
+        if notice_pmid:
+            fm.append(f"pubmed_retraction_notice_pmid: {notice_pmid}")
     md.write_text("---\n" + "\n".join(fm) + "\n---\n# body\n", encoding="utf-8")
     fields = {"journal": "J"}
     if retracted:
         fields["retracted"] = True
+        if notice_pmid:
+            fields["retraction_notice_pmid"] = notice_pmid
     records = [SourceRecord(type="pubmed", id=pmid, imported_at=IMPORTED_AT, fields=fields),
                *extra_records]
     write_provenance(sidecar_path(md, kb), Provenance(records=records))
@@ -211,6 +222,79 @@ class TestRecord:
                   "--target", str(kb), "--yes"])
         assert rc == 0
         assert client.calls == [["32738937"]]  # normalized before the request
+
+
+# --------------------------------------------------------------------------- #
+# #202 — the retraction is a TWO-field signal; both move together
+# --------------------------------------------------------------------------- #
+class TestBothFieldsMoveTogether:
+    """`retracted` and `retraction_notice_pmid` are one signal (the import writes both).
+
+    Seeding BOTH — the real import ledger shape — is what the single-field `_seed` did not,
+    so these are the tests that would have caught the orphaned notice PMID (#202).
+    """
+
+    def test_record_writes_both_fields(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        md = _seed(kb, retracted=False)  # not yet retracted in the ledger
+        # Live PubMed flags a retraction and links its notice PMID.
+        client = fake(FakeClient(
+            _set(_retracted_record("32738937", notice_pmid="18842931"))
+        ))
+        rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
+                  "--target", str(kb), "--yes"])
+        assert rc == 0
+        record = _ledger(md, kb)[("pubmed", "32738937")]
+        # BOTH fields land, matching the import ledger's shape — not `retracted` alone.
+        assert record["retracted"] is True
+        assert record["retraction_notice_pmid"] == "18842931"
+
+    def test_record_without_a_linkable_notice_omits_the_field(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        md = _seed(kb, retracted=False)
+        # A real retraction whose notice carries no PMID (spike §1): retracted, no link.
+        client = fake(FakeClient(
+            _set(_retracted_record("32738937", notice_pmid=None))
+        ))
+        rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
+                  "--target", str(kb), "--yes"])
+        assert rc == 0
+        record = _ledger(md, kb)[("pubmed", "32738937")]
+        assert record["retracted"] is True
+        # Absent, exactly as the import omits an unlinkable notice — never a null.
+        assert "retraction_notice_pmid" not in record
+
+    def test_interactive_clear_drops_both_fields(self, tmp_path, fake, capsys, monkeypatch):
+        kb = _kb(tmp_path)
+        # The real import ledger shape: BOTH fields present (the #202 reproduction).
+        md = _seed(kb, retracted=True, notice_pmid="18842931")
+        assert "retraction_notice_pmid" in _ledger(md, kb)[("pubmed", "32738937")]
+        # PubMed reversed the retraction.
+        client = fake(FakeClient(_set(_plain_record("32738937"))))
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+        rc = run(["pubmed-acknowledge-retraction", "--id", "32738937", "--target", str(kb)])
+        assert rc == 0
+        record = _ledger(md, kb)[("pubmed", "32738937")]
+        # BOTH fields drop — no orphaned notice PMID on a record that says "not retracted".
+        assert "retracted" not in record
+        assert "retraction_notice_pmid" not in record
+
+    def test_seeded_both_fields_a_second_record_is_a_byte_identical_noop(
+        self, tmp_path, fake, capsys
+    ):
+        kb = _kb(tmp_path)
+        md = _seed(kb, retracted=True, notice_pmid="18842931")  # already fully recorded
+        before = _stat(sidecar_path(md, kb))
+        client = fake(FakeClient(
+            _set(_retracted_record("32738937", notice_pmid="18842931"))
+        ))
+        rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
+                  "--target", str(kb), "--yes"])
+        assert rc == 0
+        assert "nothing to acknowledge" in capsys.readouterr().out
+        # Both fields already held: the ledger stays byte- and mtime_ns-identical.
+        assert _stat(sidecar_path(md, kb)) == before
 
 
 # --------------------------------------------------------------------------- #

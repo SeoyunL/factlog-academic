@@ -258,6 +258,92 @@ class TestNoOp:
 
 
 # --------------------------------------------------------------------------- #
+# 4b. companion fields — a signal that spans more than one field (#202)
+# --------------------------------------------------------------------------- #
+class TestCompanionFields:
+    """PubMed's retraction is `retracted` + `retraction_notice_pmid`; both must move in
+    ONE write. arXiv/OpenAlex pass no companions and stay byte-for-byte the single field."""
+
+    # A stand-in two-field schema; the field names are the only thing the module sees.
+    PUBMED = AcknowledgeSchema(type="pubmed", field="retracted")
+
+    def test_set_writes_primary_and_companion_in_one_record(self, tmp_path):
+        side = _seed(tmp_path, "p", [
+            SourceRecord("pubmed", "3", IMPORTED_AT, {"journal": "J"}),
+        ])
+        result = acknowledge(
+            tmp_path, "3", True, self.PUBMED,
+            {"retraction_notice_pmid": "18842931"},
+        )
+        assert result.status == ACK_WRITTEN
+        rec = _ledger(side)[("pubmed", "3")]
+        assert rec["retracted"] is True
+        assert rec["retraction_notice_pmid"] == "18842931"
+        assert rec["journal"] == "J"  # untouched
+
+    def test_clear_drops_primary_and_companion_together(self, tmp_path):
+        # The real import ledger shape: BOTH fields present (#202 reproduction).
+        side = _seed(tmp_path, "p", [
+            SourceRecord("pubmed", "3", IMPORTED_AT,
+                         {"journal": "J", "retracted": True,
+                          "retraction_notice_pmid": "18842931"}),
+        ])
+        result = acknowledge(
+            tmp_path, "3", None, self.PUBMED,
+            {"retraction_notice_pmid": None},
+        )
+        assert result.status == ACK_WRITTEN
+        rec = _ledger(side)[("pubmed", "3")]
+        # No orphan: neither field survives, and the neighbour field is preserved.
+        assert "retracted" not in rec
+        assert "retraction_notice_pmid" not in rec
+        assert rec["journal"] == "J"
+
+    def test_a_none_companion_on_a_set_omits_that_field(self, tmp_path):
+        # A retraction whose notice has no linkable PMID: retracted set, companion dropped.
+        side = _seed(tmp_path, "p", [
+            SourceRecord("pubmed", "3", IMPORTED_AT, {"journal": "J"}),
+        ])
+        acknowledge(tmp_path, "3", True, self.PUBMED,
+                    {"retraction_notice_pmid": None})
+        rec = _ledger(side)[("pubmed", "3")]
+        assert rec["retracted"] is True
+        assert "retraction_notice_pmid" not in rec
+
+    def test_holding_both_values_is_a_byte_and_mtime_identical_noop(self, tmp_path):
+        side = _seed(tmp_path, "p", [
+            SourceRecord("pubmed", "3", IMPORTED_AT,
+                         {"retracted": True, "retraction_notice_pmid": "18842931"}),
+        ])
+        before = _stat(side)
+        result = acknowledge(
+            tmp_path, "3", True, self.PUBMED,
+            {"retraction_notice_pmid": "18842931"},
+        )
+        assert result.status == ACK_UNCHANGED
+        assert _stat(side) == before
+
+    def test_companion_naming_the_primary_field_is_a_caller_bug(self, tmp_path):
+        _seed(tmp_path, "p", [
+            SourceRecord("pubmed", "3", IMPORTED_AT, {"journal": "J"}),
+        ])
+        import pytest
+        with pytest.raises(ValueError):
+            acknowledge(tmp_path, "3", True, self.PUBMED, {"retracted": False})
+
+    def test_no_companions_is_the_unchanged_single_field_primitive(self, tmp_path):
+        # The arXiv/OpenAlex call shape: no companions, byte-for-byte the old behaviour.
+        side = _seed(tmp_path, "p", [
+            SourceRecord("arxiv", "1", IMPORTED_AT, {"version": 2}),
+        ])
+        acknowledge(tmp_path, "1", "author", ARXIV)  # no companions arg
+        assert _ledger(side)[("arxiv", "1")] == {
+            "type": "arxiv", "id": "1", "imported_at": IMPORTED_AT,
+            "version": 2, "withdrawn_by": "author",
+        }
+
+
+# --------------------------------------------------------------------------- #
 # 5. blast radius of one record
 # --------------------------------------------------------------------------- #
 class TestBlastRadius:

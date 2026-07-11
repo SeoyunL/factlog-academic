@@ -52,9 +52,20 @@ record's ``fields`` in **every** provenance sidecar that carries the ``(type, id
 * **A no-op is byte- and ``mtime_ns``-identical.** Acknowledging a value the ledger
   already holds compares the serialized record and does not open the file, so the sidecar
   is left untouched to the byte and to the mtime.
-* **Blast radius of one record.** Only the target ``(type, id)``'s named field moves;
-  every other field of that record (``imported_at`` included) and every other record in
-  the same sidecar are left exactly as they were.
+* **Blast radius of one record.** Only the target ``(type, id)``'s named field — and the
+  *companion* fields a caller passes with it — move; every other field of that record
+  (``imported_at`` included) and every other record in the same sidecar are left exactly
+  as they were.
+* **A signal that spans more than one field moves as one write.** Some source signals are
+  carried by a set of fields, not one: PubMed's retraction is ``retracted`` *and*
+  ``retraction_notice_pmid``, and an import writes both (``pubmed/source_writer.py``).
+  Managing them by one single-field write per field would let the second fail after the
+  first landed — the orphaned ``retraction_notice_pmid`` on a cleared ``retracted`` that
+  #202 named — or drift the acknowledge ledger from the import ledger. So the caller may
+  pass a ``companions`` mapping that is applied in the **same** read-modify-write as the
+  primary field: set together, cleared together (a ``None`` companion drops, like the
+  primary), never two uncoordinated writers. arXiv and OpenAlex pass none and are byte-
+  for-byte unchanged.
 * **No ledger is ever created.** Creating a ledger invents ``imported_at`` and the
   provenance origin — an *import*'s write (#58, #63). A ``(type, id)`` that no ledger
   carries is a reported :data:`ACK_NO_LEDGER`, never a silent no-op and never a new file.
@@ -62,7 +73,7 @@ record's ``fields`` in **every** provenance sidecar that carries the ``(type, id
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,6 +184,7 @@ def acknowledge(
     entry_id: str,
     value: object,
     schema: AcknowledgeSchema,
+    companions: Mapping[str, object] | None = None,
 ) -> AcknowledgeResult:
     """Write *value* into the ``schema.field`` of the ``(schema.type, entry_id)`` record
     in every provenance sidecar that carries it. Returns one :class:`AcknowledgeResult`.
@@ -181,14 +193,32 @@ def acknowledge(
     which is how the human clears an identifying signal a refresh may not touch. Any other
     value is stored verbatim; this primitive is neutral about what the field means.
 
+    *companions* is an optional ``{field: value}`` mapping applied **in the same
+    read-modify-write** as the primary field, for a source signal that spans more than one
+    field (PubMed's ``retracted`` + ``retraction_notice_pmid``, #202). Each companion is
+    stored verbatim, and a ``None`` companion drops its field exactly as a ``None`` primary
+    does, so the whole signal is set together and cleared together in one atomic write —
+    never two uncoordinated writers that could leave a half-written record. Omit it (or
+    pass ``None``/empty) and behaviour is byte-for-byte the single-field primitive arXiv and
+    OpenAlex use. A companion may not name ``schema.field`` (it would race the primary
+    value); doing so is a caller bug and raises ``ValueError``.
+
     The whole contract lives in the module docstring; in short: every ledger naming the id
     is updated (match on the id, never position); a value the ledger already holds is a
-    byte- and ``mtime_ns``-identical no-op; only the named field of the target record
-    moves (``imported_at`` and every neighbouring record and record-field untouched); no
-    ``.md`` is opened; no ledger is created; and both the read and the write are guarded
-    per sidecar with ``(ProvenanceError, OSError)`` so one bad sidecar is that record's
-    error, not a batch crash, and a partial write is an error, not a success.
+    byte- and ``mtime_ns``-identical no-op; only the named field (and any companions) of the
+    target record moves (``imported_at`` and every neighbouring record and record-field
+    untouched); no ``.md`` is opened; no ledger is created; and both the read and the write
+    are guarded per sidecar with ``(ProvenanceError, OSError)`` so one bad sidecar is that
+    record's error, not a batch crash, and a partial write is an error, not a success.
     """
+    companion_fields: Mapping[str, object] = companions or {}
+    if schema.field in companion_fields:
+        # A companion that names the primary field would race the primary value in the same
+        # write; the caller must pass that value as `value`, not smuggle it in twice.
+        raise ValueError(
+            f"companion field {schema.field!r} duplicates the primary acknowledge field; "
+            "pass its value as the primary `value`, not in `companions`."
+        )
     root = Path(kb_root)
     sidecar_root = root / SIDECAR_DIR
 
@@ -221,10 +251,13 @@ def acknowledge(
             continue
         found = True
 
-        # Only the named field moves; every other field (imported_at included) is carried
-        # through unchanged, and every co-resident record is left where it is.
+        # Only the named field (and any companions) moves; every other field (imported_at
+        # included) is carried through unchanged, and every co-resident record is left where
+        # it is. Companions land in this same dict so the whole signal is one write.
         fields = dict(existing.fields)
         fields[schema.field] = value
+        for companion_field, companion_value in companion_fields.items():
+            fields[companion_field] = companion_value
         record = SourceRecord(
             type=existing.type,
             id=existing.id,

@@ -3957,8 +3957,20 @@ def cmd_pubmed_acknowledge_retraction(args: argparse.Namespace) -> int:
     # Write the live value: `True` records a retraction, `None` clears one (removing the
     # field — never a literal `False`, which would diverge from an import's
     # absent-means-not-retracted convention and change the JSON bytes).
+    #
+    # PubMed's retraction is a TWO-field signal (#202): `retracted` and the notice PMID that
+    # links to *why*. The import ledger writes both (source_writer `_provenance_record`), so
+    # acknowledge must manage both as one signal, or it writes a self-inconsistent record —
+    # on a clear, an orphaned `retraction_notice_pmid` beside a dropped `retracted`; on a
+    # record, a `retracted: True` with no audit link, diverging from the import ledger.
+    # The companion rides the SAME atomic write as `retracted` (never a second uncoordinated
+    # writer): on a record it carries the live notice PMID (`None` when the retraction has no
+    # linkable notice, exactly as the import omits it); on a clear both drop together.
     value = True if current_retracted else None
-    result = acknowledge(target, pmid, value, schema)
+    notice_pmid = work.retraction_notice_pmid if current_retracted else None
+    result = acknowledge(
+        target, pmid, value, schema, {"retraction_notice_pmid": notice_pmid}
+    )
 
     if result.status == ACK_WRITTEN:
         if current_retracted:
