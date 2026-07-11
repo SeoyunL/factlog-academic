@@ -86,10 +86,13 @@ factlog ingest --scan --target ~/wiki        # auto-convert every binary under s
 
 ### `runs/*.json` is the source of truth — commit it
 
-`facts/candidates.csv` is **rebuilt from `runs/*.json` on every merge**. It is a
-projection, not a record. Lose `runs/*.json` and every fact a human reviewed and
-accepted is gone — only `superseded` tombstones survive, because those are the
-only rows carried over independently of a backing run.
+A KB has **two** irreplaceable records, and they are not the same file:
+
+- **`runs/*.json` holds the facts.** `facts/candidates.csv` is rebuilt from it on
+  every merge, so losing `runs/` erases every fact that is not re-extracted.
+- **`facts/candidates.csv` holds the human decisions.** `factlog accept` / `reject`
+  write the `accepted` / `superseded` status **there and nowhere else**. Delete it
+  and a re-merge quietly demotes every accepted fact back to `candidate`.
 
 So if you version-control your KB:
 
@@ -97,12 +100,14 @@ So if you version-control your KB:
 |---|---|---|
 | `sources/` | **yes** | your originals |
 | `runs/*.json` | **yes** | the extracted facts themselves |
-| `facts/`, `pages/`, `decisions/` | yes (or regenerate) | rebuilt from the above |
+| `facts/` | **yes — never regenerate** | the human accept/reject decisions live only here |
+| `policy/` | **yes** | the rules you wrote (logic policy, questions, typed relations, …) |
+| `pages/`, `decisions/` | optional | regenerated on every merge |
 | `runs/sources/` | no | text conversions, regenerable with `factlog ingest --scan` |
 
-`merge_candidates` refuses to rebuild a populated `candidates.csv` from an empty
-`runs/`, so this can no longer destroy a KB silently — but the data still has to
-exist somewhere.
+`merge_candidates` now refuses any rebuild that would delete a fact a human
+accepted, so a lost `runs/` can no longer erase a KB silently — but the data still
+has to exist somewhere.
 
 ### Active KB (target the set-up KB from anywhere)
 

@@ -13,9 +13,14 @@
 #   (a) an empty runs/ + a populated candidates.csv -> merge REFUSES, exit 1
 #   (b) candidates.csv is left byte-identical (nothing destroyed)
 #   (c) finalize propagates the failure instead of reporting success
-#   (d) --allow-empty is the explicit opt-out (someone really emptying a KB)
+#   (d) --allow-delete is the explicit opt-out (someone really discarding facts)
 #   (e) a genuinely empty KB (no facts yet) still merges fine — no false alarm
 #   (f) a normal KB with runs/ still merges
+#   (g) THE RATCHET: a partial runs/ loss (or a clone re-synced from scratch) must
+#       not delete an accepted fact either. Guarding only "runs/ is empty" was a
+#       cliff: /factlog sync re-extracts, so raw_rows > 0, the empty-check stayed
+#       silent, and every fact not re-extracted vanished with exit 0.
+#   (h) examples/sample-kb — the KB this repo ships — must survive its own rule
 #
 # Usage: bash tests/test_merge_no_data_loss.sh
 
@@ -82,10 +87,10 @@ else
 fi
 
 # ------------------------------------------------------------------ (d)
-if "$PYTHON" "$MERGE" --wiki "$KB" --allow-empty >/dev/null 2>&1; then
-  ok "(d) --allow-empty is the explicit opt-out"
+if "$PYTHON" "$MERGE" --wiki "$KB" --allow-delete >/dev/null 2>&1; then
+  ok "(d) --allow-delete is the explicit opt-out"
 else
-  bad "(d) --allow-empty did not permit the rebuild"
+  bad "(d) --allow-delete did not permit the rebuild"
 fi
 
 # ------------------------------------------------------------------ (e)
@@ -96,6 +101,34 @@ if "$PYTHON" "$MERGE" --wiki "$FRESH" >/dev/null 2>&1; then
   ok "(e) a KB with no facts yet still merges — the guard does not false-alarm"
 else
   bad "(e) the guard blocked a legitimately empty KB"
+fi
+
+# ------------------------------------------------------------------ (g)
+RATCHET="$(new_kb)"
+cat > "$RATCHET/runs/2026-01-02T00-00-00-b.json" <<'JSON'
+[{"subject":"C","relation":"knows","object":"D","source":"sources/a.md","status":"confirmed","confidence":0.9,"note":""}]
+JSON
+"$PYTHON" "$MERGE" --wiki "$RATCHET" >/dev/null 2>&1
+rm -f "$RATCHET/runs/2026-01-02T00-00-00-b.json"   # one run file lost, the other intact
+
+if "$PYTHON" "$MERGE" --wiki "$RATCHET" >/dev/null 2>&1; then
+  bad "(g) a partial runs/ loss silently deleted an accepted fact"
+else
+  ok "(g) a partial runs/ loss is refused too — the guard is a ratchet, not a cliff"
+fi
+if grep -q "^C,knows,D," "$RATCHET/facts/candidates.csv"; then
+  ok "(g) the accepted fact survived the refused merge"
+else
+  bad "(g) the accepted fact was deleted anyway"
+fi
+
+# ------------------------------------------------------------------ (h)
+SAMPLE="$TMP_ROOT/sample-kb"
+cp -r "$PLUGIN_ROOT/examples/sample-kb" "$SAMPLE"
+if "$PYTHON" "$MERGE" --wiki "$SAMPLE" >/dev/null 2>&1; then
+  ok "(h) examples/sample-kb obeys its own rule (runs/*.json is committed)"
+else
+  bad "(h) the shipped sample KB fails the guard — it has no runs/*.json"
 fi
 
 echo "---"

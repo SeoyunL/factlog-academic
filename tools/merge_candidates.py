@@ -823,11 +823,11 @@ def main() -> int:
         help="exit non-zero if any input row is rejected during normalisation",
     )
     parser.add_argument(
-        "--allow-empty",
+        "--allow-delete",
         action="store_true",
         help=(
-            "permit rebuilding candidates.csv from an empty runs/ even when it still holds facts "
-            "(DESTRUCTIVE: every reviewed fact is erased; see #218)"
+            "permit a rebuild that deletes facts a human accepted (DESTRUCTIVE; only when the "
+            "loss is intended — normally restore runs/*.json instead, see #218)"
         ),
     )
     args = parser.parse_args()
@@ -887,14 +887,14 @@ def main() -> int:
     # fresh clone. Until that contract is settled, refuse the destructive write.
     if not raw_rows:
         keepable = existing_keepable_rows(root)
-        if keepable and not args.allow_empty:
+        if keepable and not args.allow_delete:
             print(
-                f"merge_candidates: REFUSING to rebuild facts/candidates.csv — runs/ yielded 0 candidate "
-                f"rows but candidates.csv still holds {len(keepable)} fact(s).\n"
+                f"merge_candidates: REFUSING to rebuild facts/candidates.csv — '{input_pattern}' yielded 0 "
+                f"candidate rows but candidates.csv still holds {len(keepable)} fact(s).\n"
                 f"  runs/*.json is the source of truth for candidates.csv; rebuilding from an empty runs/ "
                 f"would destroy every reviewed fact and leave only superseded rows.\n"
-                f"  Restore runs/*.json (it must be version-controlled with the KB — see #218), or pass "
-                f"--allow-empty if you really mean to empty this KB.",
+                f"  Restore runs/*.json (version-control it with the KB — see #218), or accept the loss:\n"
+                f"    python3 tools/merge_candidates.py --wiki {root} --allow-delete",
                 file=sys.stderr,
             )
             return 1
@@ -961,6 +961,43 @@ def main() -> int:
                 restored += 1
         if restored:
             print(f"  preserved {restored} human-accepted row(s) from candidates.csv")
+
+    # --- the ratchet (#218) -------------------------------------------------
+    # A human acceptance may only leave candidates.csv through a human gate:
+    # `factlog reject` / `eject --fact` retire it as a tombstone (carried over
+    # above), and those are the ONLY ways it should disappear. If this merge would
+    # drop an accepted/confirmed row that the runs no longer assert, the backing
+    # runs/*.json was lost — not retired — and rebuilding would erase a human
+    # decision.
+    #
+    # Guarding only "runs/ is empty" was a cliff, not a ratchet: the real disaster
+    # is a KB cloned without runs/ and then re-synced, where extraction writes a
+    # FEW rows, the empty-check stays silent, and every fact that was not
+    # re-extracted vanishes with exit 0. The question is not how many rows came in;
+    # it is whether this merge destroys a human decision.
+    destroyed = sorted(
+        key for key in engine_keys if key not in present_keys
+    )
+    if destroyed and not args.allow_delete:
+        print(
+            f"merge_candidates: REFUSING to rebuild facts/candidates.csv — it would delete "
+            f"{len(destroyed)} fact(s) a human accepted, which the current runs/ no longer assert.\n"
+            f"  An accepted fact must only leave the KB through `factlog reject` or "
+            f"`factlog eject --fact` (which leave a tombstone). Its backing runs/*.json is "
+            f"missing, so this rebuild would erase a human decision instead:",
+            file=sys.stderr,
+        )
+        for subject, relation, object_, source in destroyed[:10]:
+            print(f"    - {subject} / {relation} / {object_}   ({source})", file=sys.stderr)
+        if len(destroyed) > 10:
+            print(f"    ... and {len(destroyed) - 10} more", file=sys.stderr)
+        print(
+            f"  Restore runs/*.json (version-control it with the KB — see #218), or re-run with "
+            f"--allow-delete to accept the loss:\n"
+            f"    python3 tools/merge_candidates.py --wiki {root} --allow-delete",
+            file=sys.stderr,
+        )
+        return 1
 
     # Respect a deliberate human re-review: a row the human pulled back to
     # needs_review in candidates.csv must not be silently re-promoted by a stale
