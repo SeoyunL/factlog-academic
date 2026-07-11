@@ -1497,9 +1497,15 @@ def _assert_no_canonical_head(policy_text: str) -> None:
 
     Raises :class:`FactlogError` on first offending line with an actionable message.
     """
+    # edge/path are the engine's own derivations, not EDB we emit -- but a policy that
+    # heads `edge` re-draws every link the attribute filter removed, and the scaffold
+    # promises, unconditionally, that no edge is drawn along an attribute relation. A
+    # guarantee with an unguarded escape hatch is the false promise this issue is about.
     _SOURCES = {
         "canonical": "relation-aliases.md",
         "attr_rel": "attribute-relations.md",
+        "edge": "the engine's edge/2 rule",
+        "path": "the engine's path/2 rule",
     }
     # Drop comment lines, strip quoted literals, then split into logical
     # STATEMENTS on clause-terminating '.' rather than per physical line. A period
@@ -1509,18 +1515,47 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     # line with a preceding rule's terminator as an in-body reference (#261); a
     # statement is a full clause, so canonical-left-of-neck (or no neck at all)
     # is unambiguously a head/fact.
-    # Strip quoted literals FIRST (so a `//` inside a reason string is not read as a
-    # comment), then strip comments to END OF LINE -- not just whole comment lines. A
-    # trailing `// TODO` after a clause's '.' stayed in the text, so the next statement
-    # began with the comment, the head anchor never matched, and a reserved head walked
-    # straight through: #226 came back with rc=0, and the `canonical` guard became
-    # WEAKER than it was before this change.
-    unquoted = re.sub(r'"[^"]*"', "", policy_text)
-    uncommented = re.sub(r"(//|#).*$", "", unquoted, flags=re.MULTILINE)
-    bare = "\n".join(line for line in uncommented.splitlines() if line.strip())
-    # A `.decl` directive has no clause-terminating '.', so it runs into the next
-    # statement. Pull the directives out first, check them, and match heads on what is
-    # left.
+    # ONE left-to-right lex, in the engine's order. Two regex passes did not work in
+    # either order: stripping comments first left a `//` inside a reason string looking
+    # like a comment, and stripping quotes first let an ODD `"` inside a comment pair up
+    # with a quote on a LATER line and delete everything between -- including a reserved
+    # head. Both orders let a policy nullify the filter with rc=0. A single scan with one
+    # bit of state cannot disagree with itself.
+    out: list[str] = []
+    in_string = False
+    i = 0
+    while i < len(policy_text):
+        ch = policy_text[i]
+        if in_string:
+            if ch == '"':
+                in_string = False
+            elif ch == "\n":
+                # The engine cannot parse an unterminated string either. Fail loudly
+                # rather than guess at what the rest of the file means.
+                raise FactlogError(
+                    "unterminated string literal in logic-policy(.extra).dl; a quoted "
+                    "value must close on the line it opens"
+                )
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(" ")  # the literal's content is not code
+            i += 1
+            continue
+        if policy_text.startswith("//", i) or ch == "#":
+            while i < len(policy_text) and policy_text[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    if in_string:
+        raise FactlogError(
+            "unterminated string literal in logic-policy(.extra).dl; a quoted value "
+            "must close on the line it opens"
+        )
+    bare = "\n".join(line for line in "".join(out).splitlines() if line.strip())
+
     for name in re.findall(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)", bare):
         if name in _SOURCES:
             raise FactlogError(

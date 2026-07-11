@@ -225,3 +225,59 @@ class TestInlineCommentsDoNotHideAHead:
 
     def test_a_slash_inside_a_string_is_not_a_comment(self):
         fcommon._assert_no_canonical_head('ok(X, "a // b") :- attr_rel(R).')
+
+
+class TestOneLexerNotTwoRegexPasses:
+    """Two regex passes were wrong in BOTH orders, and each order was a live bypass.
+
+    Comments-first: a `//` inside a reason string looked like a comment.
+    Quotes-first: an ODD `"` inside a comment paired with a quote on a LATER line and
+    deleted everything between -- including a reserved head. The guard saw nothing, the
+    engine ran the rule, attr_rel became IDB, every emitted atom was dropped, and #226
+    came back with rc=0.
+    """
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            '// prefer the "canonical\nattr_rel(R) :- relation(S, R, O).',
+            '# beware of " here\ncanonical("a","b","c").',
+            '// a stray "\nedge(S, O) :- relation(S, R, O).',
+        ],
+    )
+    def test_an_odd_quote_in_a_comment_cannot_hide_a_head(self, policy):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            'ok(X, "a // b") :- canonical(X, R, O).',
+            'ok(X, "a # b") :- attr_rel(R).',
+            '.decl ok(entity: symbol, reason: symbol)\nok(X, "r") :- edge(X, Y).',
+        ],
+    )
+    def test_a_comment_marker_inside_a_string_is_not_a_comment(self, policy):
+        fcommon._assert_no_canonical_head(policy)
+
+    def test_an_unterminated_string_fails_loudly(self):
+        """The engine cannot parse it either; swallowing it would mean guessing."""
+        with pytest.raises(fcommon.FactlogError, match="unterminated string"):
+            fcommon._assert_no_canonical_head('ok(X, "never closed) :- relation(X, R, O).')
+
+
+class TestEdgeAndPathAreReservedToo:
+    """The scaffold promises, unconditionally, that no edge is drawn along an attribute
+    relation. A policy heading `edge` re-draws every link the filter removed -- a
+    guarantee with an unguarded escape hatch is the false promise #226 is about."""
+
+    @pytest.mark.parametrize(
+        "policy",
+        ["edge(S, O) :- relation(S, R, O).", "path(S, O) :- edge(S, O)."],
+    )
+    def test_heading_an_engine_derivation_is_rejected(self, policy):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_referencing_them_in_a_body_is_still_fine(self):
+        fcommon._assert_no_canonical_head('reach(X, "r") :- path(X, Y).')
