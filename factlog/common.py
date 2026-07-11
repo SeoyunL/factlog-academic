@@ -1527,6 +1527,14 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     while i < len(policy_text):
         ch = policy_text[i]
         if in_string:
+            if ch == "\\":
+                # A backslash escapes the next char, `\"` included. pyrewire 1.0.3+
+                # supports these (see MIN_PYREWIRE_VERSION), and generate_logic_policy
+                # emits them via dl_string, so a reason like "size 5\" bolt" is a
+                # closed string the engine parses -- treating the escaped quote as a
+                # terminator rejected policies factlog itself generates.
+                i += 2
+                continue
             if ch == '"':
                 in_string = False
             elif ch == "\n":

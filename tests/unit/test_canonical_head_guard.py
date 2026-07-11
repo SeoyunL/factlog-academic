@@ -281,3 +281,32 @@ class TestEdgeAndPathAreReservedToo:
 
     def test_referencing_them_in_a_body_is_still_fine(self):
         fcommon._assert_no_canonical_head('reach(X, "r") :- path(X, Y).')
+
+
+
+class TestBackslashEscapesMatchTheEngine:
+    """pyrewire 1.0.3+ supports `\\"` escapes (MIN_PYREWIRE_VERSION), and
+    generate_logic_policy emits them via dl_string. Treating an escaped quote as a
+    string terminator rejected policies factlog itself generates and the engine parses.
+    """
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            # a reason with an odd embedded quote, as dl_string would serialize it
+            r'requires_review(X, "size 5\" bolt") :- relation(X, "status", _).',
+            r'after(X, "flagged \"provisional\"") :- relation(X, "s", _).',
+            r'ok(X, "a\" b") :- attr_rel(R).',  # escaped quote + a body reference
+        ],
+    )
+    def test_an_escaped_quote_is_not_a_terminator(self, policy):
+        fcommon._assert_no_canonical_head(policy)  # engine parses it; the guard must too
+
+    def test_a_head_hidden_behind_an_escaped_quote_is_still_caught(self):
+        # the escape must not become a new way to smuggle a reserved head
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(r'ok(X, "z\") :- relation(X,R,O).' + "\nattr_rel(R) :- relation(S,R,O).")
+
+    def test_a_genuinely_unterminated_string_still_fails_loudly(self):
+        with pytest.raises(fcommon.FactlogError, match="unterminated string"):
+            fcommon._assert_no_canonical_head('ok(X, "never closed) :- relation(X, R, O).')
