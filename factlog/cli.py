@@ -1837,14 +1837,16 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Conflicts (single-valued relations with >1 distinct object)
     if sv:
-        by_key: dict[tuple, set] = {}
-        for r in engine_rows:
-            if r["relation"] in sv:
-                by_key.setdefault((r["subject"], r["relation"]), set()).add(r["object"])
-        conflicts = {k: v for k, v in by_key.items() if len(v) > 1}
+        # The gate's own function, not a private counter. The inline one knew nothing of
+        # the value hierarchy, relation aliases or typed grouping, so status told the
+        # user "1 conflict" about a KB check_conflicts had just cleared -- and told them
+        # to fix it by hand-editing candidates.csv (#219).
+        conflicts = common.detect_conflicts(
+            engine_rows, sv, ctx.typed_relations(), common.relation_aliases(ctx.root), common.value_hierarchy(ctx.root)
+        )
         msg = f"  conflicts:  {len(conflicts)} (over {len(sv)} single-valued relation(s))"
         if conflicts:
-            msg += "  ⚠ resolve via superseded / see tools/check_conflicts.py"
+            msg += "  ⚠ run tools/check_conflicts.py for the resolution steps"
         print(msg)
     else:
         print("  conflicts:  n/a (no single-valued relations declared in policy/single-valued.md)")

@@ -469,6 +469,15 @@ space, a `:` or a `<`. Ancestors are transitive (`a ⊂ b` and `b ⊂ c` means a
 query for `c` also matches an `a` row). Names are matched after Unicode NFC
 normalisation, so a policy file written on macOS still meets its facts.
 
+**Contradiction detection.** A hierarchy also tells `check_conflicts` that a
+supertype and its subtype are not a contradiction. With `연구유형` declared
+single-valued, a paper carrying both `관찰연구` and `코호트연구` is being described at
+two levels of precision, and both rows are true — so it is not reported, and
+`finalize` does not stop. Genuine siblings still are: `관찰연구` and `실험연구` on one
+paper remains a conflict, and so does a chain plus a sibling. Retiring a fact is a
+human decision (`factlog eject --fact`), never something you should do to silence a
+false alarm.
+
 **Scope — where subsumption applies.** It is applied when a query's **object** is
 matched, by all three of the gate, the evaluator and the logic report, so
 `/factlog ask` and `/factlog check` cannot disagree about what a question means.
