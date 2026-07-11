@@ -55,8 +55,12 @@ def _kb(tmp_path):
     return tmp_path
 
 
-def _record_xml(pmid, *, retracted=False, notice_pmid=None):
-    """One <PubmedArticle> efetch record, optionally carrying retraction markers."""
+def _record_xml(pmid, *, retracted=False, notice_pmid=None, journal="J", doi=None):
+    """One <PubmedArticle> efetch record, optionally carrying retraction markers.
+
+    ``journal`` and ``doi`` set the identifier/journal fields a refresh compares (and
+    ``--auto-update`` may write); ``doi=None`` emits no DOI at all (the common shape).
+    """
     pub_types = ""
     comments = ""
     if retracted:
@@ -71,12 +75,13 @@ def _record_xml(pmid, *, retracted=False, notice_pmid=None):
             f'<CommentsCorrections RefType="RetractionIn">{notice}</CommentsCorrections>'
             '</CommentsCorrectionsList>'
         )
+    doi_id = f'<ArticleId IdType="doi">{doi}</ArticleId>' if doi else ""
     return f"""
   <PubmedArticle>
     <MedlineCitation>
       <PMID>{pmid}</PMID>
       <Article>
-        <Journal><Title>J</Title>
+        <Journal><Title>{journal}</Title>
           <JournalIssue><PubDate><Year>2020</Year></PubDate></JournalIssue></Journal>
         <ArticleTitle>Paper {pmid}</ArticleTitle>
         {pub_types}
@@ -85,6 +90,7 @@ def _record_xml(pmid, *, retracted=False, notice_pmid=None):
     </MedlineCitation>
     <PubmedData><ArticleIdList>
       <ArticleId IdType="pubmed">{pmid}</ArticleId>
+      {doi_id}
     </ArticleIdList></PubmedData>
   </PubmedArticle>"""
 
@@ -127,16 +133,26 @@ def run(argv):
     return args.func(args)
 
 
-def _add_paper(kb, name, pmid, *, retracted=None, notice_pmid=None, sub="", ledger=True):
+def _add_paper(
+    kb, name, pmid, *, retracted=None, notice_pmid=None, sub="", ledger=True,
+    journal="J", doi=None, extra_fields=None,
+):
     """Write a source .md (front matter) and, when ``ledger``, its PubMed sidecar.
 
     ``retracted`` records the ledger/front-matter retraction status (None -> absent).
+    ``journal``/``doi`` are the identifier/journal fields a refresh compares; ``doi=None``
+    records no DOI. ``extra_fields`` seeds additional ledger fields (e.g. mesh) so a test
+    can assert ``--auto-update`` leaves them untouched.
     """
     src_dir = kb / "sources"
     if sub:
         src_dir = src_dir / sub
         src_dir.mkdir(parents=True, exist_ok=True)
     fm = [f"pmid: {pmid}", "imported_from: pubmed"]
+    if journal:
+        fm.append(f"journal: {journal}")
+    if doi:
+        fm.append(f"doi: {doi}")
     if retracted and not ledger:
         fm.append("pubmed_retracted: true")
         if notice_pmid:
@@ -144,7 +160,13 @@ def _add_paper(kb, name, pmid, *, retracted=None, notice_pmid=None, sub="", ledg
     md = src_dir / f"{name}.md"
     md.write_text("---\n" + "\n".join(fm) + "\n---\n\n# Paper\n", encoding="utf-8")
     if ledger:
-        fields: dict = {"journal": "J"}
+        fields: dict = {}
+        if journal:
+            fields["journal"] = journal
+        if doi:
+            fields["doi"] = doi
+        if extra_fields:
+            fields.update(extra_fields)
         if retracted:
             fields["retracted"] = True
             if notice_pmid:
@@ -227,9 +249,11 @@ class TestUnchangedDefinition:
 
 
 class _Work:
-    def __init__(self, *, retracted=False, notice=None):
+    def __init__(self, *, retracted=False, notice=None, doi=None, journal=None):
         self.retracted = retracted
         self.retraction_notice_pmid = notice
+        self.doi = doi
+        self.journal = journal
 
 
 class TestFreshnessAndFlagged:
@@ -441,3 +465,200 @@ class TestConfirmation:
         assert client.calls == []  # declined before any fetch
         assert "aborted" in err
         assert not check_log_path(kb).exists()
+
+
+# --------------------------------------------------------------------------- #
+# --auto-update (#169): writes only the narrow identifier/journal fields, never
+# retraction, never a source .md; unchanged means byte-identical (#121).
+# --------------------------------------------------------------------------- #
+DOI = "10.1234/new"
+
+
+class TestAutoUpdateEnumeration:
+    """The narrow-field enumeration lives in one place and a test reads it (#169)."""
+
+    def test_enumeration_is_doi_and_journal_only(self):
+        assert rf.AUTO_UPDATE_FIELDS == ("doi", "journal")
+
+    def test_enumeration_never_includes_retraction(self):
+        # The whole reason --auto-update can exist: it writes transcription corrections,
+        # not the human-gate retraction signal. If retraction ever entered the enumeration
+        # this assertion is the tripwire.
+        for field in ("retracted", "retraction_notice_pmid", "retraction_verified_at"):
+            assert field not in rf.AUTO_UPDATE_FIELDS
+
+    def test_writer_moves_exactly_the_enumerated_fields(self, tmp_path):
+        # The report's changed_fields and the writer's moved fields both derive from
+        # AUTO_UPDATE_FIELDS, so they cannot name different sets.
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="Old", doi=None)
+        entries, _ = rf.collect_ledger_entries(kb)
+        check = rf._diff(entries[0], _Work(journal="New", doi=DOI))
+        assert set(check.changed_fields) == set(rf.AUTO_UPDATE_FIELDS)
+        outcomes = rf.apply_auto_update([check], kb)
+        assert set(outcomes[0].fields) == set(rf.AUTO_UPDATE_FIELDS)
+
+
+class TestUnchangedIsByteIdentical:
+    """#121: a record the report calls unchanged is one --auto-update leaves byte-identical."""
+
+    def test_report_unchanged_implies_writer_byte_identical(self, tmp_path):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=DOI)
+        entries, _ = rf.collect_ledger_entries(kb)
+        check = rf._diff(entries[0], _Work(journal="J", doi=DOI))  # live == recorded
+        assert check.status == rf.STATUS_UNCHANGED
+        before = _snapshot(kb)
+        outcomes = rf.apply_auto_update([check], kb)
+        assert outcomes[0].status == rf.UPDATE_UNCHANGED
+        assert _snapshot(kb) == before  # ledger AND source .md byte- and mtime-identical
+
+    def test_cli_unchanged_record_writes_nothing_but_checklog(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=DOI)
+        before = _snapshot(kb)
+        fake(FakeClient({"111": _set(_record_xml("111", journal="J", doi=DOI))}))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        assert rc == 0
+        assert _snapshot(kb) == before  # nothing under sources/ or the ledger moved
+
+    def test_mixed_batch_rewrites_only_the_changed_record(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "same", "111", journal="J", doi=DOI)      # will be unchanged
+        _add_paper(kb, "drift", "222", journal="Old", doi=None)  # will drift
+        same_side = sidecar_path(kb / "sources" / "same.md", kb)
+        same_before = (same_side.read_bytes(), same_side.stat().st_mtime_ns)
+        fake(FakeClient({
+            "111": _set(_record_xml("111", journal="J", doi=DOI)),
+            "222": _set(_record_xml("222", journal="New", doi=DOI)),
+        }))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        assert rc == 0
+        # the unchanged record's sidecar is byte- and mtime-identical
+        assert (same_side.read_bytes(), same_side.stat().st_mtime_ns) == same_before
+        # the drifted record's sidecar recorded the new identifier/journal
+        rec = read_provenance(sidecar_path(kb / "sources" / "drift.md", kb)).records[0]
+        assert rec.fields["journal"] == "New" and rec.fields["doi"] == DOI
+
+
+class TestAutoUpdateWrites:
+    def test_writes_doi_and_journal_into_the_ledger(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="Old", doi=None)
+        md = kb / "sources" / "a.md"
+        md_before = (md.read_bytes(), md.stat().st_mtime_ns)
+        fake(FakeClient({"111": _set(_record_xml("111", journal="New", doi=DOI))}))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        assert rc == 0
+        rec = read_provenance(sidecar_path(md, kb)).records[0]
+        assert rec.fields["journal"] == "New"
+        assert rec.fields["doi"] == DOI
+        assert rec.imported_at == IMPORTED_AT  # provenance clock preserved
+        # P4: the original .md is never opened — byte- and mtime_ns-identical.
+        assert (md.read_bytes(), md.stat().st_mtime_ns) == md_before
+
+    def test_leaves_unenumerated_fields_untouched(self, tmp_path, fake):
+        kb = _kb(tmp_path)
+        _add_paper(
+            kb, "a", "111", journal="Old",
+            extra_fields={"pubmed_mesh_major": ["Neoplasms"]},
+        )
+        fake(FakeClient({"111": _set(_record_xml("111", journal="New"))}))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        assert rc == 0
+        rec = read_provenance(sidecar_path(kb / "sources" / "a.md", kb)).records[0]
+        assert rec.fields["journal"] == "New"
+        assert rec.fields["pubmed_mesh_major"] == ["Neoplasms"]  # not an identifier: untouched
+
+    def test_porcelain_emits_update_rows_and_changed_fields_column(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="Old", doi=None)
+        fake(FakeClient({"111": _set(_record_xml("111", journal="New", doi=DOI))}))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update", "--porcelain"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "update\t111\tupdated\t" in out
+        assert "updated\t1" in out
+        assert "doi,journal" in out  # the check row's changed_fields column
+
+
+class TestAutoUpdateNeverWritesRetraction:
+    """--auto-update is not an acknowledgement (#169): retraction is copied through verbatim."""
+
+    def test_newly_retracted_record_keeps_no_retracted_field_and_is_reported(
+        self, tmp_path, fake, capsys
+    ):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=None)  # ledger records NOT retracted
+        # PubMed now reports a retraction AND a new DOI: the DOI is written, retraction is not.
+        fake(FakeClient({
+            "111": _set(_record_xml("111", retracted=True, notice_pmid="999", journal="J", doi=DOI))
+        }))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        out = capsys.readouterr().out
+        assert rc == 0  # a retraction is news, not an error
+        assert "RETRACTED" in out and "111" in out  # surfaced for a human
+        rec = read_provenance(sidecar_path(kb / "sources" / "a.md", kb)).records[0]
+        assert rec.fields["doi"] == DOI          # the transcription correction was written
+        assert "retracted" not in rec.fields     # the human-gate signal was NOT
+
+    def test_no_source_md_mtime_changes_over_a_newly_retracted_kb(self, tmp_path, fake):
+        # Done-when: no sources/*.md mtime_ns changes across an --auto-update run over a KB
+        # with a newly retracted paper (even one whose identifier/journal also drifted).
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="Old", doi=None, sub="2020")
+        _add_paper(kb, "b", "222", journal="J", doi=DOI)
+        md_before = {
+            p: p.stat().st_mtime_ns
+            for p in (kb / "sources").rglob("*.md")
+        }
+        fake(FakeClient({
+            "111": _set(_record_xml("111", retracted=True, journal="New", doi=DOI)),
+            "222": _set(_record_xml("222", journal="J", doi=DOI)),
+        }))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        assert rc == 0
+        md_after = {p: p.stat().st_mtime_ns for p in (kb / "sources").rglob("*.md")}
+        assert md_after == md_before  # not one original .md was touched
+
+
+class TestAutoUpdateNoLedger:
+    def test_front_matter_only_record_gets_no_ledger(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "fm", "444", ledger=False, journal="Old")
+        fake(FakeClient({"444": _set(_record_xml("444", journal="New", doi=DOI))}))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert not (kb / "source-provenance").exists()  # no ledger fabricated
+        assert "pubmed-backfill-provenance" in out
+
+
+class TestAutoUpdateFailureIsolation:
+    def test_write_error_is_a_per_id_error_not_a_batch_crash(self, tmp_path, monkeypatch):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="Old", doi=None)
+        check = rf.RefreshCheck(
+            pmid="111",
+            status=rf.STATUS_CHANGED,
+            recorded_journal="Old",
+            current_journal="New",
+            current_doi=DOI,
+            changed_fields=("doi", "journal"),
+            sources=("source-provenance/a.json",),
+        )
+
+        def _boom(*_a, **_k):
+            raise OSError("read-only ledger")
+
+        monkeypatch.setattr(rf, "write_provenance", _boom)
+        outcomes = rf.apply_auto_update([check], kb)
+        assert outcomes[0].status == rf.UPDATE_ERROR
+        assert "read-only ledger" in outcomes[0].reason
+
+    def test_error_result_is_skipped_by_auto_update(self, tmp_path):
+        # A deleted/merged PMID (#170's job to follow) is an error result: --auto-update
+        # writes nothing for it.
+        kb = _kb(tmp_path)
+        err = rf.RefreshCheck(pmid="111", status=rf.STATUS_ERROR, reason="deleted")
+        assert rf.apply_auto_update([err], kb) == []
