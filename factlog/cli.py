@@ -494,6 +494,39 @@ This file describes the Datalog rules used to reason over the knowledge base.
 Add your policy rules here. Each rule should be documented with a brief
 explanation of its purpose.
 """,
+    "policy/single-valued.md": """\
+# Single-valued (functional) relations
+#
+# List relation names that may hold AT MOST ONE object per subject. One relation
+# NAME per line; '#' comment lines and '-' bullets are allowed; quote a name
+# containing spaces in backticks.
+#
+# This is what turns a contradiction into an ERROR instead of two facts sitting
+# quietly side by side. If two distinct objects are asserted for the same
+# (subject, single-valued relation) it is reported as a CONFLICT and the KB
+# refuses to compile until a human resolves it.
+#
+# To SEE conflicts:
+#   factlog status              -> `conflicts: N`
+#   tools/check_conflicts.py    -> each conflict, and the resolution steps
+#   /factlog check              -> the same, inside Claude Code
+#
+# To RESOLVE one (never by hand-editing facts/candidates.csv, which bypasses the
+# gate this KB is built around):
+#   factlog eject --fact SUBJECT RELATION OBJECT    retire a row
+#   factlog amend SUBJECT RELATION OBJECT --set-object NEW    correct one
+#
+# If the two values are a supertype and its subtype (a cohort study IS an
+# observational study), neither is wrong: declare the relationship in
+# policy/value-hierarchy.md and both rows are kept.
+#
+# A relation you do NOT list may hold many objects per subject, which is the
+# right default for things like `cites` or `mentions`.
+#
+# Example (remove the leading '# ' to activate):
+# published_year
+# `연구 유형`
+""",
     "policy/attribute-relations.md": """\
 # Attribute (literal-valued) relations
 #
