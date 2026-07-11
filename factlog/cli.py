@@ -4209,13 +4209,6 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     )
 
 
-def _make_pubmed_client(config):
-    """Build the real PubMed client. Indirected so tests can inject a fake."""
-    from factlog.integrations.pubmed.client import PubMedClient
-
-    return PubMedClient(config)
-
-
 def _pubmed_show_results(works, count: int, *, porcelain: bool,
                          query_translation: str | None = None) -> None:
     """Render pubmed-search results. Mirrors :func:`_arxiv_show_results`.
