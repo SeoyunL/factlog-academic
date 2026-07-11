@@ -494,6 +494,32 @@ This file describes the Datalog rules used to reason over the knowledge base.
 Add your policy rules here. Each rule should be documented with a brief
 explanation of its purpose.
 """,
+    "policy/single-valued.md": """\
+# Single-valued (functional) relations
+#
+# List relation names that may hold AT MOST ONE object per subject. One relation
+# NAME per line; '#' comment lines and '-' bullets are allowed; quote a name
+# containing spaces in backticks.
+#
+# This is what turns a contradiction into an ERROR instead of two facts sitting
+# quietly side by side. If two distinct objects are asserted for the same
+# (subject, single-valued relation), `factlog check` and `finalize` report a
+# CONFLICT and refuse to compile until a human resolves it -- with
+# `factlog eject --fact SUBJECT RELATION OBJECT` (retire a row) or
+# `factlog amend ... --set-object` (correct one), never by hand-editing
+# facts/candidates.csv.
+#
+# If the two values are a supertype and its subtype (a cohort study IS an
+# observational study), neither is wrong: declare the relationship in
+# policy/value-hierarchy.md and both rows are kept.
+#
+# A relation you do NOT list may hold many objects per subject, which is the
+# right default for things like `cites` or `mentions`.
+#
+# Example (remove the leading '# ' to activate):
+# published_year
+# `연구 유형`
+""",
     "policy/attribute-relations.md": """\
 # Attribute (literal-valued) relations
 #
@@ -3943,7 +3969,7 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
                 print(f"skipped\t{porcelain_field(check.pmid)}")
             print(f"would_check\t{len(to_check)}")
             print(f"skipped\t{len(skipped)}")
-            print(f"dry_run\t1")
+            print("dry_run\t1")
             print(f"target\t{target}")
         else:
             print(
