@@ -3743,31 +3743,6 @@ def _make_pubmed_client(config):
     return PubMedClient(config)
 
 
-def _pubmed_prepare(args, command: str):
-    """Resolve the target KB and PubMed settings, or None on a user error.
-
-    Mirrors :func:`_arxiv_prepare` / :func:`_openalex_prepare` exactly; #166 adds
-    the same helper for its import path, and the duplicate is folded into one at
-    the pre-merge rebase (an additive collision resolved by the integrator).
-    """
-    from pathlib import Path
-
-    from factlog.integrations.pubmed.config import PubMedConfigError, load_config
-
-    porcelain = getattr(args, "porcelain", False)
-    target_str, source = factlog_config.resolve_root(args.target)
-    target = Path(target_str)
-    if source in ("config", "cwd") and not porcelain:
-        print(f"factlog {command}: target KB {target} (from {source})")
-    if not _require_kb(target, command):
-        return None
-    try:
-        return target, load_config(kb_root=target)
-    except PubMedConfigError as exc:
-        print(f"factlog {command}: {exc}", file=sys.stderr)
-        return None
-
-
 def _pubmed_show_results(works, count: int, *, porcelain: bool,
                          query_translation: str | None = None) -> None:
     """Render pubmed-search results. Mirrors :func:`_arxiv_show_results`.
@@ -3838,11 +3813,12 @@ def _pubmed_search_retraction_warnings(works) -> list[str]:
 def cmd_pubmed_search(args: argparse.Namespace) -> int:
     """Search PubMed, list the results, and surface a suspicious zero (#167).
 
-    Free (a key only raises the rate limit). This lands the search, the
-    silent-zero guard and the listing; interactive selection and import-on-select
-    arrive with #166's ``PubMedSourceWriter`` (the same non-interactive-first split
-    ``arxiv-search`` made between #80 and #81). Until then the import call is a
-    single local seam (:func:`_pubmed_import_selected`).
+    Free (a key only raises the rate limit). It searches, applies the silent-zero
+    guard, lists the results, and imports the chosen ones through #166's shared
+    import path (:func:`_pubmed_import_selected` -> ``import_outcome``) — the same
+    ``sources/`` writer, candidate boundary and cross-source merge ``pubmed-import``
+    uses, never a second writer. Selection mirrors ``arxiv-search``: a TTY prompt, or
+    ``--all`` to take the whole set; a run that cannot ask selects nothing.
 
     The silent-zero guard is the point (spec, #167). ``esearch`` answers a
     malformed field tag or a nonexistent MeSH term with HTTP 200 and zero results,
@@ -3875,17 +3851,12 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
         parse_efetch_response,
     )
 
-    prepared = _pubmed_prepare(args, "pubmed-search")
-    if prepared is None:
-        return 1
-    target, config = prepared
-
     porcelain = getattr(args, "porcelain", False)
     dry_run = getattr(args, "dry_run", False)
     mesh = tuple(args.mesh or ())
     limit = args.limit if args.limit is not None else DEFAULT_LIMIT
 
-    # --limit is factlog policy; reject an out-of-range value before the client is built.
+    # --limit is factlog policy; reject an out-of-range value before anything else.
     if args.limit is not None and (args.limit < 1 or args.limit > MAX_LIMIT):
         print(f"factlog pubmed-search: --limit must be between 1 and {MAX_LIMIT}, "
               f"got {args.limit}", file=sys.stderr)
@@ -3893,7 +3864,9 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
 
     # Validate every filter up front so a typo never reaches the transport: an
     # unknown field tag, a quote-broken mesh term, a reversed/out-of-range year are
-    # all silences PubMed would answer with a zero, so they are refused here.
+    # all silences PubMed would answer with a zero, so they are refused here. This is
+    # pure (network-free), so it runs before `_pubmed_prepare` — a query typo is told
+    # to the operator without first demanding a KB or a contact email.
     try:
         validate_field_tags(args.query)
         for term in mesh:
@@ -3906,7 +3879,9 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
         return 1
 
     # --show-query prints the exact term that WOULD be sent and spends no request.
-    # It is NOT --dry-run: --dry-run sends the search and declines to write.
+    # It is NOT --dry-run: --dry-run sends the search and declines to write. Because
+    # it sends nothing, it needs nothing — no KB, no NCBI email — so it returns here,
+    # before `_pubmed_prepare` (which requires both for a request-spending run).
     if args.show_query:
         if porcelain:
             print(f"query\t{composed}")
@@ -3915,6 +3890,13 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
             print(f"  term:   {composed}")
             print(f"  retmax: {limit}")
         return 0
+
+    # From here on the command spends requests, so it now demands the KB and the NCBI
+    # contact email `_pubmed_prepare` enforces (the same gate `pubmed-import` uses).
+    prepared = _pubmed_prepare(args, "pubmed-search")
+    if prepared is None:
+        return 1
+    target, config = prepared
 
     client = _make_pubmed_client(config)
     if not porcelain:
@@ -3943,6 +3925,9 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
 
     # Fetch the returned PMIDs so the listing carries titles/authors/year — reusing
     # #163's parser rather than re-reading the XML. esearch returns only ids+count.
+    # The whole classified outcome is kept (not just `.works`) so a selection can be
+    # imported through #166's `import_outcome` without a second efetch.
+    outcome = None
     works: tuple = ()
     if result.ids:
         try:
@@ -3954,10 +3939,11 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
             print(f"factlog pubmed-search: {exc}", file=sys.stderr)
             return 1
         try:
-            works = parse_efetch_response(fetched, result.ids).works
+            outcome = parse_efetch_response(fetched, result.ids)
         except PubMedParseError as exc:
             print(f"factlog pubmed-search: {exc}", file=sys.stderr)
             return 1
+        works = outcome.works
 
     _pubmed_show_results(works, result.count, porcelain=porcelain,
                          query_translation=result.query_translation)
@@ -3965,9 +3951,9 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
         for warning in _pubmed_search_retraction_warnings(works):
             print(warning, file=sys.stderr)
 
-    # Selection + import land with #166 (see docstring). A command that cannot ask
-    # must not guess: --all is the explicit opt-in a non-interactive run needs, and
-    # a search that silently imports nothing in CI is the same silent-zero failure
+    # Selection, then import through #166's importer. A command that cannot ask must
+    # not guess: --all is the explicit opt-in a non-interactive run needs, and a
+    # search that silently imports nothing in CI is the same silent-zero failure
     # wearing another hat (#167). The write itself is the single seam below.
     if args.all:
         chosen = list(works)
@@ -3979,29 +3965,48 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
             print("\nNothing selected; no files written. Re-run with --all to select "
                   "every result.")
         return 0
-    return _pubmed_import_selected(chosen, target=target, config=config,
+    return _pubmed_import_selected(chosen, outcome, target=target, config=config,
                                    dry_run=dry_run, porcelain=porcelain)
 
 
-def _pubmed_import_selected(chosen, *, target, config, dry_run: bool, porcelain: bool) -> int:
-    """The single seam where selected results become sources/ (import-on-select).
+def _pubmed_import_selected(chosen, outcome, *, target, config, dry_run: bool, porcelain: bool) -> int:
+    """Import the selected search results through #166's shared import path.
 
-    Deferred to #166, which owns ``PubMedSourceWriter`` and the import path this
-    must reuse (never a second writer). Until #166 lands on this branch, the seam
-    surfaces the selection honestly and writes nothing — a truthful deferral, not a
-    silent no-op — and the pre-merge rebase swaps this body for the shared
-    ``import_works`` call (the same path ``pubmed-import`` uses), exactly as
-    ``arxiv-search`` reuses the single-id importer. Kept as one call site so that
-    swap touches nothing else.
+    The single seam where a ``pubmed-search`` selection becomes ``sources/`` files.
+    It reuses :func:`~factlog.integrations.pubmed.importer.import_outcome` (and, under
+    it, :class:`~factlog.integrations.pubmed.source_writer.PubMedSourceWriter`) rather
+    than a second writer, so the candidate boundary (P1/P2), the ``--dry-run``
+    no-write, the ``--porcelain`` contract and cross-source merge (§7.3) are all
+    inherited exactly as ``pubmed-import`` gets them.
+
+    The chosen works are a subset of the efetch ``outcome``; the outcome is filtered
+    down to the selected PMIDs and handed to ``import_outcome`` — no second request.
+    A selection can only ever be *present*/*merged* records (a deleted/unparseable id
+    never appeared in the listing to be picked), so no per-id errors are synthesised
+    here. ``--dry-run`` plans without writing; the report is summarised either way.
     """
-    count = len(chosen)
-    verb = "would import" if dry_run else "selected"
-    message = (
-        f"factlog pubmed-search: {verb} {count} result(s). Importing PubMed results "
-        "into sources/ lands with #166 (PubMedSourceWriter); no files were written."
+    from datetime import datetime, timezone
+
+    from factlog.integrations.pubmed.importer import import_outcome
+    from factlog.integrations.pubmed.work_parser import PubMedFetchOutcome
+
+    if outcome is None:  # defensive: an empty selection returns before this call
+        return 0
+
+    chosen_pmids = {work.pmid for work in chosen}
+    selected = PubMedFetchOutcome(
+        present=tuple(p for p in outcome.present if p.work.pmid in chosen_pmids),
+        merged=tuple(m for m in outcome.merged if m.work.pmid in chosen_pmids),
     )
-    print(message, file=sys.stderr)
-    return 0
+
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report = import_outcome(
+        selected, target=target, config=config, imported_at=imported_at, dry_run=dry_run,
+    )
+    warnings = _pubmed_retraction_warnings(report, list(chosen))
+    return _pubmed_finish(
+        report, target, dry_run=dry_run, porcelain=porcelain, warnings=warnings
+    )
 
 
 def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
@@ -5768,23 +5773,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ax_backfill.set_defaults(func=cmd_arxiv_backfill_provenance)
 
-    def _pubmed_common(p):
-        # Mirrors _openalex_common/_arxiv_common; #166 defines the same helper for
-        # its import path, and the additive duplicate is folded into one at the
-        # pre-merge rebase.
-        p.add_argument(
-            "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
-        )
-        p.add_argument(
-            "--dry-run", action="store_true",
-            help="show what would be imported without creating any files",
-        )
-        p.add_argument(
-            "--porcelain", action="store_true",
-            help="machine-readable output (tab-separated field/value counts) for scripts",
-        )
-        return p
-
     pm_search = _pubmed_common(sub.add_parser(
         "pubmed-search",
         help="search PubMed and list the results, surfacing a suspicious zero "
@@ -5819,9 +5807,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pm_search.add_argument(
         "--all", action="store_true",
-        help="select every result without prompting (needed when stdin is not a "
-             "terminal). Import-on-select lands with #166; until then this reports "
-             "the selection and writes nothing.",
+        help="import every result without prompting (needed when stdin is not a "
+             "terminal); imported records still pass the sync -> review -> accept gate",
     )
     pm_search.set_defaults(func=cmd_pubmed_search)
 
