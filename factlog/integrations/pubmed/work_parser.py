@@ -55,6 +55,7 @@ import re
 from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
+from factlog.integrations.openalex.api_client import OpenAlexError, normalize_doi
 from factlog.integrations.pubmed.mesh import MeshHeading, parse_mesh_headings
 from factlog.integrations.pubmed.retraction import detect_retraction
 
@@ -62,6 +63,7 @@ __all__ = [
     "ParsedPubMedWork",
     "PresentRecord",
     "MergedRecord",
+    "UnparseableRecord",
     "PubMedFetchOutcome",
     "PubMedParseError",
     "parse_article",
@@ -148,17 +150,41 @@ class MergedRecord:
 
 
 @dataclass(frozen=True)
+class UnparseableRecord:
+    """A ``<PubmedArticle>`` element that ``parse_article`` could not reduce.
+
+    A record with no ``<PMID>`` (or no ``<MedlineCitation>``) is *unaddressable*:
+    nothing downstream can key on it, so it cannot join ``present``/``merged``.
+    Rather than let one such record abort a whole batch — discarding the records
+    that *did* parse — the batch wrapper isolates the failure here. It is a
+    **loud** bucket, not a silent drop: ``reason`` is the raise's message and
+    ``xml`` the serialized offending element, so a caller can log or surface
+    exactly what was lost (position ``index`` in the response) instead of a batch
+    silently shrinking. A single-record parse via :func:`parse_article` still
+    raises; only the batch wrapper collects.
+    """
+
+    index: int
+    reason: str
+    xml: str
+
+
+@dataclass(frozen=True)
 class PubMedFetchOutcome:
     """One efetch response classified against the PMIDs that were requested.
 
-    The three buckets are kept separate on purpose (see module docstring): a
-    downstream refresh acts differently on a deleted vs a merged PMID, and cannot
-    recover a distinction this parser throws away.
+    The buckets are kept separate on purpose (see module docstring): a downstream
+    refresh acts differently on a deleted vs a merged PMID, and cannot recover a
+    distinction this parser throws away. ``unparseable`` holds records that could
+    not be reduced at all (no PMID); it is populated per-record so one bad record
+    never discards the good ones in the same batch, and stays visible rather than
+    silently swallowed.
     """
 
     present: tuple[PresentRecord, ...] = ()
     deleted: tuple[str, ...] = ()
     merged: tuple[MergedRecord, ...] = ()
+    unparseable: tuple[UnparseableRecord, ...] = ()
 
     @property
     def works(self) -> tuple[ParsedPubMedWork, ...]:
@@ -255,20 +281,27 @@ def _pub_date(article: ET.Element) -> tuple[int | None, str | None]:
 
 
 def _normalize_doi(value: str | None) -> str | None:
-    """A bare, lowercased DOI, stripping any ``doi:`` or ``doi.org`` prefix.
+    """A bare, lowercased ``10.<registrant>/<suffix>`` DOI, or ``None``.
 
-    DOIs are case-insensitive; §7.1 duplicate detection matches on bare DOIs, so
-    they are reduced to that shape here. A value that does not look like a DOI
-    (no ``10.`` registrant) is dropped rather than recorded as junk.
+    Delegates to the shared strict ``normalize_doi`` — the *same* function
+    OpenAlex normalizes with — rather than keeping a second implementation here.
+    §7.1 duplicate detection compares bare, lowercased DOIs across sources, so a
+    DOI reached via PubMed must fold to exactly the shape a DOI reached via
+    OpenAlex does; one shared normalizer is the only way that stays true as the
+    rule evolves (no drift).
+
+    The shared normalizer *raises* on junk — right for a mistyped ``--doi`` CLI
+    argument. In an efetch payload, though, an absent field or a non-DOI
+    ``ELocationID`` (e.g. a publisher PII) is just absence, not a caller bug, so —
+    following OpenAlex's ``_optional`` pattern — the raise is caught and reported
+    as ``None`` instead of aborting an otherwise usable record.
     """
-    text = _text(value)
-    if text is None:
+    if not isinstance(value, str) or not value.strip():
         return None
-    lowered = text.lower()
-    lowered = re.sub(r"^(?:https?://)?(?:dx\.)?doi\.org/", "", lowered)
-    lowered = re.sub(r"^doi:\s*", "", lowered)
-    lowered = lowered.strip()
-    return lowered if lowered.startswith("10.") else None
+    try:
+        return normalize_doi(value)
+    except OpenAlexError:
+        return None
 
 
 def _doi(article: ET.Element, pubmed_data: ET.Element | None) -> str | None:
@@ -376,11 +409,15 @@ def parse_efetch_response(xml_text: str, requested_pmids) -> PubMedFetchOutcome:
     ``requested_pmids`` may be a single PMID string or an iterable of them.
 
     Returns a :class:`PubMedFetchOutcome` with present/deleted/merged buckets
-    (see module docstring). Raises :class:`PubMedParseError` for a body that is
-    not parseable ``PubmedArticleSet`` XML — including the ``<ERROR>`` body a
-    malformed id earns (spike §5). A gone PMID is **not** an error: it lands in
-    ``deleted``. A network failure never reaches here — the client (#162) raises
-    it — so a value in ``deleted`` and a raised exception are never confusable.
+    plus an ``unparseable`` bucket (see module docstring). A **body-level** fault
+    still raises :class:`PubMedParseError`: a body that is not parseable
+    ``PubmedArticleSet`` XML, including the ``<ERROR>`` body a malformed id earns
+    (spike §5). A **single record** that cannot be reduced (no PMID) does *not*
+    raise here, though — it is isolated into ``unparseable`` so the sibling
+    records that parsed survive the batch, and the loss stays visible rather than
+    silently swallowed. A gone PMID is **not** an error: it lands in ``deleted``.
+    A network failure never reaches here — the client (#162) raises it — so a
+    value in ``deleted`` and a raised exception are never confusable.
     """
     text = _require_str(xml_text)
     requested = _normalize_requested(requested_pmids)
@@ -403,7 +440,25 @@ def parse_efetch_response(xml_text: str, requested_pmids) -> PubMedFetchOutcome:
 
     # An empty set is the deleted/gone signal (spike §5): well-formed, not an
     # error. Records fall out below as `deleted` with no work attached.
-    works = [parse_article(record) for record in root.findall("PubmedArticle")]
+    #
+    # Parse per record, not all-or-nothing: #162 fetches PMIDs in batches, so one
+    # unaddressable record (no PMID) must not raise past here and discard the
+    # dozens that parsed fine ("absence is data"). The failure is not swallowed
+    # either — it lands in `unparseable`, loud and inspectable. A bare
+    # `parse_article` still raises; only this batch wrapper isolates and collects.
+    works: list[ParsedPubMedWork] = []
+    unparseable: list[UnparseableRecord] = []
+    for index, record in enumerate(root.findall("PubmedArticle")):
+        try:
+            works.append(parse_article(record))
+        except PubMedParseError as exc:
+            unparseable.append(
+                UnparseableRecord(
+                    index=index,
+                    reason=str(exc),
+                    xml=ET.tostring(record, encoding="unicode"),
+                )
+            )
 
     requested_set = set(requested)
     present: list[PresentRecord] = []
@@ -418,12 +473,17 @@ def parse_efetch_response(xml_text: str, requested_pmids) -> PubMedFetchOutcome:
 
     unmatched_requested = [p for p in requested if p not in matched]
 
-    # A single-request merge is unambiguous: exactly one PMID went unanswered and
-    # exactly one record came back under a different id — pair them, and the
-    # requested PMID is merged, not deleted. Any other arrangement leaves the
-    # pairing unknowable (batch omission, spike §4), so unexpected records surface
-    # with requested_pmid=None and unmatched requests stay deleted.
-    if len(unmatched_requested) == 1 and len(unexpected) == 1:
+    # A single-*request* merge is unambiguous: only ONE PMID was asked for, it
+    # went unanswered, and exactly one record came back under a different id — the
+    # pairing (request X, receive Y) is forced. The `len(requested) == 1` guard is
+    # load-bearing: efetch returns by omission, never substitution (spike §4), so
+    # in a batch a "1 unmatched + 1 unexpected" coincidence is NOT a merge — the
+    # unmatched PMID may simply be deleted while the unexpected one belongs to a
+    # different, un-asked lineage. Without the guard a batch would falsely pair
+    # them and report a real deletion as a merge. So merge only for a lone
+    # request; any batch shape leaves unexpected records with requested_pmid=None
+    # and unmatched requests as deleted.
+    if len(requested) == 1 and len(unmatched_requested) == 1 and len(unexpected) == 1:
         merged = (
             MergedRecord(
                 requested_pmid=unmatched_requested[0],
@@ -439,4 +499,9 @@ def parse_efetch_response(xml_text: str, requested_pmids) -> PubMedFetchOutcome:
         )
         deleted = tuple(unmatched_requested)
 
-    return PubMedFetchOutcome(present=tuple(present), deleted=deleted, merged=merged)
+    return PubMedFetchOutcome(
+        present=tuple(present),
+        deleted=deleted,
+        merged=merged,
+        unparseable=tuple(unparseable),
+    )
