@@ -70,13 +70,25 @@ Windows `C:\Users\<이름>`), `--target <경로>` 로 원하는 위치를 고를
 ├── sources/              ← 여기에 내 문서를 넣습니다 (보고서·논문·노트·wiki 등)
 ├── facts/                ← (엔진 산출물) candidates.csv · accepted.dl · logic_report.txt
 ├── policy/               ← (선택) 검토 질문·정책 규칙
-├── runs/                 ← (엔진 산출물) 추출 실행 기록, 바이너리 변환본(runs/sources/)
+├── runs/                 ← **추출 원본** runs/*.json (버전관리 필수) + 변환본 runs/sources/ (재생성 가능)
 ├── pages/ · decisions/   ← (엔진 산출물) 사람이 손대지 않음
 └── templates/
 ```
 
 > **핵심:** 내가 직접 넣는 것은 `<KB>/sources/` 안의 문서뿐입니다. 나머지 폴더는
-> factlog가 채우고 관리합니다. `.docx`·`.pdf` 같은 바이너리도 `sources/` 에 두면
+> factlog가 채우고 관리합니다.
+>
+> **KB에는 대체 불가능한 원본이 둘 있고, 같은 파일이 아닙니다.**
+>
+> - **`runs/*.json` 에 사실이 있습니다.** `facts/candidates.csv` 는 매 병합마다
+>   여기서 다시 만들어지므로, `runs/` 를 잃으면 재추출되지 않은 사실이 전부 사라집니다.
+> - **`facts/candidates.csv` 에 사람의 판정이 있습니다.** `factlog accept`/`reject` 는
+>   `accepted`/`superseded` 상태를 **오직 여기에만** 씁니다. 이 파일을 지우고 재병합하면
+>   승인한 사실이 조용히 `candidate` 로 강등됩니다.
+>
+> KB를 버전관리한다면 `sources/`, `runs/*.json`, `facts/`, `policy/` 를 **모두
+> 커밋하십시오**. `runs/sources/`(바이너리 변환본)만 재생성 가능하므로 `.gitignore`
+> 해도 됩니다. `.docx`·`.pdf` 같은 바이너리도 `sources/` 에 두면
 > `/factlog sync` 가 자동으로 텍스트로 변환합니다(→ `runs/sources/`).
 
 #### candidate vs accepted — 신뢰 경계
