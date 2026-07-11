@@ -718,6 +718,23 @@ def existing_superseded_rows(root: Path) -> list[dict[str, str]]:
     return rows
 
 
+def existing_keepable_rows(root: Path) -> list[dict[str, str]]:
+    """candidates.csv rows a rebuild would DESTROY — everything but tombstones.
+
+    `superseded` rows are carried over by existing_superseded_rows() regardless of
+    runs/, so they survive a rebuild. Every other row is reconstructed from
+    runs/*.json and vanishes if runs/ is empty (#218)."""
+    csv_path = root / "facts" / "candidates.csv"
+    if not csv_path.is_file():
+        return []
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        return [
+            {k: (row.get(k) or "") for k in FACT_HEADER}
+            for row in csv.DictReader(f)
+            if (row.get("status") or "").strip() not in SUPERSEDED_STATUSES
+        ]
+
+
 def existing_engine_keys(root: Path) -> dict[tuple[str, str, str, str], str]:
     """Map (subject, relation, object, source-without-#anchor) -> engine status
     for rows currently marked confirmed/accepted in candidates.csv.
@@ -805,6 +822,14 @@ def main() -> int:
         action="store_true",
         help="exit non-zero if any input row is rejected during normalisation",
     )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help=(
+            "permit rebuilding candidates.csv from an empty runs/ even when it still holds facts "
+            "(DESTRUCTIVE: every reviewed fact is erased; see #218)"
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(args.wiki).expanduser().resolve()
@@ -847,6 +872,32 @@ def main() -> int:
     # ------------------------------------------------------------------
     raw_rows = load_candidate_files(root, input_pattern)
     print(f"  candidate rows loaded: {len(raw_rows)}")
+
+    # ------------------------------------------------------------------
+    # 1b. Refuse to erase a populated KB (#218)
+    # ------------------------------------------------------------------
+    # runs/*.json is the SOURCE OF TRUTH for candidates.csv, which is rebuilt from
+    # it on every merge. If runs/ is gone but candidates.csv still holds facts, the
+    # rebuild writes an (almost) empty table: every accepted fact a human reviewed
+    # is destroyed, and only `superseded` rows survive. That happened silently, and
+    # finalize then reported "no contradictions" over an empty engine input.
+    #
+    # runs/ is easy to lose: the docs call it an engine artifact and the shipped
+    # .gitignore excludes it, so a version-controlled KB loses every fact on a
+    # fresh clone. Until that contract is settled, refuse the destructive write.
+    if not raw_rows:
+        keepable = existing_keepable_rows(root)
+        if keepable and not args.allow_empty:
+            print(
+                f"merge_candidates: REFUSING to rebuild facts/candidates.csv — runs/ yielded 0 candidate "
+                f"rows but candidates.csv still holds {len(keepable)} fact(s).\n"
+                f"  runs/*.json is the source of truth for candidates.csv; rebuilding from an empty runs/ "
+                f"would destroy every reviewed fact and leave only superseded rows.\n"
+                f"  Restore runs/*.json (it must be version-controlled with the KB — see #218), or pass "
+                f"--allow-empty if you really mean to empty this KB.",
+                file=sys.stderr,
+            )
+            return 1
 
     # ------------------------------------------------------------------
     # 2. Normalise and deduplicate

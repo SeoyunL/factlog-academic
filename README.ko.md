@@ -70,13 +70,19 @@ Windows `C:\Users\<이름>`), `--target <경로>` 로 원하는 위치를 고를
 ├── sources/              ← 여기에 내 문서를 넣습니다 (보고서·논문·노트·wiki 등)
 ├── facts/                ← (엔진 산출물) candidates.csv · accepted.dl · logic_report.txt
 ├── policy/               ← (선택) 검토 질문·정책 규칙
-├── runs/                 ← (엔진 산출물) 추출 실행 기록, 바이너리 변환본(runs/sources/)
+├── runs/                 ← **추출 원본** runs/*.json (버전관리 필수) + 변환본 runs/sources/ (재생성 가능)
 ├── pages/ · decisions/   ← (엔진 산출물) 사람이 손대지 않음
 └── templates/
 ```
 
 > **핵심:** 내가 직접 넣는 것은 `<KB>/sources/` 안의 문서뿐입니다. 나머지 폴더는
-> factlog가 채우고 관리합니다. `.docx`·`.pdf` 같은 바이너리도 `sources/` 에 두면
+> factlog가 채우고 관리합니다.
+>
+> **단, `runs/*.json` 은 산출물이 아니라 원본입니다.** `facts/candidates.csv` 는 매
+> 병합마다 `runs/*.json` 에서 **다시 만들어집니다**. 그래서 `runs/*.json` 을 잃으면
+> 사람이 검토해 승인한 사실이 전부 사라집니다. KB를 버전관리한다면 `runs/*.json` 을
+> **반드시 커밋하십시오**. `runs/sources/`(바이너리 변환본)만 재생성 가능하므로
+> `.gitignore` 해도 됩니다. `.docx`·`.pdf` 같은 바이너리도 `sources/` 에 두면
 > `/factlog sync` 가 자동으로 텍스트로 변환합니다(→ `runs/sources/`).
 
 #### candidate vs accepted — 신뢰 경계

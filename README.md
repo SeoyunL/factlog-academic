@@ -80,9 +80,29 @@ extraction reads.
 > Top-level (non-nested) sources are unaffected.
 
 ```bash
-factlog ingest report.docx --target ~/wiki   # → ~/wiki/runs/sources/report.md (pandoc)
+factlog ingest report.docx --target ~/wiki   # → ~/wiki/runs/sources/report.docx.md (pandoc)
 factlog ingest --scan --target ~/wiki        # auto-convert every binary under sources/
 ```
+
+### `runs/*.json` is the source of truth — commit it
+
+`facts/candidates.csv` is **rebuilt from `runs/*.json` on every merge**. It is a
+projection, not a record. Lose `runs/*.json` and every fact a human reviewed and
+accepted is gone — only `superseded` tombstones survive, because those are the
+only rows carried over independently of a backing run.
+
+So if you version-control your KB:
+
+| Path | Commit it? | Why |
+|---|---|---|
+| `sources/` | **yes** | your originals |
+| `runs/*.json` | **yes** | the extracted facts themselves |
+| `facts/`, `pages/`, `decisions/` | yes (or regenerate) | rebuilt from the above |
+| `runs/sources/` | no | text conversions, regenerable with `factlog ingest --scan` |
+
+`merge_candidates` refuses to rebuild a populated `candidates.csv` from an empty
+`runs/`, so this can no longer destroy a KB silently — but the data still has to
+exist somewhere.
 
 ### Active KB (target the set-up KB from anywhere)
 

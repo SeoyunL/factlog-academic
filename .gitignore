@@ -11,8 +11,11 @@ dist/
 venv/
 env/
 
-# factlog runtime artifacts (generated inside a target KB)
-runs/
+# factlog: runs/*.json is NOT an artifact — it is the SOURCE OF TRUTH that
+# facts/candidates.csv is rebuilt from on every merge. Losing it destroys every
+# reviewed fact (#218), so a version-controlled KB MUST commit it.
+# Only the text conversions under runs/sources/ are regenerable (factlog ingest).
+runs/sources/
 
 # oh-my-claudecode session/runtime state — local only, never committed
 .omc/
