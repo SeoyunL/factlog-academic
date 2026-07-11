@@ -170,6 +170,29 @@ RETRACTION_IN_NO_PMID = _wrap(
     "</CommentsCorrectionsList>"
 )
 
+# --- Two RetractionIn comments: the first has no linkable PMID, the second does.
+# The notice PMID is the first *non-empty* one across all comments, not the first
+# element — so an empty lead comment must not shadow a later linkable one.
+MULTI_RETRACTION_IN = _wrap(
+    "<PMID Version=\"1\">42500000</PMID>"
+    "<Article PubModel=\"Electronic\">"
+    "<ArticleTitle>Two RetractionIn comments, first unlinkable.</ArticleTitle>"
+    "<PublicationTypeList>"
+    "<PublicationType UI=\"D016428\">Journal Article</PublicationType>"
+    "</PublicationTypeList>"
+    "</Article>"
+    "<CommentsCorrectionsList>"
+    "<CommentsCorrections RefType=\"RetractionIn\">"
+    "<RefSource>J Example. 2026;4(4):4.</RefSource>"
+    "<PMID Version=\"1\"></PMID>"
+    "</CommentsCorrections>"
+    "<CommentsCorrections RefType=\"RetractionIn\">"
+    "<RefSource>J Example. 2026;5(5):5.</RefSource>"
+    "<PMID Version=\"1\">42599999</PMID>"
+    "</CommentsCorrections>"
+    "</CommentsCorrectionsList>"
+)
+
 
 # ----------------------------------------------------------------------------
 # detect_retraction — the pure function
@@ -234,9 +257,40 @@ def test_retraction_in_with_no_pmid_element_is_none_safe():
     assert status.retraction_notice_pmid is None
 
 
+def test_multiple_retraction_in_takes_first_non_empty_notice_pmid():
+    # NIT: the first RetractionIn comment carries no linkable PMID; the notice
+    # PMID must be the second comment's, not an empty first-element shadow.
+    status = detect_retraction(MULTI_RETRACTION_IN)
+    assert status.retracted is True
+    assert status.via_retraction_in is True
+    assert status.retraction_notice_pmid == "42599999"
+
+
 def test_detect_accepts_a_parsed_element_too():
     element = ET.fromstring(RETRACTED_BOTH)
     assert detect_retraction(element) == detect_retraction(RETRACTED_BOTH)
+
+
+def test_single_record_wrapped_in_a_set_is_unwrapped():
+    # A PubmedArticleSet holding exactly one record is accepted (unwrapped).
+    one = f"<PubmedArticleSet>{RETRACTED_BOTH}</PubmedArticleSet>"
+    assert detect_retraction(one) == detect_retraction(RETRACTED_BOTH)
+
+
+def test_multi_record_set_is_refused_not_ored_across_records():
+    # MINOR 3 footgun: a set with a retracted and a non-retracted record must not
+    # OR their markers into one True. Classifying a batch is not this function's job.
+    both = (
+        "<PubmedArticleSet>"
+        f"{RETRACTED_BOTH}{CONTROL_NOT_RETRACTED}"
+        "</PubmedArticleSet>"
+    )
+    with pytest.raises(ValueError):
+        detect_retraction(both)
+
+
+def test_empty_set_is_not_retracted():
+    assert detect_retraction("<PubmedArticleSet></PubmedArticleSet>").retracted is False
 
 
 def test_detect_rejects_a_non_xml_non_element_input():

@@ -27,8 +27,8 @@ retraction the day they disagree.** So: retracted iff marker 1 OR marker 2.
 ## The false-positive trap this OR is built to avoid (spike §1)
 
 The retraction *notice* is a separate record shaped like a retraction in the
-opposite direction: its PublicationType is ``Retraction Notice`` (not
-``Retracted Publication``) and its ``CommentsCorrections`` RefType is
+opposite direction: its PublicationType is ``Retraction of Publication`` (UI
+``D016440``, not ``Retracted Publication``) and its ``CommentsCorrections`` RefType is
 ``RetractionOf`` (not ``RetractionIn``), pointing *back* at the retracted
 article. Matching by exact string on ``Retracted Publication`` / ``RetractionIn``
 — never a substring search for "retract" — makes the OR naturally exclude the
@@ -69,8 +69,8 @@ __all__ = [
 ]
 
 #: The exact ``PublicationType`` text NLM assigns a retracted article (UI
-#: ``D016441``). Matched exactly — not as a substring — so ``Retraction Notice``
-#: (the notice record's own type) is never mistaken for it.
+#: ``D016441``). Matched exactly — not as a substring — so ``Retraction of
+#: Publication`` (the notice record's own type, UI ``D016440``) is never mistaken for it.
 RETRACTED_PUBLICATION_TYPE = "Retracted Publication"
 
 #: The exact ``CommentsCorrections`` RefType that links a retracted article out
@@ -135,28 +135,52 @@ def _clean(value: str | None) -> str | None:
     return collapsed or None
 
 
-def _as_element(source: ET.Element | str) -> ET.Element:
-    """Accept a parsed element or raw efetch XML; return an element to search.
+def _as_record(source: ET.Element | str) -> ET.Element:
+    """Normalize the input to a *single* record element to search.
 
-    A ``str`` is parsed and its root returned — whether that root is a single
-    ``<PubmedArticle>`` or a ``<PubmedArticleSet>``, the marker search below uses
-    descendant axes, so either works. A non-str, non-Element input is a caller
-    bug and raises ``TypeError`` rather than silently reporting not-retracted.
+    Accepts a single-record element (``<PubmedArticle>`` / ``<MedlineCitation>`` /
+    ``<Article>``) or the raw XML of one. A ``<PubmedArticleSet>`` wrapping exactly
+    one record is unwrapped to that record; an **empty** set is returned as-is (no
+    record, so no markers, so not retracted).
+
+    A set holding *more than one* record is refused with ``ValueError``. The marker
+    search below uses descendant axes (``.//``), which would otherwise OR markers
+    across sibling records — one retracted paper in a batch would flag the whole
+    set. Retraction is a per-record fact, so multi-record classification belongs to
+    ``parse_efetch_response`` (which parses each record on its own), never here. A
+    non-str, non-Element input is a caller bug and raises ``TypeError`` rather than
+    silently reporting not-retracted.
     """
     if isinstance(source, str):
-        return ET.fromstring(source)
-    if isinstance(source, ET.Element):
-        return source
-    raise TypeError(
-        f"detect_retraction expects an XML string or Element, got {type(source).__name__}"
-    )
+        element = ET.fromstring(source)
+    elif isinstance(source, ET.Element):
+        element = source
+    else:
+        raise TypeError(
+            f"detect_retraction expects an XML string or Element, got {type(source).__name__}"
+        )
+    if element.tag == "PubmedArticleSet":
+        articles = element.findall("PubmedArticle")
+        if len(articles) > 1:
+            raise ValueError(
+                "detect_retraction takes a single PubMed record, not a "
+                f"multi-record PubmedArticleSet ({len(articles)} records); the "
+                "descendant-axis marker search would OR retractions across records. "
+                "Classify each record separately (see parse_efetch_response)."
+            )
+        if len(articles) == 1:
+            return articles[0]
+    return element
 
 
 def _has_retracted_publication_type(element: ET.Element) -> bool:
     """True iff a ``PublicationType`` reads exactly ``Retracted Publication``.
 
-    Exact text match (case-insensitive on the controlled term, but never a
-    substring) so ``Retraction Notice`` and ``Published Erratum`` cannot trip it.
+    Exact, case-sensitive text match against NLM's controlled term (never a
+    substring), so ``Retraction of Publication`` and ``Published Erratum`` cannot
+    trip it. Case-sensitivity is deliberate: the value is a controlled MeSH term
+    NLM emits verbatim, so a case difference would signal a feed change worth
+    noticing rather than something to paper over.
     """
     for pub_type in element.iterfind(".//PublicationType"):
         if _clean(pub_type.text) == RETRACTED_PUBLICATION_TYPE:
@@ -190,15 +214,18 @@ def _retraction_in_notice_pmid(element: ET.Element) -> tuple[bool, str | None]:
 def detect_retraction(source: ET.Element | str) -> RetractionStatus:
     """Detect a retraction on one efetch record (or raw efetch XML).
 
-    ``source`` is a ``<PubmedArticle>`` element (as ``work_parser`` holds it), a
-    ``<PubmedArticleSet>``/``<MedlineCitation>`` element, or the raw efetch XML
-    string. The record is retracted iff it carries the ``Retracted Publication``
-    publication type **or** a ``RetractionIn`` comment — the OR the module
-    docstring justifies. Never raises on a normal record; a non-retracted record
-    (and a retraction *notice*, which carries neither marker) returns
+    ``source`` is a *single* record: a ``<PubmedArticle>`` element (as
+    ``work_parser`` holds it), a ``<MedlineCitation>``/``<Article>`` element, the
+    raw efetch XML of one record, or a ``<PubmedArticleSet>`` wrapping exactly one.
+    A multi-record set is refused with ``ValueError`` (see :func:`_as_record`):
+    classifying a batch is ``parse_efetch_response``'s job, not this per-record
+    function's. The record is retracted iff it carries the ``Retracted
+    Publication`` publication type **or** a ``RetractionIn`` comment — the OR the
+    module docstring justifies. Never raises on a normal record; a non-retracted
+    record (and a retraction *notice*, which carries neither marker) returns
     ``retracted=False``.
     """
-    element = _as_element(source)
+    element = _as_record(source)
     via_pub_type = _has_retracted_publication_type(element)
     via_retraction_in, notice_pmid = _retraction_in_notice_pmid(element)
     return RetractionStatus(
