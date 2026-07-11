@@ -665,7 +665,7 @@ def load_logic_policy() -> str:
 
 def policy_predicates(policy_program: str | None = None) -> set[str]:
     text = policy_program if policy_program is not None else load_logic_policy()
-    built_in = {"relation", "edge", "path"}
+    built_in = {"relation", "edge", "path", "attr_rel"}
     return {
         name
         for name in re.findall(r"^\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\(", text, flags=re.MULTILINE)
@@ -1285,7 +1285,9 @@ _TYPED_REL_RE = re.compile(
     r"^(?:`(?P<qname>[^`]+)`|(?P<name>\S+))\s*:\s*(?P<type>\w+)\s+as\s+(?P<alias>\S+)"
     r"(?:\s*\((?P<units>[^)]*)\))?\s*$"
 )
-_TYPED_RESERVED = {"relation", "edge", "path"}  # built-in engine predicates
+# Built-in engine predicates. `attr_rel` joined them with #226: a policy file
+# declaring its own `attr_rel` used to work and now collides with the program.
+_TYPED_RESERVED = {"relation", "edge", "path", "attr_rel"}
 
 
 def _try(fn):
@@ -1833,31 +1835,30 @@ def dependency_graph(
 ) -> dict[str, list[str]]:
     """Edges between entities, mirroring the engine's `edge/2`.
 
-    An edge into a LITERAL NODE is skipped, exactly as the engine rule skips it:
-    the object of an attribute relation is a value (a date, a count), not a node a
-    dependency path can run through (#226). "Literal node" is defined the same way
-    entity_set defines it — an attribute-relation object that is never a subject —
-    because a relation-keyed filter would diverge from entity_set whenever a value
-    also heads a fact of its own: the vocabulary gate would admit it as an entity
-    while the engine reported no path to it, i.e. a false VERIFIED NEGATIVE. A
-    wrong assertion is worse than an honest "cannot express".
+    An ATTRIBUTE RELATION is skipped, exactly as the engine rule skips it: its object
+    is a value (a date, a count), and asserting a value about a thing is not a
+    dependency you can route through (#226).
+
+    The filter keys on the RELATION, not on the node. Keying on the node — "a value
+    that never appears as a subject" — was tried and is wrong in both directions:
+    it deletes a genuinely asserted non-attribute edge into a value that happens to
+    be attributed elsewhere (a real false negative), and one stray fact making a
+    value a subject turns that value back into a hub every path can route through,
+    which is #226 itself.
+
+    A literal can therefore still be an entity (entity_set admits any subject) while
+    no path leads INTO it. That is not a divergence: `path` is defined over
+    dependency edges, so "no dependency path to 2030.1" is an honest verified
+    negative even though 2030.1 heads facts of its own.
 
     Keeping this in step with the engine matters — the report asks the ENGINE
     whether a path exists and then asks THIS to render the trace, so a divergence
     would print a route the engine says does not exist.
     """
     attrs = attribute_relation_forms() if attr_forms is None else attr_forms
-    rows = engine_input_rows(facts)
-    subjects = {row["subject"] for row in rows}
-    literals = {
-        row["object"]
-        for row in rows
-        if unicodedata.normalize("NFC", row["relation"]) in attrs
-        and row["object"] not in subjects
-    }
     graph: dict[str, list[str]] = defaultdict(list)
-    for row in rows:
-        if row["object"] in literals:
+    for row in engine_input_rows(facts):
+        if unicodedata.normalize("NFC", row["relation"]) in attrs:
             continue
         graph[row["subject"]].append(row["object"])
     return graph
@@ -1917,14 +1918,10 @@ WIRELOG_PROGRAM = """
 .decl relation(subject: symbol, rel: symbol, object: symbol)
 .decl canonical(subject: symbol, rel: symbol, object: symbol)
 .decl attr_rel(rel: symbol)
-.decl subj(node: symbol)
-.decl literal_node(value: symbol)
 .decl edge(start: symbol, target: symbol)
 .decl path(start: symbol, target: symbol)
 
-subj(S) :- relation(S, R, O).
-literal_node(O) :- relation(S, R, O), attr_rel(R), !subj(O).
-edge(S, O) :- relation(S, R, O), !literal_node(O).
+edge(S, O) :- relation(S, R, O), !attr_rel(R).
 path(S, O) :- edge(S, O).
 path(S, O) :- edge(S, M), path(M, O).
 """
@@ -1953,7 +1950,15 @@ def attribute_relation_forms(
     alias_map = relation_aliases() if aliases is None else aliases
     forms: set[str] = set()
     for name in declared:
-        canon = unicodedata.normalize("NFC", name)
+        nfc_name = unicodedata.normalize("NFC", name)
+        # Canonicalize the DECLARATION too, not just expand it. Expanding only
+        # canonical -> surface covered a declared canonical whose facts carry an
+        # alias, but not the reverse -- a KB declaring the alias `게재연도` while its
+        # facts say `published_year` had every attribute row miss the filter, and the
+        # scaffold never tells the user which form to declare. Canonicalizing both
+        # sides covers both directions with one rule.
+        canon = alias_map.get(nfc_name, nfc_name)
+        forms.add(nfc_name)
         forms.add(canon)
         forms |= surface_variants(canon, alias_map)
     return forms

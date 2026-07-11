@@ -70,7 +70,7 @@ class TestDependencyGraph:
 
 class TestEngineProgram:
     def test_the_edge_rule_excludes_attribute_relations(self):
-        assert "!literal_node(O)" in common.WIRELOG_PROGRAM
+        assert "!attr_rel(R)" in common.WIRELOG_PROGRAM
 
     def test_no_declarations_emit_no_attr_facts(self, kb):
         # A KB that declares nothing must produce a byte-identical program.
@@ -88,6 +88,19 @@ class TestEngineProgram:
 # The string assertions above pass even when the `.decl attr_rel` line is deleted:
 # the engine then fails to load the relation, the filter dies silently, and the
 # literal comes back as a path node. Only running the engine catches that.
+
+try:
+    import pyrewire as _pyrewire  # noqa: F401
+
+    _HAVE_ENGINE = True
+except ImportError:  # pragma: no cover - depends on the install
+    _HAVE_ENGINE = False
+
+# Decide engine availability in the PARENT, once. Sniffing the child's stderr for
+# "No module named" swallowed any ImportError in our own code as "no engine", which
+# is how deleting `.decl attr_rel` once passed as 4 skips.
+pytestmark = pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
+
 
 def _kb(tmp_path, rows, policy, aliases=None):
     kb = tmp_path / "kb"
@@ -144,9 +157,6 @@ print(json.dumps({"engine": eng, "tracer": sorted(py), "entities": sorted(c.enti
         # and rejected OUR program is a failure, not a skip: deleting the
         # `.decl attr_rel` line makes the filter die silently, and a blanket skip
         # here reported that as green.
-        missing = "No module named" in proc.stderr or "pyrewire" in proc.stderr.lower() and "version" in proc.stderr.lower()
-        if missing:
-            pytest.skip(f"pyrewire unavailable: {proc.stderr[-200:]}")
         raise AssertionError(f"engine rejected the program:\n{proc.stderr[-800:]}")
     got = json.loads(proc.stdout.strip().splitlines()[-1])
     return (
@@ -166,16 +176,36 @@ def test_engine_drops_pure_literal_from_paths(tmp_path):
     assert eng == tracer  # the report asks the engine, then renders with the tracer
 
 
-def test_literal_that_is_also_a_subject_stays_reachable(tmp_path):
-    """entity_set admits it as an entity, so the engine must NOT deny the path.
+def test_a_literal_never_becomes_a_hub(tmp_path):
+    """One stray fact making a value a subject must NOT reopen #226.
 
-    Otherwise the vocabulary gate lets the query through and the engine answers a
-    false `verified negative` about a chain that genuinely exists.
+    A node-keyed filter ("a value that never appears as a subject") was tried, and
+    a single row like `2020 비고 코로나_유행` turned the year back into a hub every
+    paper routed through — the exact symptom #226 reports. The filter keys on the
+    RELATION, so the year stays off every path regardless of what else it heads.
     """
-    rows = [*ROWS, ("2030.1", "비고", "메모")]
-    eng, tracer, ents = _engine_and_tracer(_kb(tmp_path, rows, "정식_운영\n"))
-    assert "2030.1" in ents
-    assert ("갑", "2030.1") in eng
+    rows = [
+        ("논문A", "published_year", "2020"),
+        ("논문B", "published_year", "2020"),
+        ("2020", "비고", "코로나_유행"),
+    ]
+    eng, tracer, _ = _engine_and_tracer(_kb(tmp_path, rows, "published_year\n"))
+    assert ("논문A", "2020") not in eng
+    assert ("논문A", "코로나_유행") not in eng  # no routing THROUGH the year
+    assert ("2020", "코로나_유행") in eng  # the year's own fact still holds
+    assert eng == tracer
+
+
+def test_a_real_edge_into_an_attributed_value_survives(tmp_path):
+    """A non-attribute relation into a value is a genuine edge and must stay.
+
+    The node-keyed filter deleted it — `병 참조 2030.1` was asserted and accepted,
+    yet the engine answered "no path", a real false verified negative.
+    """
+    rows = [*ROWS, ("병", "참조", "2030.1")]
+    eng, tracer, _ = _engine_and_tracer(_kb(tmp_path, rows, "정식_운영\n"))
+    assert ("병", "2030.1") in eng
+    assert ("갑", "2030.1") not in eng  # the attribute link is still not an edge
     assert eng == tracer
 
 
@@ -185,6 +215,21 @@ def test_filter_survives_a_relation_alias(tmp_path):
     kb = _kb(
         tmp_path, rows, "published_year\n", aliases="- `게재연도` -> `published_year`\n"
     )
+    eng, tracer, ents = _engine_and_tracer(kb)
+    assert "2020" not in ents
+    assert ("갑", "2020") not in eng
+    assert eng == tracer
+
+
+def test_filter_survives_a_REVERSE_alias(tmp_path):
+    """Declaring the ALIAS must filter facts stored under the canonical.
+
+    Expanding canonical -> surface only covered one direction, and the scaffold never
+    tells the user which form to declare, so a KB declaring `게재연도` while its facts
+    said `published_year` had every attribute row miss the filter.
+    """
+    rows = [("갑", "통합", "을"), ("을", "published_year", "2020")]
+    kb = _kb(tmp_path, rows, "게재연도\n", aliases="- `게재연도` -> `published_year`\n")
     eng, tracer, ents = _engine_and_tracer(kb)
     assert "2020" not in ents
     assert ("갑", "2020") not in eng
