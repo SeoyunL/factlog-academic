@@ -251,6 +251,46 @@ Settings resolve in the order `<KB>/policy/arxiv-config.toml` >
 secrets boundary**: `email` is not authentication but an identification courtesy
 carried in the User-Agent.
 
+### Importing PubMed records (`factlog pubmed-*`)
+
+You can search and import biomedical records from [PubMed](https://pubmed.ncbi.nlm.nih.gov)
+(NCBI E-utilities) by PMID, re-check whether a record's metadata or retraction
+status has drifted, and turn a paper's PubMed MeSH terms into vocabulary
+proposals. Imported items are still **candidates** and pass the
+`sync → review → accept` gate. This needs `pip install 'factlog[pubmed]'`.
+
+```bash
+factlog pubmed-search --query "immune checkpoint" --mesh "Neoplasms" --limit 25
+factlog pubmed-import --pmid 16354850                # repeatable, up to 200 per run
+factlog pubmed-refresh --older-than 30               # reports drift; --auto-update records identifier/journal
+factlog pubmed-acknowledge-retraction --id 16354850
+factlog pubmed-backfill-provenance --dry-run         # gives a ledger to front-matter-only papers
+factlog pubmed-mesh --for <slug>                     # propose MeSH vocabulary from a paper's ledger PMID
+```
+
+**Determinism boundary** — the order that keeps PubMed a reported track, not an
+authority.
+
+1. Import has no ledger authority — a record is a candidate until it passes
+   `sync → review → accept`.
+2. `pubmed-refresh` reports drift. `--auto-update` writes only the identifier and
+   journal fields to the ledger, never `sources/*.md`.
+3. **A retraction is never auto-absorbed.** PubMed is the source of truth here
+   (OpenAlex's `is_retracted` has documented false positives, #51); a detected
+   retraction surfaces on every run until `pubmed-acknowledge-retraction` records
+   that a human saw it.
+4. A deleted PMID is flagged, never silently dropped; a merged PMID is reported,
+   never silently rewritten.
+5. MeSH terms from PubMed and OpenAlex coexist, each source-scoped. PubMed's carry
+   the major/minor distinction OpenAlex cannot supply reliably before ~2022 (#53).
+
+An API key is optional for NCBI but, for factlog's batched requests, effectively
+required — without one E-utilities throttles hard. It is read from the
+`NCBI_API_KEY` environment variable, `~/.config/factlog/pubmed.toml`, or an
+explicitly passed path, and **deliberately never from a KB `policy/` file** (a KB
+is often its own committed repo, so the secrets boundary keeps the credential out
+of it). See `docs/pubmed.md` for the full walkthrough.
+
 ### Discovering the vocabulary (`factlog vocab`)
 
 `ask` and `provenance` need exact entity/relation names. `factlog vocab` lists
