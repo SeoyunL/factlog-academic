@@ -1515,20 +1515,33 @@ def _assert_no_canonical_head(policy_text: str) -> None:
         if line.strip() and not line.strip().startswith(("//", "#"))
     ]
     bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
+    # A `.decl` directive has no clause-terminating '.', so it runs into the next
+    # statement. Pull the directives out first, check them, and match heads on what is
+    # left.
+    for name in re.findall(r"^\s*\.decl\s+([A-Za-z_][A-Za-z0-9_]*)", bare, re.MULTILINE):
+        if name in _SOURCES:
+            raise FactlogError(
+                f"{name} is a reserved engine predicate (populated from "
+                f"{_SOURCES[name]}) and is already declared by the engine; remove the "
+                f".decl from logic-policy(.extra).dl"
+            )
+    bare = re.sub(r"^\s*\.decl\s+[^\n]*$", "", bare, flags=re.MULTILINE)
+
     for statement in _split_policy_statements(bare):
-        for name, source in _SOURCES.items():
-            head_pos = statement.find(f"{name}(")
-            if head_pos < 0:
-                continue
-            neck_pos = statement.find(":-")
-            if neck_pos < 0 or head_pos < neck_pos:
-                # A bare fact (no neck) or the predicate left of the neck → head.
-                raise FactlogError(
-                    f"{name} is a reserved engine EDB predicate (populated from "
-                    f"{source}); it may appear only in rule bodies, not as a "
-                    f"rule head/fact in logic-policy(.extra).dl"
-                )
-            # To the right of the neck → body reference → allowed.
+        # Tokenize the HEAD; do not substring-search the statement. A substring search
+        # was wrong in both directions: `attr_rel (R) :- ...` (one space) slipped past
+        # it and #226 came back with rc=0, while `not_canonical(X, ...) :- ...` -- a
+        # user predicate that merely CONTAINS the reserved name -- was rejected, so a
+        # KB that worked before could no longer run `factlog check`.
+        head = statement.split(":-", 1)[0]
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", head)
+        if m and m.group(1) in _SOURCES:
+            name = m.group(1)
+            raise FactlogError(
+                f"{name} is a reserved engine EDB predicate (populated from "
+                f"{_SOURCES[name]}); it may appear only in rule bodies, not as a "
+                f"rule head/fact in logic-policy(.extra).dl"
+            )
 
 
 def _split_policy_statements(text: str) -> list[str]:

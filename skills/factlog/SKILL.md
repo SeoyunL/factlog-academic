@@ -266,8 +266,11 @@ first-class entity. The guarantee is about the RELATION: no edge is drawn ALONG 
 attribute relation, so no path reaches a value by way of one. A value that appears
 nowhere else is therefore kept OUT of the entity set — not listed, not a path node,
 not a `count` subject — and the query translator won't mistake a date for an entity.
-A value that ALSO appears as a subject of its own fact, or as the object of a
-non-attribute relation, is an ordinary entity, and paths may run through it. They remain fully verifiable as relation
+A value that is a SUBJECT of its own fact is an ordinary entity and a path may START
+at it — but a path still cannot END at it or run THROUGH it, since the only link
+pointing into it is the attribute relation, which is not an edge. If some
+NON-attribute relation has the value as its object, that link is an edge, so a path
+may end at the value and run through it. They remain fully verifiable as relation
 objects — `relation("을서비스", "정식_운영", "2030.1")?` still resolves. The file is
 optional; with no declarations the entity set is unchanged (every object is an
 entity). Run `tools/entity_audit.py` to find candidates (objects that look like

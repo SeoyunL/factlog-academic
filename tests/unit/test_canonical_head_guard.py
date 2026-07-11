@@ -173,3 +173,36 @@ class TestLoadLogicPolicyCanonicalHeadGuard:
         dl = _make_kb(tmp_path, dl_text=dl_text, extra_text=extra_text)
         result = fcommon._load_logic_policy_from(dl)
         assert "canonical" in result
+
+
+class TestHeadIsMatchedAsAToken:
+    """The guard tokenizes the head. Substring-searching it was wrong BOTH ways: a
+    single space slipped a reserved head past it (and #226 came back with rc=0), while
+    a user predicate that merely CONTAINS a reserved name was rejected, so a KB that
+    ran fine before could no longer run `factlog check`."""
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            'attr_rel (R) :- relation(S, R, O).',  # one space
+            'canonical (S, R, O) :- relation(S, R, O).',
+            'attr_rel("정식_운영").',  # a bare fact
+            ".decl attr_rel(rel: symbol)",  # a redeclaration
+        ],
+    )
+    def test_a_reserved_head_is_rejected_however_it_is_spaced(self, policy):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            'not_canonical(X, "unaliased") :- relation(X, "depends_on", Y).',
+            "no_attr_rel(R) :- relation(S, R, O).",
+            "attr_rel_ok(R) :- relation(S, R, O).",
+            'ok(X, "r") :- canonical(X, R, O).',  # a body reference is the point of it
+            '.decl ok(entity: symbol, reason: symbol)\nok(X, "r") :- attr_rel(R).',
+        ],
+    )
+    def test_a_predicate_that_merely_contains_a_reserved_name_is_allowed(self, policy):
+        fcommon._assert_no_canonical_head(policy)
