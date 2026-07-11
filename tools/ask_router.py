@@ -70,11 +70,10 @@ from common import (  # noqa: E402
     canonical_value,
     canonical_variants_of,
     is_quoted_string,
-    is_variable,
     query_args,
     classify_query,
     dependency_graph,
-    dependency_path,
+    path_query_rows,
     entity_set,
     fact_signals,
     load_accepted_facts,
@@ -413,17 +412,7 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         }
         return {"rows": [[str(len(objects))]], "count": len(objects)}
     if predicate == "path":
-        if len(args) == 2 and all(is_quoted_string(a) for a in args):
-            path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
-            rows = [path] if path else []
-        else:
-            rows = [
-                [start, target]
-                for (start, target) in sorted(_reachable_pairs(facts))
-                if (len(args) == 2
-                    and (is_variable(args[0]) or arg_value(args[0]) == start)
-                    and (is_variable(args[1]) or arg_value(args[1]) == target))
-            ]
+        rows = path_query_rows(args, facts)
         return {"rows": rows, "count": len(rows)}
     if predicate in policy_predicates(_policy_program_optional()):
         # Engine evaluation of a policy predicate re-loads the policy program AND

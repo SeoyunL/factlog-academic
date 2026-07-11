@@ -1845,6 +1845,53 @@ def dependency_graph(facts: list[dict[str, str]]) -> dict[str, list[str]]:
     return graph
 
 
+def reachable_pairs(facts: list[dict[str, str]]) -> set[tuple[str, str]]:
+    """Transitive closure of the engine's `path/2`, in pure python.
+
+    Mirrors WIRELOG_PROGRAM without needing the engine, so a variable `path` query
+    resolves before `/factlog check` has run.
+    """
+    graph = dependency_graph(facts)
+    pairs: set[tuple[str, str]] = set()
+    for start in list(graph):
+        seen: set[str] = set()
+        stack = list(graph.get(start, []))
+        while stack:
+            node = stack.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            pairs.add((start, node))
+            stack.extend(graph.get(node, []))
+    return pairs
+
+
+def path_query_rows(args: list[str], facts: list[dict[str, str]]) -> list[list[str]]:
+    """Rows answering a `path` query, whether its arguments are constants or variables.
+
+    THE shared answer, so the report and the ask router cannot disagree. They did: the
+    report only handled two quoted constants, so `path("A", X)?` produced no result
+    line at all, the result list came back empty, and main's fallback printed
+    `no facts/query.dl found` about a file that was right there -- while ask answered
+    the same question with two rows (#220). #213 unified relation and count this way;
+    path was left behind.
+
+    Two constants yield the TRACE (the route), a variable yields one row per matching
+    reachable pair -- the same shapes the two callers already rendered.
+    """
+    if len(args) != 2:
+        return []
+    if all(is_quoted_string(a) for a in args):
+        path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
+        return [path] if path else []
+    return [
+        [start, target]
+        for (start, target) in sorted(reachable_pairs(facts))
+        if (is_variable(args[0]) or arg_value(args[0]) == start)
+        and (is_variable(args[1]) or arg_value(args[1]) == target)
+    ]
+
+
 def dependency_path(facts: list[dict[str, str]], start: str, target: str) -> list[str]:
     graph = dependency_graph(facts)
     # The engine defines path/2 only over edges (path(S,O):-edge(S,O) / :-edge(S,M),
