@@ -3671,13 +3671,15 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
             print(f"factlog pubmed-refresh: {exc}", file=sys.stderr)
             return 1
 
-    # Record what was actually observed this run: every record PubMed answered gets a fresh
-    # timestamp. A per-id error is left as it was so it is retried. Nothing under sources/ is
-    # touched — the check-log is the only thing report-only ever writes.
+    # Record what was actually observed this run: only a record whose state was confirmed
+    # under the requested PMID gets a fresh timestamp. A per-id error, a merged PMID, and a
+    # deleted PMID (#170) are deliberately left unadvanced so they keep surfacing every run
+    # until a human acts — the same "never silently drop" contract a retraction has. Nothing
+    # under sources/ is touched — the check-log is the only thing report-only ever writes.
     now_iso = now.isoformat()
     recorded_any = False
     for result in results:
-        if result.status != rf.STATUS_ERROR:
+        if result.status in (rf.STATUS_UNCHANGED, rf.STATUS_CHANGED):
             record_check(check_log, result.pmid, now_iso)
             recorded_any = True
     if recorded_any:
@@ -3704,7 +3706,11 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
         ):
             print(line)
     update_errors = any(u.status == rf.UPDATE_ERROR for u in updates)
-    return 1 if summary.errors or update_errors else 0
+    # A merged or deleted PMID (#170) reaches the exit code like a per-id error (#112's
+    # principle): the KB holds a PMID PubMed no longer serves under, so its state could not
+    # be confirmed and a human must act. A command returning 0 while that is true is the
+    # silent direction a script keying only on the exit status would misread as healthy.
+    return 1 if summary.errors or update_errors or summary.merged or summary.deleted else 0
 
 
 def cmd_pubmed_acknowledge_retraction(args: argparse.Namespace) -> int:

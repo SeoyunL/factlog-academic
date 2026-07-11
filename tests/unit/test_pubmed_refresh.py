@@ -256,6 +256,77 @@ class _Work:
         self.journal = journal
 
 
+class TestMergedDeletedClassification:
+    """#170: check_entries consumes the parser's four signals; neither merged nor deleted
+    writes, and an unparseable record is an error, not a deletion."""
+
+    def test_merged_is_status_merged_with_both_ids(self):
+        client = FakeClient({"111": _set(_record_xml("999"))})
+        [result] = rf.check_entries([rf.LedgerEntry(pmid="111")], client)
+        assert result.status == rf.STATUS_MERGED
+        assert result.pmid == "111"  # requested id kept
+        assert result.returned_pmid == "999"  # survivor id exposed
+        assert "merged into PMID 999" in result.reason
+
+    def test_deleted_is_status_deleted(self):
+        client = FakeClient({})  # empty response for 111
+        [result] = rf.check_entries([rf.LedgerEntry(pmid="111")], client)
+        assert result.status == rf.STATUS_DELETED
+        assert result.pmid == "111"
+        assert result.returned_pmid is None
+
+    def test_present_is_still_diffed(self):
+        client = FakeClient({"111": _set(_record_xml("111", retracted=True))})
+        [result] = rf.check_entries([rf.LedgerEntry(pmid="111")], client)
+        assert result.status == rf.STATUS_CHANGED and result.newly_retracted
+
+    def test_unparseable_record_is_error_not_deleted(self):
+        # A record came back for the request but has no <PMID>: it lands in the parser's
+        # `unparseable` bucket AND the requested id lands in `deleted` (nothing matched).
+        # This must be a per-id ERROR, never a false "deleted upstream".
+        body = "<PubmedArticleSet><PubmedArticle><MedlineCitation></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+        client = FakeClient({"111": body})
+        [result] = rf.check_entries([rf.LedgerEntry(pmid="111")], client)
+        assert result.status == rf.STATUS_ERROR
+        assert result.status != rf.STATUS_DELETED
+        assert "could not be parsed" in result.reason and "not a deletion" in result.reason
+
+    def test_deleted_network_unparseable_are_three_distinct_states(self):
+        empty = FakeClient({})  # deleted: empty well-formed response
+        [deleted] = rf.check_entries([rf.LedgerEntry(pmid="111")], empty)
+        assert deleted.status == rf.STATUS_DELETED
+
+        bad = FakeClient({"111": "<PubmedArticleSet><PubmedArticle><MedlineCitation></MedlineCitation></PubmedArticle></PubmedArticleSet>"})
+        [unparse] = rf.check_entries([rf.LedgerEntry(pmid="111")], bad)
+        assert unparse.status == rf.STATUS_ERROR
+
+        down = FakeClient({}, raise_exc=PubMedConnectionError("down"))
+        # a network failure PROPAGATES (never becomes a per-id status at all)
+        with pytest.raises(PubMedConnectionError):
+            rf.check_entries([rf.LedgerEntry(pmid="111")], down)
+
+    def test_merged_note_names_both_ids_and_offers_only(self):
+        result = rf.RefreshCheck(pmid="111", status=rf.STATUS_MERGED, returned_pmid="999")
+        note = rf.merged_note(result)
+        assert "111" in note and "999" in note
+        assert "NOT rewritten" in note and "human decision" in note
+
+    def test_deleted_note_keeps_the_entry(self):
+        result = rf.RefreshCheck(pmid="111", status=rf.STATUS_DELETED)
+        note = rf.deleted_note(result)
+        assert "deleted upstream" in note and "kept, not dropped" in note
+
+    def test_summary_counts_merged_and_deleted_separately(self):
+        results = [
+            rf.RefreshCheck(pmid="1", status=rf.STATUS_MERGED, returned_pmid="9"),
+            rf.RefreshCheck(pmid="2", status=rf.STATUS_DELETED),
+            rf.RefreshCheck(pmid="3", status=rf.STATUS_UNCHANGED),
+        ]
+        summary = rf.summarize(results, [])
+        assert summary.merged == 1 and summary.deleted == 1
+        assert summary.checked == 1  # merged/deleted excluded from "checked"
+
+
 class TestFreshnessAndFlagged:
     def test_recent_check_is_skipped_older_forces_recheck(self):
         entries = [rf.LedgerEntry(pmid="1")]
@@ -401,27 +472,112 @@ class TestReportOnly:
         assert _snapshot(kb) == before
         assert not check_log_path(kb).exists()
 
-    def test_deleted_pmid_is_a_per_id_error_exit_1(self, tmp_path, fake, capsys):
+    def test_deleted_pmid_is_flagged_not_dropped_exit_1(self, tmp_path, fake, capsys):
         kb = _kb(tmp_path)
         _add_paper(kb, "a", "111")
         _add_paper(kb, "b", "222")
-        # 111 answers, 222 comes back empty (deleted) -> per-id error
+        before = _snapshot(kb)
+        # 111 answers, 222 comes back empty (deleted upstream) -> a review flag, not a drop
         fake(FakeClient({"111": _set(_record_xml("111"))}))
         rc = run(["pubmed-refresh", "--target", str(kb)])
         out = capsys.readouterr().out
-        assert rc == 1  # an unresolvable id is an error
-        assert "Could not check" in out and "222" in out
-        # the record that DID answer still advanced the check-log; the errored one did not
+        assert rc == 1  # an unresolvable id reaches the exit code (#112 principle)
+        assert "Deleted upstream" in out and "222" in out
+        assert "the KB entry is kept, not dropped" in out
+        assert "Deleted upstream:     1" in out
+        # the KB entry for the deleted PMID is UNTOUCHED: sources/*.md and sidecar immutable
+        assert _snapshot(kb) == before
+        assert (kb / "sources" / "b.md").exists()
+        # the record that DID answer advanced the check-log; the deleted one did NOT, so it
+        # keeps surfacing every run until a human acts (never silently dropped)
         log = read_check_log(check_log_path(kb))
         assert "111" in log.entries and "222" not in log.entries
 
-    def test_connection_failure_aborts_without_writing_checklog(self, tmp_path, fake):
+    def test_merged_pmid_reports_both_ids_and_never_rewrites_kb(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111")
+        before = _snapshot(kb)
+        # request 111, PubMed returns the record under 999 (NCBI merged the two)
+        fake(FakeClient({"111": _set(_record_xml("999"))}))
+        rc = run(["pubmed-refresh", "--target", str(kb)])
+        out = capsys.readouterr().out
+        assert rc == 1  # unresolvable under the recorded PMID -> exit code
+        assert "Merged upstream" in out
+        assert "111" in out and "999" in out  # BOTH ids reported
+        assert "is NOT rewritten" in out
+        assert "Merged upstream:      1" in out
+        # the KB is not silently re-keyed: files byte-identical, ledger keeps original pmid
+        assert _snapshot(kb) == before
+        rec = read_provenance(sidecar_path(kb / "sources" / "a.md", kb)).records[0]
+        assert rec.id == "111"
+        # a merged PMID does not advance the check-log either: it keeps surfacing
+        log = read_check_log(check_log_path(kb))
+        assert "111" not in log.entries
+
+    def test_merged_surfaces_survivor_retraction_when_present(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111")
+        # the survivor 999 is itself reported RETRACTED — a fact-checking signal to surface
+        fake(FakeClient({"111": _set(_record_xml("999", retracted=True, notice_pmid="777"))}))
+        rc = run(["pubmed-refresh", "--target", str(kb)])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "surviving record is currently reported RETRACTED" in out
+        assert "777" in out
+
+    def test_merged_porcelain_row_carries_survivor_pmid(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111")
+        fake(FakeClient({"111": _set(_record_xml("999"))}))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--porcelain"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "check\t111\tmerged\t0\t0\tmerged into PMID 999" in out
+        assert "merged\t1" in out
+
+    def test_deleted_porcelain_row(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111")
+        fake(FakeClient({}))  # empty response for 111 -> deleted
+        rc = run(["pubmed-refresh", "--target", str(kb), "--porcelain"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "check\t111\tdeleted\t0\t0\t" in out
+        assert "deleted\t1" in out
+
+    def test_unparseable_response_is_error_not_deleted(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111")
+        before = _snapshot(kb)
+        # a record comes back but has no <PMID> — parseable-as-XML, unreducible-as-record
+        body = "<PubmedArticleSet><PubmedArticle><MedlineCitation></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+        fake(FakeClient({"111": body}))
+        rc = run(["pubmed-refresh", "--target", str(kb)])
+        out = capsys.readouterr().out
+        assert rc == 1
+        # reported as a per-id error, NEVER as a deletion (the record did come back)
+        assert "Could not check" in out and "111" in out
+        assert "not a deletion" in out
+        assert "Deleted upstream (flagged for review" not in out
+        assert "has been deleted upstream" not in out
+        assert "Deleted upstream:     0" in out  # tally shows zero deletions
+        # KB untouched and the errored id did NOT advance the check-log
+        assert _snapshot(kb) == before
+        log = read_check_log(check_log_path(kb))
+        assert "111" not in log.entries
+
+    def test_connection_failure_aborts_without_writing_checklog(self, tmp_path, fake, capsys):
         kb = _kb(tmp_path)
         _add_paper(kb, "a", "111")
         fake(FakeClient({}, raise_exc=PubMedConnectionError("down")))
         rc = run(["pubmed-refresh", "--target", str(kb)])
+        out, err = capsys.readouterr()
         assert rc == 2
         assert not check_log_path(kb).exists()
+        # #170: a network failure is reported as a network failure, never flagged as a
+        # deleted PMID — a flaky connection must not mark a live paper as gone.
+        assert "Deleted upstream" not in out
+        assert "down" in err
 
     def test_porcelain_rows(self, tmp_path, fake, capsys):
         kb = _kb(tmp_path)
@@ -472,6 +628,7 @@ class TestConfirmation:
 # retraction, never a source .md; unchanged means byte-identical (#121).
 # --------------------------------------------------------------------------- #
 DOI = "10.1234/new"
+OTHER_DOI = "10.9999/other"
 
 
 class TestAutoUpdateEnumeration:
@@ -657,8 +814,61 @@ class TestAutoUpdateFailureIsolation:
         assert "read-only ledger" in outcomes[0].reason
 
     def test_error_result_is_skipped_by_auto_update(self, tmp_path):
-        # A deleted/merged PMID (#170's job to follow) is an error result: --auto-update
-        # writes nothing for it.
+        # An error result has nothing confirmed: --auto-update writes nothing for it.
         kb = _kb(tmp_path)
-        err = rf.RefreshCheck(pmid="111", status=rf.STATUS_ERROR, reason="deleted")
+        err = rf.RefreshCheck(pmid="111", status=rf.STATUS_ERROR, reason="unparseable")
         assert rf.apply_auto_update([err], kb) == []
+
+    def test_merged_and_deleted_results_are_skipped_by_auto_update(self, tmp_path):
+        # #170: a merged PMID is surface-only — --auto-update NEVER re-keys it (a re-key is a
+        # human's P1 decision). A deleted PMID is gone. Both are skipped entirely, even when
+        # a ledger sidecar exists for the record.
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=DOI)
+        merged = rf.RefreshCheck(
+            pmid="111", status=rf.STATUS_MERGED, returned_pmid="999",
+            recorded_journal="J", recorded_doi=DOI,
+            sources=("source-provenance/a.json",),
+        )
+        deleted = rf.RefreshCheck(
+            pmid="111", status=rf.STATUS_DELETED,
+            recorded_journal="J", recorded_doi=DOI,
+            sources=("source-provenance/a.json",),
+        )
+        assert rf.apply_auto_update([merged], kb) == []
+        assert rf.apply_auto_update([deleted], kb) == []
+
+
+class TestAutoUpdateMergedSurfaceOnly:
+    """#170 decision, wired to #169's flag: --auto-update surfaces a merged PMID (offer),
+    never follows it. Neither the recorded PMID nor the ledger is rewritten."""
+
+    def test_merged_under_auto_update_offers_only_and_writes_nothing(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=DOI)
+        before = _snapshot(kb)
+        # request 111, PubMed returns the record under 999, and we pass --auto-update
+        fake(FakeClient({"111": _set(_record_xml("999", journal="NewJournal", doi=OTHER_DOI))}))
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        # offered, not followed: both ids surfaced, and NO ledger write happened even under
+        # --auto-update (the survivor's journal/doi are NOT written to 111's record)
+        assert "Merged upstream" in out and "999" in out
+        assert "Ledger updated" not in out
+        assert _snapshot(kb) == before  # sources/*.md AND sidecar byte-identical
+        rec = read_provenance(sidecar_path(kb / "sources" / "a.md", kb)).records[0]
+        assert rec.id == "111"  # PMID unchanged
+        assert rec.fields.get("journal") == "J"  # survivor's journal NOT absorbed
+        assert rec.fields.get("doi") == DOI  # survivor's doi NOT absorbed
+
+    def test_deleted_under_auto_update_writes_nothing(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        _add_paper(kb, "a", "111", journal="J", doi=DOI)
+        before = _snapshot(kb)
+        fake(FakeClient({}))  # empty -> deleted
+        rc = run(["pubmed-refresh", "--target", str(kb), "--auto-update"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Deleted upstream" in out
+        assert _snapshot(kb) == before  # KB entry kept, nothing written

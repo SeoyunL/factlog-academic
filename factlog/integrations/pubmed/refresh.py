@@ -13,7 +13,11 @@ metadata with what the ledger recorded. It **reports** the divergence. Without
 thing it advances is the KB-level check-log's last-checked timestamps.
 
 It is the PubMed counterpart of ``openalex-refresh`` (#83) and ``arxiv-check-versions``
-(#78/#79). Following a merged/deleted PMID is #170 and is not implemented here.
+(#78/#79). A merged or deleted PMID is handled (#170), but only to *surface* it: a merge is
+reported with both PMIDs and offered — never followed, not even under ``--auto-update`` —
+because a PMID is a ``CROSS_SOURCE_IDS`` identifier and re-keying is a human decision (P1);
+a deletion is flagged for review and the KB entry is never dropped; a network failure stays
+a network failure and is never mistaken for a deletion. See :func:`check_entries`.
 
 ## What a refresh compares — and what ``--auto-update`` may write (#169)
 
@@ -101,6 +105,8 @@ __all__ = [
     "STATUS_CHANGED",
     "STATUS_ERROR",
     "STATUS_SKIPPED",
+    "STATUS_MERGED",
+    "STATUS_DELETED",
     "UPDATE_WRITTEN",
     "UPDATE_UNCHANGED",
     "UPDATE_NO_LEDGER",
@@ -120,6 +126,8 @@ __all__ = [
     "provenance_of",
     "retraction_note",
     "un_retraction_note",
+    "merged_note",
+    "deleted_note",
     "report_lines",
     "porcelain_lines",
     "estimate_lines",
@@ -160,6 +168,15 @@ STATUS_UNCHANGED = "unchanged"
 STATUS_CHANGED = "changed"
 STATUS_ERROR = "error"
 STATUS_SKIPPED = "skipped"
+#: A PMID PubMed answered under a *different* PMID (NCBI merged two records; #170).
+#: Distinct from an error: efetch succeeded and named the survivor — a human decides
+#: whether to follow the pointer, so it is surfaced (with both ids), never auto-followed,
+#: not even under ``--auto-update`` (:func:`apply_auto_update` skips it).
+STATUS_MERGED = "merged"
+#: A PMID PubMed no longer serves at all — an empty (well-formed) response, not a network
+#: failure (#170). Flagged for human review; the KB entry is never dropped, because a
+#: deleted PMID is usually a signalled removal a fact-checking tool must surface.
+STATUS_DELETED = "deleted"
 
 
 @dataclass(frozen=True)
@@ -198,6 +215,10 @@ class RefreshCheck:
     ``recorded_from`` is ``"ledger"`` or ``"front-matter"`` so a note never claims "the
     ledger recorded" a value that came from front matter. For an error result the ``pmid``
     may instead be a ledger/source path and ``reason`` explains it.
+
+    ``returned_pmid`` is set only for :data:`STATUS_MERGED`: the PMID PubMed served the
+    record under, so both the requested (:attr:`pmid`) and the survivor id are reported and
+    a human can decide whether to follow the merge. The KB is never silently re-keyed.
     """
 
     pmid: str
@@ -215,6 +236,7 @@ class RefreshCheck:
     recorded_from: str = "ledger"
     reason: str = ""
     sources: tuple[str, ...] = ()
+    returned_pmid: str | None = None
 
 
 def _relative(path: Path, kb_root: Path) -> str:
@@ -465,6 +487,87 @@ def _diff(entry: LedgerEntry, work) -> RefreshCheck:
     )
 
 
+def _merged_record(outcome, requested_pmid: str):
+    """The :class:`MergedRecord` for *requested_pmid*, or ``None`` if none merged it.
+
+    ``check_entries`` fetches one PMID at a time, so the parser's single-request merge rule
+    fires and pairs the merge unambiguously (``requested_pmid`` is set). We still tolerate a
+    ``None`` (ambiguous) pairing — with a lone request there can be at most one merged
+    record, and it is this entry's — so the match is by the requested id, falling back to a
+    solitary unpaired merge.
+    """
+    for record in outcome.merged:
+        if record.requested_pmid == requested_pmid:
+            return record
+    for record in outcome.merged:
+        if record.requested_pmid is None:
+            return record
+    return None
+
+
+def _merged_check(entry: LedgerEntry, merged) -> RefreshCheck:
+    """A :data:`STATUS_MERGED` result carrying both the requested and the returned PMID.
+
+    The retraction status of the survivor is read for the report, but the merge is only
+    *offered*: nothing here re-keys the KB, and :func:`apply_auto_update` skips it entirely,
+    so ``--auto-update`` never follows a merge either. ``reason`` carries the survivor id so
+    the porcelain row exposes it without a new column."""
+    return RefreshCheck(
+        pmid=entry.pmid,
+        status=STATUS_MERGED,
+        returned_pmid=merged.returned_pmid,
+        recorded_doi=entry.recorded_doi,
+        recorded_journal=entry.recorded_journal,
+        current_retracted=bool(merged.work.retracted),
+        current_notice_pmid=merged.work.retraction_notice_pmid,
+        recorded_retracted=entry.recorded_retracted,
+        recorded_from=provenance_of(entry.sources),
+        reason=f"merged into PMID {merged.returned_pmid}",
+        sources=entry.sources,
+    )
+
+
+def _deleted_check(entry: LedgerEntry) -> RefreshCheck:
+    """A :data:`STATUS_DELETED` result for a PMID PubMed no longer serves.
+
+    Flagged for human review; the caller keeps the KB entry untouched (never dropped), and
+    :func:`apply_auto_update` skips it (nothing to write for a record that is gone)."""
+    return RefreshCheck(
+        pmid=entry.pmid,
+        status=STATUS_DELETED,
+        recorded_doi=entry.recorded_doi,
+        recorded_journal=entry.recorded_journal,
+        recorded_retracted=entry.recorded_retracted,
+        recorded_from=provenance_of(entry.sources),
+        reason="deleted upstream (PubMed serves no record under this PMID)",
+        sources=entry.sources,
+    )
+
+
+def _unparseable_check(entry: LedgerEntry, unparseable) -> RefreshCheck:
+    """A :data:`STATUS_ERROR` result for a request whose returned record could not be
+    reduced (no PMID).
+
+    Distinct from a deletion: a record DID come back — it just could not be parsed — so
+    this must never read as "deleted upstream". The per-record raise message(s) are carried
+    through so the loss is inspectable, exactly as the parser's ``unparseable`` bucket keeps
+    it visible rather than swallowed."""
+    reasons = "; ".join(u.reason for u in unparseable) or "record could not be parsed"
+    return RefreshCheck(
+        pmid=entry.pmid,
+        status=STATUS_ERROR,
+        reason=(
+            f"PubMed returned a record that could not be parsed ({reasons}); "
+            "retraction status not confirmed (not a deletion)"
+        ),
+        recorded_doi=entry.recorded_doi,
+        recorded_journal=entry.recorded_journal,
+        recorded_retracted=entry.recorded_retracted,
+        recorded_from=provenance_of(entry.sources),
+        sources=entry.sources,
+    )
+
+
 def check_entries(
     entries: Sequence[LedgerEntry],
     client,
@@ -474,11 +577,29 @@ def check_entries(
     """Fetch each record by PMID (``efetch``) and diff its retraction status against the
     ledger. Results are keyed by the **requested** PMID, never response order.
 
-    A PMID that no longer returns a record (deleted, or merged away under a different
-    PMID) is a per-id ``error``, never a crash and never *followed* — following a merge is
-    #170, out of scope here. A per-id parse problem is likewise isolated. Connection and
-    rate-limit/service failures propagate (the caller decides the exit code); a partial
-    batch cannot be trusted.
+    A PMID PubMed no longer serves is not collapsed into a generic error — the parser
+    classifies it and #170 keeps the four cases apart:
+
+    * **merged** — efetch returned the record under a *different* PMID (NCBI merged two
+      records). Reported as :data:`STATUS_MERGED` carrying **both** the requested and the
+      returned PMID, and the KB is *never* silently re-keyed: the PMID is a
+      ``CROSS_SOURCE_IDS`` identifier, so changing it changes what a future import merges
+      against — a human's decision (P1). The merge is *offered*, not followed, even under
+      ``--auto-update`` (:func:`apply_auto_update` skips it), mirroring #106's "``--yes``
+      may not clear a withdrawal".
+    * **deleted** — efetch returned an empty (well-formed) response: the PMID is gone
+      upstream. Reported as :data:`STATUS_DELETED` and **flagged for human review**; the KB
+      entry is *never* dropped, because a deleted PMID is usually a signalled removal a
+      fact-checking tool must surface, and erasing the entry would destroy the evidence.
+    * **unparseable** — a record *did* come back but could not be reduced (no ``<PMID>``).
+      A per-id :data:`STATUS_ERROR`, **not** a deletion: the parser lists the requested id
+      in ``deleted`` (nothing matched) *and* the record in ``unparseable``, so this checks
+      ``unparseable`` first — a deletion is inferred only from a genuinely empty response,
+      never by elimination.
+
+    Connection and rate-limit/service failures **propagate** (the caller decides the exit
+    code) — a network failure is never mistaken for a deletion, so a flaky connection can
+    never flag a live paper as gone.
 
     ``progress`` is called with ``(records_done, records_total)`` after each record.
     """
@@ -511,21 +632,36 @@ def check_entries(
                 )
             )
         else:
+            # Consume the parser's FOUR signals explicitly — never collapse them or infer a
+            # deletion by elimination. A returned record with no PMID lands in
+            # `outcome.unparseable` while the requested id ALSO lands in `outcome.deleted`
+            # (nothing matched it), so an "else -> deleted" would call a record that DID come
+            # back "deleted upstream" — a false claim. Order: present -> merged ->
+            # unparseable(error) -> deleted, so a genuine empty response is the ONLY path to
+            # STATUS_DELETED. #170 keeps merged/deleted apart; neither rewrites or drops the
+            # KB entry.
             present = {r.requested_pmid: r.work for r in outcome.present}
             work = present.get(entry.pmid)
+            merged = _merged_record(outcome, entry.pmid)
             if work is not None:
                 results.append(_diff(entry, work))
+            elif merged is not None:
+                results.append(_merged_check(entry, merged))
+            elif outcome.unparseable:
+                results.append(_unparseable_check(entry, outcome.unparseable))
+            elif entry.pmid in outcome.deleted:
+                results.append(_deleted_check(entry))
             else:
-                # Absent from the response (deleted) or returned under a different PMID
-                # (merged). Either way this run could not confirm the record's retraction
-                # status; report it per-id and leave following the pointer to #170.
+                # Defensive: a shape none of the four buckets claim for this id. Never guess
+                # "deleted" — surface it as a per-id error.
                 results.append(
                     RefreshCheck(
                         pmid=entry.pmid,
                         status=STATUS_ERROR,
                         reason=(
-                            "PubMed returned no record under this PMID (deleted, or merged "
-                            "away under a different PMID); retraction status not confirmed"
+                            "PubMed returned a response this PMID could not be resolved "
+                            "against (not present, merged, unparseable, or deleted); "
+                            "retraction status not confirmed"
                         ),
                         recorded_doi=entry.recorded_doi,
                         recorded_journal=entry.recorded_journal,
@@ -549,6 +685,8 @@ class Summary:
     changed: int = 0
     retracted: int = 0
     un_retracted: int = 0
+    merged: int = 0
+    deleted: int = 0
     errors: int = 0
     skipped: int = 0
 
@@ -557,12 +695,19 @@ def summarize(
     results: Iterable[RefreshCheck], skipped: Sequence[RefreshCheck]
 ) -> Summary:
     """Count outcomes. ``retracted`` counts newly-retracted records and ``un_retracted``
-    counts records PubMed no longer flags but the KB still does; ``checked`` excludes
-    skipped and errored."""
+    counts records PubMed no longer flags but the KB still does; ``merged``/``deleted``
+    count PMIDs PubMed re-keyed or removed upstream (#170). ``checked`` excludes skipped,
+    errored, merged, and deleted — none of those confirmed a metadata state."""
     summary = Summary(skipped=len(skipped))
     for result in results:
         if result.status == STATUS_ERROR:
             summary.errors += 1
+            continue
+        if result.status == STATUS_MERGED:
+            summary.merged += 1
+            continue
+        if result.status == STATUS_DELETED:
+            summary.deleted += 1
             continue
         summary.checked += 1
         if result.status == STATUS_CHANGED:
@@ -651,14 +796,22 @@ def apply_auto_update(
     * A ledger that will not read **or write** is that record's problem — a per-id
       :data:`UPDATE_ERROR`, never a batch crash.
 
-    Error results (a deleted/merged PMID, a corrupt ledger) are ignored: #170 owns
-    following a moved PMID, and a record this run could not fetch has nothing to write.
-    Returns one :class:`LedgerRefresh` per record acted on, in ``pmid`` order.
+    A result that is not a confirmed diff is ignored — an error, a **merged** PMID, or a
+    **deleted** PMID (#170). Merged is the load-bearing case: it is *surface-only*, so
+    ``--auto-update`` **never** re-keys a merged record. Re-keying a PMID changes what a
+    future import merges against (it is a ``CROSS_SOURCE_IDS`` identifier), a consequence
+    beyond one sidecar and a human's decision (P1) — the same reason ``--yes`` may not clear
+    a withdrawal (#106). A deleted record is gone upstream and has nothing to write. Only
+    :data:`STATUS_UNCHANGED`/:data:`STATUS_CHANGED` results are eligible. Returns one
+    :class:`LedgerRefresh` per record acted on, in ``pmid`` order.
     """
     root = Path(kb_root)
     outcomes: list[LedgerRefresh] = []
     for result in results:
-        if result.status == STATUS_ERROR:
+        # Only a confirmed diff is writable. STATUS_ERROR, STATUS_MERGED, and STATUS_DELETED
+        # are all skipped here — merged is surface-only (a re-key is a human's P1 decision,
+        # #170), deleted is gone, and an error had nothing to confirm.
+        if result.status not in (STATUS_UNCHANGED, STATUS_CHANGED):
             continue
 
         # A record spoken for only by `sources/*.md` has no ledger to update.
@@ -807,6 +960,52 @@ def un_retraction_note(result: RefreshCheck) -> str:
     return note
 
 
+def merged_note(result: RefreshCheck) -> str:
+    """The line for a PMID PubMed merged into a different one (#170).
+
+    Names **both** the requested PMID and the survivor it now serves the record under, and
+    *offers* — does not perform — updating the KB's PMID. The PMID is a ``CROSS_SOURCE_IDS``
+    identifier (``common/source_writer.py``): changing it changes what a future import
+    merges against, a consequence beyond one sidecar, so following the merge is a human's
+    decision (P1) — this command surfaces it and stops. ``--auto-update`` does not follow a
+    merge either; surfacing is the safe default.
+    """
+    retracted = (
+        f" The surviving record is currently reported RETRACTED by PubMed"
+        f"{f' (notice PMID {result.current_notice_pmid})' if result.current_notice_pmid else ''}."
+        if result.current_retracted
+        else ""
+    )
+    where = "front matter" if result.recorded_from == "front-matter" else "ledger"
+    return (
+        f"PubMed no longer serves PMID {result.pmid} directly; it now returns the record "
+        f"under PMID {result.returned_pmid} (the two were merged upstream). The KB still "
+        f"records {result.pmid}; it is NOT rewritten, because a PMID is a cross-source "
+        f"identifier and changing it changes what a future import merges against — a human "
+        f"decision. Review both PMIDs and, if the merge is right, update the {where} by "
+        f"hand.{retracted}"
+    )
+
+
+def deleted_note(result: RefreshCheck) -> str:
+    """The line for a PMID PubMed no longer serves at all (#170).
+
+    A deletion is an empty (well-formed) efetch response — not a network failure — so it is
+    reported as its own signal and **flagged for human review**. The KB entry is kept: a
+    deleted PMID is usually a signalled removal a fact-checking tool must surface, and
+    dropping the entry because upstream did would destroy the evidence that something
+    happened. Nothing under ``sources/`` or the sidecar is touched.
+    """
+    where = "front matter" if result.recorded_from == "front-matter" else "ledger"
+    return (
+        f"PubMed serves no record under PMID {result.pmid} (an empty response, not a "
+        f"network error): the PMID has been deleted upstream. This is flagged for human "
+        f"review; the KB entry is kept, not dropped — a deleted PMID is usually a signalled "
+        f"removal, and erasing the {where} would destroy the evidence. Confirm what "
+        f"happened before trusting any claim from this record."
+    )
+
+
 def _sources_suffix(result: RefreshCheck) -> str:
     return f"  (sources: {', '.join(result.sources)})" if result.sources else ""
 
@@ -854,6 +1053,8 @@ def report_lines(
     retracted = [r for r in results if r.newly_retracted]
     un_retracted = [r for r in results if r.un_retracted]
     changed = [r for r in results if r.status == STATUS_CHANGED and r.changed_fields]
+    merged = [r for r in results if r.status == STATUS_MERGED]
+    deleted = [r for r in results if r.status == STATUS_DELETED]
     errors = [r for r in results if r.status == STATUS_ERROR]
 
     if retracted:
@@ -885,6 +1086,16 @@ def report_lines(
                 f"{details}{_sources_suffix(result)}"
             )
 
+    if merged:
+        lines.append("\nMerged upstream (offered, not followed — a human decides whether to re-key):")
+        for result in merged:
+            lines.append(f"  ⤳ {merged_note(result)}{_sources_suffix(result)}")
+
+    if deleted:
+        lines.append("\nDeleted upstream (flagged for review; the KB entry is kept, never dropped):")
+        for result in deleted:
+            lines.append(f"  ⚑ {deleted_note(result)}{_sources_suffix(result)}")
+
     if errors:
         lines.append("\nCould not check:")
         for result in errors:
@@ -898,6 +1109,8 @@ def report_lines(
     lines.append(f"  {'Metadata changed:':<22}{summary.changed}")
     lines.append(f"  {'Retracted (new):':<22}{summary.retracted}")
     lines.append(f"  {'Retracted (reversed):':<22}{summary.un_retracted}")
+    lines.append(f"  {'Merged upstream:':<22}{summary.merged}")
+    lines.append(f"  {'Deleted upstream:':<22}{summary.deleted}")
     lines.append(f"  {'Errors:':<22}{summary.errors}")
     lines.append(f"  {'Skipped:':<22}{summary.skipped}")
     if updates:
@@ -961,7 +1174,9 @@ def porcelain_lines(
     ``check\\t<pmid>\\t<status>\\t<retracted>\\t<un_retracted>\\t<reason>\\t<changed_fields>``
     with ``retracted``/``un_retracted`` as ``0``/``1`` and ``changed_fields`` comma-joined
     (empty for none). ``changed_fields`` is appended last so a parser keying on the earlier
-    fixed columns is unaffected. The ``update`` rows are
+    fixed columns is unaffected. A ``merged`` row carries the survivor PMID in ``<reason>``
+    (``merged into PMID <id>``) so a consumer sees both ids without a new column; a
+    ``deleted`` row's ``<reason>`` names the deletion. The ``update`` rows are
     ``update\\t<pmid>\\t<status>\\t<fields>\\t<ledgers>``. Progress and the estimate stay on
     stderr only.
     """
@@ -991,6 +1206,8 @@ def porcelain_lines(
     rows.append(f"changed\t{summary.changed}")
     rows.append(f"retracted\t{summary.retracted}")
     rows.append(f"un_retracted\t{summary.un_retracted}")
+    rows.append(f"merged\t{summary.merged}")
+    rows.append(f"deleted\t{summary.deleted}")
     rows.append(f"errors\t{summary.errors}")
     rows.append(f"skipped\t{summary.skipped}")
     if updates:

@@ -96,3 +96,10 @@ Automatic Term Mapping(ATM)으로 단어들을 MeSH·저널 색인에 매핑해 
 
 문자 그대로의 구를 원하면 직접 따옴표로 감싸세요(`--query '"gene therapy"'`). 그때 매칭이 안
 되면 (2)가 `QuotedPhraseNotFound` 를 표면화합니다.
+
+## `pubmed-refresh` 의 병합·삭제된 PMID (#170)
+
+`pubmed-refresh` 는 NCBI가 병합한 PMID(다른 PMID로 응답)는 요청·반환 PMID를 **둘 다** 보고하고
+사람에게 재키잉을 제안만 하며(자동 실행·`--auto-update` 자동 추종 없음 — PMID는 cross-source
+식별자라 향후 import 병합 대상을 바꾸므로 사람 몫), 삭제된 PMID(빈 응답)는 검토용으로 flag하되
+KB 엔트리를 절대 조용히 drop하지 않습니다(네트워크 실패는 삭제로 오인하지 않고 그대로 보고).
