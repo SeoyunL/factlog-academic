@@ -1709,12 +1709,15 @@ def entity_set(
     relations; pass a KbContext's attribute_relations() to read a non-default KB.
     None falls back to the module-level (ambient-root) attribute_relations()."""
     selected = engine_input_rows(facts if facts is not None else load_accepted_facts())
-    literal_rels = attribute_relations() if attribute_rels is None else attribute_rels
+    # Surface forms, not raw declarations: a KB that declares the canonical while
+    # its facts carry an alias had every attribute row miss this filter, so the
+    # literal was admitted as an entity anyway (#226).
+    literal_rels = attribute_relation_forms(attribute_rels)
     entities: set[str] = set()
     for row in selected:
         if row["subject"]:
             entities.add(row["subject"])
-        if row["object"] and row["relation"] not in literal_rels:
+        if row["object"] and unicodedata.normalize("NFC", row["relation"]) not in literal_rels:
             entities.add(row["object"])
     return entities
 
@@ -1824,26 +1827,49 @@ def build_text_to_datalog_prompt(question: str) -> str:
     return rendered
 
 
-def dependency_graph(facts: list[dict[str, str]]) -> dict[str, list[str]]:
+def dependency_graph(
+    facts: list[dict[str, str]],
+    attr_forms: set[str] | None = None,
+) -> dict[str, list[str]]:
     """Edges between entities, mirroring the engine's `edge/2`.
 
-    Attribute relations are skipped, exactly as the engine rule skips them: their
-    objects are literals (a date, a count), not nodes a dependency path can run
-    through (#226). Keeping the two definitions in step matters — the report asks
-    the ENGINE whether a path exists and then asks THIS to render the trace, so a
-    divergence would print a route the engine says does not exist.
+    An edge into a LITERAL NODE is skipped, exactly as the engine rule skips it:
+    the object of an attribute relation is a value (a date, a count), not a node a
+    dependency path can run through (#226). "Literal node" is defined the same way
+    entity_set defines it — an attribute-relation object that is never a subject —
+    because a relation-keyed filter would diverge from entity_set whenever a value
+    also heads a fact of its own: the vocabulary gate would admit it as an entity
+    while the engine reported no path to it, i.e. a false VERIFIED NEGATIVE. A
+    wrong assertion is worse than an honest "cannot express".
+
+    Keeping this in step with the engine matters — the report asks the ENGINE
+    whether a path exists and then asks THIS to render the trace, so a divergence
+    would print a route the engine says does not exist.
     """
-    attrs = attribute_relations()
+    attrs = attribute_relation_forms() if attr_forms is None else attr_forms
+    rows = engine_input_rows(facts)
+    subjects = {row["subject"] for row in rows}
+    literals = {
+        row["object"]
+        for row in rows
+        if unicodedata.normalize("NFC", row["relation"]) in attrs
+        and row["object"] not in subjects
+    }
     graph: dict[str, list[str]] = defaultdict(list)
-    for row in engine_input_rows(facts):
-        if row["relation"] in attrs:
+    for row in rows:
+        if row["object"] in literals:
             continue
         graph[row["subject"]].append(row["object"])
     return graph
 
 
-def dependency_path(facts: list[dict[str, str]], start: str, target: str) -> list[str]:
-    graph = dependency_graph(facts)
+def dependency_path(
+    facts: list[dict[str, str]],
+    start: str,
+    target: str,
+    attr_forms: set[str] | None = None,
+) -> list[str]:
+    graph = dependency_graph(facts, attr_forms)
     # The engine defines path/2 only over edges (path(S,O):-edge(S,O) / :-edge(S,M),
     # path(M,O)), so a path requires >= 1 edge: match `target` only AFTER at least
     # one hop. This makes a reflexive path("X","X") a verified negative unless a real
@@ -1865,11 +1891,14 @@ def dependency_path(facts: list[dict[str, str]], start: str, target: str) -> lis
 
 
 def first_dependency_path(facts: list[dict[str, str]]) -> list[str]:
+    # Read the policy ONCE: this is an S x O loop, and dependency_graph used to
+    # re-parse attribute-relations.md on every call inside it.
+    attr_forms = attribute_relation_forms()
     entities = sorted({row["subject"] for row in facts})
     targets = sorted({row["object"] for row in facts})
     for start in entities:
         for target in targets:
-            path = dependency_path(facts, start, target)
+            path = dependency_path(facts, start, target, attr_forms)
             if len(path) > 1:
                 return path
     return []
@@ -1888,21 +1917,57 @@ WIRELOG_PROGRAM = """
 .decl relation(subject: symbol, rel: symbol, object: symbol)
 .decl canonical(subject: symbol, rel: symbol, object: symbol)
 .decl attr_rel(rel: symbol)
+.decl subj(node: symbol)
+.decl literal_node(value: symbol)
 .decl edge(start: symbol, target: symbol)
 .decl path(start: symbol, target: symbol)
 
-edge(S, O) :- relation(S, R, O), !attr_rel(R).
+subj(S) :- relation(S, R, O).
+literal_node(O) :- relation(S, R, O), attr_rel(R), !subj(O).
+edge(S, O) :- relation(S, R, O), !literal_node(O).
 path(S, O) :- edge(S, O).
 path(S, O) :- edge(S, M), path(M, O).
 """
 
 
+def attribute_relation_forms(
+    attribute_rels: set[str] | None = None,
+    aliases: dict[str, str] | None = None,
+) -> set[str]:
+    """Every SURFACE form that names a declared attribute relation.
+
+    The engine's `!attr_rel(R)` compares R against the name stored in accepted.dl,
+    which is the surface form. A declaration names the CANONICAL, so a KB that
+    declares `published_year` while its facts say `게재연도` had the filter miss
+    every row and the literal stayed a path node — the same alias-blindness #213
+    fixed for report/ask/gate. NFC too: a policy file saved as NFD silently
+    matched nothing.
+
+    One set, shared by the engine emitter, dependency_graph, and entity_set, so
+    the three cannot drift — a divergence here means the report renders a route
+    the engine says does not exist.
+    """
+    declared = attribute_relations() if attribute_rels is None else attribute_rels
+    if not declared:
+        return set()
+    alias_map = relation_aliases() if aliases is None else aliases
+    forms: set[str] = set()
+    for name in declared:
+        canon = unicodedata.normalize("NFC", name)
+        forms.add(canon)
+        forms |= surface_variants(canon, alias_map)
+    return forms
+
+
 def _attr_rel_facts() -> str:
     """`attr_rel` facts for the declared attribute relations (empty when none)."""
-    names = sorted(attribute_relations())
+    names = sorted(attribute_relation_forms())
     if not names:
         return ""
-    return "\n" + "\n".join(f'attr_rel("{name}").' for name in names) + "\n"
+    # dl_string, not an f-string: a name carrying a quote emitted `attr_rel(""x"")`
+    # and the engine failed to parse the whole program, killing `factlog check` on
+    # a KB that worked before the declaration existed.
+    return "\n" + "\n".join(f"attr_rel({dl_string(name)})." for name in names) + "\n"
 
 
 def decode_wirelog_value(session: EasySession, value: object) -> object:

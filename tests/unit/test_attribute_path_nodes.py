@@ -22,6 +22,12 @@ from __future__ import annotations
 import common
 import factlog.common as fc
 import pytest
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 
 
 @pytest.fixture
@@ -64,7 +70,7 @@ class TestDependencyGraph:
 
 class TestEngineProgram:
     def test_the_edge_rule_excludes_attribute_relations(self):
-        assert "!attr_rel(R)" in common.WIRELOG_PROGRAM
+        assert "!literal_node(O)" in common.WIRELOG_PROGRAM
 
     def test_no_declarations_emit_no_attr_facts(self, kb):
         # A KB that declares nothing must produce a byte-identical program.
@@ -75,3 +81,117 @@ class TestEngineProgram:
         emitted = common._attr_rel_facts()
         assert 'attr_rel("정식_운영").' in emitted
         assert 'attr_rel("발행연도").' in emitted
+
+
+# --- behavioural pins: run the ENGINE, not a substring check on the program ---
+#
+# The string assertions above pass even when the `.decl attr_rel` line is deleted:
+# the engine then fails to load the relation, the filter dies silently, and the
+# literal comes back as a path node. Only running the engine catches that.
+
+def _kb(tmp_path, rows, policy, aliases=None):
+    kb = tmp_path / "kb"
+    subprocess.run(
+        [sys.executable, "-m", "factlog", "init", "--target", str(kb)],
+        capture_output=True,
+        check=True,
+    )
+    (kb / "sources" / "a.md").write_text("a\n")
+    lines = ["subject,relation,object,source,status,confidence,note"]
+    lines += [f"{s},{r},{o},sources/a.md,accepted,0.9," for s, r, o in rows]
+    (kb / "facts" / "candidates.csv").write_text("\n".join(lines) + "\n")
+    (kb / "policy" / "attribute-relations.md").write_text(policy)
+    if aliases:
+        (kb / "policy" / "relation-aliases.md").write_text(aliases)
+    subprocess.run(
+        [sys.executable, str(Path("tools") / "compile_facts.py")],
+        capture_output=True,
+        env={**os.environ, "FACTLOG_ROOT": str(kb), "PYTHONPATH": os.getcwd()},
+        check=True,
+    )
+    return kb
+
+
+def _engine_and_tracer(kb):
+    """(engine path set, tracer reachable set) for a KB, in a fresh interpreter."""
+    script = r"""
+import os, sys
+from collections import deque
+sys.path.insert(0, os.getcwd())
+import factlog.common as c
+facts = c.load_accepted_facts()
+eng = sorted(tuple(t) for t in c.run_wirelog().get("path", set()))
+g = c.dependency_graph(facts)
+py = set()
+for s0 in list(g):
+    q, seen = deque(g[s0]), set()
+    while q:
+        n = q.popleft()
+        if n in seen:
+            continue
+        seen.add(n); py.add((s0, n)); q.extend(g.get(n, []))
+import json
+print(json.dumps({"engine": eng, "tracer": sorted(py), "entities": sorted(c.entity_set(facts))}))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "FACTLOG_ROOT": str(kb), "PYTHONPATH": os.getcwd()},
+    )
+    if proc.returncode != 0:
+        # Skip ONLY when the engine is genuinely absent. An engine that IS present
+        # and rejected OUR program is a failure, not a skip: deleting the
+        # `.decl attr_rel` line makes the filter die silently, and a blanket skip
+        # here reported that as green.
+        missing = "No module named" in proc.stderr or "pyrewire" in proc.stderr.lower() and "version" in proc.stderr.lower()
+        if missing:
+            pytest.skip(f"pyrewire unavailable: {proc.stderr[-200:]}")
+        raise AssertionError(f"engine rejected the program:\n{proc.stderr[-800:]}")
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+    return (
+        {tuple(x) for x in got["engine"]},
+        {tuple(x) for x in got["tracer"]},
+        set(got["entities"]),
+    )
+
+
+ROWS = [("갑", "통합", "을"), ("을", "정식_운영", "2030.1")]
+
+
+def test_engine_drops_pure_literal_from_paths(tmp_path):
+    eng, tracer, ents = _engine_and_tracer(_kb(tmp_path, ROWS, "정식_운영\n"))
+    assert ("갑", "2030.1") not in eng
+    assert "2030.1" not in ents
+    assert eng == tracer  # the report asks the engine, then renders with the tracer
+
+
+def test_literal_that_is_also_a_subject_stays_reachable(tmp_path):
+    """entity_set admits it as an entity, so the engine must NOT deny the path.
+
+    Otherwise the vocabulary gate lets the query through and the engine answers a
+    false `verified negative` about a chain that genuinely exists.
+    """
+    rows = [*ROWS, ("2030.1", "비고", "메모")]
+    eng, tracer, ents = _engine_and_tracer(_kb(tmp_path, rows, "정식_운영\n"))
+    assert "2030.1" in ents
+    assert ("갑", "2030.1") in eng
+    assert eng == tracer
+
+
+def test_filter_survives_a_relation_alias(tmp_path):
+    """Declaring the canonical must filter facts stored under a surface alias."""
+    rows = [("갑", "통합", "을"), ("을", "게재연도", "2020")]
+    kb = _kb(
+        tmp_path, rows, "published_year\n", aliases="- `게재연도` -> `published_year`\n"
+    )
+    eng, tracer, ents = _engine_and_tracer(kb)
+    assert "2020" not in ents
+    assert ("갑", "2020") not in eng
+    assert eng == tracer
+
+
+def test_quoted_relation_name_does_not_crash_the_engine(tmp_path):
+    """A quote in a declared name emitted `attr_rel(""x"")` and killed the program."""
+    eng, tracer, _ = _engine_and_tracer(_kb(tmp_path, ROWS, '- "정식_운영"\n'))
+    assert eng == tracer  # reaching here at all means the engine parsed the program
