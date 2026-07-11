@@ -58,11 +58,11 @@ no facts on its own.
 | `.md`, `.markdown`, `.txt` | **Directly supported** | UTF-8 text, read verbatim. This is what every extraction reference assumes. |
 | Other UTF-8 text (`.rst`, `.org`, `.csv`, source code) | Supported as plain text | No special parsing; treated as raw text. |
 | `.docx`, binary `.pdf`, `.odt`, `.epub` | **Auto-converted** | `factlog ingest` converts these to text via pandoc / textutil / pdftotext. |
-| `.html`, `.htm`, `.rtf` | **Auto-converted** | Text-based containers: the bytes are text but the content is markup, so they are converted rather than read raw — the original is not an extraction input once a conversion exists. |
+| `.html`, `.htm`, `.xhtml`, `.rtf` | **Auto-converted** | Text-based containers: the bytes are text but the content is markup, so they are converted rather than read raw — the original is not an extraction input once a conversion exists. |
 | `.hwpx` (Hancom OWPML) | **Auto-converted** | Built-in extractor (no external tool) — reads the zip's `Contents/section*.xml` text. |
 | `.hwp` (legacy Hancom, HWP 5.x) | **Auto-converted** | Via `hwp5html` (pyhwp) → pandoc → markdown, tables preserved. Needs `pip install pyhwp` + pandoc; if absent, reported with a hint. |
 | `.pptx` (PowerPoint) | **Auto-converted** | Built-in extractor (no external tool) — reads on-slide text from the zip's `ppt/slides/slideN.xml`, slides in order, one block per slide. Speaker notes are excluded; table cells flatten to one line per cell (row/column grouping not preserved). |
-| `.xlsx`, images | **Not converted** | No bundled converter — reported with a hint; convert by hand. |
+| `.xml`, `.svg`, `.xlsx`, images | **Not converted** | Markup or binary with no general converter — reported with a hint; extract the text you need by hand. `.xml`/`.svg` are still kept OUT of extraction so their tags are never read as prose. |
 
 `factlog ingest` writes the converted text into the KB's **`runs/sources/`**
 directory (alongside the other generated run artifacts) — **never into
