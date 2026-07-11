@@ -193,8 +193,19 @@ def evaluate_queries(
             if len(constants) >= 2:
                 is_reachable = (constants[0], constants[1]) in inferred["path"]
                 trace = dependency_path(facts, constants[0], constants[1]) if is_reachable else []
-                value = " -> ".join(trace) if trace else "(not found)"
-                results.append(f"path {constants[0]} -> {constants[1]}: {value}")
+                if is_reachable and not trace:
+                    # The ENGINE proved the pair and the tracer cannot render a route.
+                    # Printing "(not found)" would launder the engine's YES into a NO --
+                    # a verified negative contradicting the engine, in a report signed
+                    # with the engine's name. Report the pair and say the two disagree.
+                    results.append(
+                        f"path {constants[0]} -> {constants[1]}: {constants[0]} -> {constants[1]} "
+                        f"(engine only — no route through the accepted facts; a policy rule "
+                        f"or a tracer/engine divergence)"
+                    )
+                else:
+                    value = " -> ".join(trace) if trace else "(not found)"
+                    results.append(f"path {constants[0]} -> {constants[1]}: {value}")
         elif line.startswith("relation"):
             rows = relation_results(line, facts, hierarchy)
             args = query_args(line)
