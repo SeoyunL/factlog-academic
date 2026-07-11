@@ -527,6 +527,27 @@ explanation of its purpose.
 # published_year
 # `연구 유형`
 """,
+    "policy/relation-aliases.md": """\
+# Relation aliases
+#
+# Map a SURFACE relation name to the CANONICAL one you want the engine to use, so
+# facts written `게재연도` and `발행년도` are treated as the one relation
+# `published_year`. Without this, the engine sees them as two unrelated relations
+# and a query for one misses facts stored under the other.
+#
+# Format: one mapping per line, `raw` -> `canonical`. BACKTICKS ARE REQUIRED around
+# BOTH names (unlike the other policy files, where they are optional) -- a line with
+# an arrow but no backticks is reported as malformed and skipped, not applied. `#`
+# comment lines and a leading `-`/`*` bullet are allowed.
+#
+# The canonical name is the one you declare in the OTHER policy files
+# (attribute-relations.md, single-valued.md, typed-relations.md); aliases are folded
+# to it before those are applied.
+#
+# Example (remove the leading '# ' to activate):
+# - `게재연도` -> `published_year`
+# - `publication_year` -> `published_year`
+""",
     "policy/attribute-relations.md": """\
 # Attribute (literal-valued) relations
 #

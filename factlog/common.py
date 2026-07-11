@@ -1427,9 +1427,19 @@ def relation_aliases(root: Path | None = None) -> dict[str, str]:
         stripped = re.sub(r"^\s*[-*]\s+", "", line.strip()).strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # Expect exactly `raw` -> `canonical` — arrow is required.
+        # Expect exactly `raw` -> `canonical` — arrow AND backticks required.
         m = re.fullmatch(r"`([^`]+)`\s*->\s*`([^`]+)`", stripped)
         if not m:
+            # A line with an arrow but no backticks is a mapping the user meant to make
+            # and mis-spelled. Silently skipping it -- the old behaviour -- left the
+            # alias not applied with no sign, so a query that relied on it just missed.
+            # typed-relations.md warns on the same shape; match it, rather than swallow.
+            if "->" in stripped:
+                print(
+                    f"relation-aliases.md: skipping malformed line {line.strip()!r} "
+                    "(each mapping needs backticks: `raw` -> `canonical`)",
+                    file=sys.stderr,
+                )
             continue
         raw = unicodedata.normalize("NFC", m.group(1).strip())
         canonical = unicodedata.normalize("NFC", m.group(2).strip())
