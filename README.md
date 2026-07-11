@@ -308,6 +308,39 @@ factlog vocab --all        # include non-engine names (candidate/needs_review/su
 Objects of declared attribute relations are literals, not entities, so they are
 excluded from the entity list (same typing as `status`).
 
+### Auditing the value vocabulary (`tools/value_audit.py`)
+
+Relation names are curated by policy. **Values are not** — they arrive one
+extraction at a time, and nothing notices when the same thing lands twice under
+two strings. A real KB held both `IL-10` and `기타(IL-10)` as accepted facts, so
+`relation(P, "염증지표", "IL-10")?` returned 3 rows out of 4. The fourth was
+hiding behind a different string: a silent omission, which is the one failure
+mode this KB exists to prevent.
+
+```bash
+python3 tools/value_audit.py --wiki ~/wiki           # report (always exits 0)
+python3 tools/value_audit.py --wiki ~/wiki --strict  # exit non-zero on provable query leaks
+```
+
+It compares values only **within the same relation**, and every finding is a
+rule rather than a similarity guess:
+
+| Finding | Meaning |
+|---|---|
+| **split wrapper** | `기타(IL-10)` beside `IL-10` — one value filed twice. Queries are leaking now. |
+| **wrapper value** | `기타(INFLA-score)` — not queryable by its own name. |
+| **placeholder** | `기타`, `불명`, `N/A` — carries no information, hides what the source said. |
+| **spelling duplicate** | Equal after folding case/space/punctuation. If the spellings sit on **one** subject it is a value split; on **different** subjects it may be a duplicate record — a different repair. |
+
+Nothing is merged automatically. Fix with `factlog amend <subject> <relation>
+<object> --set-object <canonical>`, which rewrites the row durably (both
+`candidates.csv` and the backing `runs/*.json`).
+
+`tools/entity_audit.py` is the neighbouring check: it looks for *entity*
+fragmentation across the whole KB by a shared-token heuristic, so it is broader
+and far noisier (2275 candidates on that same KB). Use `value_audit` when you
+want precise, per-relation findings you can act on.
+
 ### Typed relations (`policy/typed-relations.md`)
 
 Some relations carry a literal object that should be **compared**, not just

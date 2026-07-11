@@ -523,6 +523,36 @@ factlog vocab --all        # include non-engine names (candidate/needs_review/su
 선언된 속성(attribute) 관계의 객체는 엔티티가 아니라 리터럴이므로 엔티티 목록에서
 제외됩니다(`status` 와 동일한 타이핑).
 
+#### 값 어휘 감사 (`tools/value_audit.py`)
+
+관계 이름은 정책이 관리합니다. 그러나 **값은 관리되지 않습니다** — 추출할 때마다
+하나씩 들어올 뿐이고, 같은 것이 두 문자열로 두 번 들어와도 아무도 알아채지
+못합니다. 실제 KB에 `IL-10` 과 `기타(IL-10)` 이 둘 다 accepted 상태로 있었고, 그래서
+`relation(P, "염증지표", "IL-10")?` 는 4건 중 3건만 돌려줬습니다. 나머지 하나는 다른
+문자열 뒤에 숨어 있었습니다. 조용한 누락 — 이 KB가 막으려는 바로 그 실패입니다.
+
+```bash
+python3 tools/value_audit.py --wiki ~/wiki           # 보고 (항상 exit 0)
+python3 tools/value_audit.py --wiki ~/wiki --strict  # 확실한 질의 누수가 있으면 non-zero
+```
+
+값은 **같은 관계 안에서만** 비교하며, 모든 발견은 유사도 추측이 아니라 규칙입니다.
+
+| 발견 | 의미 |
+|---|---|
+| **split wrapper** | `기타(IL-10)` 이 `IL-10` 과 공존 — 한 값이 두 번 기록됨. 지금 질의가 새고 있음. |
+| **wrapper value** | `기타(INFLA-score)` — 제 이름으로 질의할 수 없음. |
+| **placeholder** | `기타`, `불명`, `N/A` — 정보가 없고, 원문이 말한 바를 가림. |
+| **spelling duplicate** | 대소문자·공백·문장부호를 접으면 같은 값. 같은 **주체**에 두 표기면 값 분열, **다른 주체**들이면 중복 레코드 의심(수리 방법이 다름). |
+
+자동으로 병합하지 않습니다. `factlog amend <subject> <relation> <object>
+--set-object <정본>` 으로 고치면 `candidates.csv` 와 뒷단 `runs/*.json` 이 함께
+갱신됩니다.
+
+`tools/entity_audit.py` 는 이웃한 점검입니다. KB 전체에서 *엔티티* 분열을 토큰 공유
+휴리스틱으로 찾으므로 범위가 넓고 훨씬 시끄럽습니다(같은 KB에서 후보 2275건). 바로
+조치할 수 있는 정밀한 관계별 발견이 필요하면 `value_audit` 을 쓰십시오.
+
 #### 타입 지정 관계 (`policy/typed-relations.md`)
 
 어떤 관계의 리터럴 객체는 단순 매칭이 아니라 **비교**되어야 합니다 — 그래야
