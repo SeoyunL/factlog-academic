@@ -1099,6 +1099,71 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_status_to_runs(
+    target, filt: dict, from_statuses: set, new_status: str, nfc
+) -> int:
+    """Write a status decision into runs/*.json, so accept/reject are durable.
+
+    A human decision lived only in candidates.csv, which merge REBUILDS from runs/*.json.
+    So deleting candidates.csv and re-merging silently downgraded an accepted fact back
+    to candidate -- the decision was never in the source of truth. amend already writes
+    to runs; accept/reject did not (#233). This is a status-only change (no value edit),
+    so the matching run item is updated in place.
+
+    Returns the number of run rows changed. Import-local like the callers.
+    """
+    import json
+
+    from factlog.common import KNOWN_STATUSES
+
+    runs_dir = target / "runs"
+    if not runs_dir.is_dir():
+        return 0
+    changed = 0
+    for jp in sorted(runs_dir.glob("*.json")):
+        try:
+            data = json.loads(jp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            # merge fails loudly on a corrupt run file; here, skipping it silently would
+            # let accept report success while the decision never reached the file that
+            # holds this triple -- the durability the change promises, quietly lost.
+            print(
+                f"factlog: warning — could not read {jp.name} to record the decision "
+                f"({exc}); if it holds this fact, re-run after fixing the file.",
+                file=sys.stderr,
+            )
+            continue
+        if not isinstance(data, list):
+            continue
+        dirty = False
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            fields = {
+                "subject": nfc(str(item.get("subject", "")).strip()),
+                "relation": nfc(str(item.get("relation", "")).strip()),
+                "object": nfc(str(item.get("object", "")).strip()),
+            }
+            if not all(fields.get(k) == v for k, v in filt.items()):
+                continue
+            st = str(item.get("status", "")).strip()
+            # This runs only AFTER the CSV gate found a genuinely-pending match, so the
+            # decision is real. Mirror merge's normalization: a blank or unrecognized
+            # status is coerced to needs_review (PENDING) when candidates.csv is rebuilt,
+            # so the run item merge will treat as pending must be flipped here too --
+            # otherwise the decision vanishes on the next re-merge, the exact silent
+            # downgrade this fix is about, in a row the extractor mis-stamped or an edit
+            # left blank.
+            if st not in from_statuses and st in KNOWN_STATUSES:
+                continue
+            item["status"] = new_status
+            dirty = True
+            changed += 1
+        if dirty:
+            _atomic_write_text(jp, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return changed
+
+
 def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -> int:
     """Shared body of `accept` (-> accepted) and `reject` (-> superseded).
 
@@ -1185,9 +1250,17 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
             changed += 1
     _atomic_write_csv(csv_path, rows, out_fields)
 
+    # Durability: write the decision into runs/*.json too, the source of truth merge
+    # rebuilds candidates.csv from. Without this, deleting candidates.csv and re-merging
+    # silently downgraded the decision (#233).
+    runs_changed = _apply_status_to_runs(target, filt, set(REVIEW_STATUSES), new_status, nfc)
+
     recompile_failed = not _recompile_accepted(target, verb)
     recompiled = "accepted.dl NOT recompiled" if recompile_failed else "accepted.dl recompiled"
-    print(f"factlog {verb}: {changed} row(s) → {new_status}; {recompiled}")
+    print(
+        f"factlog {verb}: {changed} candidate row(s) → {new_status}, "
+        f"{runs_changed} runs/*.json row(s) updated; {recompiled}"
+    )
     if recompile_failed:
         print(
             f"factlog {verb}: the status change WAS saved to candidates.csv; "
