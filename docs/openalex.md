@@ -81,10 +81,10 @@ factlog openalex-import --doi 10.1007/s10462-023-10448-w
 이미 KB에 있는 소스에서 인용 그래프를 한 단계 넓힙니다.
 
 ```bash
-factlog openalex-cite --for smith-2023-neurosymbolic                      # 이 논문을 인용한 저작
-factlog openalex-cite --for smith-2023-neurosymbolic --direction cited    # 이 논문이 인용한 저작
-factlog openalex-cite --for smith-2023-neurosymbolic --direction both --limit 50
-factlog openalex-cite --for smith-2023-neurosymbolic --auto-import        # 나열된 저작을 모두 임포트
+factlog openalex-cite --for artur-d-avila-garcez-2023-neurosymbolic-ai-the-3rd-wave                      # 이 논문을 인용한 저작
+factlog openalex-cite --for artur-d-avila-garcez-2023-neurosymbolic-ai-the-3rd-wave --direction cited    # 이 논문이 인용한 저작
+factlog openalex-cite --for artur-d-avila-garcez-2023-neurosymbolic-ai-the-3rd-wave --direction both --limit 50
+factlog openalex-cite --for artur-d-avila-garcez-2023-neurosymbolic-ai-the-3rd-wave --auto-import        # 나열된 저작을 모두 임포트
 ```
 
 - `--for <slug>` (필수) — 출발점이 되는 factlog 소스 슬러그. `openalex_id` front matter가
