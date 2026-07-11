@@ -3541,6 +3541,260 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     )
 
 
+def _make_pubmed_client(config):
+    """Build the real PubMed client. Indirected so tests can inject a fake."""
+    from factlog.integrations.pubmed.client import PubMedClient
+
+    return PubMedClient(config)
+
+
+def _pubmed_prepare(args, command: str):
+    """Resolve the target KB and PubMed settings, or None on a user error.
+
+    Mirrors :func:`_arxiv_prepare` / :func:`_openalex_prepare` exactly; #166 adds
+    the same helper for its import path, and the duplicate is folded into one at
+    the pre-merge rebase (an additive collision resolved by the integrator).
+    """
+    from pathlib import Path
+
+    from factlog.integrations.pubmed.config import PubMedConfigError, load_config
+
+    porcelain = getattr(args, "porcelain", False)
+    target_str, source = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if source in ("config", "cwd") and not porcelain:
+        print(f"factlog {command}: target KB {target} (from {source})")
+    if not _require_kb(target, command):
+        return None
+    try:
+        return target, load_config(kb_root=target)
+    except PubMedConfigError as exc:
+        print(f"factlog {command}: {exc}", file=sys.stderr)
+        return None
+
+
+def _pubmed_show_results(works, count: int, *, porcelain: bool,
+                         query_translation: str | None = None) -> None:
+    """Render pubmed-search results. Mirrors :func:`_arxiv_show_results`.
+
+    The ``--porcelain`` line shape matches the sibling search commands:
+    ``result\t<index>\t<pmid>\t<flag>\t<title>`` then ``found\t<count>``. The flag
+    is ``retracted`` (PubMed's own dual-marker signal, #164) or ``-``. Zero results
+    is a legitimate answer, so it prints a plain "0 results"; whether that zero is
+    *suspicious* is surfaced separately on stderr by the silent-zero guard.
+    """
+    if porcelain:
+        for index, work in enumerate(works, 1):
+            flag = "retracted" if work.retracted else "-"
+            print(f"result\t{index}\t{work.pmid}\t{flag}\t{work.title or ''}")
+        print(f"found\t{count}")
+        return
+
+    if count == 0:
+        print("Found 0 results.")
+        return
+
+    print(f"Found {count} results, showing top {len(works)}:\n")
+    for index, work in enumerate(works, 1):
+        authors = work.authors[0] if work.authors else "anonymous"
+        year = work.year or "n.d."
+        journal = work.journal or "?"
+        print(f"  {index}. PMID {work.pmid} \"{work.title or '(untitled)'}\" "
+              f"({authors} {year}, {journal})")
+        if work.retracted:
+            # PubMed flags retraction with two co-occurring markers (spike §3); it
+            # is a source signal, not a human-accepted claim (§6.4). Name it, and
+            # never conflate it with a mere correction.
+            print("      ⚠ PubMed reports this as RETRACTED; this signal is unverified "
+                  "— confirm before trusting any claim from it.")
+    if query_translation is not None:
+        # Make PubMed's own reading of the query visible rather than rewriting the
+        # operator's words (#89's answer for PubMed; Automatic Term Mapping). stderr
+        # would hide it from a scrolled-back human, so it rides stdout in human mode.
+        print(f"\nPubMed read the query as: {query_translation}")
+
+
+def _pubmed_search_retraction_warnings(works) -> list[str]:
+    """One stderr line per retracted result, for --porcelain where prose can't ride stdout."""
+    lines = []
+    for work in works:
+        if work.retracted:
+            lines.append(
+                f"⚠ PubMed reports PMID {work.pmid} as retracted (unverified). "
+                "Confirm before trusting any claim from it."
+            )
+    return lines
+
+
+def cmd_pubmed_search(args: argparse.Namespace) -> int:
+    """Search PubMed, list the results, and surface a suspicious zero (#167).
+
+    Free (a key only raises the rate limit). This lands the search, the
+    silent-zero guard and the listing; interactive selection and import-on-select
+    arrive with #166's ``PubMedSourceWriter`` (the same non-interactive-first split
+    ``arxiv-search`` made between #80 and #81). Until then the import call is a
+    single local seam (:func:`_pubmed_import_selected`).
+
+    The silent-zero guard is the point (spec, #167). ``esearch`` answers a
+    malformed field tag or a nonexistent MeSH term with HTTP 200 and zero results,
+    indistinguishable from an honest empty set on the count alone. So an unknown
+    ``[field tag]`` is rejected before a request is spent; PubMed's own
+    ``ErrorList``/``WarningList`` (``PhraseNotFound`` / ``QuotedPhraseNotFound`` /
+    ``FieldNotFound``) is surfaced verbatim; and a *filtered* zero is surfaced with
+    the ``--year``/``--mesh`` filters named — see
+    :mod:`factlog.integrations.pubmed.search`. ``--show-query`` prints the composed
+    ``term`` and sends nothing; ``--dry-run`` sends the search and declines to write
+    (they are different, per the issue).
+    """
+    from factlog.integrations.pubmed.client import (
+        PubMedConnectionError,
+        PubMedError,
+    )
+    from factlog.integrations.pubmed.search import (
+        DEFAULT_LIMIT,
+        MAX_LIMIT,
+        PubMedSearchValidationError,
+        build_year_filter,
+        compose_query,
+        mesh_clause,
+        parse_esearch,
+        silent_zero_report,
+        validate_field_tags,
+    )
+    from factlog.integrations.pubmed.work_parser import (
+        PubMedParseError,
+        parse_efetch_response,
+    )
+
+    prepared = _pubmed_prepare(args, "pubmed-search")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+    mesh = tuple(args.mesh or ())
+    limit = args.limit if args.limit is not None else DEFAULT_LIMIT
+
+    # --limit is factlog policy; reject an out-of-range value before the client is built.
+    if args.limit is not None and (args.limit < 1 or args.limit > MAX_LIMIT):
+        print(f"factlog pubmed-search: --limit must be between 1 and {MAX_LIMIT}, "
+              f"got {args.limit}", file=sys.stderr)
+        return 1
+
+    # Validate every filter up front so a typo never reaches the transport: an
+    # unknown field tag, a quote-broken mesh term, a reversed/out-of-range year are
+    # all silences PubMed would answer with a zero, so they are refused here.
+    try:
+        validate_field_tags(args.query)
+        for term in mesh:
+            mesh_clause(term)
+        if args.year:
+            build_year_filter(args.year)
+        composed = compose_query(args.query, year=args.year, mesh=mesh)
+    except PubMedSearchValidationError as exc:
+        print(f"factlog pubmed-search: {exc}", file=sys.stderr)
+        return 1
+
+    # --show-query prints the exact term that WOULD be sent and spends no request.
+    # It is NOT --dry-run: --dry-run sends the search and declines to write.
+    if args.show_query:
+        if porcelain:
+            print(f"query\t{composed}")
+        else:
+            print("Would search PubMed (no request sent):")
+            print(f"  term:   {composed}")
+            print(f"  retmax: {limit}")
+        return 0
+
+    client = _make_pubmed_client(config)
+    if not porcelain:
+        print(f'Searching PubMed: "{args.query}"...')
+    try:
+        raw = client.esearch(composed, retmax=limit)
+    except PubMedConnectionError as exc:
+        print(f"factlog pubmed-search: {exc}", file=sys.stderr)
+        return 2
+    except PubMedError as exc:
+        print(f"factlog pubmed-search: {exc}", file=sys.stderr)
+        return 1
+
+    result = parse_esearch(raw)
+
+    # Surface the silent-zero guard BEFORE the count, on stderr, so --porcelain
+    # stdout stays parseable. This is what keeps a nonexistent-MeSH zero from
+    # reading as an honest empty set (#167's whole point).
+    for line in silent_zero_report(result, year=args.year, mesh=mesh):
+        print(f"factlog pubmed-search: {line}", file=sys.stderr)
+
+    # A whole-request rejection (bad db, unparseable body) leaves no trustworthy
+    # count or ids; it was surfaced above, so stop with a non-zero exit.
+    if result.top_level_error:
+        return 1
+
+    # Fetch the returned PMIDs so the listing carries titles/authors/year — reusing
+    # #163's parser rather than re-reading the XML. esearch returns only ids+count.
+    works: tuple = ()
+    if result.ids:
+        try:
+            fetched = client.efetch(result.ids)
+        except PubMedConnectionError as exc:
+            print(f"factlog pubmed-search: {exc}", file=sys.stderr)
+            return 2
+        except PubMedError as exc:
+            print(f"factlog pubmed-search: {exc}", file=sys.stderr)
+            return 1
+        try:
+            works = parse_efetch_response(fetched, result.ids).works
+        except PubMedParseError as exc:
+            print(f"factlog pubmed-search: {exc}", file=sys.stderr)
+            return 1
+
+    _pubmed_show_results(works, result.count, porcelain=porcelain,
+                         query_translation=result.query_translation)
+    if porcelain:
+        for warning in _pubmed_search_retraction_warnings(works):
+            print(warning, file=sys.stderr)
+
+    # Selection + import land with #166 (see docstring). A command that cannot ask
+    # must not guess: --all is the explicit opt-in a non-interactive run needs, and
+    # a search that silently imports nothing in CI is the same silent-zero failure
+    # wearing another hat (#167). The write itself is the single seam below.
+    if args.all:
+        chosen = list(works)
+    else:
+        interactive = not porcelain and not dry_run and sys.stdin.isatty()
+        chosen = _select_search_results(works, interactive=interactive, command="pubmed-search")
+    if not chosen:
+        if not porcelain and works:
+            print("\nNothing selected; no files written. Re-run with --all to select "
+                  "every result.")
+        return 0
+    return _pubmed_import_selected(chosen, target=target, config=config,
+                                   dry_run=dry_run, porcelain=porcelain)
+
+
+def _pubmed_import_selected(chosen, *, target, config, dry_run: bool, porcelain: bool) -> int:
+    """The single seam where selected results become sources/ (import-on-select).
+
+    Deferred to #166, which owns ``PubMedSourceWriter`` and the import path this
+    must reuse (never a second writer). Until #166 lands on this branch, the seam
+    surfaces the selection honestly and writes nothing — a truthful deferral, not a
+    silent no-op — and the pre-merge rebase swaps this body for the shared
+    ``import_works`` call (the same path ``pubmed-import`` uses), exactly as
+    ``arxiv-search`` reuses the single-id importer. Kept as one call site so that
+    swap touches nothing else.
+    """
+    count = len(chosen)
+    verb = "would import" if dry_run else "selected"
+    message = (
+        f"factlog pubmed-search: {verb} {count} result(s). Importing PubMed results "
+        "into sources/ lands with #166 (PubMedSourceWriter); no files were written."
+    )
+    print(message, file=sys.stderr)
+    return 0
+
+
 def cmd_arxiv_check_versions(args: argparse.Namespace) -> int:
     """Is any arXiv record in the KB behind arXiv's latest? (#78/#79, §11 Step 6).
     Reads the provenance ledgers and a KB-level check-log, queries arXiv, and
@@ -5279,6 +5533,63 @@ def build_parser() -> argparse.ArgumentParser:
         help="machine-readable output (tab-separated rows) for scripts",
     )
     ax_backfill.set_defaults(func=cmd_arxiv_backfill_provenance)
+
+    def _pubmed_common(p):
+        # Mirrors _openalex_common/_arxiv_common; #166 defines the same helper for
+        # its import path, and the additive duplicate is folded into one at the
+        # pre-merge rebase.
+        p.add_argument(
+            "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+        )
+        p.add_argument(
+            "--dry-run", action="store_true",
+            help="show what would be imported without creating any files",
+        )
+        p.add_argument(
+            "--porcelain", action="store_true",
+            help="machine-readable output (tab-separated field/value counts) for scripts",
+        )
+        return p
+
+    pm_search = _pubmed_common(sub.add_parser(
+        "pubmed-search",
+        help="search PubMed and list the results, surfacing a suspicious zero "
+             "(free; a nonexistent MeSH term or bad field tag is caught, not read "
+             "as an empty result)",
+    ))
+    pm_search.add_argument(
+        "--show-query", action="store_true",
+        help="print the exact esearch term that would be sent and exit, without "
+             "spending a request. Different from --dry-run, which searches and "
+             "declines to write.",
+    )
+    pm_search.add_argument(
+        "--query", required=True,
+        help="PubMed query in PubMed syntax (required). A bare multi-word query is "
+             "sent verbatim and PubMed applies Automatic Term Mapping; the listing "
+             "shows how PubMed read it (QueryTranslation), and --show-query shows the "
+             "composed term. Quote a phrase yourself to search it literally. A "
+             "[field tag] PubMed does not know is rejected before a request is sent.",
+    )
+    pm_search.add_argument(
+        "--year", help="publication year or range, e.g. 2023 or 2020-2025",
+    )
+    pm_search.add_argument(
+        "--mesh", action="append", dest="mesh",
+        help="restrict to a MeSH term, repeatable (AND-combined). The term is sent "
+             "as [MeSH Terms]; a term PubMed cannot map is surfaced, not swallowed.",
+    )
+    pm_search.add_argument(
+        "--limit", type=int, default=None,
+        help="number of results (default: 25, max: 200)",
+    )
+    pm_search.add_argument(
+        "--all", action="store_true",
+        help="select every result without prompting (needed when stdin is not a "
+             "terminal). Import-on-select lands with #166; until then this reports "
+             "the selection and writes nothing.",
+    )
+    pm_search.set_defaults(func=cmd_pubmed_search)
 
     return parser
 
