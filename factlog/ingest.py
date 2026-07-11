@@ -176,13 +176,34 @@ BUILTIN_CONVERTERS: frozenset[str] = frozenset({"factlog-hwpx", "factlog-hwp", "
 # (on PATH, or always for a built-in). Each entry: (tool_name, output_suffix,
 # builder) where builder is an argv-list builder for PATH tools, or a
 # (src, dst) -> bool callable for built-ins.
+# Formats whose BYTES are text but whose text is not the document: RTF control
+# words, HTML tags. `--scan` sniffs content to avoid converting a mislabelled .pdf
+# that is really plain text, and these tripped that sniff — so `--scan` skipped
+# them forever. Since /factlog sync's first step IS --scan, their markup went into
+# extraction as if it were prose, and the "no conversion" warning never fired
+# because they were not classified as binary (#222). The sniff exists for formats
+# that MUST be binary; these are not among them.
+TEXT_CONTAINER_EXTS: frozenset[str] = frozenset({".html", ".htm", ".rtf"})
+
 INGEST_CONVERTERS: dict[str, list[tuple]] = {
     ".docx": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".odt": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".epub": [("pandoc", ".md", _conv_pandoc)],
     ".html": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".htm": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
-    ".rtf": [("textutil", ".txt", _conv_textutil)],
+    # pandoc first, like every other entry, with textutil as the macOS fallback.
+    # Order matters beyond preference: the chain picks the OUTPUT EXTENSION, so a
+    # platform-dependent first choice makes the same original convert to .md on
+    # Linux and .txt on macOS. Both land in runs/sources/, both get extracted, and
+    # the same document then yields duplicate facts under two source refs. Putting
+    # the portable converter first makes every platform converge on .md.
+    # (textutil was first on the claim that it handles legacy code pages; measured
+    # on a cp949 RTF it mangles them exactly as pandoc does, so the claim bought
+    # nothing and cost the divergence.) With textutil alone, a Linux/Windows user
+    # got a permanent "run factlog ingest --scan" warning for a command that could
+    # never convert anything, and the RTF control words kept going into extraction
+    # (#222).
+    ".rtf": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".pdf": [("pdftotext", ".txt", _conv_pdftotext)],
     ".hwpx": [("factlog-hwpx", ".md", _conv_hwpx)],
     ".hwp": [("factlog-hwp", ".md", _conv_hwp)],

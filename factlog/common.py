@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from factlog import literal_types
+from factlog.ingest import TEXT_CONTAINER_EXTS
 
 try:
     import pyrewire
@@ -455,7 +456,18 @@ def source_file_refs(root: Path) -> set[str]:
 
 
 def is_text_source(path: Path, *, sniff: int = 8192) -> bool:
-    """Return True iff *path*'s leading bytes look like readable UTF-8 text.
+    """Is *path* ingestible AS TEXT, exactly as extraction reads it?
+
+    Content decides — except for the text-based CONTAINERS (`.html`, `.htm`,
+    `.rtf`). Their bytes are text, so a content sniff called them ingestible, and
+    every consumer of this function then agreed: `--scan` skipped converting them,
+    the "unconverted binary" warning ignored them, and coverage/status filed the
+    raw original as a text source to extract from — so RTF control words and HTML
+    tags went into extraction as if they were prose (#222).
+    
+    They are NOT ingestible as text. Declaring that here, once, is what keeps the
+    four consumers in step; the first fix hand-rolled the exception at two call
+    sites and the other two silently kept the old answer.
 
     The in-session fact extraction reads each sources/ file as text, so a file is
     only ingestible if it decodes as text. A file is treated as non-text when its
@@ -465,6 +477,8 @@ def is_text_source(path: Path, *, sniff: int = 8192) -> bool:
     invalid trailing byte means binary. Detection is content-based, so binary
     formats (.docx, .pdf, images, ...) are flagged regardless of their extension.
     """
+    if path.suffix.lower() in TEXT_CONTAINER_EXTS:
+        return False
     try:
         raw = path.read_bytes()
     except OSError:

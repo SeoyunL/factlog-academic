@@ -2062,32 +2062,17 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 
 def _looks_binary(path, sniff: int = 8192) -> bool:
-    """Strict boolean inverse of merge_candidates.is_text_source for --scan
-    discovery: ``_looks_binary(p) == (not is_text_source(p))`` for every file.
+    """Strict boolean inverse of ``common.is_text_source`` for --scan discovery:
+    ``_looks_binary(p) == (not is_text_source(p))`` for every file.
 
-    Treats a file as binary if its first *sniff* bytes contain a NUL or do not
-    decode as UTF-8. A multi-byte char truncated at the sniff boundary is
-    tolerated (not binary) ONLY when the file actually extends past the boundary;
-    a fully-read short file with an invalid trailing byte is binary. Previously
-    this read just ``[:sniff]`` and so could not tell a short truncated file from
-    a boundary-truncated long one, disagreeing with is_text_source on the former —
-    which left such a source classified as NEITHER text nor binary (#259). Read
-    one byte past *sniff* to recover the "extends past sniff" signal cheaply.
+    Delegating keeps that invariant true BY CONSTRUCTION. It used to be a parallel
+    implementation of the same content sniff, and when the text-container exception
+    (#222) was added to one and not the other, --scan and coverage/status quietly
+    answered differently about the same file.
     """
-    try:
-        with path.open("rb") as fh:
-            raw = fh.read(sniff + 1)
-    except OSError:
-        return True
-    chunk = raw[:sniff]
-    if b"\x00" in chunk:
-        return True
-    try:
-        chunk.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        return not (len(raw) > sniff and exc.start >= len(chunk) - 3)
-    return False
+    from factlog import common as _common
 
+    return not _common.is_text_source(path, sniff=sniff)
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     """Convert binary/office file(s) into text source(s) under <target>/sources/.
@@ -2153,9 +2138,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 continue
             ref = unicodedata.normalize("NFC", path.relative_to(target).as_posix())
             if not _looks_binary(path):
-                # Only a recognized *conversion target* (a binary-format
-                # extension) is worth flagging: a plain .txt/.md source is read
-                # directly by sync as text and is correctly not a conversion job.
+                # Only a recognized *conversion target* is worth flagging: a plain
+                # .txt/.md source is read directly by sync as text and is correctly
+                # not a conversion job. (Text containers are no longer "text" —
+                # is_text_source owns that call now, see #222.)
                 if path.suffix.lower() not in ingest.INGEST_CONVERTERS:
                     continue
                 if is_sync_ignored(ref, patterns):
