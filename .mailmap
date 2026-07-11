@@ -1,0 +1,4 @@
+# Canonicalize Seoyun Lee's machine-local / misconfigured git identities.
+# Display normalization only — does not rewrite history. See git-shortlog(1) MAPPING AUTHORS.
+Seoyun Lee <seoyun.lee@cleverplant.com> <seoyun@iseoyun-ui-MacBookAir.local>
+Seoyun Lee <seoyun.lee@cleverplant.com> <r@r.com>
