@@ -339,7 +339,7 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 factlog export --bibtex   # 소스를 인용: BibTeX (또는 --csl 로 CSL-JSON)
 ```
 
-`export` 는 `sources/` **아래 모든 깊이**의 `.md` 의 YAML front matter 를 읽어, `title`
+`export` 는 `sources/` **와** `runs/sources/` **아래 모든 깊이**의 `.md` 의 YAML front matter 를 읽어(`factlog sources` 가 세는 집합과 동일), `title`
 또는 `zotero_key` 를 가진 소스마다 한 항목을 낸다. 인용할 수 없는 소스(front matter 가
 없거나 두 필드가 다 없는 경우)는 조용히 빠지지 않고 stderr 에 이름이 찍힌다 — 인용 목록에서
 문헌이 소리 없이 사라지는 것이야말로 이 KB 가 막으려는 실패다. 다른 폴더의 두 소스가 같은

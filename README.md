@@ -140,7 +140,7 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 factlog export --bibtex   # cite your sources: BibTeX (or --csl for CSL-JSON)
 ```
 
-`export` reads the YAML front matter of every `.md` under `sources/`, at any depth, and
+`export` reads the YAML front matter of every `.md` under `sources/` **and** `runs/sources/`, at any depth — the same set `factlog sources` lists — and
 emits one entry per source that carries a `title` or a `zotero_key`. A source it cannot
 cite (no front matter, or front matter with neither field) is named on stderr rather
 than dropped quietly — a citation list that silently loses a work is the failure this
