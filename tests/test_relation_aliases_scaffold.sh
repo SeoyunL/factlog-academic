@@ -71,6 +71,33 @@ c.relation_aliases(Path(os.environ['FACTLOG_ROOT']))" 2>&1 >/dev/null)"
 printf '%s' "$ERR3" | grep -q "malformed" && bad "(c) a comment line was warned about" \
   || ok "(c) comments and blanks are silent"
 
+# refinements: inline comments, unicode arrows, backtick-internal '#'
+parse_out() {  # $1=kb -> the parsed dict, stderr merged, malformed marker preserved
+  FACTLOG_ROOT="$1" "$PY" -c "
+import os, sys; sys.path.insert(0, os.getcwd())
+from pathlib import Path
+import factlog.common as c
+print(c.relation_aliases(Path(os.environ['FACTLOG_ROOT'])))" 2>&1
+}
+
+printf -- '- `게재연도` -> `published_year`  # 저널 게재연도\n' > "$KB2/policy/relation-aliases.md"
+O="$(parse_out "$KB2")"
+printf '%s' "$O" | grep -q "'게재연도': 'published_year'" && ! printf '%s' "$O" | grep -q malformed \
+  && ok "(e) a valid mapping with an inline comment parses, no warning" \
+  || bad "(e) an inline comment broke a valid mapping: $O"
+
+printf -- '- `게재연도` \xe2\x86\x92 `published_year`\n' > "$KB2/policy/relation-aliases.md"  # unicode arrow
+O="$(parse_out "$KB2")"
+printf '%s' "$O" | grep -q malformed \
+  && ok "(e) a unicode-arrow mapping is warned, not silently dropped" \
+  || bad "(e) a unicode arrow was dropped silently: $O"
+
+printf -- '- `a#b` -> `c`\n' > "$KB2/policy/relation-aliases.md"  # '#' inside backticks
+O="$(parse_out "$KB2")"
+printf '%s' "$O" | grep -q "'a#b': 'c'" && ! printf '%s' "$O" | grep -q malformed \
+  && ok "(e) a '#' inside backticks is part of the name, not a comment" \
+  || bad "(e) a backtick-internal '#' was mishandled: $O"
+
 grep -q "policy/relation-aliases.md" README.md && ok "(d) README documents it" || bad "(d) README does not"
 grep -q "policy/relation-aliases.md" README.ko.md && ok "(d) README.ko documents it" || bad "(d) README.ko does not"
 
