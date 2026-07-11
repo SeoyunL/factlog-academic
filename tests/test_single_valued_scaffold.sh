@@ -41,8 +41,34 @@ printf '%s' "$OUT" | grep -q "CONFLICT: single-valued 'published_year'" \
   && ok "(c) uncommenting the scaffolded example actually detects the conflict" \
   || bad "(c) the scaffolded example does not work"
 
-FACTLOG_ROOT="$KB" "$PY" -m factlog status 2>&1 | grep -q "conflicts:  1" \
+ST="$(FACTLOG_ROOT="$KB" "$PY" -m factlog status 2>&1 || true)"
+printf '%s' "$ST" | grep -q "conflicts:  1" \
   && ok "(d) status agrees" || bad "(d) status disagrees with the gate"
+
+# The SECOND scaffolded example is backtick-quoted and contains a space. Ship an
+# example, prove it parses.
+KB2="$(mktemp -d)/kb"
+"$PY" -m factlog init --target "$KB2" >/dev/null
+printf 'a\n' > "$KB2/sources/a.md"
+{ printf 'subject,relation,object,source,status,confidence,note\n'
+  printf 'P,연구 유형,관찰연구,sources/a.md,accepted,0.9,\n'
+  printf 'P,연구 유형,실험연구,sources/a.md,accepted,0.9,\n'; } > "$KB2/facts/candidates.csv"
+sed -e 's/^# `연구 유형`$/`연구 유형`/' "$KB2/policy/single-valued.md" > "$KB2/policy/sv.tmp"
+mv "$KB2/policy/sv.tmp" "$KB2/policy/single-valued.md"
+FACTLOG_ROOT="$KB2" "$PY" tools/compile_facts.py >/dev/null 2>&1
+# Capture, do not pipe: check_conflicts exits 1 when it finds a conflict, and under
+# `set -o pipefail` that fails the whole pipeline even when grep matched.
+OUT2="$(FACTLOG_ROOT="$KB2" "$PY" tools/check_conflicts.py 2>&1 || true)"
+printf '%s' "$OUT2" | grep -q "single-valued '연구 유형'" \
+  && ok "(f) the backtick-quoted example with a space parses too" \
+  || bad "(f) the backtick-quoted example does not work"
+
+# Re-running init must NOT clobber a user's declarations.
+printf 'my_relation\n' > "$KB2/policy/single-valued.md"
+"$PY" -m factlog init --target "$KB2" >/dev/null 2>&1
+[ "$(cat "$KB2/policy/single-valued.md")" = "my_relation" ] \
+  && ok "(g) re-running init does not overwrite an existing single-valued.md" \
+  || bad "(g) init CLOBBERED the user's declarations"
 
 # README must say what goes in the file -- status points users at it.
 grep -q "policy/single-valued.md" README.md && ok "(e) README documents it" || bad "(e) README does not"
