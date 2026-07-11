@@ -120,6 +120,50 @@ else
   ok "(f) the warning clears once the container is converted"
 fi
 
+# --- (g)(h) the two consumers that had DIVERGED: coverage and status ------------
+# The bug was that four consumers each decided "is this a text source?" their own
+# way, and coverage/status kept a private exception that called a markup container
+# an extractable text source. The pins above reach those two only INDIRECTLY, via
+# --scan and merge. Pin them head-on, so restoring a private exception is caught.
+KB3="$TMP_ROOT/kb3"
+"$PYTHON" -m factlog init --target "$KB3" >/dev/null
+printf '<html><body><p>hi</p></body></html>\n' > "$KB3/sources/page.html"
+
+COV="$(FACTLOG_ROOT="$KB3" "$PYTHON" tools/coverage.py 2>&1 || true)"
+if printf '%s' "$COV" | grep -q 'GAP (binary, run factlog ingest): sources/page.html'; then
+  ok "(g) coverage calls an unconverted container a conversion gap"
+else
+  bad "(g) coverage does not flag the container for conversion"
+fi
+if printf '%s' "$COV" | grep -q '1 binary needing conversion'; then
+  ok "(g) coverage counts it as needing conversion, not as prose"
+else
+  bad "(g) coverage still treats the container as an extractable text source"
+fi
+
+if [ "$have_html" -eq 1 ]; then
+  FACTLOG_ROOT="$KB3" "$PYTHON" -m factlog ingest --scan >/dev/null 2>&1 || true
+  COV2="$(FACTLOG_ROOT="$KB3" "$PYTHON" tools/coverage.py 2>&1 || true)"
+  if printf '%s' "$COV2" | grep -q '0 binary needing conversion'; then
+    ok "(h) coverage clears the conversion gap once converted"
+  else
+    bad "(h) coverage still asks for a conversion that exists"
+  fi
+  if printf '%s' "$COV2" | grep -q 'sources/page.html  \[converted'; then
+    ok "(h) coverage credits the original to its conversion"
+  else
+    bad "(h) coverage does not pair the original with its conversion"
+  fi
+  ST="$(FACTLOG_ROOT="$KB3" "$PYTHON" -m factlog status 2>&1 || true)"
+  if printf '%s' "$ST" | grep -q 'sources:'; then
+    ok "(h) status reports on sources without crashing on the container"
+  else
+    bad "(h) status lost its sources line"
+  fi
+else
+  echo "SKIP: (h) needs pandoc"
+fi
+
 echo "---"
 echo "passed: $pass, failed: $fail"
 [ "$fail" -eq 0 ]
