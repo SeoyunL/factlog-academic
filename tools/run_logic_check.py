@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 from common import (
+    ENGINE_STATUSES,
     FACTS_DIR,
     QUERY_PREDICATES,
+    REVIEW_STATUSES,
+    SUPERSEDED_STATUSES,
     allowed_relations,
     dependency_path,
     value_set,
@@ -22,6 +25,11 @@ from common import (
     query_args,
     quoted_constants,
 )
+
+# Every status the fact vocabulary defines. `superseded` rows are retired by
+# `factlog reject`/`amend` and are legitimately outside engine input, so they
+# must not be warned about — only a genuinely unrecognised status (a typo) is.
+KNOWN_STATUSES = ENGINE_STATUSES | REVIEW_STATUSES | SUPERSEDED_STATUSES
 
 
 def query_lines() -> list[str]:
@@ -173,7 +181,7 @@ def main() -> None:
     for row in candidates:
         if not row["subject"] or not row["relation"] or not row["object"]:
             errors.append(f"incomplete fact row: {row}")
-        if row["status"] not in {"confirmed", "accepted", "needs_review", "candidate"}:
+        if row["status"] not in KNOWN_STATUSES:
             warnings.append(f"unknown status treated as non-engine input: {row['status']}")
 
     for predicate in sorted(policy_query_predicates):
