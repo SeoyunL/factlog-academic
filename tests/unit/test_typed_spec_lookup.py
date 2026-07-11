@@ -29,7 +29,6 @@ def test_lookup_folds_an_alias_to_its_canonical():
 
 
 def test_lookup_folds_nfc():
-    nfd = unicodedata.normalize("NFD", "published_year")  # ascii, unchanged, so use a hangul case
     hangul_specs = {"발표일": TypedRelSpec(type="date", alias="pubdate")}
     nfd_name = unicodedata.normalize("NFD", "발표일")
     assert nfd_name != "발표일"  # genuinely decomposed
