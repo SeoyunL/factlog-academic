@@ -13,7 +13,6 @@ rate with/without a key.
 """
 from __future__ import annotations
 
-import json
 
 import pytest
 
@@ -37,7 +36,6 @@ from factlog.integrations.pubmed.check_log import (
 from factlog.integrations.pubmed.client import (
     PubMedClient,
     PubMedConnectionError,
-    PubMedServiceError,
 )
 
 IMPORTED_AT = "2026-01-01T00:00:00+00:00"

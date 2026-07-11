@@ -205,7 +205,7 @@ class TestRecord:
         kb = _kb(tmp_path)
         md = _seed(kb, retracted=True)  # already recorded
         before = _stat(sidecar_path(md, kb))
-        client = fake(FakeClient(_set(_retracted_record("32738937"))))
+        fake(FakeClient(_set(_retracted_record("32738937"))))
 
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
                   "--target", str(kb), "--yes"])
@@ -238,7 +238,7 @@ class TestBothFieldsMoveTogether:
         kb = _kb(tmp_path)
         md = _seed(kb, retracted=False)  # not yet retracted in the ledger
         # Live PubMed flags a retraction and links its notice PMID.
-        client = fake(FakeClient(
+        fake(FakeClient(
             _set(_retracted_record("32738937", notice_pmid="18842931"))
         ))
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
@@ -253,7 +253,7 @@ class TestBothFieldsMoveTogether:
         kb = _kb(tmp_path)
         md = _seed(kb, retracted=False)
         # A real retraction whose notice carries no PMID (spike §1): retracted, no link.
-        client = fake(FakeClient(
+        fake(FakeClient(
             _set(_retracted_record("32738937", notice_pmid=None))
         ))
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
@@ -270,7 +270,7 @@ class TestBothFieldsMoveTogether:
         md = _seed(kb, retracted=True, notice_pmid="18842931")
         assert "retraction_notice_pmid" in _ledger(md, kb)[("pubmed", "32738937")]
         # PubMed reversed the retraction.
-        client = fake(FakeClient(_set(_plain_record("32738937"))))
+        fake(FakeClient(_set(_plain_record("32738937"))))
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937", "--target", str(kb)])
@@ -286,7 +286,7 @@ class TestBothFieldsMoveTogether:
         kb = _kb(tmp_path)
         md = _seed(kb, retracted=True, notice_pmid="18842931")  # already fully recorded
         before = _stat(sidecar_path(md, kb))
-        client = fake(FakeClient(
+        fake(FakeClient(
             _set(_retracted_record("32738937", notice_pmid="18842931"))
         ))
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
@@ -364,7 +364,7 @@ class TestClearIsGatedOnAHuman:
         md = _seed(kb, retracted=True)  # ledger records a retraction
         before = _stat(sidecar_path(md, kb))
         # PubMed no longer reads as retracted.
-        client = fake(FakeClient(_set(_plain_record("32738937"))))
+        fake(FakeClient(_set(_plain_record("32738937"))))
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
                   "--target", str(kb), "--yes"])
         assert rc == 1
@@ -377,7 +377,7 @@ class TestClearIsGatedOnAHuman:
     def test_interactive_clear_removes_the_field(self, tmp_path, fake, capsys, monkeypatch):
         kb = _kb(tmp_path)
         md = _seed(kb, retracted=True)
-        client = fake(FakeClient(_set(_plain_record("32738937"))))
+        fake(FakeClient(_set(_plain_record("32738937"))))
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937", "--target", str(kb)])
@@ -390,7 +390,7 @@ class TestClearIsGatedOnAHuman:
         kb = _kb(tmp_path)
         md = _seed(kb, retracted=False)
         before = _stat(sidecar_path(md, kb))
-        client = fake(FakeClient(_set(_retracted_record("32738937"))))
+        fake(FakeClient(_set(_retracted_record("32738937"))))
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937", "--target", str(kb)])
@@ -452,7 +452,7 @@ class TestNothingToAcknowledge:
         kb = _kb(tmp_path)
         md = _seed(kb, retracted=False)
         before = _stat(sidecar_path(md, kb))
-        client = fake(FakeClient(_set(_plain_record("32738937"))))
+        fake(FakeClient(_set(_plain_record("32738937"))))
         rc = run(["pubmed-acknowledge-retraction", "--id", "32738937",
                   "--target", str(kb), "--yes"])
         assert rc == 0

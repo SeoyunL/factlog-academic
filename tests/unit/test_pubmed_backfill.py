@@ -32,7 +32,6 @@ import factlog.integrations.common.backfill as bf
 import factlog.integrations.pubmed.backfill as pb
 from factlog.integrations.common.provenance import (
     ProvenanceError,
-    SourceRecord,
     read_provenance,
     sidecar_path,
 )

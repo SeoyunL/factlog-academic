@@ -3943,7 +3943,7 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
                 print(f"skipped\t{porcelain_field(check.pmid)}")
             print(f"would_check\t{len(to_check)}")
             print(f"skipped\t{len(skipped)}")
-            print(f"dry_run\t1")
+            print("dry_run\t1")
             print(f"target\t{target}")
         else:
             print(
