@@ -1509,23 +1509,26 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     # line with a preceding rule's terminator as an in-body reference (#261); a
     # statement is a full clause, so canonical-left-of-neck (or no neck at all)
     # is unambiguously a head/fact.
-    kept = [
-        line
-        for line in policy_text.splitlines()
-        if line.strip() and not line.strip().startswith(("//", "#"))
-    ]
-    bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
+    # Strip quoted literals FIRST (so a `//` inside a reason string is not read as a
+    # comment), then strip comments to END OF LINE -- not just whole comment lines. A
+    # trailing `// TODO` after a clause's '.' stayed in the text, so the next statement
+    # began with the comment, the head anchor never matched, and a reserved head walked
+    # straight through: #226 came back with rc=0, and the `canonical` guard became
+    # WEAKER than it was before this change.
+    unquoted = re.sub(r'"[^"]*"', "", policy_text)
+    uncommented = re.sub(r"(//|#).*$", "", unquoted, flags=re.MULTILINE)
+    bare = "\n".join(line for line in uncommented.splitlines() if line.strip())
     # A `.decl` directive has no clause-terminating '.', so it runs into the next
     # statement. Pull the directives out first, check them, and match heads on what is
     # left.
-    for name in re.findall(r"^\s*\.decl\s+([A-Za-z_][A-Za-z0-9_]*)", bare, re.MULTILINE):
+    for name in re.findall(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)", bare):
         if name in _SOURCES:
             raise FactlogError(
                 f"{name} is a reserved engine predicate (populated from "
                 f"{_SOURCES[name]}) and is already declared by the engine; remove the "
                 f".decl from logic-policy(.extra).dl"
             )
-    bare = re.sub(r"^\s*\.decl\s+[^\n]*$", "", bare, flags=re.MULTILINE)
+    bare = re.sub(r"\.decl\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", bare)
 
     for statement in _split_policy_statements(bare):
         # Tokenize the HEAD; do not substring-search the statement. A substring search

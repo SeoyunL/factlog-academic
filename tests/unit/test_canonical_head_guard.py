@@ -206,3 +206,22 @@ class TestHeadIsMatchedAsAToken:
     )
     def test_a_predicate_that_merely_contains_a_reserved_name_is_allowed(self, policy):
         fcommon._assert_no_canonical_head(policy)
+
+
+class TestInlineCommentsDoNotHideAHead:
+    """A trailing `// TODO` after a clause's '.' left the comment at the head of the
+    NEXT statement, so the head anchor never matched and a reserved head walked through
+    -- #226 back with rc=0, and the canonical guard weaker than before the change."""
+
+    @pytest.mark.parametrize("reserved", ["attr_rel(R) :- relation(S, R, O).", "canonical(S, R, O) :- relation(S, R, O)."])
+    def test_a_head_behind_an_inline_comment_is_rejected(self, reserved):
+        policy = 'foo(X, "r") :- relation(X, "a", Y).  // TODO\n' + reserved
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_a_decl_that_is_not_at_the_start_of_a_line_is_rejected(self):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head("foo(X) :- bar(X). .decl attr_rel(rel: symbol)")
+
+    def test_a_slash_inside_a_string_is_not_a_comment(self):
+        fcommon._assert_no_canonical_head('ok(X, "a // b") :- attr_rel(R).')

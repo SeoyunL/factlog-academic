@@ -511,11 +511,13 @@ explanation of its purpose.
 #     way of one. That is the guarantee; it is about the relation, not the value.
 #   - a value that only ever appears at the object end of attribute relations is
 #     therefore not an entity: not listed, not a path node, not a count subject.
-#   - if the value is a SUBJECT of its own fact, it is an ordinary entity and a path
-#     may START at it. A path still cannot END at it or run THROUGH it, because the
-#     only link pointing INTO it is the attribute relation, and that is not an edge.
-#   - if some NON-attribute relation has the value as its object, that link IS an
-#     edge, so a path may end at the value and run through it as well.
+#   - the value is still an ENTITY if it appears as a subject anywhere, so it can be
+#     named in a query. Being an entity is not the same as being on a path.
+#   - a path may START at it only if it is the subject of a NON-attribute relation
+#     (that is the only way it gets an outgoing edge).
+#   - a path may END at it only if a NON-attribute relation has it as its object
+#     (the only way it gets an incoming edge).
+#   - a path RUNS THROUGH it only when both of the above hold.
 #
 # Declaring the relation does not make the value invisible; it stops the attribute
 # assertion from being treated as a dependency.

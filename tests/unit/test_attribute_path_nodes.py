@@ -365,3 +365,26 @@ def test_the_generator_refuses_attr_rel_as_a_policy_predicate():
     import generate_logic_policy as glp
 
     assert "attr_rel" in glp.RESERVED_PREDICATES
+
+
+def test_a_subject_of_only_attribute_relations_starts_no_path(tmp_path):
+    """Being a subject is not the same as having an outgoing EDGE.
+
+    The scaffold said a value that is a subject of its own fact starts a path. If that
+    fact is itself an attribute relation, it is not an edge, so nothing starts. The
+    promise is now written in terms of edges only; this is the case that falsified the
+    earlier wording.
+    """
+    rows = [("을서비스", "정식_운영", "2030.1"), ("2030.1", "정식_운영", "분기2")]
+    eng, tracer, ents = _engine_and_tracer(_kb(tmp_path, rows, "정식_운영\n"))
+    assert "2030.1" in ents  # an entity, because it is a subject
+    assert ("2030.1", "분기2") not in eng  # but no path starts at it
+    assert eng == tracer
+
+
+def test_end_at_it_needs_an_incoming_non_attribute_edge(tmp_path):
+    """END is possible, THROUGH is not, when the value has no outgoing edge."""
+    rows = [("병", "참조", "2030.1"), ("2030.1", "정식_운영", "분기2")]
+    eng, _, _ = _engine_and_tracer(_kb(tmp_path, rows, "정식_운영\n"))
+    assert ("병", "2030.1") in eng  # ends at it
+    assert ("병", "분기2") not in eng  # but does not run through it
