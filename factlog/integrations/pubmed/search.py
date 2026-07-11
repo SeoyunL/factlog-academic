@@ -108,9 +108,15 @@ _FIELD_TAG_NAMES = frozenset({
     "mesh subheading", "mesh terms", "modification date", "nlm unique id",
     "other term", "pagination", "personal name as subject",
     "pharmacological action", "place of publication", "pmid",
-    "publication date", "date - publication", "publication type", "publisher",
+    "publication date", "publication type", "publisher",
     "secondary source id", "subset", "supplementary concept", "text word",
     "title", "title/abstract", "transliterated title", "volume",
+    # PubMed's Advanced Search builder shows the date fields as "Date - X"; the
+    # bare "X date" forms above are the older spellings. Both must pass or a query
+    # copied out of the builder false-rejects. Each pairs with an abbreviation
+    # below: dp/crdt/dcom/edat/mhda/lr.
+    "date - publication", "date - create", "date - completion",
+    "date - entry", "date - entrez", "date - mesh", "date - modification",
 })
 _FIELD_TAG_ABBREVS = frozenset({
     "ad", "all", "aid", "au", "auid", "book", "dcom", "cois", "cn", "crdt",

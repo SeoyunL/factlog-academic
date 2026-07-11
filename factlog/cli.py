@@ -3592,6 +3592,12 @@ def _pubmed_show_results(works, count: int, *, porcelain: bool,
 
     if count == 0:
         print("Found 0 results.")
+        # A zero is exactly where "how did PubMed read my words" matters most: the
+        # QueryTranslation shows whether ATM widened, narrowed, or dropped the query
+        # that returned nothing. Surfacing it only on non-empty results would hide
+        # the one diagnostic that explains an honest zero — so it rides the zero path
+        # too, keeping the module's "a real search surfaces QueryTranslation" promise.
+        _pubmed_show_query_translation(query_translation)
         return
 
     print(f"Found {count} results, showing top {len(works)}:\n")
@@ -3607,10 +3613,18 @@ def _pubmed_show_results(works, count: int, *, porcelain: bool,
             # never conflate it with a mere correction.
             print("      ⚠ PubMed reports this as RETRACTED; this signal is unverified "
                   "— confirm before trusting any claim from it.")
+    _pubmed_show_query_translation(query_translation)
+
+
+def _pubmed_show_query_translation(query_translation: str | None) -> None:
+    """Print PubMed's own reading of the query, when it volunteered one.
+
+    Makes PubMed's Automatic Term Mapping visible rather than rewriting the
+    operator's words (#89's answer for PubMed). It rides stdout in human mode —
+    stderr would hide it from a scrolled-back human — and is shown at any count,
+    zero included, because a zero is where "how did PubMed read this" matters most.
+    """
     if query_translation is not None:
-        # Make PubMed's own reading of the query visible rather than rewriting the
-        # operator's words (#89's answer for PubMed; Automatic Term Mapping). stderr
-        # would hide it from a scrolled-back human, so it rides stdout in human mode.
         print(f"\nPubMed read the query as: {query_translation}")
 
 

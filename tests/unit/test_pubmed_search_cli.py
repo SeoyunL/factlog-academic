@@ -165,6 +165,17 @@ class TestSilentZeroGuard:
         assert "filter was applied" not in captured.err
         assert "nonexistent MeSH" not in captured.err
 
+    def test_zero_results_still_surfaces_the_query_translation(self, tmp_path, fake, capsys):
+        # A zero is where "how did PubMed read my words" matters most; the
+        # QueryTranslation must not be hidden by the empty-result early return.
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=0, query_translation="asdfqwerzxcv[All Fields]")))
+        rc = run(["pubmed-search", "--query", "asdfqwerzxcv", "--target", str(_kb(tmp_path))])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Found 0 results." in out
+        assert "PubMed read the query as: asdfqwerzxcv[All Fields]" in out
+
     def test_top_level_error_exits_nonzero(self, tmp_path, fake, capsys):
         fake(FakePubMedClient(esearch_body="<eSearchResult><ERROR>Invalid db name</ERROR></eSearchResult>"))
         rc = run(["pubmed-search", "--query", "cancer", "--target", str(_kb(tmp_path))])
