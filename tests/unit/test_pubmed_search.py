@@ -17,7 +17,6 @@ from factlog.integrations.pubmed.search import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
     PUBMED_EPOCH_YEAR,
-    EsearchResult,
     PubMedSearchValidationError,
     build_year_filter,
     compose_query,

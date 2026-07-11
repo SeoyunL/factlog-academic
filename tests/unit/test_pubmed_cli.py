@@ -144,7 +144,7 @@ class TestPorcelain:
         kb = _kb(tmp_path)
         fake(FakeClient())
         run(["pubmed-import", "--pmid", "32738937", "--target", str(kb), "--porcelain", "--dry-run"])
-        rows = [l for l in capsys.readouterr().out.splitlines() if l.startswith("work\t")]
+        rows = [line for line in capsys.readouterr().out.splitlines() if line.startswith("work\t")]
         assert len(rows) == 1
         fields = rows[0].split("\t")
         assert fields[1] == "imported"
@@ -156,7 +156,7 @@ class TestPorcelain:
         kb = _kb(tmp_path)
         fake(FakeClient())
         run(["pubmed-import", "--pmid", "12\t34", "--target", str(kb), "--porcelain", "--dry-run"])
-        rows = [l for l in capsys.readouterr().out.splitlines() if l.startswith("work\t")]
+        rows = [line for line in capsys.readouterr().out.splitlines() if line.startswith("work\t")]
         assert len(rows) == 1
         # Exactly four fields: work, status, key, name — the tab was neutralized.
         assert len(rows[0].split("\t")) == 4
