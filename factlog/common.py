@@ -1845,31 +1845,10 @@ def dependency_graph(facts: list[dict[str, str]]) -> dict[str, list[str]]:
     return graph
 
 
-def reachable_pairs(facts: list[dict[str, str]]) -> set[tuple[str, str]]:
-    """Transitive closure of the engine's `path/2`, in pure python.
-
-    Mirrors WIRELOG_PROGRAM without needing the engine, so a variable `path` query
-    resolves before `/factlog check` has run.
-    """
-    graph = dependency_graph(facts)
-    pairs: set[tuple[str, str]] = set()
-    for start in list(graph):
-        seen: set[str] = set()
-        stack = list(graph.get(start, []))
-        while stack:
-            node = stack.pop()
-            if node in seen:
-                continue
-            seen.add(node)
-            pairs.add((start, node))
-            stack.extend(graph.get(node, []))
-    return pairs
-
-
 def path_query_rows(
     args: list[str],
     facts: list[dict[str, str]],
-    pairs: set[tuple[str, str]] | None = None,
+    pairs: set[tuple[str, str]],
 ) -> list[list[str]]:
     """Rows answering a `path` query, whether its arguments are constants or variables.
 
@@ -1885,7 +1864,11 @@ def path_query_rows(
     """
     if len(args) != 2:
         return []
-    reachable = reachable_pairs(facts) if pairs is None else pairs
+    # `pairs` is required: it is the ENGINE's path/2. Defaulting to a python closure
+    # over the accepted facts would leave a second source of truth in the tree, and the
+    # two would drift -- which is the bug this function exists to end. Both callers (the
+    # report and the ask router) run the engine and pass its answer.
+    reachable = pairs
     if all(is_quoted_string(a) for a in args):
         start, target = arg_value(args[0]), arg_value(args[1])
         if (start, target) not in reachable:
