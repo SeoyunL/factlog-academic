@@ -70,11 +70,9 @@ from common import (  # noqa: E402
     canonical_value,
     canonical_variants_of,
     is_quoted_string,
-    is_variable,
     query_args,
     classify_query,
-    dependency_graph,
-    dependency_path,
+    path_query_rows,
     entity_set,
     fact_signals,
     load_accepted_facts,
@@ -344,27 +342,6 @@ def coverage_hint(
     )
 
 
-def _reachable_pairs(facts: list[dict[str, str]]) -> set[tuple[str, str]]:
-    """Transitive closure of edge(S,O) :- relation(S, _, O), pure-python.
-
-    Mirrors the wirelog `path` semantics (WIRELOG_PROGRAM) without needing the
-    engine, so variable `path` queries resolve even before `/factlog check`.
-    """
-    graph = dependency_graph(facts)
-    pairs: set[tuple[str, str]] = set()
-    for start in list(graph):
-        seen: set[str] = set()
-        stack = list(graph.get(start, []))
-        while stack:
-            node = stack.pop()
-            if node in seen:
-                continue
-            seen.add(node)
-            pairs.add((start, node))
-            stack.extend(graph.get(node, []))
-    return pairs
-
-
 def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     """Evaluate a validated engine query: relation, path, or a policy predicate.
 
@@ -413,17 +390,17 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         }
         return {"rows": [[str(len(objects))]], "count": len(objects)}
     if predicate == "path":
-        if len(args) == 2 and all(is_quoted_string(a) for a in args):
-            path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
-            rows = [path] if path else []
-        else:
-            rows = [
-                [start, target]
-                for (start, target) in sorted(_reachable_pairs(facts))
-                if (len(args) == 2
-                    and (is_variable(args[0]) or arg_value(args[0]) == start)
-                    and (is_variable(args[1]) or arg_value(args[1]) == target))
-            ]
+        # Ask the ENGINE, exactly as the policy-predicate branch below does. Answering
+        # from the python closure over accepted facts made ask return a VERIFIED
+        # NEGATIVE for a pair the engine had proved -- an edge rule in
+        # logic-policy.extra.dl reaches pairs no closure over relation/3 can see -- so
+        # ask and the report disagreed about the same KB (#220). Degrade the same way
+        # too: a signalled empty result, never a faked verified negative.
+        try:
+            inferred = run_wirelog()
+        except Exception as exc:  # noqa: BLE001 — engine/loader raise non-FactlogError too
+            return {"rows": [], "count": 0, "policy_unevaluable": str(exc)}
+        rows = path_query_rows(args, facts, inferred["path"])
         return {"rows": rows, "count": len(rows)}
     if predicate in policy_predicates(_policy_program_optional()):
         # Engine evaluation of a policy predicate re-loads the policy program AND

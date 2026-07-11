@@ -43,7 +43,7 @@ RELATION_RE = re.compile(r"^[^\s\"`(),.]+$")
 # common._assert_no_canonical_head, so adding it here is not load-bearing. It is
 # listed anyway so a bullet can never generate a canonical(...) HEAD if predicate
 # inference ever grows a path that returns "canonical".
-RESERVED_PREDICATES = {"relation", "edge", "path", "review_required", "canonical"}
+RESERVED_PREDICATES = {"relation", "edge", "path", "review_required", "canonical", "attr_rel"}
 CANONICAL_PREFIX_RE = re.compile(r"^\{canonical\}\s+")
 
 

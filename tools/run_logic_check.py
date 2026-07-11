@@ -5,20 +5,22 @@
 from __future__ import annotations
 
 from common import (
+    attribute_relation_forms,
     FACTS_DIR,
     KNOWN_STATUSES,
     canonical_value,
     declared_ancestors,
-    is_quoted_string,
     is_variable,
     relation_aliases,
     relation_row_matches,
+    dependency_path,
+    is_quoted_string,
+    path_query_rows,
     typed_projection_warnings,
     QUERY_PREDICATES,
     allowed_relations,
     value_hierarchy,
     value_hierarchy_warnings,
-    dependency_path,
     value_set,
     ensure_dirs,
     load_accepted_facts,
@@ -154,6 +156,17 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         if not all(is_variable(a) or is_quoted_string(a) for a in args):
             errors.append(f"relation arguments must be variables or quoted strings: {line}")
             return errors, warnings
+    if predicate == "path":
+        # The same guard `relation` has, and for the same reason: without it the report
+        # answered a malformed path query with "0 rows" -- a VERIFIED NEGATIVE -- while
+        # the ask gate rejected it as bad_arity/malformed (#213, #220).
+        args = query_args(line)
+        if len(args) != 2:
+            errors.append(f"path query must have start and target arguments: {line}")
+            return errors, warnings
+        if not all(is_variable(a) or is_quoted_string(a) for a in args):
+            errors.append(f"path arguments must be variables or quoted strings: {line}")
+            return errors, warnings
     for constant in quoted_constants(line):
         if constant and canonical_value(constant) not in entities and constant not in {"S", "R", "O", "X", "Q"}:
             warnings.append(f"query references non-engine entity or relation: {constant}")
@@ -189,12 +202,40 @@ def evaluate_queries(
         if predicate in policy_query_predicates:
             results.append(policy_result_line(predicate, line, inferred))
         elif line.startswith("path"):
-            constants = quoted_constants(line)
-            if len(constants) >= 2:
-                is_reachable = (constants[0], constants[1]) in inferred["path"]
-                trace = dependency_path(facts, constants[0], constants[1]) if is_reachable else []
-                value = " -> ".join(trace) if trace else "(not found)"
-                results.append(f"path {constants[0]} -> {constants[1]}: {value}")
+            # Constants AND variables. The old branch only handled two quoted
+            # constants, so `path("A", X)?` appended nothing, the result list came
+            # back empty, and main's fallback claimed `no facts/query.dl found` about
+            # a file that was right there -- while `ask` answered the same question
+            # (#220). Shared with the ask router so the two cannot diverge (#213).
+            args = query_args(line)
+            # The ENGINE decides what is reachable; python only renders the route. The
+            # first cut let the python closure decide, so on a KB with an edge rule in
+            # logic-policy.extra.dl the report said "(not found)" about a pair the
+            # engine had proved -- a verification artifact contradicting the engine
+            # while signed with its name.
+            rows = path_query_rows(args, facts, inferred["path"])
+            if all(is_quoted_string(a) for a in args) and len(args) == 2:
+                start, target = arg_value(args[0]), arg_value(args[1])
+                # Explicit attr_forms, matching first_dependency_path: the route must be
+                # drawn over the same graph the engine used, not an ambient default.
+                route = dependency_path(facts, start, target, attribute_relation_forms())
+                if not rows:
+                    value = "(not found)"
+                elif route:
+                    value = " -> ".join(route)
+                else:
+                    # Reachable per the engine, but no route through the accepted facts
+                    # -- a rule in logic-policy.extra.dl put the edge there. Printing
+                    # `start -> target` would draw a one-hop route that does not exist;
+                    # printing "(not found)" would deny what the engine proved. Say what
+                    # is true.
+                    value = "reachable (engine); no route through the accepted facts"
+                results.append(f"path {start} -> {target}: {value}")
+            else:
+                routes = "; ".join(f"{start} -> {target}" for start, target in rows)
+                suffix = f"; {routes}" if routes else ""
+                results.append(f"path results: {len(rows)} rows{suffix}")
+
         elif line.startswith("relation"):
             rows = relation_results(line, facts, hierarchy)
             args = query_args(line)
@@ -301,10 +342,28 @@ def main() -> None:
     report.extend([f"- {item}" for item in policy_items] or ["- no generated policy predicates"])
     report.append("")
     report.append("Query evaluation:")
-    report.extend(
-        [f"- {item}" for item in evaluate_queries(facts, inferred, policy_query_predicates, value_hierarchy())]
-        or ["- no facts/query.dl found"]
-    )
+    query_items = [
+        f"- {item}"
+        for item in evaluate_queries(facts, inferred, policy_query_predicates, value_hierarchy())
+    ]
+    if query_items:
+        report.extend(query_items)
+    elif not (FACTS_DIR / "query.dl").is_file():
+        report.append("- no facts/query.dl found")
+    else:
+        # The file IS there. Saying "not found" sent users looking for a file they had
+        # already written, when the truth was that no line in it produced a result
+        # (#220). Say which.
+        raw = (FACTS_DIR / "query.dl").read_text(encoding="utf-8")
+        lines = [ln.strip() for ln in raw.splitlines()]
+        pending = [ln for ln in lines if ln and not ln.startswith("//")]
+        if not pending:
+            report.append("- facts/query.dl is empty (no queries to evaluate)")
+        else:
+            report.append(
+                f"- facts/query.dl has {len(pending)} line(s) but none produced a "
+                f"result — see Errors above"
+            )
 
     text = "\n".join(report) + "\n"
     out = FACTS_DIR / "logic_report.txt"

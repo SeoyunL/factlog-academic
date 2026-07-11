@@ -163,6 +163,12 @@ class KbContext:
     def attribute_relations(self) -> set[str]:
         return _relation_names_from(self.policy_dir / "attribute-relations.md")
 
+    def relation_aliases(self) -> dict[str, str]:
+        # Resolving THIS KB's attribute relations needs THIS KB's alias map; reading
+        # it from the ambient root made one KB answer differently under --target than
+        # under FACTLOG_ROOT (#226).
+        return relation_aliases(self.root)
+
     def typed_relations(self) -> dict[str, TypedRelSpec]:
         path = self.policy_dir / "typed-relations.md"
         if not path.is_file():
@@ -172,7 +178,7 @@ class KbContext:
             predicates=_try(lambda: policy_predicates(self.load_logic_policy())),
         )
         specs = _parse_typed_relations(path.read_text(encoding="utf-8"), reserved)
-        _warn_typed_not_attribute(specs, self.attribute_relations())
+        _warn_typed_not_attribute(specs, self.attribute_relations(), self.relation_aliases())
         return specs
 
 
@@ -680,7 +686,7 @@ def load_logic_policy() -> str:
 
 def policy_predicates(policy_program: str | None = None) -> set[str]:
     text = policy_program if policy_program is not None else load_logic_policy()
-    built_in = {"relation", "edge", "path"}
+    built_in = {"relation", "edge", "path", "attr_rel"}
     return {
         name
         for name in re.findall(r"^\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\(", text, flags=re.MULTILINE)
@@ -1484,7 +1490,10 @@ def attribute_relations() -> set[str]:
 
     Objects of these relations (dates, numbers, ordinals, ...) are excluded from
     entity_set so they do not pollute the entity vocabulary (entity listings,
-    path nodes, count subjects). They remain valid relation-query objects — see
+    path nodes, count subjects) — provided the value appears nowhere else. No edge is
+    drawn ALONG an attribute relation, which is the actual guarantee; a value that also
+    appears as a subject, or as the object of a non-attribute relation, is an ordinary
+    entity and paths may run through it. They remain valid relation-query objects — see
     value_set and classify_query — so a fact about a literal is still verifiable.
     Same file format as single-valued.md; absent file → no attribute relations
     → entity_set == value_set (fully backward compatible).
@@ -1518,7 +1527,9 @@ _TYPED_REL_RE = re.compile(
     r"^(?:`(?P<qname>[^`]+)`|(?P<name>\S+))\s*:\s*(?P<type>\w+)\s+as\s+(?P<alias>\S+)"
     r"(?:\s*\((?P<units>[^)]*)\))?\s*$"
 )
-_TYPED_RESERVED = {"relation", "edge", "path"}  # built-in engine predicates
+# Built-in engine predicates. `attr_rel` joined them with #226: a policy file
+# declaring its own `attr_rel` used to work and now collides with the program.
+_TYPED_RESERVED = {"relation", "edge", "path", "attr_rel"}
 
 
 def _try(fn):
@@ -1610,10 +1621,18 @@ def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = froz
     return specs
 
 
-def _warn_typed_not_attribute(specs: dict[str, TypedRelSpec], attrs: set[str]) -> None:
-    attrs_nfc = {unicodedata.normalize("NFC", a) for a in attrs}
+def _warn_typed_not_attribute(
+    specs: dict[str, TypedRelSpec],
+    attrs: set[str],
+    aliases: dict[str, str] | None = None,
+) -> None:
+    # Through the shared predicate: comparing raw declarations made this warn that a
+    # relation was "not declared" when it WAS, just under its alias -- while the engine,
+    # entity_set and vocab all treated it as an attribute. A diagnostic that cries wolf
+    # is one users learn to ignore.
+    forms = attribute_relation_forms(attrs, aliases)
     for name in specs:
-        if name not in attrs_nfc:
+        if not is_attribute_relation(name, forms):
             print(
                 f"typed-relations: {name!r} is typed but not declared in attribute-relations.md "
                 "(its object should be a literal, not an entity)",
@@ -1681,7 +1700,14 @@ def _assert_no_alias_collision(specs: dict[str, TypedRelSpec], program_text: str
 
 
 def _assert_no_canonical_head(policy_text: str) -> None:
-    """Raise FactlogError if the policy text contains a canonical/3 rule head or fact.
+    """Raise FactlogError if the policy heads a reserved ENGINE EDB predicate.
+
+    Covers `canonical` and `attr_rel`. Both are populated by us and declared in
+    WIRELOG_PROGRAM; heading either makes pyrewire treat it as IDB and SILENTLY drop
+    every EDB atom we emitted, with rc=0. For attr_rel that means `!attr_rel(R)`
+    becomes vacuously true, every edge is drawn again, and #226 is back -- with the
+    engine and the tracer now disagreeing, which the report is built on not happening.
+    canonical was guarded twice over; attr_rel was guarded nowhere.
 
     ``canonical`` is a reserved engine EDB predicate emitted by compile_facts into
     accepted.dl and declared in WIRELOG_PROGRAM.  It may appear freely in rule
@@ -1704,11 +1730,16 @@ def _assert_no_canonical_head(policy_text: str) -> None:
 
     Raises :class:`FactlogError` on first offending line with an actionable message.
     """
-    _ERR = (
-        "canonical is a reserved engine EDB predicate (populated from "
-        "relation-aliases.md); it may appear only in rule bodies, not as a "
-        "rule head/fact in logic-policy(.extra).dl"
-    )
+    # edge/path are the engine's own derivations, not EDB we emit -- but a policy that
+    # heads `edge` re-draws every link the attribute filter removed, and the scaffold
+    # promises, unconditionally, that no edge is drawn along an attribute relation. A
+    # guarantee with an unguarded escape hatch is the false promise this issue is about.
+    _SOURCES = {
+        "canonical": "relation-aliases.md",
+        "attr_rel": "attribute-relations.md",
+        "edge": "the engine's edge/2 rule",
+        "path": "the engine's path/2 rule",
+    }
     # Drop comment lines, strip quoted literals, then split into logical
     # STATEMENTS on clause-terminating '.' rather than per physical line. A period
     # terminates a clause unless it opens a '.decl'-style directive (dot followed
@@ -1717,21 +1748,79 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     # line with a preceding rule's terminator as an in-body reference (#261); a
     # statement is a full clause, so canonical-left-of-neck (or no neck at all)
     # is unambiguously a head/fact.
-    kept = [
-        line
-        for line in policy_text.splitlines()
-        if line.strip() and not line.strip().startswith(("//", "#"))
-    ]
-    bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
-    for statement in _split_policy_statements(bare):
-        canon_pos = statement.find("canonical(")
-        if canon_pos < 0:
+    # ONE left-to-right lex, in the engine's order. Two regex passes did not work in
+    # either order: stripping comments first left a `//` inside a reason string looking
+    # like a comment, and stripping quotes first let an ODD `"` inside a comment pair up
+    # with a quote on a LATER line and delete everything between -- including a reserved
+    # head. Both orders let a policy nullify the filter with rc=0. A single scan with one
+    # bit of state cannot disagree with itself.
+    out: list[str] = []
+    in_string = False
+    i = 0
+    while i < len(policy_text):
+        ch = policy_text[i]
+        if in_string:
+            if ch == "\\":
+                # A backslash escapes the next char, `\"` included. pyrewire 1.0.3+
+                # supports these (see MIN_PYREWIRE_VERSION), and generate_logic_policy
+                # emits them via dl_string, so a reason like "size 5\" bolt" is a
+                # closed string the engine parses -- treating the escaped quote as a
+                # terminator rejected policies factlog itself generates.
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            elif ch == "\n":
+                # The engine cannot parse an unterminated string either. Fail loudly
+                # rather than guess at what the rest of the file means.
+                raise FactlogError(
+                    "unterminated string literal in logic-policy(.extra).dl; a quoted "
+                    "value must close on the line it opens"
+                )
+            i += 1
             continue
-        neck_pos = statement.find(":-")
-        if neck_pos < 0 or canon_pos < neck_pos:
-            # A bare canonical fact (no neck) or canonical left of the neck → head.
-            raise FactlogError(_ERR)
-        # canonical to the right of the neck → body reference → allowed.
+        if ch == '"':
+            in_string = True
+            out.append(" ")  # the literal's content is not code
+            i += 1
+            continue
+        if policy_text.startswith("//", i) or ch == "#":
+            while i < len(policy_text) and policy_text[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    if in_string:
+        raise FactlogError(
+            "unterminated string literal in logic-policy(.extra).dl; a quoted value "
+            "must close on the line it opens"
+        )
+    bare = "\n".join(line for line in "".join(out).splitlines() if line.strip())
+
+    for name in re.findall(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)", bare):
+        if name in _SOURCES:
+            raise FactlogError(
+                f"{name} is a reserved engine predicate (populated from "
+                f"{_SOURCES[name]}) and is already declared by the engine; remove the "
+                f".decl from logic-policy(.extra).dl"
+            )
+    bare = re.sub(r"\.decl\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", bare)
+
+    for statement in _split_policy_statements(bare):
+        # Tokenize the HEAD; do not substring-search the statement. A substring search
+        # was wrong in both directions: `attr_rel (R) :- ...` (one space) slipped past
+        # it and #226 came back with rc=0, while `not_canonical(X, ...) :- ...` -- a
+        # user predicate that merely CONTAINS the reserved name -- was rejected, so a
+        # KB that worked before could no longer run `factlog check`.
+        head = statement.split(":-", 1)[0]
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", head)
+        if m and m.group(1) in _SOURCES:
+            name = m.group(1)
+            raise FactlogError(
+                f"{name} is a reserved engine EDB predicate (populated from "
+                f"{_SOURCES[name]}); it may appear only in rule bodies, not as a "
+                f"rule head/fact in logic-policy(.extra).dl"
+            )
 
 
 def _split_policy_statements(text: str) -> list[str]:
@@ -1931,23 +2020,36 @@ def value_set(facts: list[dict[str, str]] | None = None) -> set[str]:
 def entity_set(
     facts: list[dict[str, str]] | None = None,
     attribute_rels: set[str] | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> set[str]:
     """First-class entities only: every subject, plus objects whose relation is
     NOT declared an attribute relation. Objects of attribute relations are
     literal values (see attribute_relations) and are excluded so they don't show
-    up as entities (entity listings, path nodes, count subjects). With no
+    up as entities (entity listings, path nodes, count subjects) — provided they appear
+    nowhere else. No edge is drawn ALONG an attribute relation; a value that also
+    appears as a subject, or as the object of a non-attribute relation, is an ordinary
+    entity and paths may run through it. With no
     policy/attribute-relations.md this equals value_set (backward compatible).
 
     *attribute_rels* overrides which relations count as attribute (literal-valued)
     relations; pass a KbContext's attribute_relations() to read a non-default KB.
-    None falls back to the module-level (ambient-root) attribute_relations()."""
+    None falls back to the module-level (ambient-root) attribute_relations().
+
+    *aliases* must come from the SAME KB. Resolving attribute relations needs the
+    alias map, and reading it from the ambient root while taking attribute_rels from
+    the target made one KB answer differently depending on whether it was named with
+    --target or FACTLOG_ROOT -- the ambient KB's alias file leaked into the target's
+    vocabulary."""
     selected = engine_input_rows(facts if facts is not None else load_accepted_facts())
-    literal_rels = attribute_relations() if attribute_rels is None else attribute_rels
+    # Surface forms, not raw declarations: a KB that declares the canonical while
+    # its facts carry an alias had every attribute row miss this filter, so the
+    # literal was admitted as an entity anyway (#226).
+    literal_rels = attribute_relation_forms(attribute_rels, aliases)
     entities: set[str] = set()
     for row in selected:
         if row["subject"]:
             entities.add(row["subject"])
-        if row["object"] and row["relation"] not in literal_rels:
+        if row["object"] and not is_attribute_relation(row["relation"], literal_rels):
             entities.add(row["object"])
     return entities
 
@@ -2057,15 +2159,94 @@ def build_text_to_datalog_prompt(question: str) -> str:
     return rendered
 
 
-def dependency_graph(facts: list[dict[str, str]]) -> dict[str, list[str]]:
+def dependency_graph(
+    facts: list[dict[str, str]],
+    attr_forms: set[str] | None = None,
+) -> dict[str, list[str]]:
+    """Edges between entities, mirroring the engine's `edge/2`.
+
+    An ATTRIBUTE RELATION is skipped, exactly as the engine rule skips it: its object
+    is a value (a date, a count), and asserting a value about a thing is not a
+    dependency you can route through (#226).
+
+    The filter keys on the RELATION, not on the node. Keying on the node — "a value
+    that never appears as a subject" — was tried and is wrong in both directions:
+    it deletes a genuinely asserted non-attribute edge into a value that happens to
+    be attributed elsewhere (a real false negative), and one stray fact making a
+    value a subject turns that value back into a hub every path can route through,
+    which is #226 itself.
+
+    A literal can therefore still be an entity (entity_set admits any subject) while
+    no path leads INTO it. That is not a divergence: `path` is defined over
+    dependency edges, so "no dependency path to 2030.1" is an honest verified
+    negative even though 2030.1 heads facts of its own.
+
+    Keeping this in step with the engine matters — the report asks the ENGINE
+    whether a path exists and then asks THIS to render the trace, so a divergence
+    would print a route the engine says does not exist.
+    """
+    attrs = attribute_relation_forms() if attr_forms is None else attr_forms
     graph: dict[str, list[str]] = defaultdict(list)
     for row in engine_input_rows(facts):
+        if is_attribute_relation(row["relation"], attrs):
+            continue
         graph[row["subject"]].append(row["object"])
     return graph
 
 
-def dependency_path(facts: list[dict[str, str]], start: str, target: str) -> list[str]:
-    graph = dependency_graph(facts)
+def path_query_rows(
+    args: list[str],
+    facts: list[dict[str, str]],
+    pairs: set[tuple[str, str]],
+) -> list[list[str]]:
+    """Rows answering a `path` query, whether its arguments are constants or variables.
+
+    THE shared answer, so the report and the ask router cannot disagree. They did: the
+    report only handled two quoted constants, so `path("A", X)?` produced no result
+    line at all, the result list came back empty, and main's fallback printed
+    `no facts/query.dl found` about a file that was right there -- while ask answered
+    the same question with two rows (#220). #213 unified relation and count this way;
+    path was left behind.
+
+    Two constants yield the TRACE (the route), a variable yields one row per matching
+    reachable pair -- the same shapes the two callers already rendered.
+    """
+    if len(args) != 2:
+        return []
+    # `pairs` is required: it is the ENGINE's path/2. Defaulting to a python closure
+    # over the accepted facts would leave a second source of truth in the tree, and the
+    # two would drift -- which is the bug this function exists to end. Both callers (the
+    # report and the ask router) run the engine and pass its answer.
+    reachable = pairs
+    if all(is_quoted_string(a) for a in args):
+        start, target = arg_value(args[0]), arg_value(args[1])
+        if (start, target) not in reachable:
+            return []
+        route = dependency_path(facts, start, target)
+        # Reachable per the truth set but with no route through the accepted facts: a
+        # policy rule in logic-policy.extra.dl put the edge there. Report the pair, not
+        # a false "(not found)".
+        return [route] if route else [[start, target]]
+    # The SAME variable twice means a join, not two independent wildcards: `path(X, X)?`
+    # asks which nodes lie on a cycle, and answering it with every reachable pair was
+    # simply a wrong answer.
+    same_var = is_variable(args[0]) and is_variable(args[1]) and args[0] == args[1]
+    return [
+        [start, target]
+        for (start, target) in sorted(reachable)
+        if (is_variable(args[0]) or arg_value(args[0]) == start)
+        and (is_variable(args[1]) or arg_value(args[1]) == target)
+        and (not same_var or start == target)
+    ]
+
+
+def dependency_path(
+    facts: list[dict[str, str]],
+    start: str,
+    target: str,
+    attr_forms: set[str] | None = None,
+) -> list[str]:
+    graph = dependency_graph(facts, attr_forms)
     # The engine defines path/2 only over edges (path(S,O):-edge(S,O) / :-edge(S,M),
     # path(M,O)), so a path requires >= 1 edge: match `target` only AFTER at least
     # one hop. This makes a reflexive path("X","X") a verified negative unless a real
@@ -2087,26 +2268,116 @@ def dependency_path(facts: list[dict[str, str]], start: str, target: str) -> lis
 
 
 def first_dependency_path(facts: list[dict[str, str]]) -> list[str]:
+    # Read the policy ONCE: this is an S x O loop, and dependency_graph used to
+    # re-parse attribute-relations.md on every call inside it.
+    attr_forms = attribute_relation_forms()
     entities = sorted({row["subject"] for row in facts})
     targets = sorted({row["object"] for row in facts})
     for start in entities:
         for target in targets:
-            path = dependency_path(facts, start, target)
+            path = dependency_path(facts, start, target, attr_forms)
             if len(path) > 1:
                 return path
     return []
 
 
+# `attr_rel` carries the relations declared in policy/attribute-relations.md, and
+# edges skip them. Their objects are LITERALS — a date, a count — not things a
+# dependency path can meaningfully run through. The scaffolded policy file promises
+# exactly this ("kept OUT of the entity set, so they do not show up as entities,
+# path nodes, or count subjects"), but the rule had no such filter, so a path could
+# hop through `2030.1` as if a date were an entity (#226).
+#
+# A KB that declares no attribute relations gets no `attr_rel` facts, so the
+# derived edges are identical to before.
 WIRELOG_PROGRAM = """
 .decl relation(subject: symbol, rel: symbol, object: symbol)
 .decl canonical(subject: symbol, rel: symbol, object: symbol)
+.decl attr_rel(rel: symbol)
 .decl edge(start: symbol, target: symbol)
 .decl path(start: symbol, target: symbol)
 
-edge(S, O) :- relation(S, R, O).
+edge(S, O) :- relation(S, R, O), !attr_rel(R).
 path(S, O) :- edge(S, O).
 path(S, O) :- edge(S, M), path(M, O).
 """
+
+
+def attribute_relation_forms(
+    attribute_rels: set[str] | None = None,
+    aliases: dict[str, str] | None = None,
+) -> set[str]:
+    """Every SURFACE form that names a declared attribute relation.
+
+    The engine's `!attr_rel(R)` compares R against the name stored in accepted.dl,
+    which is the surface form. A declaration names the CANONICAL, so a KB that
+    declares `published_year` while its facts say `게재연도` had the filter miss
+    every row and the literal stayed a path node — the same alias-blindness #213
+    fixed for report/ask/gate. NFC too: a policy file saved as NFD silently
+    matched nothing.
+
+    One set, shared by the engine emitter, dependency_graph, and entity_set, so
+    the three cannot drift — a divergence here means the report renders a route
+    the engine says does not exist.
+    """
+    declared = attribute_relations() if attribute_rels is None else attribute_rels
+    if not declared:
+        return set()
+    alias_map = relation_aliases() if aliases is None else aliases
+    forms: set[str] = set()
+    for name in declared:
+        nfc_name = unicodedata.normalize("NFC", name)
+        # Canonicalize the DECLARATION too, not just expand it. Expanding only
+        # canonical -> surface covered a declared canonical whose facts carry an
+        # alias, but not the reverse -- a KB declaring the alias `게재연도` while its
+        # facts say `published_year` had every attribute row miss the filter, and the
+        # scaffold never tells the user which form to declare. Canonicalizing both
+        # sides covers both directions with one rule.
+        canon = alias_map.get(nfc_name, nfc_name)
+        forms.add(nfc_name)
+        forms.add(canon)
+        forms |= surface_variants(canon, alias_map)
+    return forms
+
+
+def is_attribute_relation(relation: str, attr_forms: set[str]) -> bool:
+    """Does *relation* (a stored surface form) name a declared attribute relation?
+
+    THE predicate. Every consumer that asks "is this object a literal?" -- the engine
+    emitter, dependency_graph, entity_set, vocab, entity_audit, merge_candidates --
+    calls this, so they cannot answer differently. They did: four of them compared the
+    raw declaration set, so on an alias KB `vocab --entities` listed a value as an
+    entity while `status` and the engine called it a literal, and entity_audit advised
+    declaring a relation that was already declared (#226).
+    """
+    return unicodedata.normalize("NFC", relation) in attr_forms
+
+
+def _attr_rel_facts(accepted: list[dict[str, str]] | None = None) -> str:
+    """`attr_rel` facts for the declared attribute relations (empty when none).
+
+    Emitted as the relation symbols that are ACTUALLY IN accepted.dl, not as the
+    declaration's own spelling. The engine compares symbols byte-for-byte, and
+    accepted.dl carries a row's relation verbatim (dl_atom does not normalize), so a
+    fact written NFD while the policy file is NFC slipped past `!attr_rel(R)` -- the
+    engine kept routing paths through the literal, exactly the #226 symptom, while
+    the python tracer (which does normalize) said otherwise. Matching on the stored
+    symbol keeps the two in step under any normalization, and leaves accepted.dl
+    byte-identical.
+    """
+    forms = attribute_relation_forms()
+    if not forms:
+        return ""
+    rows = load_accepted_facts() if accepted is None else accepted
+    names = sorted(
+        {row["relation"] for row in engine_input_rows(rows) if is_attribute_relation(row["relation"], forms)}
+    )
+    if not names:
+        return ""
+    # dl_string, not an f-string: a name carrying a quote emitted `attr_rel(""x"")`
+    # and the engine failed to parse the whole program, killing `factlog check` on
+    # a KB that worked before the declaration existed.
+    return "\n" + "\n".join(f"attr_rel({dl_string(name)})." for name in names) + "\n"
 
 
 def decode_wirelog_value(session: EasySession, value: object) -> object:
@@ -2232,7 +2503,10 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     accepted_program = ACCEPTED_DL.read_text(encoding="utf-8")
     policy_program = load_logic_policy()
     specs = typed_relations()
-    base_program = WIRELOG_PROGRAM + "\n" + policy_program + "\n" + accepted_program
+    accepted_rows = load_accepted_facts()
+    base_program = (
+        WIRELOG_PROGRAM + _attr_rel_facts(accepted_rows) + "\n" + policy_program + "\n" + accepted_program
+    )
     if specs:
         _assert_no_alias_collision(specs, base_program)
         # Fail loud BEFORE handing a float-bearing program to the engine: a
@@ -2252,7 +2526,7 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     session = EasySession(base_program + _typed_decls(specs))
     for value in re.findall(r'"([^"]+)"', policy_program):
         session.intern(value)
-    accepted = load_accepted_facts()
+    accepted = accepted_rows  # already loaded above for _attr_rel_facts
     for row in accepted:
         session.intern(row["subject"])
         session.intern(row["relation"])

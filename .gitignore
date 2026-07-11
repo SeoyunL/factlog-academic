@@ -32,4 +32,5 @@ credentials.json
 .idea/
 .vscode/
 
+# Local agent permission list — machine-specific, never shared.
 .claude/settings.local.json

@@ -534,10 +534,28 @@ explanation of its purpose.
 # ...) rather than a first-class entity. One relation NAME per line; '#' comment
 # lines and '-' bullets are allowed; quote a name containing spaces in backticks.
 #
-# Objects of these relations are kept OUT of the entity set (so they do not show
-# up as entities, path nodes, or count subjects) but remain valid, verifiable
-# relation-query objects. Leave this file with no declarations if every object
-# is a first-class entity.
+# An object at the OBJECT end of these relations is a value, not a thing: it is
+# kept out of the entity set, and no dependency path runs THROUGH it (an edge is
+# never drawn along an attribute relation). It remains a valid, verifiable
+# relation-query object.
+#
+# Precisely, so you can rely on it:
+#   - no edge is drawn ALONG an attribute relation, so no path reaches the value by
+#     way of one. That is the guarantee; it is about the relation, not the value.
+#   - a value that only ever appears at the object end of attribute relations is
+#     therefore not an entity: not listed, not a path node, not a count subject.
+#   - the value is still an ENTITY if it appears as a subject anywhere, so it can be
+#     named in a query. Being an entity is not the same as being on a path.
+#   - a path may START at it only if it is the subject of a NON-attribute relation
+#     (that is the only way it gets an outgoing edge).
+#   - a path may END at it only if a NON-attribute relation has it as its object
+#     (the only way it gets an incoming edge).
+#   - a path RUNS THROUGH it only when both of the above hold.
+#
+# Declaring the relation does not make the value invisible; it stops the attribute
+# assertion from being treated as a dependency.
+#
+# Leave this file with no declarations if every object is a first-class entity.
 #
 # Example (remove the leading '# ' to activate):
 # operates_since
@@ -1081,6 +1099,71 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_status_to_runs(
+    target, filt: dict, from_statuses: set, new_status: str, nfc
+) -> int:
+    """Write a status decision into runs/*.json, so accept/reject are durable.
+
+    A human decision lived only in candidates.csv, which merge REBUILDS from runs/*.json.
+    So deleting candidates.csv and re-merging silently downgraded an accepted fact back
+    to candidate -- the decision was never in the source of truth. amend already writes
+    to runs; accept/reject did not (#233). This is a status-only change (no value edit),
+    so the matching run item is updated in place.
+
+    Returns the number of run rows changed. Import-local like the callers.
+    """
+    import json
+
+    from factlog.common import KNOWN_STATUSES
+
+    runs_dir = target / "runs"
+    if not runs_dir.is_dir():
+        return 0
+    changed = 0
+    for jp in sorted(runs_dir.glob("*.json")):
+        try:
+            data = json.loads(jp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            # merge fails loudly on a corrupt run file; here, skipping it silently would
+            # let accept report success while the decision never reached the file that
+            # holds this triple -- the durability the change promises, quietly lost.
+            print(
+                f"factlog: warning — could not read {jp.name} to record the decision "
+                f"({exc}); if it holds this fact, re-run after fixing the file.",
+                file=sys.stderr,
+            )
+            continue
+        if not isinstance(data, list):
+            continue
+        dirty = False
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            fields = {
+                "subject": nfc(str(item.get("subject", "")).strip()),
+                "relation": nfc(str(item.get("relation", "")).strip()),
+                "object": nfc(str(item.get("object", "")).strip()),
+            }
+            if not all(fields.get(k) == v for k, v in filt.items()):
+                continue
+            st = str(item.get("status", "")).strip()
+            # This runs only AFTER the CSV gate found a genuinely-pending match, so the
+            # decision is real. Mirror merge's normalization: a blank or unrecognized
+            # status is coerced to needs_review (PENDING) when candidates.csv is rebuilt,
+            # so the run item merge will treat as pending must be flipped here too --
+            # otherwise the decision vanishes on the next re-merge, the exact silent
+            # downgrade this fix is about, in a row the extractor mis-stamped or an edit
+            # left blank.
+            if st not in from_statuses and st in KNOWN_STATUSES:
+                continue
+            item["status"] = new_status
+            dirty = True
+            changed += 1
+        if dirty:
+            _atomic_write_text(jp, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return changed
+
+
 def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -> int:
     """Shared body of `accept` (-> accepted) and `reject` (-> superseded).
 
@@ -1167,9 +1250,17 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
             changed += 1
     _atomic_write_csv(csv_path, rows, out_fields)
 
+    # Durability: write the decision into runs/*.json too, the source of truth merge
+    # rebuilds candidates.csv from. Without this, deleting candidates.csv and re-merging
+    # silently downgraded the decision (#233).
+    runs_changed = _apply_status_to_runs(target, filt, set(REVIEW_STATUSES), new_status, nfc)
+
     recompile_failed = not _recompile_accepted(target, verb)
     recompiled = "accepted.dl NOT recompiled" if recompile_failed else "accepted.dl recompiled"
-    print(f"factlog {verb}: {changed} row(s) → {new_status}; {recompiled}")
+    print(
+        f"factlog {verb}: {changed} candidate row(s) → {new_status}, "
+        f"{runs_changed} runs/*.json row(s) updated; {recompiled}"
+    )
     if recompile_failed:
         print(
             f"factlog {verb}: the status change WAS saved to candidates.csv; "
@@ -1719,6 +1810,7 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     scope = facts if args.all else common.engine_facts(facts)
     scope_label = "all candidate" if args.all else "engine"
     attr = ctx.attribute_relations()
+    attr_forms = common.attribute_relation_forms(attr, ctx.relation_aliases())
     sv = ctx.single_valued_relations()
     typed = ctx.typed_relations()  # {name: TypedRelSpec}; {} when no typed-relations.md
 
@@ -1733,7 +1825,10 @@ def cmd_vocab(args: argparse.Namespace) -> int:
             rel_counts[rel] += 1
         if s:
             ent_counts[s] += 1
-        if o and rel not in attr:  # objects of attribute relations are literals, not entities
+        # Surface forms, not raw declarations: a KB that declares the canonical while its
+        # facts carry an alias had vocab call the literal an entity while status and the
+        # engine called it a literal (#226).
+        if o and not common.is_attribute_relation(rel, attr_forms):
             ent_counts[o] += 1
 
     print(f"factlog vocab (KB: {target}) — {scope_label} facts")
@@ -1746,7 +1841,17 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     if show_r:
         print(f"  relations ({len(rel_counts)}):")
         for name, n in sorted(rel_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            tags = [t for t, on in (("attribute", name in attr), ("single-valued", name in sv)) if on]
+            # The same shared predicate the entity count above uses: comparing the raw
+            # declaration left vocab tagging no relation as [attribute] on an alias KB
+            # while status counted one (#226).
+            tags = [
+                t
+                for t, on in (
+                    ("attribute", common.is_attribute_relation(name, attr_forms)),
+                    ("single-valued", name in sv),
+                )
+                if on
+            ]
             # typed_relations() keys are NFC-normalized; the CSV-sourced name may be NFD.
             tname = unicodedata.normalize("NFC", name)
             if tname in typed:
@@ -1802,9 +1907,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Vocabulary
     attr = ctx.attribute_relations()
     sv = ctx.single_valued_relations()
-    # Pass attr so entity_set reads THIS KB's attribute relations, not the module
-    # default (cmd_status may target a KB other than the ambient FACTLOG_ROOT).
-    ent, val = common.entity_set(facts, attr), common.value_set(facts)
+    # Pass attr AND this KB's aliases so entity_set reads THIS KB throughout, not the
+    # module default (cmd_status may target a KB other than the ambient FACTLOG_ROOT).
+    ent, val = common.entity_set(facts, attr, ctx.relation_aliases()), common.value_set(facts)
     # Literals are values appearing only as attribute-relation objects; with no
     # attribute-relations.md declared, entity_set == value_set so there are none.
     literals = f"{len(val) - len(ent)} literal(s)" if attr else "0 literal(s) — none declared"
@@ -6228,7 +6333,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     import json
     from pathlib import Path
 
-    from factlog.bibtex import is_annotation_source, read_front_matter, to_bibtex
+    from factlog.bibtex import is_annotation_source, read_front_matter, safe_cite_key, to_bibtex
     from factlog.csl import to_csl
 
     if getattr(args, "bibtex", False) == getattr(args, "csl", False):
@@ -6241,14 +6346,54 @@ def cmd_export(args: argparse.Namespace) -> int:
     if not _require_kb(target, "export"):
         return 1
 
+    from factlog import common as _c  # noqa: PLC0415
+
     sources = []
-    for path in sorted((target / "sources").glob("*.md")):
+    # walk_source_dir, not glob("*.md"): the glob saw only the TOP level, so a source in
+    # a subdirectory -- which `factlog sources` lists and `sync` extracts from -- was
+    # dropped from the citation list with exit 0 and no warning (#223).
+    skipped: list[str] = []
+    seen_keys: dict[str, str] = {}
+    # source_files walks BOTH source roots (sources/ and runs/sources/), the same set
+    # `factlog sources` lists -- globbing sources/ alone dropped a source `factlog
+    # sources` shows from the citation list with exit 0 and no warning (#223). An ingest
+    # conversion under runs/sources/ carries an HTML provenance comment, not YAML front
+    # matter, so read_front_matter returns {} and it is reported as skipped rather than
+    # dropped silently; a hand-placed .md there with real front matter IS cited.
+    for path in _c.source_files(target):
+        if path.suffix.lower() != ".md":
+            continue
+        rel = path.relative_to(target).as_posix()
         fm = read_front_matter(path)
-        if not fm or is_annotation_source(fm):
+        if not fm:
+            skipped.append(f"{rel} (no YAML front matter)")
+            continue
+        if is_annotation_source(fm):
             continue
         if not (fm.get("zotero_key") or fm.get("title")):
+            skipped.append(f"{rel} (front matter has neither title nor zotero_key)")
             continue
-        sources.append((path.stem, fm))
+        # Dedup on the key that is actually EMITTED, not on the stem. BibTeX sanitizes
+        # the key (safe_cite_key collapses non-ASCII to "ref"), so 한글.md and 다른이름.md
+        # -- different stems -- both emit `@misc{ref,` and one silently wins in every
+        # BibTeX processor. `a.b` and `a-b` collide the same way. CSL keeps the stem as
+        # the id, so there the stem IS the emitted key.
+        emitted = safe_cite_key(path.stem) if not args.csl else path.stem
+        if emitted in seen_keys:
+            n = 2
+            while f"{emitted}-{n}" in seen_keys:
+                n += 1
+            print(
+                f"factlog export: citation key {emitted!r} is used by {seen_keys[emitted]} "
+                f"and {rel}; {rel} is exported as {emitted}-{n}",
+                file=sys.stderr,
+            )
+            emitted = f"{emitted}-{n}"
+        seen_keys[emitted] = rel
+        sources.append((emitted, fm))
+
+    for note in skipped:
+        print(f"factlog export: skipped {note}", file=sys.stderr)
 
     if args.csl:
         text = json.dumps([to_csl(fm, stem) for stem, fm in sources], ensure_ascii=False, indent=2)

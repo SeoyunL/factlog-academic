@@ -173,3 +173,140 @@ class TestLoadLogicPolicyCanonicalHeadGuard:
         dl = _make_kb(tmp_path, dl_text=dl_text, extra_text=extra_text)
         result = fcommon._load_logic_policy_from(dl)
         assert "canonical" in result
+
+
+class TestHeadIsMatchedAsAToken:
+    """The guard tokenizes the head. Substring-searching it was wrong BOTH ways: a
+    single space slipped a reserved head past it (and #226 came back with rc=0), while
+    a user predicate that merely CONTAINS a reserved name was rejected, so a KB that
+    ran fine before could no longer run `factlog check`."""
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            'attr_rel (R) :- relation(S, R, O).',  # one space
+            'canonical (S, R, O) :- relation(S, R, O).',
+            'attr_rel("정식_운영").',  # a bare fact
+            ".decl attr_rel(rel: symbol)",  # a redeclaration
+        ],
+    )
+    def test_a_reserved_head_is_rejected_however_it_is_spaced(self, policy):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            'not_canonical(X, "unaliased") :- relation(X, "depends_on", Y).',
+            "no_attr_rel(R) :- relation(S, R, O).",
+            "attr_rel_ok(R) :- relation(S, R, O).",
+            'ok(X, "r") :- canonical(X, R, O).',  # a body reference is the point of it
+            '.decl ok(entity: symbol, reason: symbol)\nok(X, "r") :- attr_rel(R).',
+        ],
+    )
+    def test_a_predicate_that_merely_contains_a_reserved_name_is_allowed(self, policy):
+        fcommon._assert_no_canonical_head(policy)
+
+
+class TestInlineCommentsDoNotHideAHead:
+    """A trailing `// TODO` after a clause's '.' left the comment at the head of the
+    NEXT statement, so the head anchor never matched and a reserved head walked through
+    -- #226 back with rc=0, and the canonical guard weaker than before the change."""
+
+    @pytest.mark.parametrize("reserved", ["attr_rel(R) :- relation(S, R, O).", "canonical(S, R, O) :- relation(S, R, O)."])
+    def test_a_head_behind_an_inline_comment_is_rejected(self, reserved):
+        policy = 'foo(X, "r") :- relation(X, "a", Y).  // TODO\n' + reserved
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_a_decl_that_is_not_at_the_start_of_a_line_is_rejected(self):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head("foo(X) :- bar(X). .decl attr_rel(rel: symbol)")
+
+    def test_a_slash_inside_a_string_is_not_a_comment(self):
+        fcommon._assert_no_canonical_head('ok(X, "a // b") :- attr_rel(R).')
+
+
+class TestOneLexerNotTwoRegexPasses:
+    """Two regex passes were wrong in BOTH orders, and each order was a live bypass.
+
+    Comments-first: a `//` inside a reason string looked like a comment.
+    Quotes-first: an ODD `"` inside a comment paired with a quote on a LATER line and
+    deleted everything between -- including a reserved head. The guard saw nothing, the
+    engine ran the rule, attr_rel became IDB, every emitted atom was dropped, and #226
+    came back with rc=0.
+    """
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            '// prefer the "canonical\nattr_rel(R) :- relation(S, R, O).',
+            '# beware of " here\ncanonical("a","b","c").',
+            '// a stray "\nedge(S, O) :- relation(S, R, O).',
+        ],
+    )
+    def test_an_odd_quote_in_a_comment_cannot_hide_a_head(self, policy):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            'ok(X, "a // b") :- canonical(X, R, O).',
+            'ok(X, "a # b") :- attr_rel(R).',
+            '.decl ok(entity: symbol, reason: symbol)\nok(X, "r") :- edge(X, Y).',
+        ],
+    )
+    def test_a_comment_marker_inside_a_string_is_not_a_comment(self, policy):
+        fcommon._assert_no_canonical_head(policy)
+
+    def test_an_unterminated_string_fails_loudly(self):
+        """The engine cannot parse it either; swallowing it would mean guessing."""
+        with pytest.raises(fcommon.FactlogError, match="unterminated string"):
+            fcommon._assert_no_canonical_head('ok(X, "never closed) :- relation(X, R, O).')
+
+
+class TestEdgeAndPathAreReservedToo:
+    """The scaffold promises, unconditionally, that no edge is drawn along an attribute
+    relation. A policy heading `edge` re-draws every link the filter removed -- a
+    guarantee with an unguarded escape hatch is the false promise #226 is about."""
+
+    @pytest.mark.parametrize(
+        "policy",
+        ["edge(S, O) :- relation(S, R, O).", "path(S, O) :- edge(S, O)."],
+    )
+    def test_heading_an_engine_derivation_is_rejected(self, policy):
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_referencing_them_in_a_body_is_still_fine(self):
+        fcommon._assert_no_canonical_head('reach(X, "r") :- path(X, Y).')
+
+
+
+class TestBackslashEscapesMatchTheEngine:
+    """pyrewire 1.0.3+ supports `\\"` escapes (MIN_PYREWIRE_VERSION), and
+    generate_logic_policy emits them via dl_string. Treating an escaped quote as a
+    string terminator rejected policies factlog itself generates and the engine parses.
+    """
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            # a reason with an odd embedded quote, as dl_string would serialize it
+            r'requires_review(X, "size 5\" bolt") :- relation(X, "status", _).',
+            r'after(X, "flagged \"provisional\"") :- relation(X, "s", _).',
+            r'ok(X, "a\" b") :- attr_rel(R).',  # escaped quote + a body reference
+        ],
+    )
+    def test_an_escaped_quote_is_not_a_terminator(self, policy):
+        fcommon._assert_no_canonical_head(policy)  # engine parses it; the guard must too
+
+    def test_a_head_hidden_behind_an_escaped_quote_is_still_caught(self):
+        # the escape must not become a new way to smuggle a reserved head
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._assert_no_canonical_head(r'ok(X, "z\") :- relation(X,R,O).' + "\nattr_rel(R) :- relation(S,R,O).")
+
+    def test_a_genuinely_unterminated_string_still_fails_loudly(self):
+        with pytest.raises(fcommon.FactlogError, match="unterminated string"):
+            fcommon._assert_no_canonical_head('ok(X, "never closed) :- relation(X, R, O).')

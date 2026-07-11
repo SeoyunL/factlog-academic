@@ -77,5 +77,6 @@ jobs:
           bash tests/test_logic_check_statuses.sh
           bash tests/test_check_empty_policy.sh
           bash tests/test_value_hierarchy_parity.sh
+          bash tests/test_path_report.sh
           bash tests/test_status_conflict_parity.sh
           bash tests/test_typed_parse_report.sh
