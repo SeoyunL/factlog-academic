@@ -241,6 +241,7 @@ def evaluate_relation(draft: str, facts: list[dict[str, str]]) -> list[list[str]
         return []
     s_arg, r_arg, o_arg = args
     hierarchy = value_hierarchy()
+    _relation_alias_map = relation_aliases() if hierarchy else {}
     # Pre-compute surface variants when the relation arg is a quoted canonical.
     rel_variants: set[str] = set()
     if is_quoted_string(r_arg):
@@ -254,7 +255,15 @@ def evaluate_relation(draft: str, facts: list[dict[str, str]]) -> list[list[str]
                 canonical_value(arg_value(r_arg)) == canonical_value(r_val) or
                 r_val in rel_variants):
             continue
-        query_relation = arg_value(r_arg) if is_quoted_string(r_arg) else None
+        # Declarations are written on CANONICAL relation names. When the query
+        # pins one, use it. When the relation is a variable, canonicalise the
+        # row's own (possibly surface-variant) name, so an aliased KB does not
+        # silently lose subsumption for variable-relation queries.
+        query_relation = (
+            arg_value(r_arg)
+            if is_quoted_string(r_arg)
+            else _relation_alias_map.get(r_val, r_val)
+        )
         if not (
             is_variable(o_arg)
             or object_matches(arg_value(o_arg), row, hierarchy, canonical_value, relation=query_relation)

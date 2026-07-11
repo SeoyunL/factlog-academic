@@ -883,18 +883,30 @@ def value_hierarchy_warnings(
     if facts is None:
         return warnings
 
-    known_relations = {row["relation"] for row in facts}
+    # Index the facts the way the LOOKUP does — by canonical relation name and
+    # normalised value. Indexing by the raw stored relation made an aliased KB
+    # (rows carrying a surface variant) report a perfectly good declaration as
+    # having "no effect", which is worse than saying nothing: a user who believes
+    # it and deletes the declaration gets the silent omission back.
+    aliases = relation_aliases(root)
+
+    def _canon_rel(name: str) -> str:
+        return _canonical_value(aliases.get(name, name))
+
     values_by_relation: dict[str, set[str]] = {}
     for row in facts:
-        values_by_relation.setdefault(row["relation"], set()).add(row["object"])
+        values_by_relation.setdefault(_canon_rel(row["relation"]), set()).add(
+            _canonical_value(row["object"])
+        )
 
     for relation, table in sorted(hierarchy.items()):
-        if relation not in known_relations:
+        key = _canonical_value(relation)
+        if key not in values_by_relation:
             warnings.append(f"value-hierarchy: no accepted fact uses relation '{relation}' — declaration has no effect")
             continue
-        values = values_by_relation.get(relation, set())
+        values = values_by_relation[key]
         for child in sorted(table):
-            if child not in values:
+            if _canonical_value(child) not in values:
                 warnings.append(
                     f"value-hierarchy: no accepted '{relation}' fact has the value '{child}' — "
                     f"declaration has no effect (typo?)"
@@ -927,6 +939,30 @@ def hierarchy_ancestors(
             if norm(child) == want_val:
                 return ancestors
     return set()
+
+
+def declared_ancestors(
+    hierarchy: dict[str, dict[str, set[str]]] | None,
+    relation: str | None,
+    normalize: Callable[[str], str] | None = None,
+) -> set[str]:
+    """Every value declared as an ancestor under `relation` (normalised).
+
+    These are queryable objects even when no fact carries them. Pass the query's
+    relation so the licence stays scoped to it; `None` (a variable-relation query,
+    which really can range over every relation) widens to the whole file.
+    """
+    if not hierarchy:
+        return set()
+    norm = normalize or (lambda value: value)
+    want = norm(relation) if relation is not None else None
+    found: set[str] = set()
+    for declared_rel, table in hierarchy.items():
+        if want is not None and norm(declared_rel) != want:
+            continue
+        for ancestors in table.values():
+            found |= {norm(ancestor) for ancestor in ancestors}
+    return found
 
 
 def object_matches(
@@ -2132,12 +2168,20 @@ def classify_query(
         if not _is_variable(object_):
             _object_value = _arg_value(object_)
             _accepted_objects = {_canonical_value(v) for v in values}
-            _declared = _canonical_value(_object_value) in {
-                _canonical_value(ancestor)
-                for table in _hierarchy.values()
-                for ancestors in table.values()
-                for ancestor in ancestors
-            }
+            # A declared ancestor is a legitimate query object even when it appears
+            # in no accepted fact — that is the point of `코호트연구 ⊂ 관찰연구`.
+            # But the licence is SCOPED TO ITS RELATION. Pooling every relation's
+            # ancestors into one vocabulary would let a declaration on one relation
+            # make the value "known" everywhere, so a query naming it under an
+            # UNRELATED relation would stop being "not our vocabulary" (route=wiki)
+            # and become a *verified negative* — the engine asserting "no such fact"
+            # about a term the KB never adopted there. A wrong assertion is worse
+            # than an honest "cannot express".
+            _declared = _canonical_value(_object_value) in declared_ancestors(
+                _hierarchy,
+                None if _is_variable(relation) else _arg_value(relation),
+                _canonical_value,
+            )
             if _canonical_value(_object_value) not in _accepted_objects and not _declared:
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation object is not an accepted entity: {_object_value}"
         if _relation_match_count(query, facts, _rel_aliases, _hierarchy) == 0:

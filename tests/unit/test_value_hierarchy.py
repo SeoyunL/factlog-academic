@@ -196,3 +196,45 @@ class TestObjectMatches:
         row = _row("S", "r", "child")
         assert common.object_matches("child", row, None)
         assert not common.object_matches("parent", row, None)
+
+
+class TestGateScope:
+    """The declaration licences a value under ITS relation, not everywhere.
+
+    Pooling every relation's ancestors into one vocabulary made a query naming a
+    declared value under an UNRELATED relation stop being "not our vocabulary"
+    (route=wiki) and become a *verified negative* — the engine asserting "no such
+    fact" about a term the KB never adopted there. A wrong assertion is worse than
+    an honest "cannot express".
+    """
+
+    def test_ancestors_are_scoped_to_their_relation(self, kb):
+        (kb / "policy" / "value-hierarchy.md").write_text(HIERARCHY_MD, encoding="utf-8")
+        h = common.value_hierarchy(kb)
+        assert "관찰연구" in common.declared_ancestors(h, "연구유형")
+        assert "관찰연구" not in common.declared_ancestors(h, "혈액형")
+
+    def test_a_variable_relation_sees_every_declaration(self, kb):
+        # A variable relation really can range over all of them, so the wide
+        # vocabulary is honest there.
+        (kb / "policy" / "value-hierarchy.md").write_text(HIERARCHY_MD, encoding="utf-8")
+        h = common.value_hierarchy(kb)
+        assert {"관찰연구", "COPD"} <= common.declared_ancestors(h, None)
+
+    def test_no_hierarchy_declares_nothing(self, kb):
+        assert common.declared_ancestors(common.value_hierarchy(kb), "연구유형") == set()
+
+
+class TestWarningsAreAliasAware:
+    def test_a_declaration_on_a_canonical_name_is_not_called_ineffective(self, kb):
+        # Rows store the surface variant; the declaration names the canonical. It
+        # DOES take effect, so warning "no effect" would push the user to delete a
+        # working declaration and bring the omission back.
+        (kb / "policy" / "value-hierarchy.md").write_text(
+            "- 연구유형: 코호트연구 ⊂ 관찰연구\n", encoding="utf-8"
+        )
+        (kb / "policy" / "relation-aliases.md").write_text(
+            "- `연구 유형` -> `연구유형`\n", encoding="utf-8"
+        )
+        facts = [_row("P2", "연구 유형", "코호트연구")]
+        assert common.value_hierarchy_warnings(kb, facts=facts) == []
