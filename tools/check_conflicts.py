@@ -40,12 +40,15 @@ os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 import literal_types  # noqa: E402
 from common import (  # noqa: E402
     TypedRelSpec,
+    canonical_value,
     engine_facts,
     ensure_dirs,
+    hierarchy_ancestors,
     load_facts,
     relation_aliases,
     single_valued_relations,
     typed_relations,
+    value_hierarchy,
 )
 
 
@@ -121,6 +124,7 @@ def detect_conflicts(
     single_valued: set[str],
     typed: dict[str, TypedRelSpec] | None = None,
     aliases: dict[str, str] | None = None,
+    hierarchy: dict[str, dict[str, set[str]]] | None = None,
 ) -> dict[tuple[str, str], list[str]]:
     """Map (subject, canonical_relation) -> sorted distinct *display* objects,
     for single-valued relations that hold more than one *distinct value* (a
@@ -162,6 +166,7 @@ def detect_conflicts(
     collapse correctly."""
     typed = typed or {}
     aliases = aliases or {}
+    hierarchy = value_hierarchy() if hierarchy is None else hierarchy
     # Precompute the set of canonical single-valued relation names so the
     # per-row membership test is O(1).
     sv = {_canonicalize(r, aliases) for r in single_valued}
@@ -179,11 +184,50 @@ def detect_conflicts(
         key = _group_key(obj, spec)
         groups = by_key.setdefault((row["subject"], canon), {})
         groups.setdefault(key, set()).add(obj)
-    return {
-        key: sorted(min(raws) for raws in groups.values())
-        for key, groups in by_key.items()
-        if len(groups) > 1
-    }
+    conflicts: dict[tuple[str, str], list[str]] = {}
+    for (subject, canon), groups in by_key.items():
+        if len(groups) <= 1:
+            continue
+        values = sorted(min(raws) for raws in groups.values())
+        if _is_specialisation_chain(values, canon, hierarchy):
+            continue
+        conflicts[(subject, canon)] = values
+    return conflicts
+
+
+def _is_specialisation_chain(
+    values: list[str],
+    relation: str,
+    hierarchy: dict[str, dict[str, set[str]]] | None,
+) -> bool:
+    """True when every value sits on ONE declared ancestor chain for *relation*.
+
+    `연구유형: 코호트연구 ⊂ 관찰연구` means a cohort study IS an observational study,
+    so a paper carrying both is not contradicting itself -- it is being described at
+    two levels of precision, and both rows are true. Reporting that as a conflict
+    made finalize refuse to compile, and the resolution text then told the user to
+    retire one of them: retire the subtype and you lose the more precise fact, retire
+    the supertype and you delete something the source states outright. Either way a
+    human-checked fact is discarded on no evidence (#219).
+
+    A chain, not merely "some pair is related": with 관찰연구 / 코호트연구 / 실험연구 the
+    first two are on a chain but 실험연구 is a genuine sibling, and that is still a
+    contradiction. So require a single most-specific value that has every other value
+    among its declared ancestors.
+
+    *hierarchy* is what value_hierarchy() returns, i.e. already transitively closed,
+    so a grandparent is reachable in one lookup.
+    """
+    if not hierarchy or len(values) < 2:
+        return False
+    for candidate in values:
+        ancestors = hierarchy_ancestors(hierarchy, relation, candidate)
+        if not ancestors:
+            continue
+        others = {canonical_value(v) for v in values if v != candidate}
+        if others <= ancestors:
+            return True
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,8 +256,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     print(
-        "  Resolve by marking the outdated row(s) status='superseded' in "
-        "facts/candidates.csv, then re-run.",
+        "  Resolve with the human gate, not by hand-editing facts/candidates.csv:\n"
+        "    factlog eject --fact SUBJECT RELATION OBJECT   retire an accepted row\n"
+        "    factlog amend SUBJECT RELATION OBJECT --set-object NEW   correct a value\n"
+        "  Retire a row only when it is genuinely outdated or wrong. If the values are\n"
+        "  a supertype and its subtype (a cohort study IS an observational study),\n"
+        "  neither is wrong: declare the relationship in policy/value-hierarchy.md\n"
+        "  (e.g. `- RELATION: SUBTYPE ⊂ SUPERTYPE`) and both rows are kept.",
         file=sys.stderr,
     )
     return 1
