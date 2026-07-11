@@ -176,7 +176,7 @@ class KbContext:
             predicates=_try(lambda: policy_predicates(self.load_logic_policy())),
         )
         specs = _parse_typed_relations(path.read_text(encoding="utf-8"), reserved)
-        _warn_typed_not_attribute(specs, self.attribute_relations())
+        _warn_typed_not_attribute(specs, self.attribute_relations(), self.relation_aliases())
         return specs
 
 
@@ -1388,10 +1388,18 @@ def _parse_typed_relations(text: str, reserved: frozenset[str] | set[str] = froz
     return specs
 
 
-def _warn_typed_not_attribute(specs: dict[str, TypedRelSpec], attrs: set[str]) -> None:
-    attrs_nfc = {unicodedata.normalize("NFC", a) for a in attrs}
+def _warn_typed_not_attribute(
+    specs: dict[str, TypedRelSpec],
+    attrs: set[str],
+    aliases: dict[str, str] | None = None,
+) -> None:
+    # Through the shared predicate: comparing raw declarations made this warn that a
+    # relation was "not declared" when it WAS, just under its alias -- while the engine,
+    # entity_set and vocab all treated it as an attribute. A diagnostic that cries wolf
+    # is one users learn to ignore.
+    forms = attribute_relation_forms(attrs, aliases)
     for name in specs:
-        if name not in attrs_nfc:
+        if not is_attribute_relation(name, forms):
             print(
                 f"typed-relations: {name!r} is typed but not declared in attribute-relations.md "
                 "(its object should be a literal, not an entity)",
@@ -1459,7 +1467,14 @@ def _assert_no_alias_collision(specs: dict[str, TypedRelSpec], program_text: str
 
 
 def _assert_no_canonical_head(policy_text: str) -> None:
-    """Raise FactlogError if the policy text contains a canonical/3 rule head or fact.
+    """Raise FactlogError if the policy heads a reserved ENGINE EDB predicate.
+
+    Covers `canonical` and `attr_rel`. Both are populated by us and declared in
+    WIRELOG_PROGRAM; heading either makes pyrewire treat it as IDB and SILENTLY drop
+    every EDB atom we emitted, with rc=0. For attr_rel that means `!attr_rel(R)`
+    becomes vacuously true, every edge is drawn again, and #226 is back -- with the
+    engine and the tracer now disagreeing, which the report is built on not happening.
+    canonical was guarded twice over; attr_rel was guarded nowhere.
 
     ``canonical`` is a reserved engine EDB predicate emitted by compile_facts into
     accepted.dl and declared in WIRELOG_PROGRAM.  It may appear freely in rule
@@ -1482,11 +1497,10 @@ def _assert_no_canonical_head(policy_text: str) -> None:
 
     Raises :class:`FactlogError` on first offending line with an actionable message.
     """
-    _ERR = (
-        "canonical is a reserved engine EDB predicate (populated from "
-        "relation-aliases.md); it may appear only in rule bodies, not as a "
-        "rule head/fact in logic-policy(.extra).dl"
-    )
+    _SOURCES = {
+        "canonical": "relation-aliases.md",
+        "attr_rel": "attribute-relations.md",
+    }
     # Drop comment lines, strip quoted literals, then split into logical
     # STATEMENTS on clause-terminating '.' rather than per physical line. A period
     # terminates a clause unless it opens a '.decl'-style directive (dot followed
@@ -1502,14 +1516,19 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     ]
     bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
     for statement in _split_policy_statements(bare):
-        canon_pos = statement.find("canonical(")
-        if canon_pos < 0:
-            continue
-        neck_pos = statement.find(":-")
-        if neck_pos < 0 or canon_pos < neck_pos:
-            # A bare canonical fact (no neck) or canonical left of the neck → head.
-            raise FactlogError(_ERR)
-        # canonical to the right of the neck → body reference → allowed.
+        for name, source in _SOURCES.items():
+            head_pos = statement.find(f"{name}(")
+            if head_pos < 0:
+                continue
+            neck_pos = statement.find(":-")
+            if neck_pos < 0 or head_pos < neck_pos:
+                # A bare fact (no neck) or the predicate left of the neck → head.
+                raise FactlogError(
+                    f"{name} is a reserved engine EDB predicate (populated from "
+                    f"{source}); it may appear only in rule bodies, not as a "
+                    f"rule head/fact in logic-policy(.extra).dl"
+                )
+            # To the right of the neck → body reference → allowed.
 
 
 def _split_policy_statements(text: str) -> list[str]:
@@ -2126,7 +2145,7 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     session = EasySession(base_program + _typed_decls(specs))
     for value in re.findall(r'"([^"]+)"', policy_program):
         session.intern(value)
-    accepted = load_accepted_facts()
+    accepted = accepted_rows  # already loaded above for _attr_rel_facts
     for row in accepted:
         session.intern(row["subject"])
         session.intern(row["relation"])

@@ -335,3 +335,33 @@ def test_a_pure_literal_cannot_be_a_count_subject(tmp_path):
     ok, reason = json.loads(proc.stdout.strip().splitlines()[-1])
     assert ok is False
     assert reason == "entity_not_accepted"
+
+
+def test_a_policy_that_heads_attr_rel_fails_loudly(tmp_path):
+    """attr_rel is a reserved EDB predicate; heading it silently nullifies the filter.
+
+    pyrewire then treats attr_rel as IDB and DROPS every atom we emitted -- with rc=0.
+    `!attr_rel(R)` becomes vacuously true, every edge is drawn again, and #226 is back,
+    with the engine and the tracer disagreeing. The repo already guards `canonical`
+    against exactly this; attr_rel was guarded nowhere.
+    """
+    kb = _kb(tmp_path, ROWS, "정식_운영\n")
+    (kb / "policy" / "logic-policy.extra.dl").write_text(
+        'attr_rel(X, "oops") :- relation(X, "통합", Y).\n', encoding="utf-8"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", "import os, sys; sys.path.insert(0, os.getcwd());"
+         "import factlog.common as c; c.run_wirelog()"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "FACTLOG_ROOT": str(kb), "PYTHONPATH": os.getcwd()},
+    )
+    assert proc.returncode != 0, "a policy heading attr_rel was accepted silently"
+    assert "attr_rel is a reserved engine EDB predicate" in proc.stderr
+
+
+def test_the_generator_refuses_attr_rel_as_a_policy_predicate():
+    sys.path.insert(0, str(Path.cwd() / "tools"))
+    import generate_logic_policy as glp
+
+    assert "attr_rel" in glp.RESERVED_PREDICATES
