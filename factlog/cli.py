@@ -5115,6 +5115,139 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_pubmed_backfill_provenance(args: argparse.Namespace) -> int:
+    """Materialize the provenance ledger a front-matter-only PubMed paper already implies (#172, #105).
+
+    A PubMed paper imported before provenance ledgers existed has front matter and no
+    sidecar, so a re-import short-circuits on the front-matter identity match before the
+    sidecar writer, its ledger is never created, and its retraction signal can never be
+    acknowledged (``pubmed-acknowledge-retraction`` refuses a paper with no ledger, and
+    points here). This builds that ledger from what the ``.md`` already asserts —
+    ``add_source`` into a fresh sidecar, no new claim — so acknowledge can then silence the
+    repeat ``pubmed-refresh`` surfaces on every run.
+
+    **No network.** This makes no new claim: the record is derived deterministically from
+    front matter, which a human reviewed at import. It changes where a belief is stored, not
+    what is believed — so, unlike acknowledge, there is **no confirmation prompt, no
+    ``--yes`` and no TTY gate**, and it needs no NCBI contact email (nothing is sent). It
+    never constructs a PubMed client. It only *reads* front matter (P4: every ``.md`` stays
+    byte- and ``mtime_ns``-identical).
+
+    A backfilled record reproduces ``PubMedSourceWriter._provenance_record`` for the values
+    the front matter carries — ``doi``, ``journal``, and PubMed's ``retracted`` /
+    ``retraction_notice_pmid`` signal — each read verbatim. The one field it cannot
+    reproduce is ``retraction_verified_at`` (the import clock, not a front-matter key): a
+    backfill consulted PubMed at no time, so it invents none. That field is not identifying,
+    so its absence causes no divergence — the same asymmetry OpenAlex documents for a field
+    its writer does not emit.
+
+    A PMID shared by two ``.md`` gets a sidecar for **each**, from its own front matter, so
+    coverage never turns on which filename sorts first (#117); a nested paper is covered too
+    (the shared #112 walker). ``--dry-run`` writes nothing and names both the ids that would
+    get a ledger and the ids refused (a missing ``imported_at``, or a ``pubmed_retracted``
+    outside the ledger's value space — anything but the YAML booleans ``true``/``false``).
+    The latter is promoted verbatim and refused by the shared writer, never coerced.
+
+    Re-running is a byte- and ``mtime_ns``-identical no-op (a record already present is not
+    rewritten). A per-id read/write fault is reported for that paper, never a batch crash.
+    """
+    from pathlib import Path
+
+    from factlog.integrations.common.backfill import (
+        BACKFILL_ERROR,
+        BACKFILL_REFUSED,
+        BACKFILL_WRITTEN,
+        backfill,
+    )
+    from factlog.integrations.pubmed.backfill import backfill_schema
+
+    command = "pubmed-backfill-provenance"
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    target_str, source = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if source in ("config", "cwd") and not porcelain:
+        print(f"factlog {command}: target KB {target} (from {source})")
+    if not _require_kb(target, command):
+        return 1
+
+    # Reads front matter and the ledgers only; constructs no PubMed client (a test asserts it).
+    results = backfill(target, backfill_schema(), dry_run=dry_run)
+
+    # BACKFILL_UNCHANGED is intentionally not handled: it can only be produced by a direct
+    # _backfill_source call, never by backfill(). A paper whose sidecar already holds an
+    # identical PubMed record is classified "ledger" by provenance_of and skipped before any
+    # write is attempted, so backfill() never yields it.
+    written = [r for r in results if r.status == BACKFILL_WRITTEN]
+    refused = [r for r in results if r.status == BACKFILL_REFUSED]
+    errors = [r for r in results if r.status == BACKFILL_ERROR]
+
+    if porcelain:
+        # The same machine contract arxiv-/openalex-backfill-provenance emit, shape for
+        # shape: tab-separated, LF-terminated, order-independent (parse by the first field).
+        #   result\t<status>\t<pmid>\t<ledger path or empty>\t<reason or empty>
+        # then the summary counts, then dry_run and the sources dir.
+        #
+        # EVERY field a caller can influence is neutralized at emission, not just `reason`:
+        # `entry_id` is a pmid read verbatim from front matter, `ledger` is a filename, and
+        # `target` is `--target` — any of them can carry a tab, CR or LF that would otherwise
+        # shift or split the columns after it (the #111 column-shift). Neutralizing only the
+        # last column leaves the earlier ones exploitable.
+        def _f(value: object) -> str:
+            return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+        for r in results:
+            print(
+                f"result\t{r.status}\t{_f(r.entry_id)}\t{_f(r.ledger)}\t{_f(r.reason)}"
+            )
+        print(f"backfilled\t{len(written)}")
+        print(f"refused\t{len(refused)}")
+        print(f"errors\t{len(errors)}")
+        print(f"dry_run\t{'1' if dry_run else '0'}")
+        print(f"target\t{_f(target / 'sources')}")
+        return 1 if errors else 0
+
+    verb = "Would backfill" if dry_run else "Backfilling"
+    print(
+        f"\n{verb} provenance ledgers for front-matter-only PubMed papers in KB: {target}\n"
+    )
+    if not results:
+        print(
+            "No front-matter-only PubMed papers found (every PubMed paper the check "
+            "commands can read already has a provenance ledger)."
+        )
+        return 0
+
+    if written:
+        label = "Would get a provenance ledger:" if dry_run else "Provenance ledger written:"
+        print(label)
+        for r in written:
+            arrow = "would write" if dry_run else "wrote"
+            print(f"  ✎ {r.entry_id}  ({arrow} {r.ledger})")
+    if refused:
+        print("\nRefused (front matter cannot supply a truthful ledger):")
+        for r in refused:
+            print(f"  ✗ {r.entry_id}: {r.reason}")
+    if errors:
+        # Not only sidecar faults: a source outside the provenance root can hold no ledger at
+        # all (#112), and it is reported here rather than skipped.
+        print("\nCould not backfill:")
+        for r in errors:
+            print(f"  ✗ {r.entry_id}: {r.reason}")
+
+    print("\nSummary:")
+    print(f"  {'Would backfill:' if dry_run else 'Backfilled:':<18}{len(written)}")
+    print(f"  {'Refused:':<18}{len(refused)}")
+    print(f"  {'Errors:':<18}{len(errors)}")
+    if written and not dry_run:
+        print(
+            "\nNext step: a paper PubMed flags as retracted among these can now be "
+            "acknowledged with 'factlog pubmed-acknowledge-retraction --id <id>'."
+        )
+    return 1 if errors else 0
+
+
 def cmd_openalex_refresh(args: argparse.Namespace) -> int:
     """Has any OpenAlex record in the KB drifted from what OpenAlex now serves? (#83).
     Reads the provenance ledgers and a KB-level check-log, re-fetches each work by id
@@ -6442,6 +6575,30 @@ def build_parser() -> argparse.ArgumentParser:
              "recorded signal and is refused unless a human confirms it interactively.",
     )
     pm_ack.set_defaults(func=cmd_pubmed_acknowledge_retraction)
+
+    pm_backfill = sub.add_parser(
+        "pubmed-backfill-provenance",
+        help="give every front-matter-only PubMed paper (imported before provenance "
+             "ledgers existed) the provenance ledger its front matter implies, so a "
+             "retraction PubMed flags can be acknowledged. No network, needs no NCBI email, "
+             "never touches sources/*.md; --dry-run previews",
+    )
+    pm_backfill.add_argument(
+        "--target", default=None,
+        help="KB root (default: the active KB; see `factlog where`)",
+    )
+    pm_backfill.add_argument(
+        "--dry-run", action="store_true",
+        help="name the ids that would get a ledger and the ids refused (missing "
+             "imported_at, or a pubmed_retracted that is not a YAML boolean) without "
+             "writing anything. A preview cannot report a write that would fail — an "
+             "unwritable source-provenance/ shows up only on the real run",
+    )
+    pm_backfill.add_argument(
+        "--porcelain", action="store_true",
+        help="machine-readable output (tab-separated rows) for scripts",
+    )
+    pm_backfill.set_defaults(func=cmd_pubmed_backfill_provenance)
 
     return parser
 

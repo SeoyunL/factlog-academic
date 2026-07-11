@@ -210,6 +210,15 @@ def _is_withdrawal_agent(value: object) -> bool:
 _FIELD_VALUE_SPACE: dict[tuple[str, str], tuple[Callable[[object], bool], str]] = {
     # owner: factlog/integrations/openalex
     ("openalex", "is_retracted"): (_is_bool, "a boolean (true or false)"),
+    # owner: factlog/integrations/pubmed
+    # PubMed's retraction signal, source-scoped like OpenAlex's `is_retracted` and read the
+    # same way (`fields.get("retracted") is True`): a boolean, present only when PubMed flags
+    # a retraction. Named here for the same reason the others are — the *read boundary* is
+    # shared — so `pubmed-backfill-provenance`, which promotes `pubmed_retracted` out of the
+    # looser front matter (#98) into the ledger, is refused by `signal_field_error` when it
+    # carries a hand-typed non-boolean, exactly as the OpenAlex backfill is (#109). Without
+    # this row the promotion had no value space to violate and a `1`/`yes` reached the ledger.
+    ("pubmed", "retracted"): (_is_bool, "a boolean (true or false)"),
     # owner: factlog/integrations/arxiv
     ("arxiv", "withdrawn_by"): (
         _is_withdrawal_agent,
