@@ -447,6 +447,7 @@ transport chain)` is a real value.
 fragmentation across the whole KB by a shared-token heuristic, so it is broader
 and far noisier (2275 candidates on that same KB). Use `value_audit` when you
 want precise, per-relation findings you can act on.
+
 ### Single-valued relations (`policy/single-valued.md`)
 
 A relation listed here may hold **at most one object per subject**. This is what turns
