@@ -44,8 +44,10 @@ response classifies each requested PMID as one of:
   (#170) can follow the pointer. Flattening these three here would leave nothing
   downstream to recover the distinction from.
 
-Retraction detection (#164) and MeSH major/minor (#165) are *deliberately not
-here*: this issue lands the record and its defensive posture only.
+MeSH major/minor (#165) is *deliberately not here*. Retraction detection (#164)
+lives in the sibling ``retraction.py`` module (a pure function); this parser only
+carries its two additive result fields (:attr:`ParsedPubMedWork.retracted`,
+:attr:`ParsedPubMedWork.retraction_notice_pmid`) and calls it once.
 """
 from __future__ import annotations
 
@@ -54,6 +56,7 @@ from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
 from factlog.integrations.pubmed.mesh import MeshHeading, parse_mesh_headings
+from factlog.integrations.pubmed.retraction import detect_retraction
 
 __all__ = [
     "ParsedPubMedWork",
@@ -109,6 +112,12 @@ class ParsedPubMedWork:
     # preserved (the level OpenAlex drops; spike §7). Empty on an unindexed
     # record. Source-scoped — coexists with OpenAlex's flat ``mesh_terms``.
     mesh_headings: tuple[MeshHeading, ...] = ()
+    # Additive retraction signal (#164). This is a *source-scoped* signal (like
+    # arXiv `withdrawn_by` / OpenAlex `openalex_is_retracted`), derived by
+    # `retraction.detect_retraction`; it never sets the merged top-level
+    # `retracted:` claim, which stays a human acknowledgement (§6.4).
+    retracted: bool = False
+    retraction_notice_pmid: str | None = None
 
     @property
     def has_abstract(self) -> bool:
@@ -301,12 +310,21 @@ def parse_article(record: ET.Element) -> ParsedPubMedWork:
     # MeSH lives under MedlineCitation, not Article (#165, spike §7): read it here
     # so it survives even a degenerate Article-less citation.
     mesh_headings = parse_mesh_headings(citation)
+    # Detected off the whole record: PublicationTypeList sits under Article, but
+    # the RetractionIn comment sits under MedlineCitation, so a record can be
+    # retracted even when Article is degenerate/absent. One call, both markers.
+    retraction = detect_retraction(record)
 
     article = citation.find("Article")
     if article is None:
         # A citation with no Article is degenerate but still addressable; expose
         # the PMID (so deleted/merged classification still works) with empty body.
-        return ParsedPubMedWork(pmid=pmid, mesh_headings=mesh_headings)
+        return ParsedPubMedWork(
+            pmid=pmid,
+            mesh_headings=mesh_headings,
+            retracted=retraction.retracted,
+            retraction_notice_pmid=retraction.retraction_notice_pmid,
+        )
 
     pubmed_data = record.find("PubmedData")
     year, pub_date_raw = _pub_date(article)
@@ -327,6 +345,8 @@ def parse_article(record: ET.Element) -> ParsedPubMedWork:
         abstract=" ".join(abstract_parts),
         pub_date_raw=pub_date_raw,
         mesh_headings=mesh_headings,
+        retracted=retraction.retracted,
+        retraction_notice_pmid=retraction.retraction_notice_pmid,
     )
 
 
