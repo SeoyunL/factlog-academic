@@ -963,11 +963,10 @@ def main() -> int:
             print(f"  preserved {restored} human-accepted row(s) from candidates.csv")
 
     # --- the ratchet (#218) -------------------------------------------------
-    # A human acceptance may only leave candidates.csv through a human gate:
-    # `factlog reject` / `eject --fact` retire it as a tombstone (carried over
-    # above), and those are the ONLY ways it should disappear. If this merge would
-    # drop an accepted/confirmed row that the runs no longer assert, the backing
-    # runs/*.json was lost — not retired — and rebuilding would erase a human
+    # A row a human has ruled on may only leave candidates.csv through a human
+    # gate: `factlog eject --fact` retires it as a tombstone (carried over above).
+    # If this merge would drop such a row because the runs no longer assert it, the
+    # backing runs/*.json was LOST, not retired — and the rebuild would erase the
     # decision.
     #
     # Guarding only "runs/ is empty" was a cliff, not a ratchet: the real disaster
@@ -975,16 +974,23 @@ def main() -> int:
     # FEW rows, the empty-check stays silent, and every fact that was not
     # re-extracted vanishes with exit 0. The question is not how many rows came in;
     # it is whether this merge destroys a human decision.
-    destroyed = sorted(
-        key for key in engine_keys if key not in present_keys
-    )
+    #
+    # "Ruled on" means engine statuses (confirmed/accepted) AND needs_review: the
+    # empty-runs guard above already counts needs_review as keepable, and guarding
+    # one but not the other gave the absurd split of refusing a total loss while
+    # silently accepting a partial one. One definition, both guards.
+    protected = dict(engine_keys)
+    protected.update(dict.fromkeys(existing_review_keys(root), "needs_review"))
+    destroyed = sorted(key for key in protected if key not in present_keys)
     if destroyed and not args.allow_delete:
         print(
             f"merge_candidates: REFUSING to rebuild facts/candidates.csv — it would delete "
-            f"{len(destroyed)} fact(s) a human accepted, which the current runs/ no longer assert.\n"
-            f"  An accepted fact must only leave the KB through `factlog reject` or "
-            f"`factlog eject --fact` (which leave a tombstone). Its backing runs/*.json is "
-            f"missing, so this rebuild would erase a human decision instead:",
+            f"{len(destroyed)} fact(s) a human has ruled on, which the current runs/ no longer "
+            f"assert.\n"
+            f"  Such a fact may only leave the KB through `factlog eject --fact SUBJECT RELATION "
+            f"OBJECT` (which leaves a tombstone). `factlog reject` will NOT do it — it only "
+            f"retires rows still pending. Its backing runs/*.json is missing, so this rebuild "
+            f"would erase the decision instead:",
             file=sys.stderr,
         )
         for subject, relation, object_, source in destroyed[:10]:
