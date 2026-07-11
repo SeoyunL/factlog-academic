@@ -332,9 +332,22 @@ rule rather than a similarity guess:
 | **placeholder** | `기타`, `불명`, `N/A` — carries no information, hides what the source said. |
 | **spelling duplicate** | Equal after folding case/space/punctuation. If the spellings sit on **one** subject it is a value split; on **different** subjects it may be a duplicate record — a different repair. |
 
+Whether a folded collision is a *split* or a *duplicate record* is decided by
+policy, not by a guess: in a relation declared in `policy/attribute-relations.md`
+the value identifies its subject (a title, a DOI), so two subjects sharing one is
+probably two records of one thing. In any other relation, values are shared
+across subjects by design, and a collision there is a real query leak.
+`--strict` fails on leaks only.
+
 Nothing is merged automatically. Fix with `factlog amend <subject> <relation>
 <object> --set-object <canonical>`, which rewrites the row durably (both
 `candidates.csv` and the backing `runs/*.json`).
+
+**What it does not catch.** The wrapper rules are deliberately narrow, so a clean
+report is not a proof of completeness. Undetected forms include `others: X`,
+`기타 X` (no parentheses), and `기타(X) 등`. Digits are never folded together
+(`1.5` is not `15`), and `etc` is not treated as a wrapper word — `ETC (electron
+transport chain)` is a real value.
 
 `tools/entity_audit.py` is the neighbouring check: it looks for *entity*
 fragmentation across the whole KB by a shared-token heuristic, so it is broader

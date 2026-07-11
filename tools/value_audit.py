@@ -61,27 +61,76 @@ import factlog_config  # noqa: E402
 
 os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 
-from common import ENGINE_STATUSES, load_facts  # noqa: E402
+import unicodedata  # noqa: E402
 
-# A value that wraps another: `기타(X)`, `other(X)`, `misc (X)`. The wrapper word
-# is what makes it a junk-drawer rather than a legitimate parenthetical such as
-# `hyperoxia-induced lung injury (HLI)`, where the parens carry an abbreviation.
-_WRAPPER_RE = re.compile(r"^(?:기타|기타사항|그 ?외|other|misc|etc)\s*[(（]\s*(?P<inner>.+?)\s*[)）]$", re.I)
+from common import ENGINE_STATUSES, CANDIDATES_CSV, attribute_relations, ensure_dirs, load_facts  # noqa: E402
 
-# Values that carry no information on their own.
+# A value that wraps another: `기타(X)`, `other(X)`, `misc (X)`, and the reversed
+# `X(기타)`. The wrapper WORD is what makes it a junk-drawer rather than a
+# legitimate parenthetical such as `hyperoxia-induced lung injury (HLI)`, where
+# the parens carry an abbreviation.
+#
+# `etc` is deliberately NOT a wrapper word: `ETC (electron transport chain)` is a
+# real value in a biomedical KB, and flagging it would make this audit the very
+# noise it was built to replace.
+_WRAPPER_WORD = r"기타|기타사항|그 ?외|그외|other|others|misc"
+_WRAPPER_RE = re.compile(rf"^(?:{_WRAPPER_WORD})\s*[(（]\s*(?P<inner>.+?)\s*[)）]$", re.I)
+_WRAPPER_SUFFIX_RE = re.compile(rf"^(?P<inner>.+?)\s*[(（]\s*(?:{_WRAPPER_WORD})\s*[)）]$", re.I)
+
+# Values that carry no information on their own. Matched EXACTLY (after NFC +
+# casefold), never through the fold: folding would swallow `Na` (sodium) into
+# `n/a`, which is a real value in a biomedical KB.
 _PLACEHOLDERS = {
     "기타", "그외", "그 외", "기타사항", "불명", "미상", "해당없음", "없음",
-    "other", "others", "misc", "unknown", "n/a", "na", "none", "tbd", "-", "?",
+    "other", "others", "misc", "unknown", "n/a", "n.a.", "none", "tbd", "-", "?",
 }
+
+# Separators BETWEEN DIGITS are load-bearing: `1.5` is not `15`, `2023-01-05` is
+# not `20230105`, `2507.03697` is not `250703697`. Folding them together reported
+# distinct numbers as one value split — a false positive that failed --strict on
+# perfectly good data.
+_DIGIT_SEP_RE = re.compile(r"(?<=\d)[-._/](?=\d)")
+_SEP_RE = re.compile(r"[\s\-_./·]+")
+_KEEP = "\x00"
 
 
 def _fold(value: str) -> str:
-    """Case/space/punctuation-insensitive key. Deterministic, not a similarity score."""
-    return re.sub(r"[\s\-_./·]+", "", value).casefold()
+    """Case/space/punctuation-insensitive key. Deterministic, not a similarity score.
+
+    NFC-normalised first: a policy-free audit that cannot see NFD text would stay
+    silent on exactly the KBs (Korean values, authored on macOS) it exists for.
+    """
+    folded = unicodedata.normalize("NFC", value)
+    folded = _DIGIT_SEP_RE.sub(_KEEP, folded)
+    return _SEP_RE.sub("", folded).casefold()
 
 
-def audit(facts: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
-    """Group values by relation and apply the four rules. Pure — no I/O."""
+def _match_wrapper(value: str) -> str | None:
+    """The wrapped value inside a junk-drawer label, or None."""
+    normalised = unicodedata.normalize("NFC", value)
+    for pattern in (_WRAPPER_RE, _WRAPPER_SUFFIX_RE):
+        match = pattern.match(normalised)
+        if match:
+            return match.group("inner")
+    return None
+
+
+def audit(
+    facts: list[dict[str, str]],
+    identity_relations: set[str] | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Group values by relation and apply the rules. Pure — no I/O.
+
+    `identity_relations` are the literal-valued (attribute) relations — a title, a
+    DOI, a year. Their value IDENTIFIES its subject, so two subjects whose values
+    fold together are probably two records of one thing, not one value split in
+    two. For every OTHER (categorical) relation, values are shared across subjects
+    by design, and a folded collision between them IS the query leak: asking for
+    `IL-8` misses the rows filed as `il 8`. Judging by subject count instead of by
+    policy got this exactly backwards, and let the leak through the --strict gate.
+    """
+    identity = identity_relations or set()
+
     by_relation: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     subjects: dict[tuple[str, str], set[str]] = defaultdict(set)
     for row in facts:
@@ -99,14 +148,17 @@ def audit(facts: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
         for value in values:
             folded[_fold(value)].append(value)
 
+        reported: set[str] = set()
+
         for value in sorted(values):
-            if value.strip().casefold() in _PLACEHOLDERS or _fold(value) in {_fold(p) for p in _PLACEHOLDERS}:
+            if unicodedata.normalize("NFC", value).strip().casefold() in _PLACEHOLDERS:
                 placeholders.append({"relation": relation, "value": value, "rows": str(values[value])})
+                reported.add(value)
                 continue
-            match = _WRAPPER_RE.match(value)
-            if not match:
+            inner = _match_wrapper(value)
+            if inner is None:
                 continue
-            inner = match.group("inner")
+            reported.add(value)
             # Does the wrapped value already exist on its own under this relation?
             twin = next((v for v in values if v != value and _fold(v) == _fold(inner)), None)
             if twin is not None:
@@ -120,25 +172,22 @@ def audit(facts: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
                     "inner": inner,
                 })
 
-        # Spelling duplicates: same folded key, different surface. Skip pairs the
-        # wrapper rules already reported, so one problem is not counted twice.
-        reported = {f["value"] for f in splits + wrappers if f["relation"] == relation}
-        for surfaces in folded.values():
-            distinct = sorted(set(surfaces) - reported)
-            if len(distinct) > 1:
-                # Whether the spellings sit on ONE subject or on several changes
-                # what the finding means, so say which. One subject spelled two
-                # ways is a value split (queries leak). Several subjects sharing a
-                # folded value is a possible DUPLICATE RECORD — two entries for
-                # one real thing — which is a different repair and a different
-                # conversation with the human.
-                owners = {s for v in distinct for s in subjects[(relation, v)]}
-                duplicates.append({
-                    "relation": relation,
-                    "values": " / ".join(f"{v} ({values[v]})" for v in distinct),
-                    "subjects": ", ".join(sorted(owners)),
-                    "kind": "split" if len(owners) == 1 else "duplicate_record",
-                })
+        # Spelling duplicates: same folded key, different surface. Values already
+        # reported by the wrapper/placeholder rules are skipped so one problem is
+        # not counted twice.
+        for key in sorted(folded):
+            distinct = sorted(set(folded[key]) - reported)
+            if len(distinct) < 2:
+                continue
+            owners = {s for v in distinct for s in subjects[(relation, v)]}
+            # See the docstring: policy decides, not the subject count.
+            kind = "duplicate_record" if relation in identity and len(owners) > 1 else "split"
+            duplicates.append({
+                "relation": relation,
+                "values": " / ".join(f"{v} ({values[v]})" for v in distinct),
+                "subjects": ", ".join(sorted(owners)),
+                "kind": kind,
+            })
 
     return {
         "splits": splits,
@@ -163,14 +212,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # A brand-new KB has no candidates.csv. entity_audit prints a line and exits
+    # 0 there; raising a traceback instead would make this unusable in the very
+    # automation the --strict gate is for (and contradicts the documented
+    # "always exits 0").
+    ensure_dirs()
+    if not CANDIDATES_CSV.is_file():
+        print("value_audit: no candidate facts")
+        return 0
+
     rows = load_facts()
     facts = rows if args.all_statuses else [r for r in rows if r["status"] in ENGINE_STATUSES]
     scope = "all candidate rows" if args.all_statuses else "engine facts"
-    found = audit(facts)
+    found = audit(facts, attribute_relations())
 
     # A provable query leak is one value split across two strings. A folded value
-    # shared by DIFFERENT subjects is a possible duplicate record — worth a human
-    # look, but not a leak, so it must not fail a CI gate.
+    # shared by different subjects of an IDENTITY (attribute) relation is a
+    # possible duplicate record instead — worth a human look, but not a leak, so
+    # it must not fail a CI gate.
     leaks = len(found["splits"]) + sum(1 for f in found["duplicates"] if f["kind"] == "split")
     print(
         f"value_audit ({scope}): {len(found['splits'])} split wrapper(s), "
@@ -190,9 +249,9 @@ def main(argv: list[str] | None = None) -> int:
         for f in found["duplicates"]:
             print(f"  • {f['relation']}: {f['values']}")
             if f["kind"] == "split":
-                print(f"      one subject ({f['subjects']}) spelled two ways — queries are leaking")
+                print(f"      subjects: {f['subjects']} — queries for one spelling miss the other")
             else:
-                print(f"      DIFFERENT subjects ({f['subjects']}) share this value")
+                print(f"      DIFFERENT subjects ({f['subjects']}) share this identifying value")
                 print("      → not a spelling split: check whether these are duplicate records")
 
     if found["wrappers"]:
