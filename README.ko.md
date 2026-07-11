@@ -456,6 +456,55 @@ arXiv는 존재하지 않는 카테고리·필드·연도에도 `200 OK` + "0건
 User-Agent 에 실리는 신원 표기용 예의입니다. 자세한 옵션·쿼리 문법·provenance front matter 는
 [docs/arxiv.md](docs/arxiv.md) 를 참고하세요.
 
+#### PubMed 문헌 가져오기 (`factlog pubmed-*`)
+
+의학·생명과학 문헌 데이터베이스 [PubMed](https://pubmed.ncbi.nlm.nih.gov) 에서 PMID로
+임포트하거나 검색해 가져오고, 가져온 논문의 MeSH 텀을 어휘 후보로 제안하고, 레코드가
+PubMed가 지금 내주는 값(DOI·저널·철회 상태)과 어긋났는지 다시 확인할 수 있습니다.
+임포트된 항목은 여전히 **후보**이며 `sync → review → accept` 게이트를 거칩니다.
+`pip install 'factlog[pubmed]'` 가 필요합니다. PubMed의 E-utilities는 API 키가
+**선택이지만 사실상 필요합니다** — 키가 없으면 초당 3요청, 있으면 초당 10요청으로
+올라갑니다. 키는 `NCBI_API_KEY` 환경변수 · `~/.config/factlog/pubmed.toml` · 명시한
+경로에서만 읽고, **커밋되는 KB 정책 파일에서는 일부러 읽지 않습니다**(자격증명 경계).
+
+```bash
+factlog pubmed-search --query "myocardial infarction" --mesh "Myocardial Infarction" --year 2020-2024
+factlog pubmed-import --pmid 32738937          # 'pmid:' 프리픽스 허용, 반복 가능(1회 최대 200)
+factlog pubmed-mesh --for smith-2023-covid     # PubMed MeSH를 어휘 후보로 제안(major/minor 구분)
+factlog pubmed-refresh                          # 보고만. --auto-update 로 식별자·저널만 원장 기록
+factlog pubmed-acknowledge-retraction --id 32738937
+factlog pubmed-backfill-provenance             # front matter만 있는 논문에 원장을 만들어 줌
+```
+
+검색은 여러 단어를 그냥 넘기면 PubMed가 Automatic Term Mapping으로 알아서 매핑하며,
+목록이 PubMed가 어떻게 읽었는지(`QueryTranslation`)를 보여 줍니다 — 구로 검색하려면
+직접 큰따옴표로 감쌉니다. `--show-query` 는 요청을 보내지 않고 실제 전송될 텀만
+출력하고, PubMed가 모르는 필드 태그는 요청을 보내기 전에 거부됩니다.
+
+**결정론 경계** — 이걸 모르면 `--auto-update` 가 무엇을 고쳤는지 오해합니다.
+
+1. 임포트는 원장(ledger)을 고쳐 쓸 권한이 없습니다. `sync → review → accept` 전까지
+   임포트된 항목은 모두 후보입니다.
+2. `pubmed-refresh` 는 어긋난 레코드를 **보고**합니다. `--auto-update` 는 식별자(DOI)·저널
+   필드만 각 레코드의 원장에 적고, `sources/*.md` 는 절대 건드리지 않습니다.
+3. **철회(retraction)는 자동 흡수되지 않습니다.** PubMed가 철회의 사실 출처이고 —
+   OpenAlex의 `is_retracted` 에는 PubMed가 철회로 기록하지 않는 오탐이 확인됐습니다(#51) —,
+   그럼에도 사람이 `factlog pubmed-acknowledge-retraction --id <pmid>` 로 확인하기 전까지
+   `pubmed-refresh` 매 실행마다 다시 표면화됩니다.
+4. **삭제된 PMID는 조용히 버리지 않고 표시합니다**(네트워크 실패를 삭제로 오인하지
+   않으려고). **병합된 PMID는 조용히 고쳐 쓰지 않고 보고합니다** — 요청한 PMID와 PubMed가
+   돌려준 PMID를 둘 다 알리고, 어느 쪽을 정본으로 쓸지는 사람이 정합니다.
+5. PubMed와 OpenAlex의 MeSH는 **출처별로 함께 보존됩니다**(하나가 다른 하나를 덮어쓰지
+   않습니다). major/minor 구분은 PubMed만 신뢰할 수 있게 제공하므로 `pubmed-mesh` 의 어휘
+   제안이 그 구분을 담습니다(#53).
+
+설정은 `<KB>/policy/pubmed-config.toml` > `~/.config/factlog/pubmed.toml` > 내장 기본값
+순으로 해석됩니다(명시한 경로를 주면 그게 최우선입니다). OpenAlex·arXiv와 달리 **자격증명
+경계가 있습니다**: `api_key` 는 사용자 레벨 파일 · 명시 경로 · `NCBI_API_KEY` 환경변수에서만
+읽고(환경변수가 파일 값보다 우선), 커밋되는 KB 정책 파일에 적으면 무시됩니다. `email` 은
+NCBI가 요구하는 연락처 표기라 정책 파일에 둬도 안전합니다(자격증명이 아닙니다). 자세한
+옵션·MeSH 처리·provenance front matter 는 [docs/pubmed.md](docs/pubmed.md) 를 참고하세요.
+
 #### 어휘 살펴보기 (`factlog vocab`)
 
 `ask` 와 `provenance` 는 정확한 엔티티/관계 이름을 필요로 합니다. `factlog vocab`
