@@ -36,3 +36,9 @@ relation("Anthropic", "develops", "Claude Code")?
 // The split (Claude vs scripts) is not an accepted relation in this KB,
 // so the question is routed to human review rather than a Datalog query.
 review_required("Which steps in factlog are performed by Claude and which by deterministic scripts?")?
+
+// q7: What does factlog depend on, directly or transitively? (variable path demo)
+// A path query whose target is a VARIABLE. The report used to print nothing at all
+// for this shape, so the result list came back empty and the fallback claimed
+// `no facts/query.dl found` -- about this very file (#220).
+path("factlog", X)?

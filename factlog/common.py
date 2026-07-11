@@ -1866,7 +1866,11 @@ def reachable_pairs(facts: list[dict[str, str]]) -> set[tuple[str, str]]:
     return pairs
 
 
-def path_query_rows(args: list[str], facts: list[dict[str, str]]) -> list[list[str]]:
+def path_query_rows(
+    args: list[str],
+    facts: list[dict[str, str]],
+    pairs: set[tuple[str, str]] | None = None,
+) -> list[list[str]]:
     """Rows answering a `path` query, whether its arguments are constants or variables.
 
     THE shared answer, so the report and the ask router cannot disagree. They did: the
@@ -1881,14 +1885,26 @@ def path_query_rows(args: list[str], facts: list[dict[str, str]]) -> list[list[s
     """
     if len(args) != 2:
         return []
+    reachable = reachable_pairs(facts) if pairs is None else pairs
     if all(is_quoted_string(a) for a in args):
-        path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
-        return [path] if path else []
+        start, target = arg_value(args[0]), arg_value(args[1])
+        if (start, target) not in reachable:
+            return []
+        route = dependency_path(facts, start, target)
+        # Reachable per the truth set but with no route through the accepted facts: a
+        # policy rule in logic-policy.extra.dl put the edge there. Report the pair, not
+        # a false "(not found)".
+        return [route] if route else [[start, target]]
+    # The SAME variable twice means a join, not two independent wildcards: `path(X, X)?`
+    # asks which nodes lie on a cycle, and answering it with every reachable pair was
+    # simply a wrong answer.
+    same_var = is_variable(args[0]) and is_variable(args[1]) and args[0] == args[1]
     return [
         [start, target]
-        for (start, target) in sorted(reachable_pairs(facts))
+        for (start, target) in sorted(reachable)
         if (is_variable(args[0]) or arg_value(args[0]) == start)
         and (is_variable(args[1]) or arg_value(args[1]) == target)
+        and (not same_var or start == target)
     ]
 
 
