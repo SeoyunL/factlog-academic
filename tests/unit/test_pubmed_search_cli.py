@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CLI tests for `factlog pubmed-search` (#167).
+"""CLI tests for `factlog pubmed-search` (#167, wired to #166's importer).
 
 The real PubMed client is replaced via ``_make_pubmed_client`` so the command runs
-without the network. A temp KB (with sources/) is the target. The focus is the
-silent-zero guard and the --show-query/--dry-run distinction — the issue's
-Done-when. Import-on-select is deferred to #166; this lands listing + guards.
+without the network. A temp KB (with sources/ and a policy file supplying the
+required NCBI contact email) is the target. The focus is the silent-zero guard,
+the --show-query/--dry-run distinction (the issue's Done-when), and — now that the
+seam is connected — that a selection actually imports through #166's path.
 """
 from __future__ import annotations
 
@@ -14,8 +15,25 @@ from factlog import cli
 
 
 def _kb(tmp_path):
+    # A KB with the contact email `_pubmed_prepare` requires for any request-spending
+    # run (mirrors test_pubmed_cli.py's fixture); NCBI must not see anonymous traffic.
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "policy").mkdir()
+    (tmp_path / "policy" / "pubmed-config.toml").write_text(
+        '[client]\nemail = "test@example.com"\n', encoding="utf-8"
+    )
+    return tmp_path
+
+
+def _kb_no_email(tmp_path):
+    # No email configured: used to prove --show-query needs neither KB nor email
+    # (it sends nothing), and that a request-spending run refuses without one.
     (tmp_path / "sources").mkdir()
     return tmp_path
+
+
+def _sources(kb):
+    return sorted(p.name for p in (kb / "sources").glob("*.md"))
 
 
 def _esearch(count=0, ids=(), query_translation=None, errors=(), warnings=()):
@@ -95,11 +113,13 @@ def run(argv):
 
 class TestShowQuery:
     def test_show_query_never_builds_the_client(self, tmp_path, monkeypatch, capsys):
+        # --show-query sends nothing, so it needs nothing: no client, and (below) no
+        # email either. A KB without email is deliberately used to prove that.
         def boom(config):
             raise AssertionError("--show-query built the client / sent a request")
         monkeypatch.setattr(cli, "_make_pubmed_client", boom)
         rc = run(["pubmed-search", "--query", "crispr cas9", "--mesh", "Neoplasms",
-                  "--show-query", "--target", str(_kb(tmp_path))])
+                  "--show-query", "--target", str(_kb_no_email(tmp_path))])
         assert rc == 0
         out = capsys.readouterr().out
         assert "no request sent" in out
@@ -109,9 +129,21 @@ class TestShowQuery:
         monkeypatch.setattr(cli, "_make_pubmed_client",
                             lambda config: (_ for _ in ()).throw(AssertionError("built")))
         rc = run(["pubmed-search", "--query", "brca1", "--show-query", "--porcelain",
-                  "--target", str(_kb(tmp_path))])
+                  "--target", str(_kb_no_email(tmp_path))])
         assert rc == 0
         assert capsys.readouterr().out.strip() == "query\tbrca1"
+
+    def test_a_request_spending_run_refuses_without_an_email(self, tmp_path, monkeypatch, capsys):
+        # The other side of the same gate: an actual search (not --show-query) refuses
+        # before a request when no contact email is configured (#166's rule, now shared
+        # by search). Isolate XDG so no ambient ~/.config email leaks in.
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        monkeypatch.delenv("NCBI_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "_make_pubmed_client",
+                            lambda config: (_ for _ in ()).throw(AssertionError("built")))
+        rc = run(["pubmed-search", "--query", "crispr", "--target", str(_kb_no_email(tmp_path))])
+        assert rc == 1
+        assert "email" in capsys.readouterr().err
 
 
 # -- field-tag rejection before a request -----------------------------------
@@ -223,29 +255,59 @@ class TestListing:
         assert ("efetch", ("111",)) in client.calls
 
 
-# -- selection seam (import deferred to #166) -------------------------------
+# -- selection -> import through #166's path --------------------------------
 
-class TestSelectionSeam:
-    def test_all_selects_every_result_and_reports_the_deferred_import(self, tmp_path, fake, capsys):
+class TestSelectionImport:
+    def test_all_imports_every_result_into_sources(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=1, ids=("111",)),
+            efetch_body=_efetch(_article("111", title="A CRISPR paper"))))
+        rc = run(["pubmed-search", "--query", "crispr", "--all", "--target", str(kb)])
+        assert rc == 0
+        # A real source file was written through #166's PubMedSourceWriter.
+        assert len(_sources(kb)) == 1
+        assert "Imported: 1" in capsys.readouterr().out
+
+    def test_dry_run_all_writes_nothing(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
         fake(FakePubMedClient(
             esearch_body=_esearch(count=1, ids=("111",)),
             efetch_body=_efetch(_article("111"))))
-        rc = run(["pubmed-search", "--query", "crispr", "--all", "--target", str(_kb(tmp_path))])
+        rc = run(["pubmed-search", "--query", "crispr", "--all", "--dry-run",
+                  "--target", str(kb)])
         assert rc == 0
-        err = capsys.readouterr().err
-        assert "#166" in err and "no files were written" in err
+        assert _sources(kb) == []
+        assert "Would import: 1" in capsys.readouterr().out
 
-    def test_non_tty_without_all_selects_nothing(self, tmp_path, fake, monkeypatch, capsys):
+    def test_all_porcelain_emits_the_import_summary_after_the_listing(self, tmp_path, fake, capsys):
+        kb = _kb(tmp_path)
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=1, ids=("111",)),
+            efetch_body=_efetch(_article("111", title="A paper"))))
+        rc = run(["pubmed-search", "--query", "crispr", "--all", "--porcelain",
+                  "--target", str(kb)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Two blocks in one stream (as arxiv-search does): the listing rows then the
+        # import summary rows.
+        assert "result\t1\t111\t-\tA paper" in out
+        assert "found\t1" in out
+        assert "imported\t1" in out
+        assert len(_sources(kb)) == 1
+
+    def test_non_tty_without_all_imports_nothing(self, tmp_path, fake, monkeypatch, capsys):
         # A non-interactive run that is not --all must not guess; it selects nothing
         # rather than silently importing every hit (the CI silent-zero, #167).
         monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False, raising=False)
+        kb = _kb(tmp_path)
         fake(FakePubMedClient(
             esearch_body=_esearch(count=1, ids=("111",)),
             efetch_body=_efetch(_article("111"))))
-        rc = run(["pubmed-search", "--query", "crispr", "--target", str(_kb(tmp_path))])
+        rc = run(["pubmed-search", "--query", "crispr", "--target", str(kb)])
         assert rc == 0
         captured = capsys.readouterr()
-        assert "no files were written" not in captured.err
+        assert _sources(kb) == []
         assert "Nothing selected" in captured.out
 
 
