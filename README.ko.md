@@ -321,9 +321,11 @@ factlog ingest --scan --target ~/wiki        # auto-convert every binary under s
 
 `factlog setup`(또는 `factlog use <kb>`)은 선택한 KB를 **활성 KB**로 기록합니다.
 그래서 `factlog` 서브커맨드(`ingest`/`sync`/`status`/…)가 어느 작업 디렉터리에서든 그
-KB를 대상으로 동작합니다 — `--target` 이 필요 없습니다. (번들 `tools/*.py` 스크립트는
-config 가 아니라 `$FACTLOG_ROOT` 를 읽으므로, 세션에서 `factlog where --porcelain` 으로
-한 번 export 합니다. 슬래시 커맨드 워크플로가 이 다리를 대신 놓아 줍니다.)
+KB를 대상으로 동작합니다 — `--target` 이 필요 없습니다. (번들 `tools/*.py` 스크립트 대부분은
+`--wiki`/`$FACTLOG_ROOT`/config 순서를 똑같이 따르지만, 일부(`compile_facts.py`,
+`run_logic_check.py`)는 `$FACTLOG_ROOT`(또는 cwd)만 읽으므로, 세션에서
+`factlog where --porcelain` 으로 한 번 export 합니다. 슬래시 커맨드 워크플로가 이 다리를
+대신 놓아 줍니다.)
 
 `factlog init`도 기록하지만, **쓸 수 있는 활성 KB가 아직 없을 때만** 그렇습니다.
 이미 활성 KB가 있으면 `init`은 새 KB를 만들되 활성 KB는 건드리지 않습니다. 그러지
@@ -336,7 +338,7 @@ config 가 아니라 `$FACTLOG_ROOT` 를 읽으므로, 세션에서 `factlog whe
 ```bash
 factlog use ~/wiki        # make ~/wiki the active KB (recorded in config)
 factlog where             # show the active KB and how it was resolved
-factlog lang ko           # 리포트/페이지 언어 설정 (CODE 생략 시 현재 값 출력)
+factlog lang ko           # 어시스턴트 내레이션 언어 설정 (엔진 리포트/CLI 출력은 원문 유지; CODE 생략 시 현재 값 출력)
 factlog sources           # list registered sources (original, conversion, fact count)
 factlog status            # KB state: facts by status, vocabulary, conflicts, logic freshness, engine
 cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.pdf.txt

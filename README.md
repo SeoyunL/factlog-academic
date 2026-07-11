@@ -122,9 +122,12 @@ are still pending.)
 
 `factlog setup` (or `factlog use <kb>`) records the chosen KB as the **active
 KB**, so the `factlog` subcommands (`ingest`/`sync`/`status`/…) target it from any
-working directory — no `--target` needed. (The bundled `tools/*.py` scripts read
-`$FACTLOG_ROOT`, not the config, so a session exports it once from `factlog where
---porcelain`; the slash-command workflow does this for you.):
+working directory — no `--target` needed. (Most bundled `tools/*.py` scripts follow the
+same precedence via `--wiki`/`$FACTLOG_ROOT`/config, but a few — `compile_facts.py`,
+`run_logic_check.py` — read only `$FACTLOG_ROOT` (or the cwd), so a session exports it
+once from `factlog where --porcelain`; the slash-command workflow does this for you.)
+
+Then, from anywhere:
 
 `factlog init` records it too, but **only when no usable active KB is set yet**.
 Once you have one, `init` scaffolds the new KB and leaves the active KB alone —
@@ -135,7 +138,7 @@ silently repoint `accept`/`reject`/`amend`/`sync` at it. Switch deliberately wit
 ```bash
 factlog use ~/wiki        # make ~/wiki the active KB (recorded in config)
 factlog where             # show the active KB and how it was resolved
-factlog lang ko           # set the report/page language (omit CODE to print it)
+factlog lang ko           # set the assistant narration language (engine reports/CLI output stay verbatim; omit CODE to print it)
 factlog sources           # list registered sources (original, conversion, fact count)
 factlog status            # KB state: facts by status, vocabulary, conflicts, logic freshness, engine
 cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.pdf.txt
