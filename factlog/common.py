@@ -1447,13 +1447,14 @@ def relation_aliases(root: Path | None = None) -> dict[str, str]:
             # and mis-spelled. Silently skipping it left the alias unapplied with no sign,
             # so a query that relied on it just missed. typed-relations.md warns on the
             # same shape; match it, rather than swallow.
-            looks_like_mapping = ("->" in stripped or "\u2192" in stripped
-                                  or "\u27f6" in stripped or "\u21a6" in stripped
+            looks_like_mapping = ("->" in stripped or "=>" in stripped
+                                  or "\u2192" in stripped or "\u27f6" in stripped
+                                  or "\u21a6" in stripped or "\u21d2" in stripped
                                   or len(re.findall(r"`[^`]+`", stripped)) >= 2)
             if looks_like_mapping:
                 print(
                     f"relation-aliases.md: skipping malformed line {line.strip()!r} "
-                    "(each mapping needs backticks: `raw` -> `canonical`)",
+                    "(each mapping needs backticks AND an ASCII arrow: `raw` -> `canonical`)",
                     file=sys.stderr,
                 )
             continue
