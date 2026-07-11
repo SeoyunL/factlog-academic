@@ -3517,6 +3517,176 @@ def cmd_pubmed_import(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
+    """Has any PubMed record in the KB gained (or lost) a retraction since import? (#168).
+
+    Reads the provenance ledgers and a KB-level check-log, re-fetches each record by PMID
+    (``efetch``), re-runs the two-marker retraction detector, and reports records whose
+    retraction status has drifted from what PubMed now serves. This is **report-only**: it
+    never writes to sources/ or a ledger; only the check-log's last-checked timestamps
+    advance. A newly-reported retraction is surfaced for a human to act on and nothing is
+    absorbed (recording an acknowledged status is #169; following a merged/deleted PMID is
+    #170). A front-matter-only paper (no PubMed ledger) is still read, and a fresh
+    retraction on it points at ``pubmed-backfill-provenance`` (#172), not a refusal.
+
+    Before spending the (rate-limited) requests, it prints an estimate of how long the run
+    will take and — when no NCBI API key is configured — what it would cost with one, then
+    asks for confirmation on an interactive terminal. ``--dry-run`` shows that plan and the
+    ETA without touching the network or writing anything.
+    """
+    from datetime import datetime, timezone
+
+    from factlog.integrations.common.porcelain import porcelain_field
+    from factlog.integrations.pubmed import refresh as rf
+    from factlog.integrations.pubmed.client import (
+        PubMedClient,
+        PubMedConnectionError,
+        PubMedError,
+        PubMedServiceError,
+    )
+    from factlog.integrations.pubmed.check_log import (
+        CheckLogError,
+        check_log_path,
+        read_check_log,
+        record_check,
+        write_check_log,
+    )
+
+    prepared = _pubmed_prepare(args, "pubmed-refresh")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    # A refresh hits the network, so NCBI's contact-email policy applies exactly as it does
+    # to an import: unidentified traffic is throttled/blocked. Checked here at the one
+    # per-run choke point (the shared prepare intentionally stays a pure resolver).
+    if not config.email:
+        print(
+            "factlog pubmed-refresh: no NCBI contact email configured. Set client.email in "
+            "~/.config/factlog/pubmed.toml (or the KB's policy/pubmed-config.toml); NCBI "
+            "throttles or blocks unidentified traffic.",
+            file=sys.stderr,
+        )
+        return 1
+
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+    only_flagged = getattr(args, "only_flagged", False)
+    older_than_days = args.older_than
+
+    # A corrupt check-log is one KB-level file; surface it as a clear failure rather than a
+    # traceback, and never as an empty log (which the next write would persist).
+    log_path = check_log_path(target)
+    try:
+        check_log = read_check_log(log_path)
+    except CheckLogError as exc:
+        print(f"factlog pubmed-refresh: {exc}", file=sys.stderr)
+        return 1
+
+    # A corrupt *ledger* is one source's problem (a per-id error), never a crash.
+    entries, ledger_errors = rf.collect_ledger_entries(target)
+    # A record named by a source outside the provenance root can never be refreshed (#112);
+    # reported per-id rather than dropped from the denominator.
+    excluded = rf.excluded_checks(target)
+    if only_flagged:
+        entries = rf.flagged_only(entries)
+    if not entries and not ledger_errors and not excluded:
+        if not porcelain:
+            scope = " flagged" if only_flagged else ""
+            print(f"factlog pubmed-refresh: no{scope} PubMed records in {target}")
+        else:
+            for line in rf.porcelain_lines([], [], rf.summarize([], []), target=target):
+                print(line)
+        return 0
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    to_check, skipped = rf.partition_by_freshness(entries, check_log, older_than_days, now)
+
+    # The pre-wait estimate (§1.3), derived from the client's real cadence — no rate
+    # constant is copied. Shown even in --dry-run so an operator can size the real run.
+    for line in rf.estimate_lines(
+        len(to_check),
+        interval=PubMedClient.min_interval(has_api_key=bool(config.api_key)),
+        keyed_interval=PubMedClient.min_interval(has_api_key=True),
+        has_key=bool(config.api_key),
+    ):
+        print(line, file=sys.stderr)
+
+    if dry_run:
+        # A preview: no network, no writes (not even the check-log). It reports the plan so
+        # the ETA above is actionable, then stops.
+        if porcelain:
+            for entry in to_check:
+                print(f"would-check\t{porcelain_field(entry.pmid)}")
+            for check in skipped:
+                print(f"skipped\t{porcelain_field(check.pmid)}")
+            print(f"would_check\t{len(to_check)}")
+            print(f"skipped\t{len(skipped)}")
+            print(f"dry_run\t1")
+            print(f"target\t{target}")
+        else:
+            print(
+                f"\nDry run: would refresh retraction status for {len(to_check)} PubMed "
+                f"record(s); {len(skipped)} skipped as checked within the last "
+                f"{rf._days(older_than_days)}. Nothing was fetched or written."
+            )
+        return 0
+
+    results: list = []
+    if to_check:
+        # Confirm on an interactive terminal before spending the requests; a non-interactive
+        # or --porcelain run proceeds (this command writes nothing under sources/, so the
+        # prompt is a courtesy, not a safety gate).
+        if not porcelain and sys.stdin.isatty():
+            answer = input("Proceed? [Y/n] ").strip().lower()
+            if answer in ("n", "no"):
+                print(
+                    "factlog pubmed-refresh: aborted; nothing was checked or written.",
+                    file=sys.stderr,
+                )
+                return 0
+
+        client = _make_pubmed_client(config)
+
+        def _progress(done: int, total: int) -> None:
+            print(f"  checked {done}/{total}", file=sys.stderr)
+
+        try:
+            results = rf.check_entries(to_check, client, progress=_progress)
+        except (PubMedConnectionError, PubMedServiceError) as exc:
+            print(f"factlog pubmed-refresh: {exc}", file=sys.stderr)
+            return 2
+        except PubMedError as exc:
+            # A transport/service failure cannot be trusted partial; the check-log is left
+            # untouched so a re-run starts clean.
+            print(f"factlog pubmed-refresh: {exc}", file=sys.stderr)
+            return 1
+
+    # Record what was actually observed this run: every record PubMed answered gets a fresh
+    # timestamp. A per-id error is left as it was so it is retried. Nothing under sources/ is
+    # touched — the check-log is the only thing report-only ever writes.
+    now_iso = now.isoformat()
+    recorded_any = False
+    for result in results:
+        if result.status != rf.STATUS_ERROR:
+            record_check(check_log, result.pmid, now_iso)
+            recorded_any = True
+    if recorded_any:
+        write_check_log(log_path, check_log)
+
+    all_results = results + ledger_errors + excluded
+    summary = rf.summarize(all_results, skipped)
+    if porcelain:
+        for line in rf.porcelain_lines(all_results, skipped, summary, target=target):
+            print(line)
+    else:
+        for line in rf.report_lines(
+            all_results, skipped, summary, target=target, older_than_days=older_than_days
+        ):
+            print(line)
+    return 1 if summary.errors else 0
+
+
 def _arxiv_show_results(works, total: int, *, porcelain: bool) -> None:
     """Render arxiv-search results. Mirrors :func:`_openalex_show_results`.
 
@@ -5938,6 +6108,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="machine-readable output (tab-separated rows) for scripts",
     )
     pm_mesh.set_defaults(func=cmd_pubmed_mesh)
+
+    pm_refresh = sub.add_parser(
+        "pubmed-refresh",
+        help="report PubMed records whose retraction status has drifted from what PubMed "
+             "now serves (report-only: never touches sources/*.md or a ledger, only the "
+             "check-log timestamp). Estimates the run time first; --dry-run previews.",
+    )
+    pm_refresh.add_argument(
+        "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+    )
+    pm_refresh.add_argument(
+        "--older-than", type=float, default=30.0, metavar="DAYS",
+        help="skip records checked within DAYS (read from the check-log, not the source "
+             "files); default 30. Use 0 to force a re-check of every record.",
+    )
+    pm_refresh.add_argument(
+        "--only-flagged", action="store_true",
+        help="re-check only records the KB already records as retracted — the cheap way to "
+             "catch a retraction PubMed has since reversed without re-fetching the library.",
+    )
+    pm_refresh.add_argument(
+        "--dry-run", action="store_true",
+        help="show which records would be refreshed and the estimated run time without "
+             "hitting the network or writing anything (not even the check-log).",
+    )
+    pm_refresh.add_argument(
+        "--porcelain", action="store_true",
+        help="machine-readable output (tab-separated rows) for scripts; the estimate and "
+             "progress stay on stderr",
+    )
+    pm_refresh.set_defaults(func=cmd_pubmed_refresh)
 
     return parser
 

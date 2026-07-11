@@ -204,9 +204,31 @@ class PubMedClient:
         self._transport = transport
         self._sleep = sleep
         self._warn = warn
-        interval = KEY_MIN_INTERVAL if self._config.api_key else NO_KEY_MIN_INTERVAL
+        interval = self.min_interval(has_api_key=bool(self._config.api_key))
         self._limiter = _RateLimiter(interval, clock=clock, sleep=sleep)
         self._warned = False
+
+    @classmethod
+    def min_interval(cls, *, has_api_key: bool) -> float:
+        """The minimum serial interval this client paces requests at (seconds).
+
+        The single home of the key -> cadence mapping: ~0.1 s with a key (10/s),
+        ~0.34 s without one (3/s). Exposed as a classmethod so a caller estimating
+        how long a refresh will take (``pubmed-refresh``, #168) derives both the
+        current cadence and the with-a-key cadence from *this* logic rather than
+        copying :data:`KEY_MIN_INTERVAL` / :data:`NO_KEY_MIN_INTERVAL` — the one
+        source of truth, so the estimate cannot silently drift from the pacing.
+        """
+        return KEY_MIN_INTERVAL if has_api_key else NO_KEY_MIN_INTERVAL
+
+    @property
+    def request_interval(self) -> float:
+        """This client's actual serial interval between requests (seconds).
+
+        Read from the live rate limiter, so an estimate built on it reflects the
+        cadence requests will *really* be paced at (key vs no key), not a guess.
+        """
+        return self._limiter._interval
 
     # -- transport ---------------------------------------------------------
     @property
