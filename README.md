@@ -456,6 +456,24 @@ fragmentation across the whole KB by a shared-token heuristic, so it is broader
 and far noisier (2275 candidates on that same KB). Use `value_audit` when you
 want precise, per-relation findings you can act on.
 
+### Relation aliases (`policy/relation-aliases.md`)
+
+Map a **surface** relation name to the **canonical** one, so facts written `게재연도` and
+`발행년도` are treated as one relation `published_year`. Without this the engine sees two
+unrelated relations and a query for one misses facts stored under the other (#213).
+
+```
+# policy/relation-aliases.md
+- `게재연도` -> `published_year`
+- `publication_year` -> `published_year`
+```
+
+One mapping per line, `raw` -> `canonical`. **Backticks are required around both names**
+here — unlike the other policy files, where they are optional. A line with an arrow but
+no backticks is a mapping you meant to make and mis-spelled, so it is reported as
+malformed on stderr and skipped, not applied silently. The canonical name is the one you
+declare in the other policy files; aliases are folded to it before those apply.
+
 ### Single-valued relations (`policy/single-valued.md`)
 
 A relation listed here may hold **at most one object per subject**. This is what turns

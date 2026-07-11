@@ -1433,9 +1433,36 @@ def relation_aliases(root: Path | None = None) -> dict[str, str]:
         stripped = re.sub(r"^\s*[-*]\s+", "", line.strip()).strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # Expect exactly `raw` -> `canonical` — arrow is required.
+        # Strip a trailing comment that starts OUTSIDE backticks, so a valid mapping with
+        # an inline note (`` `x` -> `y`  # a note``) is not read as malformed. A `#`
+        # inside backticks is part of the name; mask backtick spans, then cut at the first
+        # `#` that survives. typed-relations.md strips inline comments the same way.
+        masked = re.sub(r"`[^`]*`", lambda mm: "\x00" * len(mm.group()), stripped)
+        hash_at = masked.find("#")
+        if hash_at != -1:
+            stripped = stripped[:hash_at].strip()
+        if not stripped:
+            continue
+        # Expect exactly `raw` -> `canonical` — arrow AND backticks required. Accept the
+        # common unicode arrow variants only to DETECT a mis-spelled mapping (below), not
+        # to parse it: the format is ASCII `->`.
         m = re.fullmatch(r"`([^`]+)`\s*->\s*`([^`]+)`", stripped)
         if not m:
+            # A line that looks like a mapping -- an arrow (ASCII -> or a unicode variant)
+            # or two backtick groups -- but does not match is one the user meant to make
+            # and mis-spelled. Silently skipping it left the alias unapplied with no sign,
+            # so a query that relied on it just missed. typed-relations.md warns on the
+            # same shape; match it, rather than swallow.
+            looks_like_mapping = ("->" in stripped or "=>" in stripped
+                                  or "\u2192" in stripped or "\u27f6" in stripped
+                                  or "\u21a6" in stripped or "\u21d2" in stripped
+                                  or len(re.findall(r"`[^`]+`", stripped)) >= 2)
+            if looks_like_mapping:
+                print(
+                    f"relation-aliases.md: skipping malformed line {line.strip()!r} "
+                    "(each mapping needs backticks AND an ASCII arrow: `raw` -> `canonical`)",
+                    file=sys.stderr,
+                )
             continue
         raw = unicodedata.normalize("NFC", m.group(1).strip())
         canonical = unicodedata.normalize("NFC", m.group(2).strip())
