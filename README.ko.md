@@ -279,11 +279,11 @@ python3 -m factlog use ~/wiki      # 활성 KB로 지정
 | `.md`, `.markdown`, `.txt` | **직접 지원** | UTF-8 텍스트, 있는 그대로 읽음. 모든 추출 기준이 전제하는 형식입니다. |
 | 그 밖의 UTF-8 텍스트 (`.rst`, `.org`, `.csv`, 소스 코드) | 평문으로 지원 | 별도 파싱 없이 원시 텍스트로 취급. |
 | `.docx`, 바이너리 `.pdf`, `.odt`, `.epub` | **자동 변환** | `factlog ingest` 가 pandoc / textutil / pdftotext 로 텍스트로 변환합니다. |
-| `.html`, `.htm`, `.rtf` | **자동 변환** | 텍스트 기반 컨테이너입니다. 바이트는 텍스트지만 내용은 마크업이므로, 원문 그대로 읽지 않고 변환합니다. 변환본이 생기면 원본은 추출 입력에서 빠집니다. |
+| `.html`, `.htm`, `.xhtml`, `.rtf` | **자동 변환** | 텍스트 기반 컨테이너입니다. 바이트는 텍스트지만 내용은 마크업이므로, 원문 그대로 읽지 않고 변환합니다. 변환본이 생기면 원본은 추출 입력에서 빠집니다. |
 | `.hwpx` (한컴 OWPML) | **자동 변환** | 내장 추출기(외부 도구 불필요) — zip 내부 `Contents/section*.xml` 텍스트를 읽음. |
 | `.hwp` (구형 한컴, HWP 5.x) | **자동 변환** | `hwp5html`(pyhwp) → pandoc → markdown 경로, 표 보존. `pip install pyhwp` + pandoc 필요. 없으면 안내 메시지와 함께 보고. |
 | `.pptx` (PowerPoint) | **자동 변환** | 내장 추출기(외부 도구 불필요) — zip 내부 `ppt/slides/slideN.xml` 의 슬라이드 텍스트를 순서대로 읽고, 슬라이드당 한 블록으로 변환. 발표자 노트는 제외, 표 셀은 셀당 한 줄로 펼쳐짐(행/열 그룹 구조는 보존 안 됨). |
-| `.xlsx`, 이미지 | **변환 안 됨** | 내장 변환기 없음 — 안내 메시지와 함께 보고. 수동 변환 필요. |
+| `.xml`, `.svg`, `.xlsx`, 이미지 | **변환 안 됨** | 일반 변환기가 없는 마크업/바이너리 — 안내 메시지와 함께 보고. 필요한 텍스트는 수동으로 추출. `.xml`/`.svg` 는 태그가 산문으로 읽히지 않도록 추출 입력에서 빠집니다. |
 
 `factlog ingest` 는 변환된 텍스트를 KB의 **`runs/sources/`** 디렉터리(다른 생성
 런 아티팩트와 같은 위치)에 기록합니다 — 사용자의 원본이 그대로 남아 있어야 하는
@@ -336,7 +336,14 @@ cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 factlog eject report.pdf  # inverse of ingest: remove the conversion + retire its facts
 factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
+factlog export --bibtex   # 소스를 인용: BibTeX (또는 --csl 로 CSL-JSON)
 ```
+
+`export` 는 `sources/` **와** `runs/sources/` **아래 모든 깊이**의 `.md` 의 YAML front matter 를 읽어(`factlog sources` 가 세는 집합과 동일), `title`
+또는 `zotero_key` 를 가진 소스마다 한 항목을 낸다. 인용할 수 없는 소스(front matter 가
+없거나 두 필드가 다 없는 경우)는 조용히 빠지지 않고 stderr 에 이름이 찍힌다 — 인용 목록에서
+문헌이 소리 없이 사라지는 것이야말로 이 KB 가 막으려는 실패다. 다른 폴더의 두 소스가 같은
+파일명을 가질 수 있는데, 그때는 두 번째에 접미사가 붙은 인용 키가 부여되고 그 사실도 보고된다.
 
 > **슬래시 명령(`/factlog …`)도 활성 KB에서 동작합니다.** 다만 factlog **소스
 > 저장소 안에서** 실행하면 번들 `examples/sample-kb` 와 혼동될 수 있으니, KB
@@ -639,6 +646,31 @@ chain)` 은 실재하는 값입니다.
 `tools/entity_audit.py` 는 이웃한 점검입니다. KB 전체에서 *엔티티* 분열을 토큰 공유
 휴리스틱으로 찾으므로 범위가 넓고 훨씬 시끄럽습니다(같은 KB에서 후보 2275건). 바로
 조치할 수 있는 정밀한 관계별 발견이 필요하면 `value_audit` 을 쓰십시오.
+
+#### 단일값 관계 (`policy/single-valued.md`)
+
+여기 나열한 관계는 **한 subject 당 object 를 하나만** 가질 수 있습니다. 모순을 조용히
+공존하는 두 사실이 아니라 **에러**로 만드는 장치이며, 평범한 노트 위키가 해주지 못하는 바로
+그 일입니다.
+
+```
+# policy/single-valued.md
+published_year
+`연구 유형`
+```
+
+한 줄에 관계명 하나입니다. `#` 주석과 `-` 불릿을 쓸 수 있고, 공백이 든 이름은 백틱으로
+감쌉니다. 나열하지 않은 관계는 한 subject 에 여러 object 를 가질 수 있으며, `cites` 나
+`mentions` 같은 관계에는 그것이 옳은 기본값입니다.
+
+같은 (subject, 단일값 관계) 에 서로 다른 object 두 개가 단언되면 `CONFLICT` 로 보고되고,
+사람이 해소할 때까지 KB 는 컴파일을 거부합니다. 모순을 **보는** 방법은 `factlog status`
+(`conflicts: N`), `tools/check_conflicts.py` (각 모순과 해소 단계를 출력), 또는 Claude Code
+안에서 `/factlog check` 입니다. **해소**는 행을 물리려면 `factlog eject --fact SUBJECT
+RELATION OBJECT`, 값을 고치려면 `factlog amend SUBJECT RELATION OBJECT --set-object NEW`
+입니다. `facts/candidates.csv` 를 손으로 고치는 것은 이 KB 가 세운 사람 게이트를
+우회하므로 하지 않습니다. 두 값이 상위-하위유형이라면 어느 쪽도 틀리지 않았습니다 — 다음 절을 보십시오.
+
 #### 값 계층 (`policy/value-hierarchy.md`)
 
 같은 관계의 두 값은, 따로 말해 주지 않으면 서로 무관한 문자열입니다. 코호트연구는
@@ -694,7 +726,7 @@ chain)` 은 실재하는 값입니다.
 
 - `date` — `2030.1` / `2030-01-15` → 정렬 가능한 yyyymmdd. **엔진 투영 지원**
   (정렬/임계값/범위).
-- `ordinal` — `rank 3` / `3rd` → 정수 순위. **엔진 투영 지원**.
+- `ordinal` — `3rd` / `3위` / `제3호` → 정수 순위. 값이 **숫자로 시작**해야 합니다 — `rank 3` 은 파싱되지 않습니다. **엔진 투영 지원**.
 - `amount` — `100억` / `1,000원` → 정수 기본 단위. **엔진 투영 지원**. 단위 표가
   필요하며, 줄 끝에 인라인으로 줄 수 있습니다: `: amount as <alias> (억=1e8, 만=1e4, 원=1)`
   (값은 양의 정수). 절을 생략하면 기본 단위 표를 씁니다.

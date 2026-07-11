@@ -58,11 +58,11 @@ no facts on its own.
 | `.md`, `.markdown`, `.txt` | **Directly supported** | UTF-8 text, read verbatim. This is what every extraction reference assumes. |
 | Other UTF-8 text (`.rst`, `.org`, `.csv`, source code) | Supported as plain text | No special parsing; treated as raw text. |
 | `.docx`, binary `.pdf`, `.odt`, `.epub` | **Auto-converted** | `factlog ingest` converts these to text via pandoc / textutil / pdftotext. |
-| `.html`, `.htm`, `.rtf` | **Auto-converted** | Text-based containers: the bytes are text but the content is markup, so they are converted rather than read raw — the original is not an extraction input once a conversion exists. |
+| `.html`, `.htm`, `.xhtml`, `.rtf` | **Auto-converted** | Text-based containers: the bytes are text but the content is markup, so they are converted rather than read raw — the original is not an extraction input once a conversion exists. |
 | `.hwpx` (Hancom OWPML) | **Auto-converted** | Built-in extractor (no external tool) — reads the zip's `Contents/section*.xml` text. |
 | `.hwp` (legacy Hancom, HWP 5.x) | **Auto-converted** | Via `hwp5html` (pyhwp) → pandoc → markdown, tables preserved. Needs `pip install pyhwp` + pandoc; if absent, reported with a hint. |
 | `.pptx` (PowerPoint) | **Auto-converted** | Built-in extractor (no external tool) — reads on-slide text from the zip's `ppt/slides/slideN.xml`, slides in order, one block per slide. Speaker notes are excluded; table cells flatten to one line per cell (row/column grouping not preserved). |
-| `.xlsx`, images | **Not converted** | No bundled converter — reported with a hint; convert by hand. |
+| `.xml`, `.svg`, `.xlsx`, images | **Not converted** | Markup or binary with no general converter — reported with a hint; extract the text you need by hand. `.xml`/`.svg` are still kept OUT of extraction so their tags are never read as prose. |
 
 `factlog ingest` writes the converted text into the KB's **`runs/sources/`**
 directory (alongside the other generated run artifacts) — **never into
@@ -137,7 +137,15 @@ cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 factlog eject report.pdf  # inverse of ingest: remove the conversion + retire its facts
 factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
 factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
+factlog export --bibtex   # cite your sources: BibTeX (or --csl for CSL-JSON)
 ```
+
+`export` reads the YAML front matter of every `.md` under `sources/` **and** `runs/sources/`, at any depth — the same set `factlog sources` lists — and
+emits one entry per source that carries a `title` or a `zotero_key`. A source it cannot
+cite (no front matter, or front matter with neither field) is named on stderr rather
+than dropped quietly — a citation list that silently loses a work is the failure this
+KB exists to prevent. Two sources in different folders may share a filename; the second
+gets a suffixed citation key, and that is reported too.
 
 ### Optional integration dependencies
 
@@ -447,6 +455,32 @@ transport chain)` is a real value.
 fragmentation across the whole KB by a shared-token heuristic, so it is broader
 and far noisier (2275 candidates on that same KB). Use `value_audit` when you
 want precise, per-relation findings you can act on.
+
+### Single-valued relations (`policy/single-valued.md`)
+
+A relation listed here may hold **at most one object per subject**. This is what turns
+a contradiction into an error rather than two facts sitting quietly side by side — the
+thing a plain notes wiki cannot do for you.
+
+```
+# policy/single-valued.md
+published_year
+`연구 유형`
+```
+
+One relation name per line; `#` comments and `-` bullets are allowed; backtick-quote a
+name containing spaces. A relation you do not list may hold many objects per subject,
+which is the right default for `cites` or `mentions`.
+
+If two distinct objects are asserted for the same (subject, single-valued relation) it
+is reported as a `CONFLICT` and the KB refuses to compile until a human resolves it. You
+see conflicts with `factlog status` (`conflicts: N`), with `tools/check_conflicts.py`
+(which prints each one and the resolution steps), or with `/factlog check` inside Claude
+Code. You resolve one with `factlog eject --fact SUBJECT RELATION OBJECT` to retire a
+row, or `factlog amend SUBJECT RELATION OBJECT --set-object NEW` to correct one. Never by hand-editing
+`facts/candidates.csv`: that bypasses the gate the KB is built around. And if the two
+values are a supertype and its subtype, neither is wrong — see the next section.
+
 ### Value hierarchy (`policy/value-hierarchy.md`)
 
 Two values of the same relation are unrelated strings unless you say otherwise.
@@ -468,6 +502,15 @@ that query returned 6 rows out of 14.
 space, a `:` or a `<`. Ancestors are transitive (`a ⊂ b` and `b ⊂ c` means a
 query for `c` also matches an `a` row). Names are matched after Unicode NFC
 normalisation, so a policy file written on macOS still meets its facts.
+
+**Contradiction detection.** A hierarchy also tells `check_conflicts` that a
+supertype and its subtype are not a contradiction. With `연구유형` declared
+single-valued, a paper carrying both `관찰연구` and `코호트연구` is being described at
+two levels of precision, and both rows are true — so it is not reported, and
+`finalize` does not stop. Genuine siblings still are: `관찰연구` and `실험연구` on one
+paper remains a conflict, and so does a chain plus a sibling. Retiring a fact is a
+human decision (`factlog eject --fact`), never something you should do to silence a
+false alarm.
 
 **Scope — where subsumption applies.** It is applied when a query's **object** is
 matched, by all three of the gate, the evaluator and the logic report, so
@@ -510,7 +553,7 @@ The four types:
 
 - `date` — `2030.1` / `2030-01-15` → sortable yyyymmdd. **Engine-projectable**
   (ordering / threshold / range).
-- `ordinal` — `rank 3` / `3rd` → int rank. **Engine-projectable**.
+- `ordinal` — `3rd` / `3위` / `제3호` → int rank. The value must START with the number: `rank 3` does not parse. **Engine-projectable**.
 - `amount` — `100억` / `1,000원` → integer base unit. **Engine-projectable**.
   Needs a unit table; supply one inline at the end of the line:
   `: amount as <alias> (억=1e8, 만=1e4, 원=1)` (values must be positive ints).
@@ -676,7 +719,24 @@ retired facts immediately.
 
 A `runs/sources/` conversion is tied to the original that produced it via the
 ingest provenance header, so even when two originals share a stem,
-`eject report.docx` never disturbs `report.pptx`'s conversion. `pages/` are not
+`eject report.docx` never disturbs `report.pptx`'s conversion.
+
+Ejecting by **path** (`eject sub/report.docx`) matches the conversion whose
+recorded origin *is that path*. A conversion made before conversions mirrored
+their original's subdirectory records only a basename, so it cannot be attributed
+to a path — and that state is indistinguishable from a conversion made from a file
+outside `sources/` (the `factlog ingest report.docx --target ~/wiki` form above) or
+from an original since deleted. `eject` will **not** guess: it leaves such a
+conversion in place and names it on stderr, including when the path matched nothing
+else. Remove it by naming the conversion directly — `eject runs/sources/report.md`. While
+such a conversion is still on disk and the request matched no conversion of its own,
+`--delete-original` refuses outright (exit 1, nothing deleted): deleting the original
+while leaving a conversion we could not attribute would strand that conversion's facts
+with no source file.
+(`ingest --scan --force` does *not* migrate these: it adds a mirrored conversion
+beside the flat one and leaves the flat one, and the facts citing it, in place.)
+
+`pages/` are not
 regenerated by `eject` — run `/factlog sync` to reconcile them. The default
 `superseded` mark is a current-state retire: if you keep a **text** original
 under `sources/`, the next `/factlog sync` re-extracts and re-asserts its facts —

@@ -262,9 +262,15 @@ silently-accumulated contradictions a plain notes wiki cannot prevent.
 **Entity vs literal typing.** Relations you list in `policy/attribute-relations.md`
 (same one-name-per-line format as `single-valued.md`) are treated as
 *literal-valued*: their object is a value (a date, number, ordinal, ...), not a
-first-class entity. Such objects are kept OUT of the entity set, so they do not
-appear as entities, path nodes, or `count` subjects, and the query translator
-won't mistake a date for an entity. They remain fully verifiable as relation
+first-class entity. The guarantee is about the RELATION: no edge is drawn ALONG an
+attribute relation, so no path reaches a value by way of one. A value that appears
+nowhere else is therefore kept OUT of the entity set — not listed, not a path node,
+not a `count` subject — and the query translator won't mistake a date for an entity.
+The value is still an ENTITY if it appears as a subject anywhere, so it can be named in
+a query — but being an entity is not the same as being on a path. A path may START at
+it only if it is the subject of a NON-attribute relation (its only source of an
+outgoing edge), may END at it only if a NON-attribute relation has it as its object
+(its only source of an incoming edge), and RUNS THROUGH it only when both hold. They remain fully verifiable as relation
 objects — `relation("을서비스", "정식_운영", "2030.1")?` still resolves. The file is
 optional; with no declarations the entity set is unchanged (every object is an
 entity). Run `tools/entity_audit.py` to find candidates (objects that look like

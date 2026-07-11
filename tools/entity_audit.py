@@ -44,7 +44,8 @@ os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 
 from common import (  # noqa: E402
     CANDIDATES_CSV,
-    attribute_relations,
+    attribute_relation_forms,
+    is_attribute_relation,
     engine_facts,
     ensure_dirs,
     entity_set,
@@ -74,7 +75,9 @@ def _tokens(s: str) -> set[str]:
 
 def audit(facts: list[dict[str, str]]) -> dict[str, object]:
     rows = engine_facts(facts)
-    literal_rels = attribute_relations()
+    # Surface forms via the shared predicate: comparing raw declarations made this
+    # advise declaring a relation that WAS already declared, just under its alias.
+    literal_rels = attribute_relation_forms()
     entities = entity_set(facts)  # excludes declared-literal objects
 
     fact_count: Counter[str] = Counter()
@@ -88,9 +91,9 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
             if ent:
                 fact_count[ent] += 1
                 statuses[ent].add(st)
-        if o and rel in literal_rels:
+        if o and is_attribute_relation(rel, literal_rels):
             declared_literals.add(o)
-        elif o and rel not in literal_rels and _LITERAL_RE.match(o):
+        elif o and not is_attribute_relation(rel, literal_rels) and _LITERAL_RE.match(o):
             literal_suspects[rel].add(o)
 
     # Fragmentation clusters among entities only. Precompute norm/tokens once per

@@ -15,6 +15,7 @@ from common import (
     dependency_path,
     is_quoted_string,
     path_query_rows,
+    typed_projection_warnings,
     QUERY_PREDICATES,
     allowed_relations,
     value_hierarchy,
@@ -231,6 +232,7 @@ def evaluate_queries(
                 routes = "; ".join(f"{start} -> {target}" for start, target in rows)
                 suffix = f"; {routes}" if routes else ""
                 results.append(f"path results: {len(rows)} rows{suffix}")
+
         elif line.startswith("relation"):
             rows = relation_results(line, facts, hierarchy)
             args = query_args(line)
@@ -292,6 +294,11 @@ def main() -> None:
     # broader query now catches the narrower rows, and it does not. That is the
     # quiet omission this KB exists to surface, so say it (#211).
     warnings.extend(value_hierarchy_warnings(facts=facts))
+    # A typed literal that does not parse is dropped from its comparison predicate.
+    # That used to be announced on stderr only, so the report — the artifact the
+    # gate makes you show verbatim — said warnings: 0 while a fact was quietly
+    # missing from every typed query (#227).
+    warnings.extend(typed_projection_warnings(facts))
 
     for predicate in sorted(policy_query_predicates):
         for target, reason in sorted(inferred[predicate]):

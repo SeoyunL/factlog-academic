@@ -40,33 +40,34 @@ check "(d) a malformed path query is an ERROR, not a verified negative" "$R" "pa
 R="$(report 'path(x, "C")?')"
 check "(e) a bare token is an ERROR, like it is for relation" "$R" "path arguments must be variables or quoted strings"
 
-# The engine is the authority. An edge rule in logic-policy.extra.dl reaches pairs the
-# python closure over accepted facts cannot see; the report must not deny them.
-printf 'edge(S, T) :- relation(T, "uses", S).\n' > "$KB/policy/logic-policy.extra.dl"
-R="$(report 'path("C", "A")?')"
-printf '%s' "$R" | grep -q "path C -> A: (not found)" && { echo "FAIL: (f) the report denies a pair the ENGINE proved"; fails=$((fails+1)); } || echo "  ok: (f) the report does not contradict the engine"
-rm -f "$KB/policy/logic-policy.extra.dl"
-
-# The report and `ask` must give the SAME answer about the same KB. Both take the truth
-# set from the ENGINE: answering ask from a python closure over accepted facts made it
-# return a verified NEGATIVE for a pair the engine had proved.
-printf 'edge(S, T) :- relation(T, "uses", S).\n' > "$KB/policy/logic-policy.extra.dl"
+# Report and ask both take reachability from the ENGINE, not from a private python
+# closure -- that is what keeps them from disagreeing (#220). Since #226 reserved edge/
+# path as engine predicates a policy cannot head, the engine's path and the python
+# tracer are now the SAME computation (relation minus attr_rel), so they agree on every
+# KB by construction. Here we just confirm report and ask give the same rows for a
+# variable query, through the engine path.
 ASK="$(FACTLOG_ROOT="$KB" "$PY" - <<'PYEOF'
 import os, sys, json
 sys.path.insert(0, os.getcwd()); sys.path.insert(0, "tools")
 import factlog.common as c
 from ask_router import evaluate
 facts = c.load_accepted_facts()
-print(json.dumps(evaluate('path("C", "A")?', facts)["rows"]))
+print(json.dumps(sorted(evaluate('path("A", X)?', facts)["rows"])))
 PYEOF
 )"
-if [ "$ASK" = '[["C", "A"]]' ]; then
-  echo "  ok: (i) ask agrees with the engine, like the report does"
-else
-  echo "FAIL: (i) ask disagrees with the engine (got $ASK)"; fails=$((fails+1))
-fi
-R="$(report 'path("C", "A")?')"
-check "(i) the report does not fabricate a one-hop route" "$R" "reachable (engine); no route through the accepted facts"
+R="$(report 'path("A", X)?')"
+printf '%s' "$R" | grep -q "A -> B" && printf '%s' "$R" | grep -q "A -> C" \
+  && [ "$ASK" = '[["A", "B"], ["A", "C"]]' ] \
+  && echo "  ok: (i) report and ask give the same rows for a variable path query" \
+  || { echo "FAIL: (i) report and ask disagree (ask=$ASK)"; fails=$((fails+1)); }
+
+# A policy that HEADS edge is rejected -- that reservation (#226) is what makes the
+# engine's path authoritative and un-forgeable, which is why report and ask can trust it.
+printf 'edge(S, T) :- relation(T, "uses", S).\n' > "$KB/policy/logic-policy.extra.dl"
+ERR="$(FACTLOG_ROOT="$KB" "$PY" tools/run_logic_check.py 2>&1 >/dev/null || true)"
+printf '%s' "$ERR" | grep -q "edge is a reserved engine EDB predicate" \
+  && echo "  ok: (i) a policy heading edge is rejected, keeping the engine path authoritative" \
+  || { echo "FAIL: (i) a policy was allowed to redefine edge"; fails=$((fails+1)); }
 rm -f "$KB/policy/logic-policy.extra.dl"
 
 # The file exists but holds nothing evaluable — say that, not "not found".

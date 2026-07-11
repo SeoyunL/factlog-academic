@@ -183,7 +183,12 @@ BUILTIN_CONVERTERS: frozenset[str] = frozenset({"factlog-hwpx", "factlog-hwp", "
 # extraction as if it were prose, and the "no conversion" warning never fired
 # because they were not classified as binary (#222). The sniff exists for formats
 # that MUST be binary; these are not among them.
-TEXT_CONTAINER_EXTS: frozenset[str] = frozenset({".html", ".htm", ".rtf"})
+# Markup whose bytes are text but whose content is NOT prose. Extraction must never
+# read the raw original -- .xhtml/.html/.htm/.rtf have a converter; .xml/.svg do not,
+# so those are reported unconvertible (INGEST_HINTS) rather than fed as prose (#238).
+TEXT_CONTAINER_EXTS: frozenset[str] = frozenset(
+    {".html", ".htm", ".xhtml", ".rtf", ".xml", ".svg"}
+)
 
 INGEST_CONVERTERS: dict[str, list[tuple]] = {
     ".docx": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
@@ -191,6 +196,8 @@ INGEST_CONVERTERS: dict[str, list[tuple]] = {
     ".epub": [("pandoc", ".md", _conv_pandoc)],
     ".html": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
     ".htm": [("pandoc", ".md", _conv_pandoc), ("textutil", ".txt", _conv_textutil)],
+    # pandoc reads XHTML with its html reader (verified); textutil does not, so no fallback.
+    ".xhtml": [("pandoc", ".md", _conv_pandoc)],
     # pandoc first, like every other entry, with textutil as the macOS fallback.
     # Order matters beyond preference: the chain picks the OUTPUT EXTENSION, so a
     # platform-dependent first choice makes the same original convert to .md on
@@ -216,6 +223,8 @@ INGEST_HINTS: dict[str, str] = {
     ".png": "images need OCR (out of scope); transcribe to text manually",
     ".jpg": "images need OCR (out of scope); transcribe to text manually",
     ".jpeg": "images need OCR (out of scope); transcribe to text manually",
+    ".xml": "no general converter; extract the text you need into a .md/.txt in sources/",
+    ".svg": "an SVG is XML markup, not prose; transcribe any caption/text into sources/",
 }
 
 INSTALL_HINTS: dict[str, str] = {

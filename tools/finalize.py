@@ -256,8 +256,12 @@ def main(argv: list[str] | None = None) -> int:
                 if removed
                 else ""
             )
-            + ". Resolve them (mark outdated rows status='superseded') and re-run "
-            "before trusting the KB.",
+            + ". Resolve them through the human gate — factlog eject --fact SUBJECT "
+            "RELATION OBJECT to retire a row, or factlog amend ... --set-object to "
+            "correct one — not by hand-editing facts/candidates.csv. If the values are "
+            "a supertype and its subtype, neither is wrong: declare the relationship in "
+            "policy/value-hierarchy.md and both rows are kept. Then re-run before "
+            "trusting the KB.",
             file=sys.stderr,
         )
         return 1

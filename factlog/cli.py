@@ -494,6 +494,39 @@ This file describes the Datalog rules used to reason over the knowledge base.
 Add your policy rules here. Each rule should be documented with a brief
 explanation of its purpose.
 """,
+    "policy/single-valued.md": """\
+# Single-valued (functional) relations
+#
+# List relation names that may hold AT MOST ONE object per subject. One relation
+# NAME per line; '#' comment lines and '-' bullets are allowed; quote a name
+# containing spaces in backticks.
+#
+# This is what turns a contradiction into an ERROR instead of two facts sitting
+# quietly side by side. If two distinct objects are asserted for the same
+# (subject, single-valued relation) it is reported as a CONFLICT and the KB
+# refuses to compile until a human resolves it.
+#
+# To SEE conflicts:
+#   factlog status              -> `conflicts: N`
+#   tools/check_conflicts.py    -> each conflict, and the resolution steps
+#   /factlog check              -> the same, inside Claude Code
+#
+# To RESOLVE one (never by hand-editing facts/candidates.csv, which bypasses the
+# gate this KB is built around):
+#   factlog eject --fact SUBJECT RELATION OBJECT    retire a row
+#   factlog amend SUBJECT RELATION OBJECT --set-object NEW    correct one
+#
+# If the two values are a supertype and its subtype (a cohort study IS an
+# observational study), neither is wrong: declare the relationship in
+# policy/value-hierarchy.md and both rows are kept.
+#
+# A relation you do NOT list may hold many objects per subject, which is the
+# right default for things like `cites` or `mentions`.
+#
+# Example (remove the leading '# ' to activate):
+# published_year
+# `연구 유형`
+""",
     "policy/attribute-relations.md": """\
 # Attribute (literal-valued) relations
 #
@@ -501,10 +534,28 @@ explanation of its purpose.
 # ...) rather than a first-class entity. One relation NAME per line; '#' comment
 # lines and '-' bullets are allowed; quote a name containing spaces in backticks.
 #
-# Objects of these relations are kept OUT of the entity set (so they do not show
-# up as entities, path nodes, or count subjects) but remain valid, verifiable
-# relation-query objects. Leave this file with no declarations if every object
-# is a first-class entity.
+# An object at the OBJECT end of these relations is a value, not a thing: it is
+# kept out of the entity set, and no dependency path runs THROUGH it (an edge is
+# never drawn along an attribute relation). It remains a valid, verifiable
+# relation-query object.
+#
+# Precisely, so you can rely on it:
+#   - no edge is drawn ALONG an attribute relation, so no path reaches the value by
+#     way of one. That is the guarantee; it is about the relation, not the value.
+#   - a value that only ever appears at the object end of attribute relations is
+#     therefore not an entity: not listed, not a path node, not a count subject.
+#   - the value is still an ENTITY if it appears as a subject anywhere, so it can be
+#     named in a query. Being an entity is not the same as being on a path.
+#   - a path may START at it only if it is the subject of a NON-attribute relation
+#     (that is the only way it gets an outgoing edge).
+#   - a path may END at it only if a NON-attribute relation has it as its object
+#     (the only way it gets an incoming edge).
+#   - a path RUNS THROUGH it only when both of the above hold.
+#
+# Declaring the relation does not make the value invisible; it stops the attribute
+# assertion from being treated as a dependency.
+#
+# Leave this file with no declarations if every object is a first-class entity.
 #
 # Example (remove the leading '# ' to activate):
 # operates_since
@@ -584,10 +635,12 @@ explanation of its purpose.
 #
 # Type meanings:
 #   date     2030.1 / 2030-01-15  -> sortable yyyymmdd
-#   number   1,000 / 3.5          -> fixed-point int64, scaled ×1000 (3 decimals,
-#                                    positive only); thresholds in scaled units
+#   number   1,000 / 3.5 / -2.5   -> fixed-point int64, scaled ×1000 (3 decimals;
+#                                    negatives parse — a loss or a delta may be
+#                                    negative); thresholds in scaled units
 #                                    (e.g. `V >= 2.0` -> `V >= 2000`)
-#   ordinal  rank 3 / 3rd         -> int rank
+#   ordinal  3rd / 3위 / 제3호      -> int rank (must START with the number:
+#                                    `rank 3` does not parse)
 #   amount   100억 / 1,000원       -> integer base unit (needs a unit table)
 #
 # An `amount` line MAY carry an inline unit table; values must be positive ints:
@@ -1684,6 +1737,7 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     scope = facts if args.all else common.engine_facts(facts)
     scope_label = "all candidate" if args.all else "engine"
     attr = ctx.attribute_relations()
+    attr_forms = common.attribute_relation_forms(attr, ctx.relation_aliases())
     sv = ctx.single_valued_relations()
     typed = ctx.typed_relations()  # {name: TypedRelSpec}; {} when no typed-relations.md
 
@@ -1698,7 +1752,10 @@ def cmd_vocab(args: argparse.Namespace) -> int:
             rel_counts[rel] += 1
         if s:
             ent_counts[s] += 1
-        if o and rel not in attr:  # objects of attribute relations are literals, not entities
+        # Surface forms, not raw declarations: a KB that declares the canonical while its
+        # facts carry an alias had vocab call the literal an entity while status and the
+        # engine called it a literal (#226).
+        if o and not common.is_attribute_relation(rel, attr_forms):
             ent_counts[o] += 1
 
     print(f"factlog vocab (KB: {target}) — {scope_label} facts")
@@ -1711,7 +1768,17 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     if show_r:
         print(f"  relations ({len(rel_counts)}):")
         for name, n in sorted(rel_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            tags = [t for t, on in (("attribute", name in attr), ("single-valued", name in sv)) if on]
+            # The same shared predicate the entity count above uses: comparing the raw
+            # declaration left vocab tagging no relation as [attribute] on an alias KB
+            # while status counted one (#226).
+            tags = [
+                t
+                for t, on in (
+                    ("attribute", common.is_attribute_relation(name, attr_forms)),
+                    ("single-valued", name in sv),
+                )
+                if on
+            ]
             # typed_relations() keys are NFC-normalized; the CSV-sourced name may be NFD.
             tname = unicodedata.normalize("NFC", name)
             if tname in typed:
@@ -1767,9 +1834,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Vocabulary
     attr = ctx.attribute_relations()
     sv = ctx.single_valued_relations()
-    # Pass attr so entity_set reads THIS KB's attribute relations, not the module
-    # default (cmd_status may target a KB other than the ambient FACTLOG_ROOT).
-    ent, val = common.entity_set(facts, attr), common.value_set(facts)
+    # Pass attr AND this KB's aliases so entity_set reads THIS KB throughout, not the
+    # module default (cmd_status may target a KB other than the ambient FACTLOG_ROOT).
+    ent, val = common.entity_set(facts, attr, ctx.relation_aliases()), common.value_set(facts)
     # Literals are values appearing only as attribute-relation objects; with no
     # attribute-relations.md declared, entity_set == value_set so there are none.
     literals = f"{len(val) - len(ent)} literal(s)" if attr else "0 literal(s) — none declared"
@@ -1835,14 +1902,16 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Conflicts (single-valued relations with >1 distinct object)
     if sv:
-        by_key: dict[tuple, set] = {}
-        for r in engine_rows:
-            if r["relation"] in sv:
-                by_key.setdefault((r["subject"], r["relation"]), set()).add(r["object"])
-        conflicts = {k: v for k, v in by_key.items() if len(v) > 1}
+        # The gate's own function, not a private counter. The inline one knew nothing of
+        # the value hierarchy, relation aliases or typed grouping, so status told the
+        # user "1 conflict" about a KB check_conflicts had just cleared -- and told them
+        # to fix it by hand-editing candidates.csv (#219).
+        conflicts = common.detect_conflicts(
+            engine_rows, sv, ctx.typed_relations(), common.relation_aliases(ctx.root), common.value_hierarchy(ctx.root)
+        )
         msg = f"  conflicts:  {len(conflicts)} (over {len(sv)} single-valued relation(s))"
         if conflicts:
-            msg += "  ⚠ resolve via superseded / see tools/check_conflicts.py"
+            msg += "  ⚠ run tools/check_conflicts.py for the resolution steps"
         print(msg)
     else:
         print("  conflicts:  n/a (no single-valued relations declared in policy/single-valued.md)")
@@ -2388,7 +2457,8 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     # so a stem guess would let `eject report.docx` wrongly pull report.pptx's
     # conversion; the recorded origin name disambiguates. Falls back to a stem
     # match only when no header is present (a hand-made conversion).
-    conv_origin: dict[str, str] = {}
+    conv_origin: dict[str, str] = {}       # ref -> origin BASENAME
+    conv_origin_raw: dict[str, str] = {}   # ref -> origin as the header wrote it
     for ref, p in disk_refs.items():
         if not ref.startswith("runs/sources/"):
             continue
@@ -2412,7 +2482,56 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 # rebuilds sources/<subdir>/<origin> from the conversion's own
                 # mirrored subdir — stays correct for both header formats and no
                 # legacy basename header regresses.
+                # Keep BOTH: the basename (what pairing/--orphans want) and the
+                # header value as written. #214 headers may carry a sources/-
+                # relative path; discarding it forced conv_source_path to
+                # re-derive the subdir from the conversion's mirror, which only
+                # works for mirrored conversions and broke legacy flat ones (#221).
                 conv_origin[ref] = PurePosixPath(origin).name
+                conv_origin_raw[ref] = origin
+
+    def conv_source_path(ref: str) -> str | None:
+        """The KB-relative original a `runs/sources/` conversion was made from.
+
+        Returns None when it CANNOT be known, so the caller falls back rather than
+        inventing one:
+
+        * header carries a path (#214) -> `sources/<header>` verbatim;
+        * header is a bare name and the conversion is MIRRORED -> the mirrored
+          subdir supplies the missing part (`runs/sources/sub/report.docx.md` ->
+          `sources/sub/report.docx`);
+        * header is a bare name and the conversion is FLAT (a pre-mirroring KB) ->
+          **unknowable**. A flat conversion may well come from a nested original
+          (README documents exactly that upgrade state), so reconstructing
+          `sources/<name>` would be a guess. Deriving it anyway made `eject
+          sub/report.html` silently match nothing on such KBs (#221 review);
+        * no readable header -> the conversion's own mirrored path + stem.
+
+        Getting this right is the whole point: comparing BASENAMES let `eject
+        sub/report.docx` delete a top-level `report.docx`'s conversion — a source
+        the user never named (#221).
+        """
+        raw = conv_origin_raw.get(ref)
+        rel_parent = PurePosixPath(ref).relative_to("runs/sources").parent
+        if raw and "/" in raw:
+            return str(PurePosixPath("sources") / raw)
+        name_part = raw or PurePosixPath(ref).stem
+        candidate = str(PurePosixPath("sources") / rel_parent / name_part)
+        if candidate in disk_refs:
+            return candidate
+        if str(rel_parent) != ".":
+            # A mirrored conversion whose original is gone: the mirror still tells
+            # us where it WAS, and that is the honest answer (an orphan).
+            return candidate
+        # Flat conversion with no original of that name at the top level: this is a
+        # pre-mirroring KB whose original lives in a subdirectory the header never
+        # recorded. Reconstructing `sources/<name>` would name a file that does not
+        # exist, so say so and let the caller fall back.
+        return None
+
+    # Flat conversions whose origin cannot be attributed to a requested PATH.
+    # Reported instead of guessed at (see the path branch of matches()).
+    unattributable: set[str] = set()
 
     def matches(ref: str, name: str) -> bool:
         name = nfc(name)
@@ -2421,10 +2540,38 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             return True
         is_conv = ref.startswith("runs/sources/")
         if "/" in name:
-            # A path was given: the exact original is handled above; for a
-            # binary original also match the conversion it produced (by
-            # recorded origin). Same-basename files elsewhere are NOT matched.
-            return is_conv and conv_origin.get(ref) == np_.name
+            # A path was given. Match the original at that path, and the conversion
+            # whose ORIGIN IS THAT PATH — never a same-named file elsewhere (#221).
+            # Both sides go through PurePosixPath so `./sub/x` and `sub//x` compare
+            # equal to `sub/x` instead of missing.
+            wanted = str(PurePosixPath(name if name.startswith("sources/") else f"sources/{name}"))
+            if not is_conv:
+                return ref == wanted
+            origin = conv_source_path(ref)
+            if origin is not None:
+                return origin == wanted
+            # Origin unknowable: a FLAT conversion with a bare-name header. Falling
+            # back to a basename compare here re-created #221 — the very bug this
+            # branch exists to kill. A flat conversion's original may sit in a
+            # subdir the header never recorded (a pre-mirroring KB), but it may
+            # equally have been ingested from OUTSIDE sources/ (README documents
+            # exactly that: `factlog ingest report.docx --target ~/wiki`), or have
+            # been deleted. Those states are indistinguishable, so a basename match
+            # would delete the conversion of a document the user never named, with
+            # exit 0.
+            #
+            # So do not guess. Silent under-ejection beats silent over-ejection: the
+            # ref is reported afterwards (unattributable) so the user can eject it
+            # by its own name (ingest --scan --force does NOT migrate it -- it only adds
+            # a mirrored conversion beside the flat one and leaves the flat one).
+            # Warn for a HEADERLESS flat conversion too: conv_origin has no entry for
+            # it, so keying the warning on conv_origin left the commonest legacy shape
+            # silently un-ejected. Compare its own name (report.md -> report.docx.md
+            # both stem to the original's name under the two ingest namings).
+            own = conv_origin.get(ref) or PurePosixPath(PurePosixPath(ref).name).stem
+            if own == PurePosixPath(name).name or own == PurePosixPath(name).stem:
+                unattributable.add(ref)
+            return False
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
                 return rp.name == np_.name  # an original with that filename
@@ -2441,6 +2588,24 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             origin = conv_origin.get(ref)
             return Path(origin if origin else rp.name).stem == np_.stem
         return rp.stem == np_.stem
+
+    def _report_unattributable(refs: set[str]) -> None:
+        """Name each conversion a PATH request refused to guess about.
+
+        Silent under-ejection is just a quieter kind of wrong, so say which file was
+        left and how to remove it. Naming the ref directly is the one route measured
+        to work; `ingest --scan --force` only ADDS a mirrored conversion beside the
+        flat one, so advertising it as a migration sent the user back to this same
+        warning.
+        """
+        for ref in sorted(refs):
+            print(
+                f"factlog eject: NOT ejecting {ref} — its provenance cannot be tied to "
+                f"a path (a flat conversion records only a basename, and may have been "
+                f"made from a document outside sources/). Guessing here is what #221 "
+                f"reported. To remove it, name it directly: factlog eject {ref}",
+                file=sys.stderr,
+            )
 
     matched: set[str] = set()
     if args.orphans:
@@ -2501,6 +2666,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 matched |= hits
             else:
                 print(f"factlog eject: no source matches '{name}'", file=sys.stderr)
+        # Name what we deliberately did NOT match BEFORE any early return: when the
+        # path matched nothing else -- the commonest state on a legacy KB -- a
+        # warning printed after `return 1` is dead code, and the user gets a bare
+        # "nothing to eject" with no hint that a conversion is sitting right there.
+        _report_unattributable(unattributable - matched)
         if not matched:
             print("factlog eject: nothing to eject", file=sys.stderr)
             return 1
@@ -2516,6 +2686,35 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     conv_to_delete = [r for r in matched_sorted if r.startswith("runs/sources/") and r in disk_refs]
     orig_on_disk = [r for r in matched_sorted if not r.startswith("runs/sources/") and r in disk_refs]
     affected = [r for r in rows if match_row(r)]
+
+    # Refuse to do the IRREVERSIBLE half of a job whose reversible half we just
+    # declined. Deleting the original while leaving a conversion we could not
+    # attribute -- and the facts citing it -- would strand those facts in
+    # accepted.dl with their source file gone, and --purge would take the audit
+    # trail with it. main deleted both; this branch must not delete only the one
+    # the user cannot get back.
+    # On disk only: a conversion that is merely still CITED cannot be stranded by
+    # deleting the original -- its file is already gone, and its rows were retired
+    # by whatever removed it.
+    stranded = sorted(r for r in (unattributable - matched) if r in disk_refs)
+    # If the named original's OWN conversion was matched, this eject is complete and
+    # an unrelated flat conversion that merely shares the name is not this request's
+    # business -- blocking then would refuse a job that strands nothing.
+    if any(r.startswith("runs/sources/") for r in matched):
+        stranded = []
+    if args.delete_original and stranded and orig_on_disk:
+        print(
+            "factlog eject: refusing --delete-original — "
+            f"{len(stranded)} conversion(s) of this name cannot be attributed to the "
+            "path you gave. One of them MAY be this original's pre-mirroring "
+            "conversion, in which case deleting the original would strand its facts "
+            "with no source file; it may equally belong to another document, in which "
+            "case ejecting it retires THAT document's facts. Decide, then re-run:",
+            file=sys.stderr,
+        )
+        for ref in stranded:
+            print(f"    factlog eject {ref}", file=sys.stderr)
+        return 1
 
     action = "purge" if args.purge else "supersede"
     print(f"  candidates.csv: {len(affected)} row(s) to {action}")
@@ -3809,7 +4008,7 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
                 print(f"skipped\t{porcelain_field(check.pmid)}")
             print(f"would_check\t{len(to_check)}")
             print(f"skipped\t{len(skipped)}")
-            print(f"dry_run\t1")
+            print("dry_run\t1")
             print(f"target\t{target}")
         else:
             print(
@@ -6061,7 +6260,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     import json
     from pathlib import Path
 
-    from factlog.bibtex import is_annotation_source, read_front_matter, to_bibtex
+    from factlog.bibtex import is_annotation_source, read_front_matter, safe_cite_key, to_bibtex
     from factlog.csl import to_csl
 
     if getattr(args, "bibtex", False) == getattr(args, "csl", False):
@@ -6074,14 +6273,54 @@ def cmd_export(args: argparse.Namespace) -> int:
     if not _require_kb(target, "export"):
         return 1
 
+    from factlog import common as _c  # noqa: PLC0415
+
     sources = []
-    for path in sorted((target / "sources").glob("*.md")):
+    # walk_source_dir, not glob("*.md"): the glob saw only the TOP level, so a source in
+    # a subdirectory -- which `factlog sources` lists and `sync` extracts from -- was
+    # dropped from the citation list with exit 0 and no warning (#223).
+    skipped: list[str] = []
+    seen_keys: dict[str, str] = {}
+    # source_files walks BOTH source roots (sources/ and runs/sources/), the same set
+    # `factlog sources` lists -- globbing sources/ alone dropped a source `factlog
+    # sources` shows from the citation list with exit 0 and no warning (#223). An ingest
+    # conversion under runs/sources/ carries an HTML provenance comment, not YAML front
+    # matter, so read_front_matter returns {} and it is reported as skipped rather than
+    # dropped silently; a hand-placed .md there with real front matter IS cited.
+    for path in _c.source_files(target):
+        if path.suffix.lower() != ".md":
+            continue
+        rel = path.relative_to(target).as_posix()
         fm = read_front_matter(path)
-        if not fm or is_annotation_source(fm):
+        if not fm:
+            skipped.append(f"{rel} (no YAML front matter)")
+            continue
+        if is_annotation_source(fm):
             continue
         if not (fm.get("zotero_key") or fm.get("title")):
+            skipped.append(f"{rel} (front matter has neither title nor zotero_key)")
             continue
-        sources.append((path.stem, fm))
+        # Dedup on the key that is actually EMITTED, not on the stem. BibTeX sanitizes
+        # the key (safe_cite_key collapses non-ASCII to "ref"), so 한글.md and 다른이름.md
+        # -- different stems -- both emit `@misc{ref,` and one silently wins in every
+        # BibTeX processor. `a.b` and `a-b` collide the same way. CSL keeps the stem as
+        # the id, so there the stem IS the emitted key.
+        emitted = safe_cite_key(path.stem) if not args.csl else path.stem
+        if emitted in seen_keys:
+            n = 2
+            while f"{emitted}-{n}" in seen_keys:
+                n += 1
+            print(
+                f"factlog export: citation key {emitted!r} is used by {seen_keys[emitted]} "
+                f"and {rel}; {rel} is exported as {emitted}-{n}",
+                file=sys.stderr,
+            )
+            emitted = f"{emitted}-{n}"
+        seen_keys[emitted] = rel
+        sources.append((emitted, fm))
+
+    for note in skipped:
+        print(f"factlog export: skipped {note}", file=sys.stderr)
 
     if args.csl:
         text = json.dumps([to_csl(fm, stem) for stem, fm in sources], ensure_ascii=False, indent=2)
