@@ -18,8 +18,11 @@ from factlog.integrations.pubmed.work_parser import (
     PresentRecord,
     PubMedFetchOutcome,
     PubMedParseError,
+    UnparseableRecord,
+    parse_article,
     parse_efetch_response,
 )
+from xml.etree import ElementTree as ET
 
 # A trimmed present record in the shape of spike §1's PMID 16354850: structured
 # abstract, journal Title + ISOAbbreviation, DOI in BOTH ArticleId and
@@ -280,10 +283,59 @@ def test_unexpected_root_raises():
         parse_efetch_response("<esearchResult><Count>0</Count></esearchResult>", "1")
 
 
-def test_record_without_pmid_raises():
-    xml = "<PubmedArticleSet><PubmedArticle><MedlineCitation></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+def test_parse_article_without_pmid_raises():
+    # The single-record function is strict: no PMID -> nothing can address it, so
+    # it raises. (The BATCH wrapper isolates this instead of propagating; see
+    # test_batch_isolates_unparseable_record_and_keeps_the_good_ones.)
+    record = ET.fromstring("<PubmedArticle><MedlineCitation></MedlineCitation></PubmedArticle>")
     with pytest.raises(PubMedParseError, match="no PMID"):
-        parse_efetch_response(xml, "1")
+        parse_article(record)
+
+
+def test_batch_isolates_unparseable_record_and_keeps_the_good_ones():
+    # #162 fetches PMIDs in batches; one unaddressable record (no PMID) must not
+    # discard the ones that parsed. The good records survive as `present`, and the
+    # bad one is NOT silently dropped — it surfaces, loud, in `unparseable` with
+    # its position, the raise reason, and the offending XML.
+    good_a = _record("16354850")
+    bad = "<PubmedArticle><MedlineCitation></MedlineCitation></PubmedArticle>"
+    good_b = _record("33301246")
+    xml = _set(good_a, bad, good_b)
+    outcome = parse_efetch_response(xml, ["16354850", "33301246"])
+
+    assert {r.requested_pmid for r in outcome.present} == {"16354850", "33301246"}
+    assert len(outcome.unparseable) == 1
+    lost = outcome.unparseable[0]
+    assert isinstance(lost, UnparseableRecord)
+    assert lost.index == 1  # positional: it was the second record in the set
+    assert "no PMID" in lost.reason
+    assert "MedlineCitation" in lost.xml  # the offending element is inspectable
+
+
+def test_batch_does_not_falsely_merge_unmatched_with_unexpected():
+    # MINOR 2 regression: in a BATCH, "1 unmatched request + 1 unexpected record"
+    # must NOT be read as a merge. efetch omits, never substitutes (spike §4), so
+    # the unmatched request may simply be deleted while the unexpected record is a
+    # different lineage. Request A and B; A comes back, plus an un-asked C.
+    xml = _set(_record("16354850"), _record("77777777"))
+    outcome = parse_efetch_response(xml, ["16354850", "22222222"])
+    # A is present; B is deleted (NOT paired with C); C is merged-without-requester.
+    assert {r.requested_pmid for r in outcome.present} == {"16354850"}
+    assert outcome.deleted == ("22222222",)
+    assert len(outcome.merged) == 1
+    assert outcome.merged[0].requested_pmid is None
+    assert outcome.merged[0].returned_pmid == "77777777"
+
+
+def test_single_request_still_merges_after_batch_guard():
+    # The MINOR 2 guard only narrows the batch case; a lone request that returns
+    # under a different id is still an unambiguous merge (both PMIDs exposed).
+    xml = _set(_record("20493475"))
+    outcome = parse_efetch_response(xml, "11111111")
+    assert outcome.deleted == ()
+    assert len(outcome.merged) == 1
+    assert outcome.merged[0].requested_pmid == "11111111"
+    assert outcome.merged[0].returned_pmid == "20493475"
 
 
 def test_non_string_body_raises():
@@ -292,12 +344,27 @@ def test_non_string_body_raises():
 
 
 def test_doi_normalized_and_junk_dropped():
-    # A DOI wrapped as a URL is reduced to bare form; a non-DOI ELocationID (pii)
-    # is dropped rather than recorded.
-    xml = _set(_record("9", doi_article="https://doi.org/10.1/AB", doi_eloc=""))
-    assert parse_efetch_response(xml, "9").present[0].work.doi == "10.1/ab"
+    # A DOI wrapped as a URL is reduced to bare, lowercased form by the SHARED
+    # normalizer (the one OpenAlex uses), so both sources fold a DOI identically
+    # for §7.1 cross-source dedup; a non-DOI ELocationID (a publisher pii) is
+    # dropped rather than recorded.
+    xml = _set(_record("9", doi_article="https://doi.org/10.1234/AB", doi_eloc=""))
+    assert parse_efetch_response(xml, "9").present[0].work.doi == "10.1234/ab"
     xml2 = _set(_record("9", doi_article="", doi_eloc="S0140-6736(20)30183-5"))
     assert parse_efetch_response(xml2, "9").present[0].work.doi is None
+
+
+def test_doi_folds_to_same_form_as_openalex_shared_normalizer():
+    # Drift guard: PubMed must reuse the shared normalizer, not a parallel one.
+    # A resolver-wrapped, mixed-case DOI reaches the SAME bare 10.x/y form the
+    # shared function produces directly, so a PubMed DOI and an OpenAlex DOI for
+    # the same work compare equal in duplicate detection.
+    from factlog.integrations.openalex.api_client import normalize_doi
+
+    raw = "https://doi.org/10.1378/Chest.128.6.3817"
+    xml = _set(_record("9", doi_article=raw, doi_eloc=""))
+    pubmed_doi = parse_efetch_response(xml, "9").present[0].work.doi
+    assert pubmed_doi == normalize_doi(raw) == "10.1378/chest.128.6.3817"
 
 
 def test_parsed_work_is_hashable_and_frozen():
