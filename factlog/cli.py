@@ -3518,16 +3518,24 @@ def cmd_pubmed_import(args: argparse.Namespace) -> int:
 
 
 def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
-    """Has any PubMed record in the KB gained (or lost) a retraction since import? (#168).
+    """Has any PubMed record in the KB gained (or lost) a retraction, or an identifier/journal
+    correction, since import? (#168, #169).
 
     Reads the provenance ledgers and a KB-level check-log, re-fetches each record by PMID
     (``efetch``), re-runs the two-marker retraction detector, and reports records whose
-    retraction status has drifted from what PubMed now serves. This is **report-only**: it
-    never writes to sources/ or a ledger; only the check-log's last-checked timestamps
-    advance. A newly-reported retraction is surfaced for a human to act on and nothing is
-    absorbed (recording an acknowledged status is #169; following a merged/deleted PMID is
-    #170). A front-matter-only paper (no PubMed ledger) is still read, and a fresh
-    retraction on it points at ``pubmed-backfill-provenance`` (#172), not a refusal.
+    ``doi``/``journal`` or retraction status has drifted from what PubMed now serves.
+
+    Without ``--auto-update`` this is **report-only**: it never writes to sources/ or a
+    ledger; only the check-log's last-checked timestamps advance. With ``--auto-update`` it
+    records the narrow identifier/journal fields (``doi``, ``journal`` — the enumeration in
+    ``refresh.AUTO_UPDATE_FIELDS``) into each changed record's provenance ledger, and nothing
+    else: it never opens the original ``.md`` (P4 holds byte- and mtime_ns-identical), never
+    rewrites any other ledger field, and **never writes retraction** — a newly-reported
+    retraction is surfaced for a human to act on under both modes and nothing is absorbed
+    (recording an acknowledged status is ``pubmed-acknowledge-retraction``; following a
+    merged/deleted PMID is #170). A front-matter-only paper (no PubMed ledger) is still read,
+    and a fresh retraction — or an auto-update — on it points at ``pubmed-backfill-provenance``
+    (#172), not a refusal.
 
     Before spending the (rate-limited) requests, it prints an estimate of how long the run
     will take and — when no NCBI API key is configured — what it would cost with one, then
@@ -3572,6 +3580,7 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
     porcelain = getattr(args, "porcelain", False)
     dry_run = getattr(args, "dry_run", False)
     only_flagged = getattr(args, "only_flagged", False)
+    auto_update = getattr(args, "auto_update", False)
     older_than_days = args.older_than
 
     # A corrupt check-log is one KB-level file; surface it as a clear failure rather than a
@@ -3674,17 +3683,28 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
     if recorded_any:
         write_check_log(log_path, check_log)
 
+    # --auto-update writes only doi/journal into each changed record's ledger. It never
+    # opens a source .md; a record whose fields already match is a byte-identical no-op; a
+    # front-matter-only record has no ledger and is reported, not fabricated; a corrupt
+    # ledger is a per-id error. A retraction is surfaced under both modes and is never
+    # written. Only `results` (records actually checked this run) are eligible.
+    updates = rf.apply_auto_update(results, target) if auto_update else []
+
     all_results = results + ledger_errors + excluded
     summary = rf.summarize(all_results, skipped)
     if porcelain:
-        for line in rf.porcelain_lines(all_results, skipped, summary, target=target):
+        for line in rf.porcelain_lines(
+            all_results, skipped, summary, target=target, updates=updates
+        ):
             print(line)
     else:
         for line in rf.report_lines(
-            all_results, skipped, summary, target=target, older_than_days=older_than_days
+            all_results, skipped, summary, target=target,
+            older_than_days=older_than_days, updates=updates,
         ):
             print(line)
-    return 1 if summary.errors else 0
+    update_errors = any(u.status == rf.UPDATE_ERROR for u in updates)
+    return 1 if summary.errors or update_errors else 0
 
 
 def cmd_pubmed_acknowledge_retraction(args: argparse.Namespace) -> int:
@@ -6521,9 +6541,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     pm_refresh = sub.add_parser(
         "pubmed-refresh",
-        help="report PubMed records whose retraction status has drifted from what PubMed "
-             "now serves (report-only: never touches sources/*.md or a ledger, only the "
-             "check-log timestamp). Estimates the run time first; --dry-run previews.",
+        help="report PubMed records whose doi/journal or retraction status has drifted from "
+             "what PubMed now serves; with --auto-update record the new identifier/journal "
+             "fields in the ledger (never touches sources/*.md, never writes retraction). "
+             "Estimates the run time first; --dry-run previews.",
     )
     pm_refresh.add_argument(
         "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
@@ -6537,6 +6558,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--only-flagged", action="store_true",
         help="re-check only records the KB already records as retracted — the cheap way to "
              "catch a retraction PubMed has since reversed without re-fetching the library.",
+    )
+    pm_refresh.add_argument(
+        "--auto-update", action="store_true",
+        help="record the new doi and journal in each changed record's provenance ledger. "
+             "Never touches the original .md, never rewrites any other ledger field, and "
+             "never writes retraction (surfaced for human review under both modes; "
+             "acknowledge it with pubmed-acknowledge-retraction). Without this flag, "
+             "nothing is written but the check-log timestamp.",
     )
     pm_refresh.add_argument(
         "--dry-run", action="store_true",
