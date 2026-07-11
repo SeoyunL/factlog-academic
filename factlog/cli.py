@@ -2508,7 +2508,12 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             # So do not guess. Silent under-ejection beats silent over-ejection: the
             # ref is reported afterwards (unattributable) so the user can eject it
             # by its own name or migrate the KB with `factlog ingest --scan --force`.
-            if conv_origin.get(ref) == PurePosixPath(name).name:
+            # Warn for a HEADERLESS flat conversion too: conv_origin has no entry for
+            # it, so keying the warning on conv_origin left the commonest legacy shape
+            # silently un-ejected. Compare its own name (report.md -> report.docx.md
+            # both stem to the original's name under the two ingest namings).
+            own = conv_origin.get(ref) or PurePosixPath(PurePosixPath(ref).name).stem
+            if own == PurePosixPath(name).name or own == PurePosixPath(name).stem:
                 unattributable.add(ref)
             return False
         if np_.suffix:  # a bare filename with an extension
@@ -2527,6 +2532,24 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             origin = conv_origin.get(ref)
             return Path(origin if origin else rp.name).stem == np_.stem
         return rp.stem == np_.stem
+
+    def _report_unattributable(refs: set[str]) -> None:
+        """Name each conversion a PATH request refused to guess about.
+
+        Silent under-ejection is just a quieter kind of wrong, so say which file was
+        left and how to remove it. Naming the ref directly is the one route measured
+        to work; `ingest --scan --force` only ADDS a mirrored conversion beside the
+        flat one, so advertising it as a migration sent the user back to this same
+        warning.
+        """
+        for ref in sorted(refs):
+            print(
+                f"factlog eject: NOT ejecting {ref} — its provenance cannot be tied to "
+                f"a path (a flat conversion records only a basename, and may have been "
+                f"made from a document outside sources/). Guessing here is what #221 "
+                f"reported. To remove it, name it directly: factlog eject {ref}",
+                file=sys.stderr,
+            )
 
     matched: set[str] = set()
     if args.orphans:
@@ -2587,23 +2610,17 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 matched |= hits
             else:
                 print(f"factlog eject: no source matches '{name}'", file=sys.stderr)
+        # Name what we deliberately did NOT match BEFORE any early return: when the
+        # path matched nothing else -- the commonest state on a legacy KB -- a
+        # warning printed after `return 1` is dead code, and the user gets a bare
+        # "nothing to eject" with no hint that a conversion is sitting right there.
+        _report_unattributable(unattributable - matched)
         if not matched:
             print("factlog eject: nothing to eject", file=sys.stderr)
             return 1
 
     def match_row(d: dict) -> bool:
         return nfc(str(d.get("source", "")).partition("#")[0]) in matched
-
-    # Name what we deliberately did NOT match, so under-ejection is not silent.
-    for ref in sorted(unattributable - matched):
-        print(
-            f"factlog eject: NOT ejecting {ref} — it is a flat conversion whose "
-            f"provenance header records only a basename, so it cannot be attributed "
-            f"to a path. It may have been made from a different document. To remove "
-            f"it, name it directly (factlog eject {ref}); to give this KB attributable "
-            f"conversions, re-run factlog ingest --scan --force.",
-            file=sys.stderr,
-        )
 
     matched_sorted = sorted(matched)
     print(f"factlog eject (KB: {target}): {len(matched_sorted)} matched source ref(s):")
@@ -3906,7 +3923,7 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
                 print(f"skipped\t{porcelain_field(check.pmid)}")
             print(f"would_check\t{len(to_check)}")
             print(f"skipped\t{len(skipped)}")
-            print(f"dry_run\t1")
+            print("dry_run\t1")
             print(f"target\t{target}")
         else:
             print(

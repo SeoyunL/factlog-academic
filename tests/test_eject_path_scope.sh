@@ -189,10 +189,54 @@ if printf '%s' "$OUT" | grep -q "NOT ejecting runs/sources/report.md"; then
 else
   bad "(i) skipped the conversion silently"
 fi
-if printf '%s' "$OUT" | grep -q "ingest --scan --force"; then
-  ok "(i) the message says how to migrate the KB"
+# The message must offer a way out that actually WORKS. `ingest --scan --force` does
+# not: it adds a mirrored conversion beside the flat one and leaves the flat one, and
+# the facts citing it, in place — so following the advice returns you to this warning.
+# Naming the ref directly is the route measured to work.
+if printf '%s' "$OUT" | grep -q "factlog eject runs/sources/report.md"; then
+  ok "(i) the message offers an exit that works — name the ref directly"
 else
-  bad "(i) no migration guidance"
+  bad "(i) no usable exit offered"
+fi
+
+# --- (j) the warning must survive the early return ------------------------------
+# When the path matches nothing ELSE -- the commonest state on a legacy KB -- a
+# warning printed after `if not matched: return 1` is dead code, and the user gets a
+# bare "nothing to eject" while the conversion sits right there.
+KB8="$(mktemp -d "$TMP_ROOT/kb.XXXXXX")/wiki"
+"$PYTHON" -m factlog init --target "$KB8" >/dev/null
+printf -- '<!-- ingested-by-factlog | source: report.html | converter: pandoc -->\nbody\n' \
+  > "$KB8/runs/sources/report.html.md"
+OUT_J="$("$PYTHON" -m factlog eject docs/report.html --target "$KB8" 2>&1 || true)"
+if printf '%s' "$OUT_J" | grep -q "NOT ejecting runs/sources/report.html.md"; then
+  ok "(j) the warning still prints when nothing else matched"
+else
+  bad "(j) the warning is dead code on the no-match path"
+fi
+if printf '%s' "$OUT_J" | grep -q "scan --force"; then
+  bad "(j) still advertises --scan --force, which does not migrate anything"
+else
+  ok "(j) does not advertise a migration that does not migrate"
+fi
+
+# --- (k) a HEADERLESS flat conversion warns too ---------------------------------
+# conv_origin has no entry for it, so keying the warning on conv_origin left the
+# commonest legacy shape silently un-ejected — a quieter kind of wrong.
+KB9="$(mktemp -d "$TMP_ROOT/kb.XXXXXX")/wiki"
+"$PYTHON" -m factlog init --target "$KB9" >/dev/null
+mkdir -p "$KB9/sources/sub"
+printf 'nested\n' > "$KB9/sources/sub/report.html"
+printf 'no header here\n' > "$KB9/runs/sources/report.md"
+OUT_K="$("$PYTHON" -m factlog eject sub/report.html --target "$KB9" 2>&1 || true)"
+if [ -f "$KB9/runs/sources/report.md" ]; then
+  ok "(k) a headerless flat conversion is not deleted by a path request"
+else
+  bad "(k) deleted a headerless flat conversion the user never named"
+fi
+if printf '%s' "$OUT_K" | grep -q "NOT ejecting runs/sources/report.md"; then
+  ok "(k) a headerless flat conversion is named, not skipped silently"
+else
+  bad "(k) left a headerless flat conversion behind SILENTLY"
 fi
 
 echo "---"
