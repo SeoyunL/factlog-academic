@@ -161,6 +161,12 @@ class KbContext:
     def attribute_relations(self) -> set[str]:
         return _relation_names_from(self.policy_dir / "attribute-relations.md")
 
+    def relation_aliases(self) -> dict[str, str]:
+        # Resolving THIS KB's attribute relations needs THIS KB's alias map; reading
+        # it from the ambient root made one KB answer differently under --target than
+        # under FACTLOG_ROOT (#226).
+        return relation_aliases(self.root)
+
     def typed_relations(self) -> dict[str, TypedRelSpec]:
         path = self.policy_dir / "typed-relations.md"
         if not path.is_file():
@@ -1700,26 +1706,35 @@ def value_set(facts: list[dict[str, str]] | None = None) -> set[str]:
 def entity_set(
     facts: list[dict[str, str]] | None = None,
     attribute_rels: set[str] | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> set[str]:
     """First-class entities only: every subject, plus objects whose relation is
     NOT declared an attribute relation. Objects of attribute relations are
     literal values (see attribute_relations) and are excluded so they don't show
-    up as entities (entity listings, path nodes, count subjects). With no
+    up as entities (entity listings) and no dependency path runs THROUGH them. A
+    value that also heads a fact of its own is still an entity by virtue of being a
+    subject; `count` is not filtered by this file. With no
     policy/attribute-relations.md this equals value_set (backward compatible).
 
     *attribute_rels* overrides which relations count as attribute (literal-valued)
     relations; pass a KbContext's attribute_relations() to read a non-default KB.
-    None falls back to the module-level (ambient-root) attribute_relations()."""
+    None falls back to the module-level (ambient-root) attribute_relations().
+
+    *aliases* must come from the SAME KB. Resolving attribute relations needs the
+    alias map, and reading it from the ambient root while taking attribute_rels from
+    the target made one KB answer differently depending on whether it was named with
+    --target or FACTLOG_ROOT -- the ambient KB's alias file leaked into the target's
+    vocabulary."""
     selected = engine_input_rows(facts if facts is not None else load_accepted_facts())
     # Surface forms, not raw declarations: a KB that declares the canonical while
     # its facts carry an alias had every attribute row miss this filter, so the
     # literal was admitted as an entity anyway (#226).
-    literal_rels = attribute_relation_forms(attribute_rels)
+    literal_rels = attribute_relation_forms(attribute_rels, aliases)
     entities: set[str] = set()
     for row in selected:
         if row["subject"]:
             entities.add(row["subject"])
-        if row["object"] and unicodedata.normalize("NFC", row["relation"]) not in literal_rels:
+        if row["object"] and not is_attribute_relation(row["relation"], literal_rels):
             entities.add(row["object"])
     return entities
 
@@ -1858,7 +1873,7 @@ def dependency_graph(
     attrs = attribute_relation_forms() if attr_forms is None else attr_forms
     graph: dict[str, list[str]] = defaultdict(list)
     for row in engine_input_rows(facts):
-        if unicodedata.normalize("NFC", row["relation"]) in attrs:
+        if is_attribute_relation(row["relation"], attrs):
             continue
         graph[row["subject"]].append(row["object"])
     return graph
@@ -1962,6 +1977,19 @@ def attribute_relation_forms(
         forms.add(canon)
         forms |= surface_variants(canon, alias_map)
     return forms
+
+
+def is_attribute_relation(relation: str, attr_forms: set[str]) -> bool:
+    """Does *relation* (a stored surface form) name a declared attribute relation?
+
+    THE predicate. Every consumer that asks "is this object a literal?" -- the engine
+    emitter, dependency_graph, entity_set, vocab, entity_audit, merge_candidates --
+    calls this, so they cannot answer differently. They did: four of them compared the
+    raw declaration set, so on an alias KB `vocab --entities` listed a value as an
+    entity while `status` and the engine called it a literal, and entity_audit advised
+    declaring a relation that was already declared (#226).
+    """
+    return unicodedata.normalize("NFC", relation) in attr_forms
 
 
 def _attr_rel_facts() -> str:

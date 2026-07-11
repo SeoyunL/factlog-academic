@@ -26,7 +26,6 @@ import pytest
 
 from factlog.integrations.pubmed import retraction as retraction_module
 from factlog.integrations.pubmed.retraction import (
-    RetractionStatus,
     detect_retraction,
 )
 from factlog.integrations.pubmed.work_parser import (

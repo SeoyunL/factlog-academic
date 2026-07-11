@@ -501,10 +501,19 @@ explanation of its purpose.
 # ...) rather than a first-class entity. One relation NAME per line; '#' comment
 # lines and '-' bullets are allowed; quote a name containing spaces in backticks.
 #
-# Objects of these relations are kept OUT of the entity set (so they do not show
-# up as entities, path nodes, or count subjects) but remain valid, verifiable
-# relation-query objects. Leave this file with no declarations if every object
-# is a first-class entity.
+# An object at the OBJECT end of these relations is a value, not a thing: it is
+# kept out of the entity set, and no dependency path runs THROUGH it (an edge is
+# never drawn along an attribute relation). It remains a valid, verifiable
+# relation-query object.
+#
+# Precisely, so you can rely on it:
+#   - it is not listed as an entity, and no path routes through it;
+#   - if the SAME value also heads a fact of its own (`2020 note ...`), then it is
+#     an entity by virtue of being a subject, and paths may START at it. It still
+#     cannot be reached THROUGH an attribute relation;
+#   - `count` queries are NOT filtered by this file.
+#
+# Leave this file with no declarations if every object is a first-class entity.
 #
 # Example (remove the leading '# ' to activate):
 # operates_since
@@ -1684,6 +1693,7 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     scope = facts if args.all else common.engine_facts(facts)
     scope_label = "all candidate" if args.all else "engine"
     attr = ctx.attribute_relations()
+    attr_forms = common.attribute_relation_forms(attr, ctx.relation_aliases())
     sv = ctx.single_valued_relations()
     typed = ctx.typed_relations()  # {name: TypedRelSpec}; {} when no typed-relations.md
 
@@ -1698,7 +1708,10 @@ def cmd_vocab(args: argparse.Namespace) -> int:
             rel_counts[rel] += 1
         if s:
             ent_counts[s] += 1
-        if o and rel not in attr:  # objects of attribute relations are literals, not entities
+        # Surface forms, not raw declarations: a KB that declares the canonical while its
+        # facts carry an alias had vocab call the literal an entity while status and the
+        # engine called it a literal (#226).
+        if o and not common.is_attribute_relation(rel, attr_forms):
             ent_counts[o] += 1
 
     print(f"factlog vocab (KB: {target}) — {scope_label} facts")
@@ -1767,9 +1780,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Vocabulary
     attr = ctx.attribute_relations()
     sv = ctx.single_valued_relations()
-    # Pass attr so entity_set reads THIS KB's attribute relations, not the module
-    # default (cmd_status may target a KB other than the ambient FACTLOG_ROOT).
-    ent, val = common.entity_set(facts, attr), common.value_set(facts)
+    # Pass attr AND this KB's aliases so entity_set reads THIS KB throughout, not the
+    # module default (cmd_status may target a KB other than the ambient FACTLOG_ROOT).
+    ent, val = common.entity_set(facts, attr, ctx.relation_aliases()), common.value_set(facts)
     # Literals are values appearing only as attribute-relation objects; with no
     # attribute-relations.md declared, entity_set == value_set so there are none.
     literals = f"{len(val) - len(ent)} literal(s)" if attr else "0 literal(s) — none declared"
@@ -3823,7 +3836,7 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
                 print(f"skipped\t{porcelain_field(check.pmid)}")
             print(f"would_check\t{len(to_check)}")
             print(f"skipped\t{len(skipped)}")
-            print(f"dry_run\t1")
+            print("dry_run\t1")
             print(f"target\t{target}")
         else:
             print(

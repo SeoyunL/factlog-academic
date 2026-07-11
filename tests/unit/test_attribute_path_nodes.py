@@ -240,3 +240,27 @@ def test_quoted_relation_name_does_not_crash_the_engine(tmp_path):
     """A quote in a declared name emitted `attr_rel(""x"")` and killed the program."""
     eng, tracer, _ = _engine_and_tracer(_kb(tmp_path, ROWS, '- "정식_운영"\n'))
     assert eng == tracer  # reaching here at all means the engine parsed the program
+
+
+def test_the_scaffold_promise_is_true_clause_by_clause(tmp_path):
+    """policy/attribute-relations.md tells the user what it guarantees. Check each.
+
+    The old wording promised literals never show up as "entities, path nodes, or
+    count subjects" -- and all three clauses were false in a KB where the value also
+    heads a fact of its own. The wording is now precise; this pins it.
+    """
+    rows = [("논문A", "published_year", "2020"), ("2020", "비고", "코로나_유행")]
+    eng, tracer, ents = _engine_and_tracer(_kb(tmp_path, rows, "published_year\n"))
+    # no dependency path runs THROUGH the value
+    assert ("논문A", "2020") not in eng
+    assert ("논문A", "코로나_유행") not in eng
+    # ...but it is an entity by virtue of being a subject, and a path may START at it
+    assert "2020" in ents
+    assert ("2020", "코로나_유행") in eng
+    assert eng == tracer
+
+
+def test_a_pure_literal_is_not_an_entity(tmp_path):
+    """The other half: a value that heads nothing is not an entity at all."""
+    _, _, ents = _engine_and_tracer(_kb(tmp_path, [("논문A", "published_year", "2020")], "published_year\n"))
+    assert "2020" not in ents

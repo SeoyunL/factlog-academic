@@ -83,7 +83,8 @@ from common import (  # noqa: E402
     REVIEW_STATUSES,
     SUPERSEDED_STATUSES,
     RUNS_DIR,
-    attribute_relations,
+    attribute_relation_forms,
+    is_attribute_relation,
     ensure_dirs,
     is_sync_ignored,
     is_text_source,
@@ -437,11 +438,13 @@ def write_pages(root: Path, rows: list[dict[str, str]]) -> list[str]:
     # Objects of attribute (literal-valued) relations are values, not first-class
     # entities (see common.entity_set), so they get no concept page — consistent
     # with entity listings/path nodes and avoiding a page per free-text value.
-    literal_rels = attribute_relations()
+    # Shared predicate, so a concept page is created for exactly the objects the
+    # engine and the vocabulary treat as entities.
+    literal_rels = attribute_relation_forms()
     by_entity: dict[str, list[dict[str, str]]] = {}
     for row in rows:
         by_entity.setdefault(row["subject"], []).append(row)
-        if row["object"] and row["relation"] not in literal_rels:
+        if row["object"] and not is_attribute_relation(row["relation"], literal_rels):
             by_entity.setdefault(row["object"], []).append(row)
 
     # Assign collision-safe page filenames deterministically (#258). slugify
