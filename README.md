@@ -105,6 +105,12 @@ So if you version-control your KB:
 | `policy/` | **yes** | the rules you wrote (logic policy, questions, typed relations, …) |
 | `pages/`, `decisions/` | optional | regenerated on every merge |
 | `runs/sources/` | no | text conversions, regenerable with `factlog ingest --scan` |
+| `source-provenance/` | **yes** | per-source provenance sidecars from `zotero`/`openalex`/`arxiv`/`pubmed` import — a paper's ledger (DOI, retraction status, cross-ids) |
+| `check-log/` | **yes** | when the tool last checked each arXiv/PubMed paper; `--older-than` skips a paper based on this, so dropping it re-checks everything |
+| `merge-candidates/` | **yes** | the pair ledger `merge_candidates` uses to preserve human decisions across a rebuild |
+
+The last three appear only once you use the bibliography commands; a plain KB never
+grows them.
 
 `merge_candidates` now refuses any rebuild that would delete a fact a human has
 ruled on, so a lost `runs/` can no longer erase a KB silently — but the data still
@@ -215,7 +221,7 @@ This needs the `openalex` extra ([see above](#optional-integration-dependencies)
 ```bash
 factlog openalex-search --query "neurosymbolic AI" --year 2020-2025 --limit 50
 factlog openalex-import --doi 10.1007/s10462-023-10448-w   # or --work-id W2741809807
-factlog openalex-cite --for smith-2023-neurosymbolic --direction citing
+factlog openalex-cite --for artur-d-avila-garcez-2023-neurosymbolic-ai-the-3rd-wave --direction citing
 factlog openalex-refresh                                    # reports only; never writes the ledger
 factlog openalex-acknowledge-retraction --id W2741809807
 factlog openalex-backfill-provenance                        # gives a ledger to works that have only front matter
@@ -263,7 +269,8 @@ budget either — instead factlog keeps to arXiv's recommended 3-second delay
 between requests on its own (a courtesy that is not enforced).
 
 ```bash
-factlog arxiv-import --id 2311.09277v2        # version is pinned inline in the id; there is no --version flag
+factlog arxiv-import --id 2311.09277          # latest version
+factlog arxiv-import --id 2311.09277v1        # a specific version, pinned inline in the id (there is no --version flag)
 factlog arxiv-search --query "chain of thought" --category cs.CL --year 2020-2025
 factlog arxiv-check-versions                  # reports only; --auto-update records to the ledger
 factlog arxiv-acknowledge-withdrawal --id 2311.09277
@@ -329,6 +336,16 @@ status has drifted, and turn a paper's PubMed MeSH terms into vocabulary
 proposals. Imported items are still **candidates** and pass the
 `sync → review → accept` gate. This needs the `pubmed` extra ([see above](#optional-integration-dependencies)).
 
+**A contact email is required** — unlike OpenAlex and arXiv, every `pubmed-*` command
+fails until you set `client.email`, because NCBI throttles or blocks unidentified
+traffic. Put it in `~/.config/factlog/pubmed.toml` (or the KB's
+`policy/pubmed-config.toml`):
+
+```toml
+[client]
+email = "you@example.org"
+```
+
 ```bash
 factlog pubmed-search --query "immune checkpoint" --mesh "Neoplasms" --limit 25
 factlog pubmed-import --pmid 16354850                # repeatable, up to 200 per run
@@ -356,8 +373,8 @@ authority.
 
 An API key is optional for NCBI but, for factlog's batched requests, effectively
 required — without one E-utilities throttles hard. It is read from the
-`NCBI_API_KEY` environment variable, `~/.config/factlog/pubmed.toml`, or an
-explicitly passed path, and **deliberately never from a KB `policy/` file** (a KB
+`NCBI_API_KEY` environment variable or `~/.config/factlog/pubmed.toml`
+(there is no `--config` flag on the CLI), and **deliberately never from a KB `policy/` file** (a KB
 is often its own committed repo, so the secrets boundary keeps the credential out
 of it). See `docs/pubmed.md` for the full walkthrough.
 
@@ -746,7 +763,7 @@ warns so the silent non-ingestion is visible.
 ## Requirements
 
 - Python **3.11+** (required by the engine dependency `pyrewire`)
-- **pyrewire 1.0.1+** (`pip install -r requirements.txt`)
+- **pyrewire 1.0.3+** (`pip install -r requirements.txt`)
 - Claude Code CLI
 
 ## Install
@@ -762,7 +779,7 @@ factlog-academic is a **Claude Code plugin**. Install it from this repo's market
 
 > Install from **this** repo, not from upstream `semantic-reasoning/factlog`. The
 > upstream plugin ships none of the bibliography commands — `factlog zotero-import`,
-> `factlog openalex-*`, and `factlog arxiv-*` exist only here.
+> `factlog openalex-*`, `factlog arxiv-*`, and `factlog pubmed-*` exist only here.
 
 Run these commands **one line at a time**. If you paste multiple plugin commands
 at once, Claude Code may try to process the marketplace registration and install
