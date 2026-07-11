@@ -12,6 +12,7 @@ from common import (
     is_variable,
     relation_aliases,
     relation_row_matches,
+    dependency_path,
     is_quoted_string,
     path_query_rows,
     QUERY_PREDICATES,
@@ -212,8 +213,20 @@ def evaluate_queries(
             # while signed with its name.
             rows = path_query_rows(args, facts, inferred["path"])
             if all(is_quoted_string(a) for a in args) and len(args) == 2:
-                value = " -> ".join(rows[0]) if rows else "(not found)"
-                results.append(f"path {arg_value(args[0])} -> {arg_value(args[1])}: {value}")
+                start, target = arg_value(args[0]), arg_value(args[1])
+                route = dependency_path(facts, start, target)
+                if not rows:
+                    value = "(not found)"
+                elif route:
+                    value = " -> ".join(route)
+                else:
+                    # Reachable per the engine, but no route through the accepted facts
+                    # -- a rule in logic-policy.extra.dl put the edge there. Printing
+                    # `start -> target` would draw a one-hop route that does not exist;
+                    # printing "(not found)" would deny what the engine proved. Say what
+                    # is true.
+                    value = "reachable (engine); no route through the accepted facts"
+                results.append(f"path {start} -> {target}: {value}")
             else:
                 routes = "; ".join(f"{start} -> {target}" for start, target in rows)
                 suffix = f"; {routes}" if routes else ""

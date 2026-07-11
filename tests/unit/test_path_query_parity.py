@@ -39,11 +39,9 @@ def test_the_report_answers_the_query(query):
     assert path_query_rows(query_args(query), FACTS) == EXPECTED[query]
 
 
-@pytest.mark.parametrize("query", sorted(EXPECTED))
-def test_report_and_ask_agree(query):
-    from ask_router import evaluate
-
-    assert path_query_rows(query_args(query), FACTS) == evaluate(query, FACTS)["rows"]
+# Report/ask parity now needs a real KB: both sides ask the ENGINE for the truth set,
+# so a fixture without an accepted.dl would only prove they degrade alike. It is pinned
+# end to end in tests/test_path_report.sh instead.
 
 
 def test_a_variable_query_returns_rows_not_silence():

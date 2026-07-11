@@ -25,3 +25,4 @@ Query evaluation:
 - relation results: 0 rows
 - relation results: 0 rows
 - review_required: Which steps in factlog are performed by Claude and which by deterministic scripts?
+- path results: 3 rows; factlog -> Claude Code plugin; factlog -> fact extraction; factlog -> logic checking

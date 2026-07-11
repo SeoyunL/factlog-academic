@@ -47,6 +47,28 @@ R="$(report 'path("C", "A")?')"
 printf '%s' "$R" | grep -q "path C -> A: (not found)" && { echo "FAIL: (f) the report denies a pair the ENGINE proved"; fails=$((fails+1)); } || echo "  ok: (f) the report does not contradict the engine"
 rm -f "$KB/policy/logic-policy.extra.dl"
 
+# The report and `ask` must give the SAME answer about the same KB. Both take the truth
+# set from the ENGINE: answering ask from a python closure over accepted facts made it
+# return a verified NEGATIVE for a pair the engine had proved.
+printf 'edge(S, T) :- relation(T, "uses", S).\n' > "$KB/policy/logic-policy.extra.dl"
+ASK="$(FACTLOG_ROOT="$KB" "$PY" - <<'PYEOF'
+import os, sys, json
+sys.path.insert(0, os.getcwd()); sys.path.insert(0, "tools")
+import factlog.common as c
+from ask_router import evaluate
+facts = c.load_accepted_facts()
+print(json.dumps(evaluate('path("C", "A")?', facts)["rows"]))
+PYEOF
+)"
+if [ "$ASK" = '[["C", "A"]]' ]; then
+  echo "  ok: (i) ask agrees with the engine, like the report does"
+else
+  echo "FAIL: (i) ask disagrees with the engine (got $ASK)"; fails=$((fails+1))
+fi
+R="$(report 'path("C", "A")?')"
+check "(i) the report does not fabricate a one-hop route" "$R" "reachable (engine); no route through the accepted facts"
+rm -f "$KB/policy/logic-policy.extra.dl"
+
 # The file exists but holds nothing evaluable — say that, not "not found".
 : > "$KB/facts/query.dl"
 FACTLOG_ROOT="$KB" "$PY" tools/run_logic_check.py >/dev/null 2>&1
