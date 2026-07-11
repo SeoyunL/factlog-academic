@@ -2428,6 +2428,25 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 # legacy basename header regresses.
                 conv_origin[ref] = PurePosixPath(origin).name
 
+    def conv_source_path(ref: str) -> str | None:
+        """The KB-relative original a `runs/sources/` conversion was made from.
+
+        A conversion mirrors its original's subdirectory, so the origin's full path
+        is that mirrored subdir plus the basename recorded in the provenance header
+        — `runs/sources/sub/report.docx.md` -> `sources/sub/report.docx`.
+
+        Reconstructing it matters: `conv_origin` holds only the BASENAME, and the
+        path branch of matches() compared that against the requested basename, so
+        `eject sub/report.docx` also matched (and DELETED) the conversion of a
+        top-level `report.docx` — the exact collision the README promises can never
+        happen (#221).
+        """
+        origin = conv_origin.get(ref)
+        if not origin:
+            return None
+        rel_parent = PurePosixPath(ref).relative_to("runs/sources").parent
+        return str(PurePosixPath("sources") / rel_parent / origin)
+
     def matches(ref: str, name: str) -> bool:
         name = nfc(name)
         rp, np_ = Path(ref), Path(name)
@@ -2435,10 +2454,12 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             return True
         is_conv = ref.startswith("runs/sources/")
         if "/" in name:
-            # A path was given: the exact original is handled above; for a
-            # binary original also match the conversion it produced (by
-            # recorded origin). Same-basename files elsewhere are NOT matched.
-            return is_conv and conv_origin.get(ref) == np_.name
+            # A path was given: the exact original is handled above; for a binary
+            # original also match the conversion it produced — but only the one
+            # whose ORIGIN IS THAT PATH. Comparing basenames made a nested request
+            # sweep up a same-named file elsewhere.
+            wanted = name if name.startswith("sources/") else f"sources/{name}"
+            return is_conv and conv_source_path(ref) == wanted
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
                 return rp.name == np_.name  # an original with that filename
