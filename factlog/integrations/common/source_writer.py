@@ -95,6 +95,7 @@ IDENTITY_KEYS_BY_SOURCE = {
     "openalex": "openalex_id",
     "arxiv": "arxiv_id",
     "zotero": "zotero_key",
+    "pubmed": "pmid",
 }
 
 

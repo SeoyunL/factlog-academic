@@ -3322,6 +3322,201 @@ def cmd_arxiv_import(args: argparse.Namespace) -> int:
     )
 
 
+def _make_pubmed_client(config):
+    """Build the real PubMed client. Indirected so tests can inject a fake."""
+    from factlog.integrations.pubmed.client import PubMedClient
+
+    return PubMedClient(config)
+
+
+def _pubmed_prepare(args, command: str):
+    """Resolve the target KB and PubMed settings, or None on a user error.
+
+    Mirrors :func:`_arxiv_prepare` / :func:`_openalex_prepare`. The integration
+    package is imported here, inside the handler path, not at module top level, so
+    ``import factlog`` stays light for a user who never installed the ``pubmed``
+    extra (lazy-import discipline).
+    """
+    from pathlib import Path
+
+    from factlog.integrations.pubmed.config import PubMedConfigError, load_config
+
+    porcelain = getattr(args, "porcelain", False)
+    target_str, source = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if source in ("config", "cwd") and not porcelain:
+        print(f"factlog {command}: target KB {target} (from {source})")
+    if not _require_kb(target, command):
+        return None
+    try:
+        config = load_config(kb_root=target)
+    except PubMedConfigError as exc:
+        print(f"factlog {command}: {exc}", file=sys.stderr)
+        return None
+    # NCBI expects a contact email echoed into every request; an import run must
+    # not be anonymous. Completeness is checked here, at the one per-run choke
+    # point, rather than in the pure settings reader.
+    if not config.email:
+        print(
+            f"factlog {command}: no NCBI contact email configured. Set client.email in "
+            "~/.config/factlog/pubmed.toml (or the KB's policy/pubmed-config.toml); NCBI "
+            "throttles or blocks unidentified traffic.",
+            file=sys.stderr,
+        )
+        return None
+    return target, config
+
+
+def _pubmed_retraction_warnings(report, works) -> list[str]:
+    """One stderr line per *imported/merged* retracted paper, naming the signal.
+
+    Retraction is PubMed's own signal, not an absorbed fact: the note says so and
+    points at the notice PMID when one is linkable. Skipped and errored records
+    carry no such warning. Warnings go to stderr only, never the ``--porcelain``
+    contract.
+    """
+    by_pmid = {w.pmid: w for w in works}
+    lines = []
+    for outcome in report.outcomes:
+        if outcome.status not in ("imported", "merged"):
+            continue
+        work = by_pmid.get(outcome.key)
+        if work is not None and work.retracted:
+            notice = (
+                f" See the retraction notice (PMID {work.retraction_notice_pmid})."
+                if work.retraction_notice_pmid
+                else ""
+            )
+            lines.append(
+                f"⚠ PubMed reports {outcome.key} as retracted. This is an unverified "
+                f"signal that flags the paper for human review before any claim from it "
+                f"is trusted.{notice}"
+            )
+    return lines
+
+
+def _pubmed_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -> int:
+    """Emit the shared summary for a PubMed import and return the exit code.
+
+    Mirrors :func:`_arxiv_finish`'s porcelain contract exactly. Every
+    caller-influenced field in a porcelain row (the PMID, which comes from the
+    efetch XML, and the would-be/existing filename) is passed through
+    :func:`porcelain_field` so a stray tab/newline can never split a row (#141).
+    """
+    from factlog.integrations.common.porcelain import porcelain_field
+
+    if porcelain:
+        # Stable machine contract, tab-separated, LF-terminated. Order-independent
+        # (parse by first field):
+        #   imported\t<n> / skipped\t<n> / merged\t<n> / errors\t<n>
+        #   dry_run\t<0|1> / target\t<abs sources dir>
+        # In --dry-run only, a per-record row precedes them:
+        #   work\t<status>\t<pmid>\t<would-be or existing filename>
+        if dry_run:
+            for outcome in report.outcomes:
+                name = outcome.path.name if outcome.path is not None else ""
+                print(
+                    f"work\t{outcome.status}\t{porcelain_field(outcome.key)}\t"
+                    f"{porcelain_field(name)}"
+                )
+        print(f"imported\t{report.imported}")
+        print(f"skipped\t{report.skipped}")
+        print(f"merged\t{report.merged}")
+        print(f"errors\t{report.errors}")
+        print(f"dry_run\t{'1' if dry_run else '0'}")
+        print(f"target\t{target / 'sources'}")
+        for line in _candidate_porcelain_lines(report):
+            print(line)
+        for warning in warnings:
+            print(warning, file=sys.stderr)
+        for note in _candidate_notes(report):
+            print(note, file=sys.stderr)
+        return 1 if report.errors else 0
+
+    print(f"\n{'Would import to' if dry_run else 'Importing to'} KB: {target}\n")
+    for line in _openalex_report_lines(report, dry_run):
+        print(line)
+    print("\nSummary:")
+    print(f"  {'Would import' if dry_run else 'Imported'}: {report.imported}")
+    print(f"  {'Would skip' if dry_run else 'Skipped'}:  {report.skipped}")
+    print(f"  {'Would merge' if dry_run else 'Merged'}:   {report.merged}")
+    print(f"  Errors:   {report.errors}")
+    for warning in warnings:
+        print(f"\n{warning}", file=sys.stderr)
+    for note in _candidate_notes(report):
+        print(f"\n{note}", file=sys.stderr)
+    if report.imported and not dry_run:
+        print("\nNext step: run '/factlog sync' to extract candidate facts.")
+    return 1 if report.errors else 0
+
+
+def cmd_pubmed_import(args: argparse.Namespace) -> int:
+    """Import PubMed records by PMID into sources/. Free; up to 200 ids per run."""
+    from datetime import datetime, timezone
+
+    from factlog.integrations.pubmed.client import (
+        PubMedConnectionError,
+        PubMedError,
+        normalize_pmid,
+    )
+    from factlog.integrations.pubmed.importer import import_outcome
+    from factlog.integrations.pubmed.work_parser import (
+        PubMedParseError,
+        parse_efetch_response,
+    )
+
+    prepared = _pubmed_prepare(args, "pubmed-import")
+    if prepared is None:
+        return 1
+    target, config = prepared
+
+    porcelain = getattr(args, "porcelain", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    # Normalize each PMID individually: a syntactically bad id is a per-id error,
+    # not a batch failure. Only a transport/parse failure (below) is fatal.
+    valid, invalid = [], []
+    for raw in args.pmid:
+        try:
+            valid.append(normalize_pmid(raw))
+        except PubMedError as exc:
+            invalid.append((str(raw), str(exc)))
+
+    outcome = None
+    if valid:
+        client = _make_pubmed_client(config)
+        try:
+            # The client owns the inter-request delay (single-flight rate limiter);
+            # a batch efetch is one request. dry-run still hits the network: the
+            # title, retraction signal and slug are all needed to predict the
+            # outcome. It writes no files.
+            xml = client.efetch(valid)
+        except PubMedConnectionError as exc:
+            print(f"factlog pubmed-import: {exc}", file=sys.stderr)
+            return 2
+        except PubMedError as exc:
+            # Service, request (bad id), >200-ids and other transport failures are
+            # fatal for the whole request — the batch cannot be trusted partial.
+            print(f"factlog pubmed-import: {exc}", file=sys.stderr)
+            return 1
+        try:
+            outcome = parse_efetch_response(xml, valid)
+        except PubMedParseError as exc:
+            print(f"factlog pubmed-import: {exc}", file=sys.stderr)
+            return 1
+
+    imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    report = import_outcome(
+        outcome, invalid,
+        target=target, config=config, imported_at=imported_at, dry_run=dry_run,
+    )
+    works = list(outcome.works) if outcome is not None else []
+    warnings = _pubmed_retraction_warnings(report, works)
+    return _pubmed_finish(
+        report, target, dry_run=dry_run, porcelain=porcelain, warnings=warnings
+    )
+
+
 def _arxiv_show_results(works, total: int, *, porcelain: bool) -> None:
     """Render arxiv-search results. Mirrors :func:`_openalex_show_results`.
 
@@ -5162,6 +5357,31 @@ def build_parser() -> argparse.ArgumentParser:
              "(no separate --version flag). Up to 100 ids per run.",
     )
     ax_import.set_defaults(func=cmd_arxiv_import)
+
+    def _pubmed_common(p):
+        p.add_argument(
+            "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
+        )
+        p.add_argument(
+            "--dry-run", action="store_true",
+            help="show what would be imported without creating any files",
+        )
+        p.add_argument(
+            "--porcelain", action="store_true",
+            help="machine-readable output (tab-separated field/value counts) for scripts",
+        )
+        return p
+
+    pm_import = _pubmed_common(sub.add_parser(
+        "pubmed-import",
+        help="import PubMed records by PMID into sources/ (free; up to 200 ids per run)",
+    ))
+    pm_import.add_argument(
+        "--pmid", action="append", required=True, dest="pmid",
+        help="PubMed PMID to import, repeatable (batch), e.g. 32738937. A 'pmid:' "
+             "prefix is accepted. Up to 200 ids per run; the client paces requests.",
+    )
+    pm_import.set_defaults(func=cmd_pubmed_import)
 
     ax_search = _arxiv_common(sub.add_parser(
         "arxiv-search",
