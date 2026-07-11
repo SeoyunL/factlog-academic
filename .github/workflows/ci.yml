@@ -69,3 +69,10 @@ jobs:
         run: |
           cp -r examples/sample-kb "${RUNNER_TEMP}/golden-kb"
           FACTLOG_ROOT="${RUNNER_TEMP}/golden-kb" bash tests/golden.sh
+      # Shell harnesses that assert on the engine's output. The `test` job runs
+      # every tests/test_*.sh but installs no dependencies, so these self-skip
+      # there; without this step they would never actually run in CI.
+      - name: engine-backed shell harnesses
+        run: |
+          bash tests/test_logic_check_statuses.sh
+          bash tests/test_check_empty_policy.sh

@@ -79,6 +79,7 @@ from datetime import datetime, timezone  # noqa: E402
 from common import (  # noqa: E402
     FACT_HEADER,
     ENGINE_STATUSES,
+    KNOWN_STATUSES,
     REVIEW_STATUSES,
     SUPERSEDED_STATUSES,
     RUNS_DIR,
@@ -99,12 +100,10 @@ from factlog import literal_types  # noqa: E402
 # Constants
 # ---------------------------------------------------------------------------
 
-# Combined set of statuses that are valid in candidates.csv.
-# run_fact_sync.py used {confirmed, needs_review}; factlog common.py defines
-# ENGINE_STATUSES={confirmed, accepted} and REVIEW_STATUSES={needs_review,
-# candidate}.  We accept all four so that rows produced by either the old
-# llmwiki-ops worker or the new native Claude extraction are preserved.
-VALID_STATUSES: frozenset[str] = frozenset(ENGINE_STATUSES | REVIEW_STATUSES | SUPERSEDED_STATUSES)
+# Statuses that are valid in candidates.csv — the vocabulary common.py owns.
+# Rows produced by either the old llmwiki-ops worker or the native Claude
+# extraction are preserved, as are rows a human retired (superseded).
+VALID_STATUSES: frozenset[str] = KNOWN_STATUSES
 
 # Marker written into auto-generated concept pages.
 # We use a factlog-specific marker ("generated-by-factlog") so that pages

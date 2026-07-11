@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from common import (
     FACTS_DIR,
+    KNOWN_STATUSES,
     QUERY_PREDICATES,
     allowed_relations,
     dependency_path,
@@ -22,6 +23,21 @@ from common import (
     query_args,
     quoted_constants,
 )
+
+
+def status_warnings(candidates: list[dict]) -> list[str]:
+    """Warn only for statuses outside the vocabulary.
+
+    `superseded` is a known status: `factlog reject`/`amend` sets it, and such
+    rows are kept in candidates.csv for audit while staying out of engine input.
+    Warning on them made the report noisier the more review work had been done
+    (#208). A genuinely unrecognised status — a typo — must still warn.
+    """
+    return [
+        f"unknown status treated as non-engine input: {row['status']}"
+        for row in candidates
+        if row["status"] not in KNOWN_STATUSES
+    ]
 
 
 def query_lines() -> list[str]:
@@ -173,8 +189,7 @@ def main() -> None:
     for row in candidates:
         if not row["subject"] or not row["relation"] or not row["object"]:
             errors.append(f"incomplete fact row: {row}")
-        if row["status"] not in {"confirmed", "accepted", "needs_review", "candidate"}:
-            warnings.append(f"unknown status treated as non-engine input: {row['status']}")
+    warnings.extend(status_warnings(candidates))
 
     for predicate in sorted(policy_query_predicates):
         for target, reason in sorted(inferred[predicate]):

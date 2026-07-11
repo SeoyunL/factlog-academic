@@ -12,9 +12,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from common import FACT_HEADER, KNOWN_STATUSES
 
-FACT_HEADER = ["subject", "relation", "object", "source", "status", "confidence", "note"]
-VALID_STATUSES = {"confirmed", "accepted", "needs_review", "candidate", "superseded"}
+# An unregistered status is an *error* here, not a warning — so this set drifting
+# from the vocabulary is worse than the #208 warning bug. Derive, never restate.
+VALID_STATUSES = KNOWN_STATUSES
 
 
 def read(path: Path) -> str:

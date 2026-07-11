@@ -85,12 +85,18 @@ TEXT_TO_DATALOG_PROMPT = PROMPTS_DIR / "text_to_datalog.md"
 QUESTIONS_MD = POLICY_DIR / "questions.md"
 
 FACT_HEADER = ["subject", "relation", "object", "source", "status", "confidence", "note"]
-ENGINE_STATUSES = {"confirmed", "accepted"}
-REVIEW_STATUSES = {"needs_review", "candidate"}
+ENGINE_STATUSES = frozenset({"confirmed", "accepted"})
+REVIEW_STATUSES = frozenset({"needs_review", "candidate"})
 # A row a human (or a resolution step) has marked as replaced by a newer fact.
 # Superseded rows are retained in candidates.csv for audit but are NOT engine
 # input (they never reach accepted.dl) and are ignored by conflict detection.
-SUPERSEDED_STATUSES = {"superseded"}
+SUPERSEDED_STATUSES = frozenset({"superseded"})
+# The whole status vocabulary. Anything outside it is unrecognised (a typo).
+# Consumers MUST derive from this rather than restate the members: a tool that
+# spelled the set out by hand omitted `superseded` and warned once per retired
+# row (#208). Frozen so this union can never drift from the sets it snapshots.
+# A new `*_STATUSES` set must be added to the union — a unit test enforces it.
+KNOWN_STATUSES = frozenset(ENGINE_STATUSES | REVIEW_STATUSES | SUPERSEDED_STATUSES)
 QUERY_PREDICATES = {"relation", "path", "count", "conflict", "review_required"}
 RELATION_FACT_RE = re.compile(r"^relation\((.*)\)\.$")
 # 1.0.3 is the floor: it bundles/validates wirelog v0.52.0, the first release
