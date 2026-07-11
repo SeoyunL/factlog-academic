@@ -332,7 +332,7 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 > **활성 KB**(`FACTLOG_ROOT > config > cwd` 로 해석된)를 보호합니다 — 활성 KB가
 > 아닌 다른 KB의 엔진 입력을 직접 편집하는 경우는 게이트의 대상이 아닙니다.
 
-#### 통합 기능의 선택 의존성
+##### 통합 기능의 선택 의존성
 
 각 서지 통합은 extra 하나가 필요합니다. **이 저장소에서** 설치하십시오.
 
@@ -343,17 +343,25 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 > 설치하십시오.
 
 ```bash
-# 어디서든
-pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'
-
-# 또는 이 저장소를 클론했다면
+# 이 저장소를 클론했다면 (대부분 이 경우)
 pip install -e '.[zotero]'
+
+# 클론 없이 Claude Code 플러그인으로 설치했다면
+pip install -e "${CLAUDE_PLUGIN_ROOT}[zotero]"
+
+# 체크아웃 없이 어디서든
+pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'
 ```
+
+> **이전 버전에서 올라오셨나요?** 배포명이 `factlog` 였습니다. 두 이름이 같은 `factlog`
+> 모듈과 같은 `factlog` 명령을 소유하므로 pip이 둘을 나란히 설치하고, 옛 것만 지우면 그
+> 공유 명령이 사라집니다. `pip uninstall factlog` 후 **반드시 재설치**하십시오. 그 상태는
+> `factlog doctor` 가 잡아 알려줍니다.
 
 `zotero` 자리에 `openalex` · `arxiv` · `pubmed` 를 넣으면 됩니다.
 `pip install -e '.[zotero,arxiv]'` 처럼 한 번에 여러 개도 됩니다.
 
-### Zotero 서지 가져오기 (`factlog zotero-import`)
+#### Zotero 서지 가져오기 (`factlog zotero-import`)
 
 이미 Zotero에 문헌을 관리 중이라면, 컬렉션·태그·개별 항목을 factlog `sources/` 로
 한 번에 이관할 수 있습니다. factlog는 Zotero의 대체재가 아니라 그 위에 얹히는 검증
@@ -361,8 +369,8 @@ pip install -e '.[zotero]'
 이관된 항목은 여전히 **후보**이며 `sync → review → accept` 게이트를 거칩니다. Zotero
 원본은 절대 수정되지 않습니다(읽기 전용).
 
-Zotero 7의 **Local API**(Settings → Advanced에서 활성화, 포트 23119)와 `pip install
-'factlog[zotero]'` 가 필요합니다.
+Zotero 7의 **Local API**(Settings → Advanced에서 활성화, 포트 23119)와 `zotero` extra
+([위 절](#통합-기능의-선택-의존성) 참고)가 필요합니다.
 
 ```bash
 factlog zotero-import --collection "Systematic Review"   # 컬렉션 이관

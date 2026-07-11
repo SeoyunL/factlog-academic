@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 # Distribution name. NOT "factlog": that name is taken on PyPI by an unrelated
-# 2013 project ("File ACTivity LOGger"), so `pip install 'factlog[zotero]'` used
-# to install THAT package — and since the extra does not exist there, pip only
-# warned and exited 0, leaving the user with a wrong package and none of the
-# integration dependencies (#228).
+# 2013 project ("File ACTivity LOGger"). Asking pip for the bare name used to
+# install THAT package — and since it has no such extras, pip only warned and
+# exited 0, leaving the user with a wrong package and none of the integration
+# dependencies (#228).
 name = "factlog-academic"
 version = "0.7.0"
 description = "A Claude Code plugin that turns markdown sources into verifiable, source-backed facts: the LLM extracts, a Datalog/wirelog engine verifies."
@@ -22,7 +22,7 @@ dependencies = ["pyrewire>=1.0.3,<2.0"]
 [project.optional-dependencies]
 test = ["pytest>=7"]
 # Zotero integration (roadmap phase 1). Kept optional so the core install never
-# pulls a Zotero client; `pip install factlog[zotero]` enables `zotero-import`.
+# pulls a Zotero client; the `zotero` extra enables `zotero-import` (see README).
 zotero = ["pyzotero>=1.5"]
 # OpenAlex integration (roadmap phase 2). httpx only: the API surface factlog
 # needs is two GET endpoints, so `pyalex` (and its requests/urllib3 chain) is
@@ -41,7 +41,7 @@ arxiv = ["httpx>=0.27", "feedparser>=6.0"]
 pubmed = ["httpx>=0.27"]
 
 [project.urls]
-Homepage = "https://github.com/semantic-reasoning/factlog"
+Homepage = "https://github.com/SeoyunL/factlog-academic"
 
 [project.scripts]
 factlog = "factlog.cli:main"

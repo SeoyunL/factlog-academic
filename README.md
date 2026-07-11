@@ -118,15 +118,24 @@ Each bibliography integration needs one extra. Install it from **this repository
 > URL below (or from a clone).
 
 ```bash
-# from anywhere
-pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'
-
-# or, from a clone of this repo
+# from a clone of this repo (what most people want)
 pip install -e '.[zotero]'
+
+# installed as a Claude Code plugin, with no clone
+pip install -e "${CLAUDE_PLUGIN_ROOT}[zotero]"
+
+# from anywhere, no checkout
+pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'
 ```
 
 Swap `zotero` for `openalex`, `arxiv`, or `pubmed`. `pip install -e '.[zotero,arxiv]'`
 installs several at once.
+
+> **Upgrading from an earlier version?** The distribution used to be named
+> `factlog`. Both names own the same `factlog` module *and* the same `factlog`
+> command, so pip installs them side by side and uninstalling the old one deletes
+> the shared command. Run `pip uninstall factlog` **and then reinstall** — or just
+> run `factlog doctor`, which detects the state and says so.
 
 ### Importing Zotero bibliography (`factlog zotero-import`)
 

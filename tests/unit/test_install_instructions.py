@@ -20,8 +20,17 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
-# The exact string that installs the wrong package.
-BAD = re.compile(r"pip install\s+['\"]?factlog\[")
+# The command that installs the wrong package. Matched over WHITESPACE-NORMALISED
+# text, not line by line: the first version of this guard was line-based and a
+# prose line-wrap ("pip install\n'factlog[zotero]'") walked straight through it —
+# the offender it was written to catch was still in README.ko.md and the test was
+# green.
+BAD = re.compile(r"pip install\s+['\"`]?factlog\[")
+
+
+def _normalised(path: Path) -> str:
+    return re.sub(r"\s+", " ", path.read_text(encoding="utf-8"))
+
 
 SEARCHED = [
     *(REPO / "factlog").rglob("*.py"),
@@ -29,6 +38,12 @@ SEARCHED = [
     *REPO.glob("README*.md"),
     *(REPO / "docs").glob("*.md"),
     *(REPO / "skills").rglob("*.md"),
+    *(REPO / "commands").rglob("*.md"),
+    *(REPO / "hooks").rglob("*"),
+    *(REPO / ".github").rglob("*.yml"),
+    *REPO.glob("tests/*.sh"),
+    REPO / "pyproject.toml",
+    REPO / "requirements.txt",
 ]
 
 
@@ -47,14 +62,13 @@ def test_the_extras_still_exist():
 
 def test_nothing_tells_the_user_to_pip_install_factlog():
     offenders = [
-        f"{path.relative_to(REPO)}:{lineno}"
+        str(path.relative_to(REPO))
         for path in SEARCHED
-        if path.is_file()
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if BAD.search(line)
+        if path.is_file() and BAD.search(_normalised(path))
     ]
     assert not offenders, (
-        "these instructions install the unrelated PyPI `factlog` package: " + ", ".join(offenders)
+        "these files instruct `pip install factlog[...]`, which installs the unrelated PyPI "
+        "package: " + ", ".join(sorted(set(offenders)))
     )
 
 

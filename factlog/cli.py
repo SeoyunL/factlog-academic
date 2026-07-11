@@ -281,6 +281,26 @@ def _collect_doctor_checks() -> list[Check]:
                   ("[터미널] 경로를 고치거나 unset FACTLOG_PYTHON 하세요", perm_hint))
         )
 
+    # Stale `factlog` distribution left over from before the rename (#228). Both
+    # dists own the same `factlog` module AND the same `factlog` console script, so
+    # pip installs them side by side without a word — and uninstalling the old one
+    # then DELETES the shared command while pip still reports factlog-academic as
+    # installed. A silent break, so name it.
+    import importlib.metadata as _md
+
+    installed = {d.metadata["Name"] for d in _md.distributions() if d.metadata["Name"]}
+    if "factlog" in installed and "factlog-academic" in installed:
+        checks.append(
+            Check(
+                "WARN",
+                "옛 배포판 factlog 과 factlog-academic 이 함께 설치돼 있습니다",
+                (
+                    "[터미널] pip uninstall factlog 뒤 반드시 재설치하세요 "
+                    "(둘이 같은 factlog 명령을 공유하므로, 옛 것만 지우면 그 명령이 사라집니다)",
+                ),
+            )
+        )
+
     return checks
 
 
