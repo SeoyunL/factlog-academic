@@ -41,5 +41,30 @@ OUT_CSL="$(FACTLOG_ROOT="$KB" "$PY" -m factlog export --csl 2>/dev/null)"
 check "(f) --csl sees the nested source too" "$OUT_CSL" '"Nested"'
 absent "(g) the uncitable source is not in the CSL output" "$OUT_CSL" "plain"
 
+# --- collision on the EMITTED key, not the stem -------------------------------------
+# BibTeX sanitizes the key: safe_cite_key collapses non-ASCII to "ref", so two sources
+# with different stems (한글.md, 다른이름.md) both emit `@misc{ref,` and one silently
+# wins in every processor -- the exact silent loss this fix claims to prevent. `a.b`
+# and `a-b` collide the same way. Dedup must run on the emitted key.
+KB3="$(mktemp -d)/kb"
+"$PY" -m factlog init --target "$KB3" >/dev/null
+printf -- '---\ntitle: 첫번째\n---\nx\n' > "$KB3/sources/한글.md"
+printf -- '---\ntitle: 두번째\n---\ny\n' > "$KB3/sources/다른이름.md"
+printf -- '---\ntitle: dot\n---\nz\n' > "$KB3/sources/a.b.md"
+printf -- '---\ntitle: dash\n---\nw\n' > "$KB3/sources/a-b.md"
+
+OUT3="$(FACTLOG_ROOT="$KB3" "$PY" -m factlog export --bibtex 2>/dev/null)"
+DUP="$(printf '%s' "$OUT3" | grep -oE '@misc\{[^,]+' | sort | uniq -d)"
+if [ -z "$DUP" ]; then echo "  ok: (h) BibTeX keys are unique across non-ASCII and punctuation-only stems"; else echo "FAIL: (h) duplicate BibTeX key: $DUP"; fails=$((fails+1)); fi
+N_ENTRIES="$(printf '%s' "$OUT3" | grep -c '^@misc{')"
+[ "$N_ENTRIES" -eq 4 ] && echo "  ok: (h) all four sources are exported" || { echo "FAIL: (h) exported $N_ENTRIES of 4"; fails=$((fails+1)); }
+
+ERR3="$(FACTLOG_ROOT="$KB3" "$PY" -m factlog export --bibtex 2>&1 >/dev/null)"
+printf '%s' "$ERR3" | grep -q "citation key 'ref' is used by" && echo "  ok: (h) the non-ASCII collision is reported, not silent" || { echo "FAIL: (h) the non-ASCII collision was silent"; fails=$((fails+1)); }
+
+# CSL keeps the stem as id, so non-ASCII ids stay distinct with no collision at all.
+CSL3="$(FACTLOG_ROOT="$KB3" "$PY" -m factlog export --csl 2>/dev/null)"
+{ printf '%s' "$CSL3" | grep -q '한글' && printf '%s' "$CSL3" | grep -q '다른이름'; } && echo "  ok: (i) CSL keeps distinct non-ASCII ids" || { echo "FAIL: (i) CSL lost a non-ASCII id"; fails=$((fails+1)); }
+
 echo
 if [ "$fails" -eq 0 ]; then echo "export nested: all passed"; else echo "export nested: $fails failed"; exit 1; fi

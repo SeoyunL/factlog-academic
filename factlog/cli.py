@@ -6195,7 +6195,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     import json
     from pathlib import Path
 
-    from factlog.bibtex import is_annotation_source, read_front_matter, to_bibtex
+    from factlog.bibtex import is_annotation_source, read_front_matter, safe_cite_key, to_bibtex
     from factlog.csl import to_csl
 
     if getattr(args, "bibtex", False) == getattr(args, "csl", False):
@@ -6229,21 +6229,24 @@ def cmd_export(args: argparse.Namespace) -> int:
         if not (fm.get("zotero_key") or fm.get("title")):
             skipped.append(f"{rel} (front matter has neither title nor zotero_key)")
             continue
-        # Two sources in different folders can share a stem; a silently reused citation
-        # key would drop one entry from the bibliography just as quietly.
-        key = path.stem
-        if key in seen_keys:
+        # Dedup on the key that is actually EMITTED, not on the stem. BibTeX sanitizes
+        # the key (safe_cite_key collapses non-ASCII to "ref"), so 한글.md and 다른이름.md
+        # -- different stems -- both emit `@misc{ref,` and one silently wins in every
+        # BibTeX processor. `a.b` and `a-b` collide the same way. CSL keeps the stem as
+        # the id, so there the stem IS the emitted key.
+        emitted = safe_cite_key(path.stem) if not args.csl else path.stem
+        if emitted in seen_keys:
             n = 2
-            while f"{key}-{n}" in seen_keys:
+            while f"{emitted}-{n}" in seen_keys:
                 n += 1
             print(
-                f"factlog export: citation key {key!r} is used by {seen_keys[key]} and "
-                f"{rel}; the second is exported as {key}-{n}",
+                f"factlog export: citation key {emitted!r} is used by {seen_keys[emitted]} "
+                f"and {rel}; {rel} is exported as {emitted}-{n}",
                 file=sys.stderr,
             )
-            key = f"{key}-{n}"
-        seen_keys[key] = rel
-        sources.append((key, fm))
+            emitted = f"{emitted}-{n}"
+        seen_keys[emitted] = rel
+        sources.append((emitted, fm))
 
     for note in skipped:
         print(f"factlog export: skipped {note}", file=sys.stderr)
