@@ -12,6 +12,11 @@ ok() { echo "  ok: $1"; }
 bad() { echo "FAIL: $1"; fails=$((fails+1)); }
 
 export XDG_CONFIG_HOME="$(mktemp -d)"  # isolate the active-KB config
+# Isolate HOME too: if a regression made _init_target lose the $FACTLOG_ROOT branch, the
+# broken code would scaffold at ~/wiki. The assertions catch that (the KB is not at
+# $FACTLOG_ROOT), but WITHOUT this a caught regression still litters the real home with an
+# unwanted ~/wiki -- the exact side effect #247 removes.
+export HOME="$(mktemp -d)"
 
 # (a) init with $FACTLOG_ROOT set, no --target -> scaffolds there
 ENVKB="$(mktemp -d)/envkb"
