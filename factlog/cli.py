@@ -2375,6 +2375,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     converted = 0
     empty_converted = 0  # #229: converter ran but the output body is blank
+    warned_converted = 0  # #239: converter exited 0 but wrote quality warnings to stderr
     skipped = 0
     failures = 0
     scan_nonbinary = len(scan_nonbinary_refs)  # #215: surfaced in the summary
@@ -2448,6 +2449,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             skipped += 1
             continue
 
+        conv_warnings = ""  # #239: quality warnings an external converter emits on success
         if tool in ingest.BUILTIN_CONVERTERS:
             try:
                 ok = bool(build(src, dst))
@@ -2473,6 +2475,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 print(f"factlog ingest: {tool} failed on {src.name}: {detail}", file=sys.stderr)
                 failures += 1
                 continue
+            # #239: a converter can exit 0 yet warn on stderr about a quality
+            # problem it could not fix (pandoc's "Unsupported code page 949. Text
+            # will likely be garbled." on a cp949 RTF). returncode-only success
+            # detection swallowed that warning, so mojibake entered extraction as
+            # prose silently — the same class of harm #222 killed, wearing a
+            # different mask. Keep the stderr so the success path can surface it.
+            conv_warnings = proc.stderr.strip()
 
         when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         body = dst.read_text(encoding="utf-8", errors="replace")
@@ -2495,11 +2504,25 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 "(likely scanned/needs OCR)",
                 file=sys.stderr,
             )
+        elif conv_warnings:
+            # #239: the file has text but the converter flagged it. Split it out
+            # of `converted` (as #229 does for empty) and echo every warning line
+            # so a garbled-encoding conversion is visible, not silent.
+            warned_converted += 1
+            print(
+                f"factlog ingest: {source_label} -> {dst_rel} converted-with-warnings "
+                f"(via {tool}):",
+                file=sys.stderr,
+            )
+            for line in conv_warnings.splitlines():
+                print(f"    {line}", file=sys.stderr)
         else:
             converted += 1
             print(f"factlog ingest: {source_label} -> {dst_rel} (via {tool})")
 
     summary = f"{converted} converted, {skipped} skipped, {failures} failed"
+    if warned_converted:
+        summary += f", {warned_converted} converted-with-warnings"
     if empty_converted:
         summary += f", {empty_converted} converted-but-empty (likely scanned/needs OCR)"
     if scan_nonbinary:
