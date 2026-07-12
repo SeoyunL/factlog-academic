@@ -28,5 +28,20 @@ printf '%s' "$REPORT" | grep -qE 'flagged: Widget \([0-9]+\)$' \
   && { echo "FAIL: (b) the reason printed as a raw integer"; fails=$((fails+1)); } \
   || echo "  ok: (b) the reason did not print as a raw integer"
 
+# (c) a NON-json escape (\t) must ALSO print (backslash preserved), not a bare integer.
+# json.loads would decode \t to a tab, mismatch the engine's stored symbol, and reprint
+# the id -- the regression the first cut introduced (#250 review).
+KB2="$(mktemp -d)/kb"
+"$PY" -m factlog init --target "$KB2" >/dev/null || { echo "FAIL: init2"; exit 1; }
+printf 'a\n' > "$KB2/sources/a.md"
+printf 'subject,relation,object,source,status,confidence,note\nWidget,status,active,sources/a.md,accepted,0.9,\n' > "$KB2/facts/candidates.csv"
+printf '.decl flagged(entity: symbol, reason: symbol)\nflagged(X, "col\\tval") :- relation(X, "status", "active").\n' > "$KB2/policy/logic-policy.extra.dl"
+FACTLOG_ROOT="$KB2" "$PY" tools/compile_facts.py >/dev/null 2>&1
+FACTLOG_ROOT="$KB2" "$PY" tools/run_logic_check.py >/dev/null 2>&1
+R2="$(cat "$KB2/facts/logic_report.txt")"
+printf '%s' "$R2" | grep -qE 'flagged: Widget \([0-9]+\)$' \
+  && { echo "FAIL: (c) a \\t reason printed as a raw integer (over-decoded)"; fails=$((fails+1)); } \
+  || echo "  ok: (c) a non-json escape reason is not a raw integer"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "policy escape report: all passed"; else echo "policy escape report: $fails failed"; exit 1; fi

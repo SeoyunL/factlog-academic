@@ -2417,10 +2417,12 @@ def policy_string_literals(text: str) -> list[str]:
     real symbol out, and a policy finding whose reason held an escaped quote printed as a
     bare integer instead of its text (#250).
 
-    Literals are JSON-encoded (dl_string is json.dumps), and the engine honours the same
-    `\\"`/`\\\\` escapes (verified), so a `\\`-aware scan finds the token boundaries and
-    json.loads decodes each. A literal the scan cannot decode is one the engine could not
-    parse either, so it is skipped rather than guessed at.
+    A `\\`-aware scan finds the token boundaries (a `\\"` does not close the string).
+    Decoding then matches the ENGINE, not JSON: verified against pyrewire, it un-escapes
+    ONLY `\\"` -> `"` and `\\\\` -> `\\`, and leaves every other `\\X` (`\\n`, `\\t`, `\\/`, ...)
+    as the two literal characters -- the engine stores `a\\nb` as backslash-n-b, not a
+    newline. json.loads would over-decode those and re-create the very id/symbol mismatch
+    this fix exists to remove (#250).
     """
     out: list[str] = []
     i, n = 0, len(text)
@@ -2429,15 +2431,18 @@ def policy_string_literals(text: str) -> list[str]:
             i += 1
             continue
         j = i + 1
+        chars: list[str] = []
         while j < n and text[j] != '"':
-            j += 2 if text[j] == "\\" else 1
+            if text[j] == "\\" and j + 1 < n:
+                nxt = text[j + 1]
+                chars.append(nxt if nxt in '"\\' else "\\" + nxt)
+                j += 2
+            else:
+                chars.append(text[j])
+                j += 1
         if j >= n:  # unterminated -- the engine would reject the program
             break
-        token = text[i : j + 1]
-        try:
-            out.append(json.loads(token))
-        except json.JSONDecodeError:
-            pass
+        out.append("".join(chars))
         i = j + 1
     return out
 

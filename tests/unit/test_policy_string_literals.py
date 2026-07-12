@@ -40,3 +40,14 @@ def test_an_unterminated_string_is_skipped_not_crashed():
 
 def test_no_quotes():
     assert policy_string_literals("edge(S, O) :- relation(S, R, O).") == []
+
+
+def test_non_json_escapes_are_kept_literal_matching_the_engine():
+    # The engine un-escapes only the quote and backslash; it stores backslash-n as two
+    # chars, not a newline. json.loads would over-decode these and re-create the mismatch.
+    assert policy_string_literals(r'r("a\nb").') == ["a\\nb"]
+    assert policy_string_literals(r'r("a\tb").') == ["a\\tb"]
+    assert policy_string_literals(r'r("a\/b").') == ["a\\/b"]
+    # but the two escapes the engine DOES honour are decoded
+    assert policy_string_literals('r("a\\" b").') == ['a" b']
+    assert policy_string_literals(r'r("C:\\p").') == ["C:\\p"]
