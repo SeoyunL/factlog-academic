@@ -268,6 +268,7 @@ $ factlog accept Acme uses FastAPI
 factlog accept (KB: ~/wiki): 1 pending row(s) → accepted
   Acme / uses / FastAPI  [candidate → accepted]  ← sources/notes.md
 factlog accept: 1 candidate row(s) → accepted, 1 runs/*.json row(s) updated; accepted.dl recompiled
+factlog review: note — pages/ may be stale; run /factlog sync to regenerate them.
 ```
 
 Now ask. The answer is the engine's, and it names its source:
