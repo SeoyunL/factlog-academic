@@ -288,6 +288,45 @@ else
   bad "(l) the advised two-step way out does not work — a dead end"
 fi
 
+# --- (m) a BARE NAME refuses to guess a flat conversion's origin, like a path does ---
+# #221 stopped a PATH request from guessing; the bare-name branch still compared
+# basenames, so `eject report.html` deleted the conversion of a document ingested from
+# OUTSIDE sources/ that merely shared the name (#243). The two branches now have the
+# same safety level.
+KB11="$(mktemp -d "$TMP_ROOT/kb.XXXXXX")/wiki"
+OUT_DIR="$(mktemp -d)"
+"$PYTHON" -m factlog init --target "$KB11" >/dev/null
+mkdir -p "$KB11/sources/sub"
+printf 'nested\n' > "$KB11/sources/sub/report.html"
+printf 'outside\n' > "$OUT_DIR/report.html"
+"$PYTHON" -m factlog ingest "$OUT_DIR/report.html" --target "$KB11" >/dev/null 2>&1
+printf 'subject,relation,object,source,status,confidence,note\n' > "$KB11/facts/candidates.csv"
+printf 'X,r,Y,runs/sources/report.html.md,accepted,0.9,\n' >> "$KB11/facts/candidates.csv"
+
+OUT_M="$("$PYTHON" -m factlog eject report.html --purge --dry-run --target "$KB11" 2>&1 || true)"
+if printf '%s' "$OUT_M" | grep -q "conversion(s) to delete: 0"; then
+  ok "(m) a bare name does not delete an outside document's flat conversion"
+else
+  bad "(m) #243 is back: a bare name deleted an unattributable conversion"
+fi
+if printf '%s' "$OUT_M" | grep -q "NOT ejecting runs/sources/report.html.md"; then
+  ok "(m) it is reported, not skipped silently"
+else
+  bad "(m) the unattributable conversion was skipped silently"
+fi
+
+# ...but a bare name still ejects an ATTRIBUTABLE conversion (a top-level original's own)
+KB12="$(mktemp -d "$TMP_ROOT/kb.XXXXXX")/wiki"
+"$PYTHON" -m factlog init --target "$KB12" >/dev/null
+printf 'top\n' > "$KB12/sources/report.html"
+"$PYTHON" -m factlog ingest "$KB12/sources/report.html" --target "$KB12" >/dev/null 2>&1
+OUT_M2="$("$PYTHON" -m factlog eject report.html --dry-run --target "$KB12" 2>&1 || true)"
+if printf '%s' "$OUT_M2" | grep -q "conversion(s) to delete: 1"; then
+  ok "(m) a bare name still ejects the original's own attributable conversion"
+else
+  bad "(m) a legitimate bare-name conversion eject was blocked"
+fi
+
 echo "---"
 echo "passed: $pass, failed: $fail"
 [ "$fail" -eq 0 ]

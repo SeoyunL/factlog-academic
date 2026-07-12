@@ -2666,21 +2666,37 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             if own == PurePosixPath(name).name or own == PurePosixPath(name).stem:
                 unattributable.add(ref)
             return False
+        # A bare NAME or STEM. An original that bears it is matched -- it genuinely IS
+        # named that, no guess. A conversion is matched only when it can be ATTRIBUTED
+        # to a source (conv_source_path), by that source's name/stem; an unattributable
+        # flat conversion is reported, not matched. The path branch already refuses to
+        # guess a flat conversion's origin (#221); the bare-name branch used to compare
+        # basenames instead, so `eject report.html` deleted the conversion of a document
+        # ingested from OUTSIDE sources/ that merely shared the name (#243).
+        def _conv_bare_matches(want_name: str | None, want_stem: str | None) -> bool:
+            origin_path = conv_source_path(ref)
+            if origin_path is None:
+                # Unattributable: only report it if it actually bears the requested name/
+                # stem, so an unrelated conversion is not named.
+                base = conv_origin.get(ref) or PurePosixPath(PurePosixPath(ref).name).stem
+                shares = (want_name is not None and base == want_name) or (
+                    want_stem is not None and PurePosixPath(base).stem == want_stem
+                )
+                if shares:
+                    unattributable.add(ref)
+                return False
+            base = PurePosixPath(origin_path).name
+            if want_name is not None:
+                return base == want_name
+            return PurePosixPath(base).stem == want_stem
+
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
                 return rp.name == np_.name  # an original with that filename
-            origin = conv_origin.get(ref)  # the conversion made from this original
-            # Provenance is the reliable signal. A headerless conversion falls
-            # back to its own name minus the ingest out-suffix: since ingest now
-            # keeps the original's extension (report.pptx -> report.pptx.md), the
-            # conversion's rp.stem ("report.pptx") is the original's full name.
-            return origin == np_.name if origin else rp.stem == np_.name
-        # bare stem: every original with that stem, and a conversion made from
-        # one (matched via its recorded origin so the source's own extension in
-        # the new naming — report.pptx.md — does not defeat the stem compare).
+            return _conv_bare_matches(np_.name, None)
+        # bare stem
         if is_conv:
-            origin = conv_origin.get(ref)
-            return Path(origin if origin else rp.name).stem == np_.stem
+            return _conv_bare_matches(None, np_.stem)
         return rp.stem == np_.stem
 
     def _report_unattributable(refs: set[str]) -> None:

@@ -771,9 +771,12 @@ recorded origin *is that path*. A conversion made before conversions mirrored
 their original's subdirectory records only a basename, so it cannot be attributed
 to a path — and that state is indistinguishable from a conversion made from a file
 outside `sources/` (the `factlog ingest report.docx --target ~/wiki` form above) or
-from an original since deleted. `eject` will **not** guess: it leaves such a
-conversion in place and names it on stderr, including when the path matched nothing
-else. Remove it by naming the conversion directly — `eject runs/sources/report.md`. While
+from an original since deleted. `eject` will **not** guess — whether you give a
+path (`eject sub/report.html`) OR a bare name (`eject report.html`): it leaves such a
+conversion in place and names it on stderr, including when nothing else matched. (A bare
+name still ejects an original that bears it, and an ATTRIBUTABLE conversion — one whose
+origin can be tied to a real source — like any other; only the un-attributable flat
+conversion is left.) Remove it by naming the conversion directly — `eject runs/sources/report.md`. While
 such a conversion is still on disk and the request matched no conversion of its own,
 `--delete-original` refuses outright (exit 1, nothing deleted): deleting the original
 while leaving a conversion we could not attribute would strand that conversion's facts
