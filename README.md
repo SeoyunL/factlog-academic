@@ -561,10 +561,11 @@ credits, so `openalex-import` and `openalex-refresh` are effectively free.
   OpenAlex flags some works PubMed does not, so the front-matter key is
   `openalex_is_retracted`, never a bare `retracted:`. Acknowledge with
   `factlog openalex-acknowledge-retraction --id <id>`.
-- A front-matter-only work (imported before #84) has no ledger to close;
-  `factlog openalex-backfill-provenance` builds one from front matter (no network,
-  never touches `sources/*.md`). Nothing is lost — every ledger field has a
-  front-matter key — so no value has to be added by hand first.
+- A front-matter-only work (imported before #84) has no ledger to close, so
+  acknowledge refuses it and points to `factlog openalex-backfill-provenance`,
+  which builds one from front matter (no network, never touches `sources/*.md`).
+  Nothing is lost — every ledger field has a front-matter key — so no value has to
+  be added by hand first.
 
 Settings resolve in the order `<KB>/policy/openalex-config.toml` >
 `~/.config/factlog/openalex.toml` > built-in defaults. Unlike Zotero, there is
