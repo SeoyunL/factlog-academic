@@ -2407,6 +2407,41 @@ def _attr_rel_facts(accepted: list[dict[str, str]] | None = None) -> str:
     return "\n" + "\n".join(f"attr_rel({dl_string(name)})." for name in names) + "\n"
 
 
+def policy_string_literals(text: str) -> list[str]:
+    """Every quoted string literal in a .dl program, ESCAPE-DECODED to its real value.
+
+    `re.findall(r'"([^"]+)"', ...)` cut a literal at the first `\\"` -- so
+    `"size 5\\" bolt"` split into `size 5\\` and ` bolt`, and neither is the symbol
+    the engine stores. run_wirelog pre-interns these so decode_wirelog_value can turn an
+    engine-emitted symbol id back into its string; interning the wrong pieces left the
+    real symbol out, and a policy finding whose reason held an escaped quote printed as a
+    bare integer instead of its text (#250).
+
+    Literals are JSON-encoded (dl_string is json.dumps), and the engine honours the same
+    `\\"`/`\\\\` escapes (verified), so a `\\`-aware scan finds the token boundaries and
+    json.loads decodes each. A literal the scan cannot decode is one the engine could not
+    parse either, so it is skipped rather than guessed at.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != '"':
+            i += 1
+            continue
+        j = i + 1
+        while j < n and text[j] != '"':
+            j += 2 if text[j] == "\\" else 1
+        if j >= n:  # unterminated -- the engine would reject the program
+            break
+        token = text[i : j + 1]
+        try:
+            out.append(json.loads(token))
+        except json.JSONDecodeError:
+            pass
+        i = j + 1
+    return out
+
+
 def decode_wirelog_value(session: EasySession, value: object) -> object:
     """Resolve a wirelog integer ID back to its interned symbol string.
 
@@ -2551,7 +2586,7 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     # _typed_decls(specs) is "" when there is nothing projectable, so the program
     # text is byte-identical to today for a KB with no typed-relations (#116 inv.1).
     session = EasySession(base_program + _typed_decls(specs))
-    for value in re.findall(r'"([^"]+)"', policy_program):
+    for value in policy_string_literals(policy_program):
         session.intern(value)
     accepted = accepted_rows  # already loaded above for _attr_rel_facts
     for row in accepted:
