@@ -1048,9 +1048,9 @@ def detect_conflicts(
         if canon not in sv:
             continue
         obj = row["object"]
-        # Typed-spec lookup: try canonical name first (NFC by construction when
-        # it came from the alias map), then NFC of the raw relation (#210).
-        spec = typed.get(canon) or typed.get(unicodedata.normalize("NFC", relation))
+        # THE shared lookup rule (NFC + alias fold), same as the projection and the
+        # report use -- so a typed spec is found the same way in all three (#244).
+        spec = _lookup_typed_spec(relation, typed, aliases)
         key = _group_key(obj, spec)
         groups = by_key.setdefault((row["subject"], canon), {})
         groups.setdefault(key, set()).add(obj)
