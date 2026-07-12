@@ -287,8 +287,8 @@ detail on each step.
 
 ## Versioning your KB
 
-The single most important operational habit: **commit `runs/*.json` and `facts/`.**
-Losing them loses data no re-run can recover.
+🔴 The single most important operational habit: **commit `runs/*.json` and
+`facts/`.** Losing them loses data no re-run can recover.
 
 A KB has **two** irreplaceable records, and they are not the same file:
 
@@ -358,6 +358,14 @@ YAML **front matter** (`sources/*.md`, human-editable) and a per-paper
 **ledger** under `source-provenance/` (DOI, retraction status, cross-ids — the
 record `--auto-update` may touch, never `sources/*.md`). The distinction matters
 for the determinism boundary in each integration below.
+
+**Callout levels.** Cautions below come in two levels, so the dangerous ones stand
+apart from the merely good-to-know:
+
+- 🔴 **Irreversible / data-loss** — can destroy data or is hard to undo: deleting
+  `runs/*.json`, `factlog eject --purge`, `--delete-original`. Read before running.
+- Plain **Note:** — a smaller caution or edge case (a suffixed citation key, a
+  format that is not auto-converted). Good to know, not dangerous.
 
 ## Source file formats
 
@@ -507,6 +515,21 @@ factlog zotero-import --collection "Systematic Review" --pdf            # biblio
 factlog zotero-import --collection "Systematic Review" --annotations    # + highlights & notes
 ```
 
+### The import determinism boundary (shared)
+
+The three ledger-based imports — OpenAlex, arXiv, PubMed — obey the same three
+rules. Each integration below lists only where it *differs*.
+
+1. **Import has no ledger authority.** An imported record is a `candidate` until it
+   passes the `sync → review → accept` gate; import never writes engine input.
+2. **`--auto-update` touches only the ledger, never `sources/*.md`.** A `*-refresh`
+   / `*-check-versions --auto-update` records a few metadata fields to the
+   per-paper ledger under `source-provenance/`; your source files are never rewritten.
+3. **A retraction or withdrawal is never absorbed automatically.** It is reported
+   to a human on every run and closed only by an explicit `*-acknowledge-*`
+   command — revoking a published result is the judgment a human must make, not
+   the tool.
+
 ### Importing OpenAlex bibliography (`factlog openalex-*`)
 
 You can search and import literature from the open bibliographic database
@@ -530,25 +553,19 @@ no matter how many results you take back — being frugal with `--limit` saves
 nothing, so ask for a generous count up front. A single-record fetch costs 0
 credits, so `openalex-import` and `openalex-refresh` are effectively free.
 
-**Determinism boundary** — miss this and you will misread what `--auto-update`
-changed.
+**Determinism boundary — OpenAlex specifics** (the
+[shared rules](#the-import-determinism-boundary-shared) apply):
 
-1. Import has no permission to rewrite the ledger.
-2. `openalex-refresh --auto-update` writes only `doi` / `work_type` / `journal`
-   to the ledger. It never touches `sources/*.md`.
-3. **A retraction (the ledger's `is_retracted`) is not absorbed automatically in
-   either mode.** It is reported to a human and closed only with `factlog
-   openalex-acknowledge-retraction --id <id>`. This value is **OpenAlex's opinion**,
-   not a fact factlog asserts — OpenAlex flags some works as retracted that PubMed
-   does not. That is why the source's front-matter key is `openalex_is_retracted`,
-   not a bare `retracted:`. A work known only from front matter (imported before
-   #84) has no ledger to close, so acknowledge refuses it and points to `factlog
-   openalex-backfill-provenance`, which builds the ledger from front matter (no
-   network, never touches `sources/*.md`) so the retraction can then be
-   acknowledged. Unlike arXiv, nothing is lost — every ledger field has a
-   front-matter key — so no value has to be added by hand first.
-4. Imported items are still candidates; they become facts only after passing a
-   human `accept` gate.
+- `--auto-update` writes only `doi` / `work_type` / `journal`.
+- The retraction flag is **OpenAlex's opinion**, not a fact factlog asserts —
+  OpenAlex flags some works PubMed does not, so the front-matter key is
+  `openalex_is_retracted`, never a bare `retracted:`. Acknowledge with
+  `factlog openalex-acknowledge-retraction --id <id>`.
+- A front-matter-only work (imported before #84) has no ledger to close, so
+  acknowledge refuses it and points to `factlog openalex-backfill-provenance`,
+  which builds one from front matter (no network, never touches `sources/*.md`).
+  Nothing is lost — every ledger field has a front-matter key — so no value has to
+  be added by hand first.
 
 Settings resolve in the order `<KB>/policy/openalex-config.toml` >
 `~/.config/factlog/openalex.toml` > built-in defaults. Unlike Zotero, there is
@@ -590,31 +607,23 @@ answers a nonexistent category, field, or year with `200 OK` and "0 results" —
 which an operator reads as "no such literature exists" — so factlog validates the
 values before sending the request.
 
-**Determinism boundary** — miss this and you will misread what `--auto-update`
-changed.
+**Determinism boundary — arXiv specifics** (the
+[shared rules](#the-import-determinism-boundary-shared) apply):
 
-1. Import has no permission to rewrite the ledger.
-2. `arxiv-check-versions --auto-update` writes only `version` / `last_updated` /
-   `comment` to the ledger. It never opens `sources/*.md`.
-3. **A withdrawal (`withdrawn_by`) is not absorbed automatically in either mode.**
-   It is reported to a human and closed only with `factlog
-   arxiv-acknowledge-withdrawal --id <id>`. `--yes` can *record* a withdrawal but
-   never *clear* one — arXiv no longer reporting a withdrawal may mean "the
-   withdrawal was reversed" or "the withdrawal sentence could not be read", and the
-   code cannot tell the two apart. Clearing has to be confirmed by a human reading
-   the note at the prompt. A paper with no ledger can be closed only if its front
-   matter carries `arxiv_version`, in which case `arxiv-backfill-provenance` builds
-   a ledger first; without it the backfill refuses, and no command closes it. A
-   human must add `arxiv_version: <N>` to the paper's `sources/*.md` front matter by
-   hand — `<N>` is the paper's real arXiv version, read from
-   `https://arxiv.org/abs/<id>` (factlog does not fetch it) — after which the
-   backfill can build the ledger and the withdrawal can be acknowledged.
-4. A paper whose version cannot be compared is reported not as `unchanged` but as
-   its own state, **`no-version`**. Nothing was compared, so it cannot be called
-   "unchanged". The command that fixes it depends on the cause, and in some cases
-   there is no command that fixes it at all.
-5. Imported items are still candidates; they become facts only after passing a
-   human `accept` gate.
+- `--auto-update` writes only `version` / `last_updated` / `comment`.
+- A **withdrawal** (`withdrawn_by`) is arXiv's own act, not a journal retraction
+  (see the note below). Acknowledge with `factlog arxiv-acknowledge-withdrawal
+  --id <id>`. `--yes` can *record* a withdrawal but never *clear* one — arXiv no
+  longer reporting one is ambiguous (reversed? or the sentence could not be read?),
+  so clearing needs a human at the prompt.
+- Backfill needs the paper's real version in front matter. A front-matter-only
+  paper is closable only if it carries `arxiv_version: <N>` — the one value with no
+  ledger fallback, so you add it by hand (read `<N>` from
+  `https://arxiv.org/abs/<id>`; factlog does not fetch it), after which
+  `factlog arxiv-backfill-provenance` builds the ledger.
+- A paper whose version cannot be compared is reported as **`no-version`**, not
+  `unchanged` — nothing was compared, so it cannot be called unchanged. The fix
+  depends on the cause, and sometimes there is none.
 
 > arXiv's **withdrawal** is not the same as a journal's **retraction** (OpenAlex's
 > `is_retracted`). The former is an act by the author or an arXiv administrator on
@@ -655,21 +664,18 @@ factlog pubmed-backfill-provenance --dry-run         # gives a ledger to front-m
 factlog pubmed-mesh --for <slug>                     # propose MeSH vocabulary from a paper's ledger PMID
 ```
 
-**Determinism boundary** — the order that keeps PubMed a reported track, not an
-authority.
+**Determinism boundary — PubMed specifics** (the
+[shared rules](#the-import-determinism-boundary-shared) apply):
 
-1. Import has no ledger authority — a record is a candidate until it passes
-   `sync → review → accept`.
-2. `pubmed-refresh` reports drift. `--auto-update` writes only the identifier and
-   journal fields to the ledger, never `sources/*.md`.
-3. **A retraction is never auto-absorbed.** PubMed is the source of truth here
-   (OpenAlex's `is_retracted` has documented false positives, #51); a detected
-   retraction surfaces on every run until `pubmed-acknowledge-retraction` records
-   that a human saw it.
-4. A deleted PMID is flagged, never silently dropped; a merged PMID is reported,
-   never silently rewritten.
-5. MeSH terms from PubMed and OpenAlex coexist, each source-scoped. PubMed's carry
-   the major/minor distinction OpenAlex cannot supply reliably before ~2022 (#53).
+- `--auto-update` writes only the identifier and journal fields.
+- On retractions PubMed is the **authority** — where OpenAlex's `is_retracted` has
+  documented false positives (#51), a PubMed retraction is trusted. It still
+  surfaces every run until `factlog pubmed-acknowledge-retraction` records that a
+  human saw it.
+- A deleted PMID is flagged (never silently dropped); a merged PMID is reported
+  (never silently rewritten).
+- MeSH terms from PubMed and OpenAlex coexist, each source-scoped; PubMed's carry
+  the major/minor distinction OpenAlex cannot supply reliably before ~2022 (#53).
 
 An API key is optional for NCBI but, for factlog's batched requests, effectively
 required — without one E-utilities throttles hard. It is read from the
@@ -1010,6 +1016,10 @@ the facts that cite it. Name a source by filename, stem, or KB-relative path —
 naming the binary original (e.g. `report.pdf`) also matches its
 `runs/sources/<name>.<ext>` conversion; a bare stem matches every source with that
 stem.
+
+🔴 The default `eject` is reversible (facts become `superseded`, kept for audit),
+but **`--purge` and `--delete-original` delete data** — the candidate rows and the
+original file. Preview with `--dry-run` first.
 
 ```bash
 factlog eject report.pdf                 # delete conversion; mark citing facts superseded (kept for audit)
