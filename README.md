@@ -135,8 +135,8 @@ family, e.g. `compile_facts.py`, `run_logic_check.py`, `finalize.py` — read on
 `factlog where --porcelain` so every tool agrees; the slash-command workflow does this
 for you.)
 
-`factlog init` scaffolds at `--target` if given, else at `$FACTLOG_ROOT`, else at
-`~/wiki` — it does **not** fall back to the active KB (re-scaffolding the KB you are
+`factlog init` (and `factlog setup`) scaffold at `--target` if given, else at
+`$FACTLOG_ROOT`, else at `~/wiki` — it does **not** fall back to the active KB (re-scaffolding the KB you are
 working in would be surprising), but it does respect a `$FACTLOG_ROOT` you set for the
 session.
 

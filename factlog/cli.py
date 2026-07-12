@@ -896,8 +896,9 @@ def _apply_lang(normalized: str) -> str:
 
 
 def cmd_use(args: argparse.Namespace) -> int:
+    from pathlib import Path
 
-    target = _init_target(args.target)
+    target = Path(args.target).expanduser().resolve()
     if not target.is_dir():
         print(f"factlog use: {target} does not exist. Run 'factlog init --target {args.target}' first.", file=sys.stderr)
         return 1
@@ -2129,7 +2130,6 @@ def cmd_setup(args: argparse.Namespace) -> int:
     Idempotent and safe to re-run: deps are only installed when pyrewire is
     missing/too old, and `cmd_init` skips files/dirs that already exist.
     """
-    from pathlib import Path
 
     actions: list[str] = []
 
@@ -2167,7 +2167,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         install_attempted = True
 
     print("\n=== factlog setup: initialise knowledge base ===")
-    target = Path(args.target).expanduser().resolve()
+    target = _init_target(args.target)
     kb_created = _init_kb(target)
     previous = factlog_config.read_root()
     factlog_config.write_root(target)

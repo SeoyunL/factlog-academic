@@ -32,10 +32,19 @@ FACTLOG_ROOT="$ENV2" "$PY" -m factlog init --target "$TGT" >/dev/null 2>&1
 [ ! -d "$ENV2/policy" ] && ok "(c) \$FACTLOG_ROOT is left untouched when --target is given" \
   || bad "(c) init scaffolded \$FACTLOG_ROOT despite --target"
 
-# (d) setup honours $FACTLOG_ROOT the same way
-ENV3="$(mktemp -d)/env3"
-FACTLOG_ROOT="$ENV3" "$PY" -m factlog setup --target "$ENV3" >/dev/null 2>&1
-[ -d "$ENV3/policy" ] && ok "(d) setup scaffolds where told" || bad "(d) setup did not scaffold"
+# (d) setup honours $FACTLOG_ROOT with NO --target -- the case the crash and the
+# ignored-$FACTLOG_ROOT both live in. Only when pyrewire is already present, so setup's
+# pip step is skipped and the test is hermetic (an externally-managed python refuses the
+# install and this would fail for an unrelated reason).
+if "$PY" -c "import pyrewire" >/dev/null 2>&1; then
+  ENV3="$(mktemp -d)/env3"
+  RC=0
+  FACTLOG_ROOT="$ENV3" "$PY" -m factlog setup >/dev/null 2>&1 || RC=$?
+  [ "$RC" -eq 0 ] && ok "(d) setup with no --target does not crash"     || bad "(d) setup with no --target exited $RC (the None-target crash)"
+  [ -d "$ENV3/policy" ] && ok "(d) setup scaffolds at \$FACTLOG_ROOT when no --target"     || bad "(d) setup ignored \$FACTLOG_ROOT"
+else
+  echo "SKIP: (d) needs pyrewire (setup would attempt a pip install)"
+fi
 
 # (e) _init_target resolution, unit-checked: --target > $FACTLOG_ROOT > ~/wiki, no config
 ECASE="$(mktemp -d)/envcase"
