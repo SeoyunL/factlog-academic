@@ -2655,8 +2655,13 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         def _conv_bare_matches(want_name: str | None, want_stem: str | None) -> bool:
             origin_path = conv_source_path(ref)
             if origin_path is None:
+                # Unattributable: only report it if it actually bears the requested name/
+                # stem, so an unrelated conversion is not named.
                 base = conv_origin.get(ref) or PurePosixPath(PurePosixPath(ref).name).stem
-                if base == (want_name or "") or PurePosixPath(base).stem == (want_stem or "\0"):
+                shares = (want_name is not None and base == want_name) or (
+                    want_stem is not None and PurePosixPath(base).stem == want_stem
+                )
+                if shares:
                     unattributable.add(ref)
                 return False
             base = PurePosixPath(origin_path).name
