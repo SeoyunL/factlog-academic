@@ -75,3 +75,11 @@ def test_quoted_constants_shares_the_lexer():
     assert _quoted_constants('review_required("who said \\" hi")?') == ['who said " hi']
     # a comment marker inside the literal is not a comment
     assert _quoted_constants('review_required("a # b")?') == ["a # b"]
+
+
+def test_an_empty_literal_is_one_literal():
+    # `review_required("")?` yields one empty literal. The old regex `[^"]+` matched zero
+    # (min one char); the lexer returns ['']. Both the report and the gate see the same
+    # count, so parity holds -- pinned so the behaviour is explicit, not accidental.
+    assert policy_string_literals('review_required("")?') == [""]
+    assert policy_string_literals('r("", "b").') == ["", "b"]
