@@ -798,10 +798,28 @@ def setup_active_kb_action(previous: str | None, target) -> str:
     return f"set active KB to {target} (ingest/ask/sync default here from any directory)"
 
 
-def cmd_init(args: argparse.Namespace) -> int:
+def _init_target(cli_value: str | None) -> _Path:
+    """The KB an `init`/`setup` scaffolds: --target, else $FACTLOG_ROOT, else ~/wiki.
+
+    Unlike the other commands, config (the active KB) is NOT a fallback: `init` with no
+    args must not silently re-scaffold the KB you are working in. But a session that set
+    $FACTLOG_ROOT pointed at a location on purpose, and ignoring it created an unwanted
+    ~/wiki while the user believed they were initializing $FACTLOG_ROOT -- a silent
+    mismatch every later command then inherited (#247).
+    """
+    import os
     from pathlib import Path
 
-    target = Path(args.target).expanduser().resolve()
+    if cli_value:
+        return Path(cli_value).expanduser().resolve()
+    env = os.environ.get("FACTLOG_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path("~/wiki").expanduser().resolve()
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    target = _init_target(args.target)
     _init_kb(target)
 
     current = factlog_config.read_root()
@@ -878,9 +896,8 @@ def _apply_lang(normalized: str) -> str:
 
 
 def cmd_use(args: argparse.Namespace) -> int:
-    from pathlib import Path
 
-    target = Path(args.target).expanduser().resolve()
+    target = _init_target(args.target)
     if not target.is_dir():
         print(f"factlog use: {target} does not exist. Run 'factlog init --target {args.target}' first.", file=sys.stderr)
         return 1
@@ -6457,7 +6474,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
 
     init = sub.add_parser("init", help="scaffold an empty knowledge base layout")
-    init.add_argument("--target", default="~/wiki", help="knowledge base root to create")
+    init.add_argument("--target", default=None, help="KB root to create (default: $FACTLOG_ROOT, else ~/wiki)")
     init.add_argument(
         "--activate",
         action="store_true",
@@ -6470,7 +6487,7 @@ def build_parser() -> argparse.ArgumentParser:
         "setup",
         help="one-shot bootstrap: doctor, ensure deps, init KB, re-check",
     )
-    setup.add_argument("--target", default="~/wiki", help="knowledge base root to create")
+    setup.add_argument("--target", default=None, help="KB root to create (default: $FACTLOG_ROOT, else ~/wiki)")
     setup.add_argument(
         "--lang",
         default=None,

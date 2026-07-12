@@ -135,8 +135,13 @@ family, e.g. `compile_facts.py`, `run_logic_check.py`, `finalize.py` — read on
 `factlog where --porcelain` so every tool agrees; the slash-command workflow does this
 for you.)
 
-`factlog init` records it too, but **only when no usable active KB is set yet**.
-Once you have one, `init` scaffolds the new KB and leaves the active KB alone —
+`factlog init` scaffolds at `--target` if given, else at `$FACTLOG_ROOT`, else at
+`~/wiki` — it does **not** fall back to the active KB (re-scaffolding the KB you are
+working in would be surprising), but it does respect a `$FACTLOG_ROOT` you set for the
+session.
+
+`factlog init` records the new KB as active too, but **only when no usable active KB is
+set yet**. Once you have one, `init` scaffolds the new KB and leaves the active KB alone —
 otherwise creating a scratch KB in another shell, a test, or an agent would
 silently repoint `accept`/`reject`/`amend`/`sync` at it. Switch deliberately with
 `factlog use <kb>`, or ask for it up front with `init --activate`.
