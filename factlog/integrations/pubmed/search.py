@@ -53,6 +53,14 @@ the composed term, and a real search surfaces PubMed's own ``<QueryTranslation>`
 so the operator sees exactly how ATM read their words. A user who wants a literal
 phrase quotes it themselves, and guard (2) then surfaces any
 ``QuotedPhraseNotFound``.
+
+One measured caveat, which the advice in guard (2) is built around: PubMed raises
+``QuotedPhraseNotFound`` for **unquoted** queries too, quoting the phrase itself in
+the warning text (a live ``qzxwvunonsenseterm`` sent without quotes comes back as
+``<QuotedPhraseNotFound>"qzxwvunonsenseterm"</QuotedPhraseNotFound>`` while
+``<QueryTranslation>qzxwvunonsenseterm</QueryTranslation>`` shows ATM was never
+disabled). So the tag alone does not mean the user quoted anything, and factlog only
+advises dropping quotes when *the query we sent* actually held one (#272).
 """
 from __future__ import annotations
 
@@ -350,9 +358,15 @@ _SIGNAL_EXPLANATIONS = {
         "PubMed could not map {value!r} to any indexed term. A nonexistent MeSH "
         "term produces exactly this — verify the descriptor exists."
     ),
+    # Stated as fact only. PubMed raises this tag for queries that carried no quotes at
+    # all — it quotes the phrase itself in the warning — so a "drop the quotes"
+    # prescription here would tell the operator to undo something they never did (#272).
+    # The advice is appended, by `_quoted_phrase_line`, only when the *request* we sent
+    # actually contained a quote.
     "QuotedPhraseNotFound": (
-        "PubMed found no match for the exact phrase {value!r} (quoting disables "
-        "Automatic Term Mapping; drop the quotes to search the words loosely)."
+        "PubMed found no match for the phrase {value!r} in its phrase index. The quotes "
+        "in that warning are PubMed's own and do not mean the query was quoted — see the "
+        "QueryTranslation line for how PubMed actually read it."
     ),
     "FieldNotFound": (
         "PubMed did not recognize the field {value!r} in the query."
@@ -372,7 +386,29 @@ _SIGNAL_EXPLANATIONS = {
 _BOILERPLATE_SIGNALS = frozenset({"OutputMessage"})
 
 
-def _signal_line(tag: str, text: str) -> str:
+_QUOTED_PHRASE_ATM_ADVICE = (
+    " The query was quoted, and quoting disables Automatic Term Mapping — drop the "
+    "quotes to search the words loosely."
+)
+
+
+def _quoted_phrase_line(text: str, *, user_quoted: bool | None) -> str:
+    """The ``QuotedPhraseNotFound`` line, with the ATM advice only when it is true.
+
+    ``user_quoted`` is a fact about *the request we sent*, decided by the caller: it is
+    never inferred from the response, because PubMed puts quotes around the phrase in
+    its own warning whether or not the query had any. ``None`` means the caller did not
+    say, and then nothing is asserted about the user's input at all.
+    """
+    line = _SIGNAL_EXPLANATIONS["QuotedPhraseNotFound"].format(value=text)
+    if user_quoted:
+        line += _QUOTED_PHRASE_ATM_ADVICE
+    return line
+
+
+def _signal_line(tag: str, text: str, *, user_quoted: bool | None = None) -> str:
+    if tag == "QuotedPhraseNotFound" and text:
+        return _quoted_phrase_line(text, user_quoted=user_quoted)
     template = _SIGNAL_EXPLANATIONS.get(tag)
     if template is not None and text:
         return template.format(value=text)
@@ -381,7 +417,7 @@ def _signal_line(tag: str, text: str) -> str:
     return f"PubMed reported {tag}."
 
 
-def silent_zero_report(result: EsearchResult, *, year=None, mesh=()) -> list[str]:
+def silent_zero_report(result: EsearchResult, *, year=None, mesh=(), query=None) -> list[str]:
     """The lines to surface so a suspicious zero never reads as an honest empty set.
 
     Returns, in order:
@@ -403,8 +439,18 @@ def silent_zero_report(result: EsearchResult, *, year=None, mesh=()) -> list[str
     An honest empty set — zero results, no filter, no diagnostic signal — yields ``[]``,
     so a plain "0 results" is left to stand. Pure: the caller writes these to
     stderr.
+
+    ``query`` is the raw ``--query`` the user typed, and it exists for one question a
+    ``QuotedPhraseNotFound`` cannot answer from the response alone: *did the user quote?*
+    PubMed wraps the phrase in quotes inside its own warning even when the query carried
+    none, so reading the warning text would answer "yes" every time (#272). The check is
+    therefore a deterministic fact about **the request we sent** — ``'"' in query`` — not
+    a match against PubMed's prose. Three states: quoted (the ATM advice is true and is
+    appended), not quoted (only the fact is stated), and ``None``/unknown — the default,
+    where nothing is asserted about the user's input.
     """
     lines: list[str] = []
+    user_quoted = None if query is None else ('"' in query)
     if result.top_level_error:
         lines.append(f"PubMed rejected the request: {result.top_level_error}")
     for tag, text in (*result.errors, *result.warnings):
@@ -414,7 +460,7 @@ def silent_zero_report(result: EsearchResult, *, year=None, mesh=()) -> list[str
         # the swallowed-diagnostic failure mode #167 exists to close.
         if tag in _BOILERPLATE_SIGNALS and result.count == 0:
             continue
-        lines.append(_signal_line(tag, text))
+        lines.append(_signal_line(tag, text, user_quoted=user_quoted))
 
     mesh = tuple(mesh or ())
     if result.count == 0 and (year or mesh) and not result.top_level_error:

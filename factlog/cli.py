@@ -4933,7 +4933,10 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     # Surface the silent-zero guard BEFORE the count, on stderr, so --porcelain
     # stdout stays parseable. This is what keeps a nonexistent-MeSH zero from
     # reading as an honest empty set (#167's whole point).
-    for line in silent_zero_report(result, year=args.year, mesh=mesh):
+    # The raw `args.query`, not the composed term: the guard's one question about the
+    # user's input is "did they quote?", and only the query they typed answers it (#272).
+    # The CLI decides nothing here — it passes the fact down.
+    for line in silent_zero_report(result, year=args.year, mesh=mesh, query=args.query):
         print(f"factlog pubmed-search: {line}", file=sys.stderr)
 
     # A whole-request rejection (bad db, unparseable body) leaves no trustworthy
