@@ -1,10 +1,11 @@
 # Typed relations — full reference
 
 The README's [Typed relations](../README.md#typed-relations-policytyped-relationsmd)
-section covers the declaration format and the four types at a glance. This document
-holds the details you need only when you actually author comparison thresholds:
-per-type value normalisation, the `amount` unit table, and the compound-term form
-an extractor may emit.
+section (한국어: [타입 지정 관계](../README.ko.md#타입-지정-관계-policytyped-relationsmd))
+covers the declaration format and the four types at a glance. This document holds
+the details you need only when you actually author comparison thresholds: per-type
+value normalisation, the `amount` unit table, and the compound-term form an
+extractor may emit.
 
 A typed relation is declared in `policy/typed-relations.md`, one per line:
 
@@ -68,16 +69,7 @@ scalar from it.
 
 ## Authoring a comparison predicate
 
-The threshold is the *question*, not a property of the relation, so you write the
-rule yourself in `policy/logic-policy.extra.dl` (never `logic-policy.dl`, which is
-regenerated and byte-checked). The head must be arity-2
-`(entity: symbol, reason: symbol)` with a quoted reason string — the scalar stays
-in the body:
-
-```
-.decl after2030(entity: symbol, reason: symbol)
-after2030(S, "launch_after_2030") :- launch_date(S, D), D >= 20300101.
-```
-
-Its rows surface in `logic_report.txt` under `Policy Findings:`. See the bundled
-factlog skill reference for the full comparison-predicate contract.
+To ask a comparison over a typed relation ("which subjects launched on/after
+2030?"), you write the rule yourself in `policy/logic-policy.extra.dl`. See the
+bundled factlog skill reference for the full comparison-predicate contract (head
+shape, where the threshold goes, and how its rows surface in the logic report).
