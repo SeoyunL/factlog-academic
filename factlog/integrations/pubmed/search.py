@@ -270,7 +270,10 @@ class EsearchResult:
     ``<ErrorList>``/``<WarningList>`` children verbatim as ``(tag, text)`` pairs:
     a ``PhraseNotFound`` / ``FieldNotFound`` / ``QuotedPhraseNotFound`` is exactly
     how PubMed says a phrase or field could not be mapped, and is the
-    authoritative signal that a zero is not honest.
+    authoritative signal that a zero is not honest. They also carry non-diagnostic
+    boilerplate — a zero always brings an ``OutputMessage`` along — because this is
+    a faithful reduction of the response, not a judgement about it: which signals
+    are diagnostic is decided by :func:`silent_zero_report`, not here.
     """
 
     count: int = 0
@@ -360,6 +363,15 @@ _SIGNAL_EXPLANATIONS = {
 }
 
 
+# NCBI puts <OutputMessage>No items found.</OutputMessage> on *every* zero-count
+# esearch response — the valid-MeSH filtered zero and the nonsense query alike.
+# It is the boilerplate companion of a zero, not a diagnostic PubMed volunteered,
+# and echoing it says nothing "Found 0 results." did not already say (#271).
+# Matched by tag name only: matching the text would be a gate NCBI could silently
+# break by rewording its own boilerplate.
+_BOILERPLATE_SIGNALS = frozenset({"OutputMessage"})
+
+
 def _signal_line(tag: str, text: str) -> str:
     template = _SIGNAL_EXPLANATIONS.get(tag)
     if template is not None and text:
@@ -374,28 +386,38 @@ def silent_zero_report(result: EsearchResult, *, year=None, mesh=()) -> list[str
 
     Returns, in order:
 
-    * every ``<ErrorList>``/``<WarningList>`` signal PubMed volunteered — the
-      authoritative "a phrase/field was not found" (surfaced at *any* count, since
-      PubMed reporting it means it dropped part of the query);
     * a top-level ``<ERROR>`` if the whole request was rejected;
-    * when the count is zero **and a filter was applied** but PubMed volunteered no
-      signal, a line naming the ``--year``/``--mesh`` filters and stating that a
-      nonexistent MeSH term produces precisely this quiet zero.
+    * every *diagnostic* ``<ErrorList>``/``<WarningList>`` signal PubMed volunteered —
+      the authoritative "a phrase/field was not found" (surfaced at *any* count, since
+      PubMed reporting it means it dropped part of the query). ``OutputMessage`` is
+      excluded **at a zero count**: NCBI attaches it to every zero, so there it is the
+      boilerplate companion of the count rather than a diagnostic, and repeating it
+      adds nothing the count did not already say. At a non-zero count it is surfaced
+      like any other signal (see ``_BOILERPLATE_SIGNALS``);
+    * whenever the count is zero **and a filter was applied**, a line naming the
+      ``--year``/``--mesh`` filters and stating that a nonexistent MeSH term produces
+      precisely this quiet zero — appended *after* any diagnostic line, since a
+      nonexistent term yields both. The only exception is a top-level ``<ERROR>``,
+      where the count itself cannot be trusted.
 
-    An honest empty set — zero results, no filter, no PubMed signal — yields ``[]``,
+    An honest empty set — zero results, no filter, no diagnostic signal — yields ``[]``,
     so a plain "0 results" is left to stand. Pure: the caller writes these to
     stderr.
     """
     lines: list[str] = []
     if result.top_level_error:
         lines.append(f"PubMed rejected the request: {result.top_level_error}")
-    for tag, text in result.errors:
-        lines.append(_signal_line(tag, text))
-    for tag, text in result.warnings:
+    for tag, text in (*result.errors, *result.warnings):
+        # Boilerplate only *because* the count is zero. Should NCBI ever attach an
+        # OutputMessage to a non-zero response it is telling us something the count
+        # does not, so it is surfaced — suppressing it unconditionally would re-open
+        # the swallowed-diagnostic failure mode #167 exists to close.
+        if tag in _BOILERPLATE_SIGNALS and result.count == 0:
+            continue
         lines.append(_signal_line(tag, text))
 
     mesh = tuple(mesh or ())
-    if result.count == 0 and not lines and (year or mesh):
+    if result.count == 0 and (year or mesh) and not result.top_level_error:
         applied: list[str] = []
         if mesh:
             applied.append("MeSH term(s) " + ", ".join(repr(m) for m in mesh))

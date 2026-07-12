@@ -125,10 +125,13 @@ factlog는 세 겹으로 막습니다.
 2. **PubMed 자신의 신호를 그대로 표면화.** PubMed는 매핑하지 못한 구/필드를
    `<ErrorList>`/`<WarningList>`(`PhraseNotFound`, `QuotedPhraseNotFound`, `FieldNotFound`)로
    알려 줍니다. 이 신호를 stderr로 그대로 올립니다 — 존재하지 않는 MeSH 텀은 정확히
-   `PhraseNotFound` 를 냅니다.
-3. **필터를 쓴 0건은 표면화.** `--year`/`--mesh` 를 걸었는데 0건이면, PubMed가 아무 신호를
-   주지 않아도, 어떤 필터가 0으로 좁혔는지 말하고 "존재하지 않는 MeSH 텀이 바로 이 조용한
-   0건을 낸다"고 안내합니다.
+   `PhraseNotFound` 를 냅니다. 다만 NCBI는 **모든** 0건 응답에
+   `OutputMessage: No items found.` 를 얹습니다. 이것은 PubMed가 자발적으로 준 진단이 아니라
+   0건의 정형 동반 문구이고 "Found 0 results." 가 이미 말한 것 이상을 말하지 않으므로,
+   표면화 대상에서 제외합니다(태그 이름으로만 판정합니다).
+3. **필터를 쓴 0건은 표면화.** `--year`/`--mesh` 를 걸었는데 0건이면, 진단 신호가 있든 없든
+   항상 어떤 필터가 0으로 좁혔는지 말하고 "존재하지 않는 MeSH 텀이 바로 이 조용한 0건을
+   낸다"고 안내합니다. 존재하지 않는 MeSH 텀은 진단 신호와 필터 안내가 함께 나옵니다.
 
 필터도 신호도 없는 진짜 빈 결과(0건)는 그대로 "Found 0 results." 로 둡니다 — 정직한 0건까지
 경고로 시끄럽게 만들지 않습니다.
