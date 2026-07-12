@@ -33,9 +33,16 @@ def test_the_old_findall_would_have_split_this():
     assert "size 5\" bolt" in policy_string_literals(prog)  # the fix: it is present
 
 
-def test_an_unterminated_string_is_skipped_not_crashed():
-    # the engine would reject the program; extraction must not raise
-    assert policy_string_literals('r("open) :- x.') == []
+def test_an_unterminated_string_raises():
+    # The shared lexer is strict for policy text: an unterminated literal means the
+    # engine would reject the whole program, and load_logic_policy runs the reserved-head
+    # guard (same lexer) BEFORE interning, so this raise is reached loudly, not guessed.
+    import pytest
+
+    from factlog.common import FactlogError
+
+    with pytest.raises(FactlogError, match="unterminated string"):
+        policy_string_literals('r("open) :- x.')
 
 
 def test_no_quotes():
@@ -51,3 +58,20 @@ def test_non_json_escapes_are_kept_literal_matching_the_engine():
     # but the two escapes the engine DOES honour are decoded
     assert policy_string_literals('r("a\\" b").') == ['a" b']
     assert policy_string_literals(r'r("C:\\p").') == ["C:\\p"]
+
+
+def test_an_odd_quote_in_a_comment_does_not_shift_the_boundaries():
+    # `// the 5" bolt rule` has an odd quote; the shared lexer skips comments, so the
+    # real literals after it are still found. The old regex paired the comment quote with
+    # a later one and lost them (#250 review).
+    prog = '// the 5" bolt rule\nflagged(X, "real") :- relation(X, "s", "a").'
+    assert policy_string_literals(prog) == ["real", "s", "a"]
+
+
+def test_quoted_constants_shares_the_lexer():
+    from factlog.common import _quoted_constants
+
+    # an escaped quote inside a review_required question is decoded, not truncated
+    assert _quoted_constants('review_required("who said \\" hi")?') == ['who said " hi']
+    # a comment marker inside the literal is not a comment
+    assert _quoted_constants('review_required("a # b")?') == ["a # b"]

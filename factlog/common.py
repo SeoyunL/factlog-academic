@@ -1726,6 +1726,69 @@ def _assert_no_alias_collision(specs: dict[str, TypedRelSpec], program_text: str
             )
 
 
+def _scan_policy(text: str, *, strict: bool = True) -> tuple[str, list[str]]:
+    """ONE left-to-right lex of a .dl program, in the engine's order.
+
+    Returns (skeleton, literals):
+      * skeleton -- the text with each string literal replaced by a single space and
+        every //- or #-comment removed. This is the code STRUCTURE the reserved-head
+        guard reads.
+      * literals -- each string literal's VALUE, decoded the way pyrewire decodes it:
+        `\\"` -> `"`, `\\\\` -> `\\`, and every other `\\X` kept as the two literal
+        characters (verified against the engine). This is what run_wirelog pre-interns
+        so decode_wirelog_value can turn an emitted symbol id back into its text.
+
+    One scan with one bit of state, so the guard, the interning, and _quoted_constants
+    tokenize a policy the same way the engine does. Three parsers drifting -- a regex
+    that split a literal at `\\"`, another that missed a `//` comment, a third that
+    over-decoded `\\n` -- is what kept #226/#250 reopening.
+
+    *strict* raises FactlogError on an unterminated string (the engine rejects it too);
+    a per-line query caller passes strict=False and takes what closed.
+    """
+    skeleton: list[str] = []
+    literals: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            chars: list[str] = []
+            j = i + 1
+            closed = False
+            while j < n:
+                c = text[j]
+                if c == "\\" and j + 1 < n:
+                    nxt = text[j + 1]
+                    chars.append(nxt if nxt in '"\\' else "\\" + nxt)
+                    j += 2
+                    continue
+                if c == '"':
+                    closed = True
+                    break
+                if c == "\n":
+                    break  # a literal must close on the line it opens
+                chars.append(c)
+                j += 1
+            if not closed:
+                if strict:
+                    raise FactlogError(
+                        "unterminated string literal in logic-policy(.extra).dl; a "
+                        "quoted value must close on the line it opens"
+                    )
+                break
+            literals.append("".join(chars))
+            skeleton.append(" ")  # the literal's content is not code
+            i = j + 1
+            continue
+        if text.startswith("//", i) or ch == "#":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        skeleton.append(ch)
+        i += 1
+    return "".join(skeleton), literals
+
+
 def _assert_no_canonical_head(policy_text: str) -> None:
     """Raise FactlogError if the policy heads a reserved ENGINE EDB predicate.
 
@@ -1775,54 +1838,11 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     # line with a preceding rule's terminator as an in-body reference (#261); a
     # statement is a full clause, so canonical-left-of-neck (or no neck at all)
     # is unambiguously a head/fact.
-    # ONE left-to-right lex, in the engine's order. Two regex passes did not work in
-    # either order: stripping comments first left a `//` inside a reason string looking
-    # like a comment, and stripping quotes first let an ODD `"` inside a comment pair up
-    # with a quote on a LATER line and delete everything between -- including a reserved
-    # head. Both orders let a policy nullify the filter with rc=0. A single scan with one
-    # bit of state cannot disagree with itself.
-    out: list[str] = []
-    in_string = False
-    i = 0
-    while i < len(policy_text):
-        ch = policy_text[i]
-        if in_string:
-            if ch == "\\":
-                # A backslash escapes the next char, `\"` included. pyrewire 1.0.3+
-                # supports these (see MIN_PYREWIRE_VERSION), and generate_logic_policy
-                # emits them via dl_string, so a reason like "size 5\" bolt" is a
-                # closed string the engine parses -- treating the escaped quote as a
-                # terminator rejected policies factlog itself generates.
-                i += 2
-                continue
-            if ch == '"':
-                in_string = False
-            elif ch == "\n":
-                # The engine cannot parse an unterminated string either. Fail loudly
-                # rather than guess at what the rest of the file means.
-                raise FactlogError(
-                    "unterminated string literal in logic-policy(.extra).dl; a quoted "
-                    "value must close on the line it opens"
-                )
-            i += 1
-            continue
-        if ch == '"':
-            in_string = True
-            out.append(" ")  # the literal's content is not code
-            i += 1
-            continue
-        if policy_text.startswith("//", i) or ch == "#":
-            while i < len(policy_text) and policy_text[i] != "\n":
-                i += 1
-            continue
-        out.append(ch)
-        i += 1
-    if in_string:
-        raise FactlogError(
-            "unterminated string literal in logic-policy(.extra).dl; a quoted value "
-            "must close on the line it opens"
-        )
-    bare = "\n".join(line for line in "".join(out).splitlines() if line.strip())
+    # ONE shared lex, so the guard and the interning tokenize the policy identically
+    # (three parsers drifting is what reopened #226/#250). The skeleton has each string
+    # literal replaced by a space and comments removed.
+    skeleton, _ = _scan_policy(policy_text)
+    bare = "\n".join(line for line in skeleton.splitlines() if line.strip())
 
     for name in re.findall(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)", bare):
         if name in _SOURCES:
@@ -2408,44 +2428,15 @@ def _attr_rel_facts(accepted: list[dict[str, str]] | None = None) -> str:
 
 
 def policy_string_literals(text: str) -> list[str]:
-    """Every quoted string literal in a .dl program, ESCAPE-DECODED to its real value.
+    """Every quoted string literal in a .dl program, escape-decoded to its real value.
 
-    `re.findall(r'"([^"]+)"', ...)` cut a literal at the first `\\"` -- so
-    `"size 5\\" bolt"` split into `size 5\\` and ` bolt`, and neither is the symbol
-    the engine stores. run_wirelog pre-interns these so decode_wirelog_value can turn an
-    engine-emitted symbol id back into its string; interning the wrong pieces left the
-    real symbol out, and a policy finding whose reason held an escaped quote printed as a
-    bare integer instead of its text (#250).
-
-    A `\\`-aware scan finds the token boundaries (a `\\"` does not close the string).
-    Decoding then matches the ENGINE, not JSON: verified against pyrewire, it un-escapes
-    ONLY `\\"` -> `"` and `\\\\` -> `\\`, and leaves every other `\\X` (`\\n`, `\\t`, `\\/`, ...)
-    as the two literal characters -- the engine stores `a\\nb` as backslash-n-b, not a
-    newline. json.loads would over-decode those and re-create the very id/symbol mismatch
-    this fix exists to remove (#250).
+    Thin wrapper over the shared _scan_policy lexer so interning tokenizes the policy the
+    same way the reserved-head guard and the engine do -- a private regex here split a
+    literal at `\\"`, then missed `//` comments, then over-decoded `\\n`, each reopening
+    #250. run_wirelog pre-interns these so decode_wirelog_value turns an engine-emitted
+    symbol id back into its text.
     """
-    out: list[str] = []
-    i, n = 0, len(text)
-    while i < n:
-        if text[i] != '"':
-            i += 1
-            continue
-        j = i + 1
-        chars: list[str] = []
-        while j < n and text[j] != '"':
-            if text[j] == "\\" and j + 1 < n:
-                nxt = text[j + 1]
-                chars.append(nxt if nxt in '"\\' else "\\" + nxt)
-                j += 2
-            else:
-                chars.append(text[j])
-                j += 1
-        if j >= n:  # unterminated -- the engine would reject the program
-            break
-        out.append("".join(chars))
-        i = j + 1
-    return out
-
+    return _scan_policy(text)[1]
 
 def decode_wirelog_value(session: EasySession, value: object) -> object:
     """Resolve a wirelog integer ID back to its interned symbol string.
@@ -2689,7 +2680,11 @@ def _is_valid_arg(arg: str) -> bool:
 
 
 def _quoted_constants(line: str) -> list[str]:
-    return re.findall(r'"([^"]+)"', line)
+    # Shared lexer, not a regex: an escaped quote in a review_required question
+    # (`review_required("who said \\" hi")?`) split the old findall at `\\"`, so the
+    # report showed a truncated question and the arity check could miscount (#250).
+    # strict=False: a malformed query line is surfaced by validate_query, not a crash.
+    return _scan_policy(line, strict=False)[1]
 
 
 # Public query-parsing API -----------------------------------------------------
