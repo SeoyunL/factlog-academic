@@ -50,6 +50,26 @@ def _esearch(count=0, ids=(), query_translation=None, errors=(), warnings=()):
     return f"<eSearchResult>{''.join(parts)}</eSearchResult>"
 
 
+# What NCBI actually sends for *every* zero: the count, and boilerplate. A zero-count
+# esearch body without it is a shape PubMed never returns (#271).
+_NCBI_ZERO_BOILERPLATE = [("OutputMessage", "No items found.")]
+
+# A live capture: `sepsis` + the valid MeSH descriptor `Sepsis` + year 1810 — a real
+# filter that legitimately narrows to zero, carrying no diagnostic, only boilerplate.
+# The issue's reproduction command replayed through the CLI.
+_LIVE_VALID_MESH_ZERO = (
+    "<eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/>"
+    "<TranslationSet><Translation>     <From>sepsis</From>     "
+    '<To>"sepsis"[MeSH Terms] OR "sepsis"[All Fields]</To>    </Translation>'
+    "<Translation>     <From>Sepsis[MeSH Terms]</From>     "
+    '<To>"sepsis"[MeSH Terms]</To>    </Translation></TranslationSet>'
+    '<QueryTranslation>("sepsis"[MeSH Terms] OR "sepsis"[All Fields]) AND '
+    '"sepsis"[MeSH Terms] AND 1810/01/01:1810/12/31[Date - Publication]'
+    "</QueryTranslation><WarningList><OutputMessage>No items found.</OutputMessage>"
+    "</WarningList></eSearchResult>"
+)
+
+
 def _article(pmid, title="A paper", retracted=False):
     retr = (
         "<CommentsCorrectionsList><CommentsCorrections RefType='RetractionIn'>"
@@ -170,8 +190,13 @@ class TestFieldTagRejection:
 
 class TestSilentZeroGuard:
     def test_nonexistent_mesh_term_surfaces_a_warning_not_bare_zero(self, tmp_path, fake, capsys):
-        fake(FakePubMedClient(
-            esearch_body=_esearch(count=0, errors=[("PhraseNotFound", "notamesh")])))
+        # The real body: PhraseNotFound *and* the boilerplate every zero carries. Both
+        # the diagnostic and the filter line are owed; the boilerplate is not.
+        fake(FakePubMedClient(esearch_body=_esearch(
+            count=0,
+            errors=[("PhraseNotFound", "notamesh")],
+            warnings=_NCBI_ZERO_BOILERPLATE,
+        )))
         rc = run(["pubmed-search", "--query", "cancer", "--mesh", "notamesh",
                   "--target", str(_kb(tmp_path))])
         assert rc == 0
@@ -179,29 +204,53 @@ class TestSilentZeroGuard:
         assert "Found 0 results." in captured.out
         assert "notamesh" in captured.err
         assert "nonexistent MeSH term" in captured.err
+        assert "filter was applied" in captured.err
+        assert "OutputMessage" not in captured.err
 
-    def test_filtered_zero_is_surfaced_even_without_a_pubmed_signal(self, tmp_path, fake, capsys):
-        fake(FakePubMedClient(esearch_body=_esearch(count=0)))
+    def test_filtered_zero_names_the_filter_through_ncbi_boilerplate(self, tmp_path, fake, capsys):
+        fake(FakePubMedClient(esearch_body=_esearch(count=0, warnings=_NCBI_ZERO_BOILERPLATE)))
         rc = run(["pubmed-search", "--query", "cancer", "--year", "2020",
                   "--target", str(_kb(tmp_path))])
         assert rc == 0
         err = capsys.readouterr().err
         assert "filter was applied" in err and "'2020'" in err
+        assert "OutputMessage" not in err
+
+    def test_valid_mesh_filtered_zero_names_the_filter(self, tmp_path, fake, capsys):
+        # The issue's own reproduction (#271), replayed end-to-end through the CLI with
+        # the body NCBI actually returned: a valid MeSH term filtered to zero carries no
+        # diagnostic, only boilerplate — the filter line must still reach the operator.
+        fake(FakePubMedClient(esearch_body=_LIVE_VALID_MESH_ZERO))
+        rc = run(["pubmed-search", "--query", "sepsis", "--mesh", "Sepsis",
+                  "--year", "1810", "--target", str(_kb(tmp_path))])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Found 0 results." in captured.out
+        assert "filter was applied" in captured.err
+        assert "'Sepsis'" in captured.err and "'1810'" in captured.err
+        assert "OutputMessage" not in captured.err
+        assert "No items found" not in captured.err
 
     def test_honest_empty_set_prints_no_guard_warning(self, tmp_path, fake, capsys):
-        fake(FakePubMedClient(esearch_body=_esearch(count=0)))
+        # No filter, no diagnostic — only the boilerplate every zero carries. Neither the
+        # guard nor the boilerplate may make a plain "0 results" noisy.
+        fake(FakePubMedClient(esearch_body=_esearch(count=0, warnings=_NCBI_ZERO_BOILERPLATE)))
         rc = run(["pubmed-search", "--query", "asdfqwerzxcv", "--target", str(_kb(tmp_path))])
         assert rc == 0
         captured = capsys.readouterr()
         assert "Found 0 results." in captured.out
         assert "filter was applied" not in captured.err
         assert "nonexistent MeSH" not in captured.err
+        assert "OutputMessage" not in captured.err
 
     def test_zero_results_still_surfaces_the_query_translation(self, tmp_path, fake, capsys):
         # A zero is where "how did PubMed read my words" matters most; the
         # QueryTranslation must not be hidden by the empty-result early return.
-        fake(FakePubMedClient(
-            esearch_body=_esearch(count=0, query_translation="asdfqwerzxcv[All Fields]")))
+        fake(FakePubMedClient(esearch_body=_esearch(
+            count=0,
+            query_translation="asdfqwerzxcv[All Fields]",
+            warnings=_NCBI_ZERO_BOILERPLATE,
+        )))
         rc = run(["pubmed-search", "--query", "asdfqwerzxcv", "--target", str(_kb(tmp_path))])
         assert rc == 0
         out = capsys.readouterr().out

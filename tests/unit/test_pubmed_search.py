@@ -4,8 +4,10 @@
 Pure functions over strings and an ``esearch`` XML body — no network. The fixtures
 are shaped like the ``eSearchResult`` envelope E-utilities returns, including the
 ``ErrorList``/``WarningList`` PubMed volunteers when it cannot map a phrase or
-field. No live capture was run (network-free by design, like the client tests);
-the fixtures follow E-utilities' documented esearch envelope.
+field. The tests take no network, but the zero-count fixtures are *captured* response
+bodies, not bodies inferred from E-utilities' documented envelope: following the
+documentation alone is precisely what produced #271's drift — the docs never say a
+zero always arrives with an ``<OutputMessage>``, and every real one does.
 """
 from __future__ import annotations
 
@@ -151,6 +153,27 @@ def _esearch(count=0, ids=(), query_translation=None, errors=(), warnings=(),
     return f"<eSearchResult>{body}</eSearchResult>"
 
 
+# What NCBI actually sends for *every* zero: the count, and boilerplate. A zero-count
+# body without it is a shape PubMed never returns (#271).
+_NCBI_ZERO_BOILERPLATE = [("OutputMessage", "No items found.")]
+
+# A live capture: `sepsis` + a valid MeSH descriptor `Sepsis` + year 1810 — a real
+# filter that legitimately narrows to zero. Kept as the raw body NCBI returned so the
+# guard is asserted against what PubMed sends, not against a synthetic shape that
+# omits the boilerplate every zero carries.
+_LIVE_VALID_MESH_ZERO = (
+    "<eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/>"
+    "<TranslationSet><Translation>     <From>sepsis</From>     "
+    '<To>"sepsis"[MeSH Terms] OR "sepsis"[All Fields]</To>    </Translation>'
+    "<Translation>     <From>Sepsis[MeSH Terms]</From>     "
+    '<To>"sepsis"[MeSH Terms]</To>    </Translation></TranslationSet>'
+    '<QueryTranslation>("sepsis"[MeSH Terms] OR "sepsis"[All Fields]) AND '
+    '"sepsis"[MeSH Terms] AND 1810/01/01:1810/12/31[Date - Publication]'
+    "</QueryTranslation><WarningList><OutputMessage>No items found.</OutputMessage>"
+    "</WarningList></eSearchResult>"
+)
+
+
 class TestParseEsearch:
     def test_count_and_ids(self):
         r = parse_esearch(_esearch(count=3, ids=("1", "2", "3")))
@@ -188,26 +211,6 @@ class TestParseEsearch:
 
 
 # -- the silent-zero guard --------------------------------------------------
-
-# What NCBI actually sends for *every* zero: the count, and boilerplate.
-_NCBI_ZERO_BOILERPLATE = [("OutputMessage", "No items found.")]
-
-# A live capture: `sepsis` + a valid MeSH descriptor `Sepsis` + year 1810 — a real
-# filter that legitimately narrows to zero. Kept as the raw body NCBI returned so the
-# guard is asserted against what PubMed sends, not against a synthetic shape that
-# omits the boilerplate every zero carries (#271).
-_LIVE_VALID_MESH_ZERO = (
-    "<eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/>"
-    "<TranslationSet><Translation>     <From>sepsis</From>     "
-    '<To>"sepsis"[MeSH Terms] OR "sepsis"[All Fields]</To>    </Translation>'
-    "<Translation>     <From>Sepsis[MeSH Terms]</From>     "
-    '<To>"sepsis"[MeSH Terms]</To>    </Translation></TranslationSet>'
-    '<QueryTranslation>("sepsis"[MeSH Terms] OR "sepsis"[All Fields]) AND '
-    '"sepsis"[MeSH Terms] AND 1810/01/01:1810/12/31[Date - Publication]'
-    "</QueryTranslation><WarningList><OutputMessage>No items found.</OutputMessage>"
-    "</WarningList></eSearchResult>"
-)
-
 
 class TestSilentZeroGuard:
     def test_nonexistent_mesh_term_surfaces_phrase_not_found(self):
@@ -263,6 +266,16 @@ class TestSilentZeroGuard:
         lines = silent_zero_report(r)
         assert any("zzz qqq" in ln for ln in lines)
         assert not any("OutputMessage" in ln for ln in lines)
+
+    def test_output_message_at_a_nonzero_count_is_surfaced(self):
+        # The counterexample. OutputMessage is boilerplate only *because* the count is
+        # zero. Attached to a non-zero count it would be telling us something the count
+        # does not, so it must not be swallowed — an unconditional suppression would
+        # re-open the very failure mode the guard exists to close.
+        r = parse_esearch(_esearch(
+            count=5, ids=("1",), warnings=[("OutputMessage", "Something unexpected.")]))
+        lines = silent_zero_report(r)
+        assert any("Something unexpected." in ln for ln in lines)
 
     def test_honest_empty_set_stays_silent(self):
         # Zero results, no filter, no diagnostic signal — only the boilerplate every

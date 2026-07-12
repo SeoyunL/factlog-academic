@@ -270,7 +270,10 @@ class EsearchResult:
     ``<ErrorList>``/``<WarningList>`` children verbatim as ``(tag, text)`` pairs:
     a ``PhraseNotFound`` / ``FieldNotFound`` / ``QuotedPhraseNotFound`` is exactly
     how PubMed says a phrase or field could not be mapped, and is the
-    authoritative signal that a zero is not honest.
+    authoritative signal that a zero is not honest. They also carry non-diagnostic
+    boilerplate — a zero always brings an ``OutputMessage`` along — because this is
+    a faithful reduction of the response, not a judgement about it: which signals
+    are diagnostic is decided by :func:`silent_zero_report`, not here.
     """
 
     count: int = 0
@@ -387,9 +390,10 @@ def silent_zero_report(result: EsearchResult, *, year=None, mesh=()) -> list[str
     * every *diagnostic* ``<ErrorList>``/``<WarningList>`` signal PubMed volunteered —
       the authoritative "a phrase/field was not found" (surfaced at *any* count, since
       PubMed reporting it means it dropped part of the query). ``OutputMessage`` is
-      excluded: NCBI attaches it to every zero, so it is the boilerplate companion of
-      a zero rather than a diagnostic, and repeating it adds nothing to the count
-      itself (see ``_BOILERPLATE_SIGNALS``);
+      excluded **at a zero count**: NCBI attaches it to every zero, so there it is the
+      boilerplate companion of the count rather than a diagnostic, and repeating it
+      adds nothing the count did not already say. At a non-zero count it is surfaced
+      like any other signal (see ``_BOILERPLATE_SIGNALS``);
     * whenever the count is zero **and a filter was applied**, a line naming the
       ``--year``/``--mesh`` filters and stating that a nonexistent MeSH term produces
       precisely this quiet zero — appended *after* any diagnostic line, since a
@@ -404,7 +408,11 @@ def silent_zero_report(result: EsearchResult, *, year=None, mesh=()) -> list[str
     if result.top_level_error:
         lines.append(f"PubMed rejected the request: {result.top_level_error}")
     for tag, text in (*result.errors, *result.warnings):
-        if tag in _BOILERPLATE_SIGNALS:
+        # Boilerplate only *because* the count is zero. Should NCBI ever attach an
+        # OutputMessage to a non-zero response it is telling us something the count
+        # does not, so it is surfaced — suppressing it unconditionally would re-open
+        # the swallowed-diagnostic failure mode #167 exists to close.
+        if tag in _BOILERPLATE_SIGNALS and result.count == 0:
             continue
         lines.append(_signal_line(tag, text))
 
