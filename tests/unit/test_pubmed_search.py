@@ -173,6 +173,16 @@ _LIVE_VALID_MESH_ZERO = (
     "</WarningList></eSearchResult>"
 )
 
+# A live capture: `--query qzxwvunonsenseterm`, sent WITHOUT quotes. PubMed quotes the
+# phrase in its own warning; QueryTranslation shows no quotes, so ATM was never off (#272).
+_LIVE_UNQUOTED_NONSENSE_ZERO = (
+    "<eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/>"
+    "<TranslationSet/>"
+    "<QueryTranslation>qzxwvunonsenseterm</QueryTranslation>"
+    "<WarningList><QuotedPhraseNotFound>\"qzxwvunonsenseterm\"</QuotedPhraseNotFound>"
+    "<OutputMessage>No items found.</OutputMessage></WarningList></eSearchResult>"
+)
+
 
 class TestParseEsearch:
     def test_count_and_ids(self):
@@ -225,6 +235,58 @@ class TestSilentZeroGuard:
         r = parse_esearch(_esearch(count=0, warnings=[("QuotedPhraseNotFound", '"foo bar"')]))
         lines = silent_zero_report(r)
         assert any("foo bar" in ln for ln in lines)
+        # Without the query, nothing is known about the user's input — so no prescription
+        # to undo something they may never have done (#272).
+        assert not any("drop the quotes" in ln for ln in lines)
+
+    def test_unquoted_query_is_never_told_to_drop_quotes(self):
+        # The live body: PubMed quoted the phrase in its own warning even though the
+        # query carried no quotes. Advising "drop the quotes" here is unactionable.
+        r = parse_esearch(_LIVE_UNQUOTED_NONSENSE_ZERO)
+        lines = silent_zero_report(r, query="qzxwvunonsenseterm")
+        assert any("qzxwvunonsenseterm" in ln for ln in lines)
+        assert not any("drop the quotes" in ln for ln in lines)
+        assert not any("disables Automatic Term Mapping" in ln for ln in lines)
+
+    def test_quoted_query_keeps_the_atm_advice(self):
+        # The user *did* quote: quoting disables ATM, so the advice is true and useful.
+        r = parse_esearch(_esearch(count=0, warnings=[("QuotedPhraseNotFound", '"gene therapy"')]))
+        lines = silent_zero_report(r, query='"gene therapy"')
+        assert any("disables Automatic Term Mapping" in ln for ln in lines)
+        assert any("drop the quotes" in ln for ln in lines)
+
+    def test_quoted_query_never_denies_that_the_user_quoted(self):
+        # The line must not tell a user who *did* quote that the quotes are PubMed's own
+        # and "do not mean the query was quoted" — that would be, in the quoted branch,
+        # exactly the false assertion about the user's input #272 exists to remove.
+        r = parse_esearch(_esearch(count=0, warnings=[("QuotedPhraseNotFound", '"gene therapy"')]))
+        lines = silent_zero_report(r, query='"gene therapy"')
+        assert lines
+        assert not any("do not mean the query was quoted" in ln for ln in lines)
+        assert not any("PubMed's own" in ln for ln in lines)
+
+    def test_advice_attaches_only_to_the_phrase_the_user_actually_quoted(self):
+        # A query can quote one phrase and leave another bare. The advice is owed only
+        # for the phrase PubMed *named*: telling the operator to unquote `foo` — which
+        # they never quoted — is the original bug wearing a different query.
+        r = parse_esearch(_esearch(count=0, warnings=[("QuotedPhraseNotFound", '"foo"')]))
+        lines = silent_zero_report(r, query='"gene therapy" AND foo')
+        assert any("foo" in ln for ln in lines)
+        assert not any("drop the quotes" in ln for ln in lines)
+
+    def test_advice_attaches_when_the_named_phrase_is_the_quoted_one(self):
+        # Same query, but now PubMed names the phrase the user *did* quote.
+        r = parse_esearch(_esearch(count=0, warnings=[("QuotedPhraseNotFound", '"gene therapy"')]))
+        lines = silent_zero_report(r, query='"gene therapy" AND foo')
+        assert any("drop the quotes" in ln for ln in lines)
+
+    def test_unknown_query_asserts_nothing_about_the_users_input(self):
+        # No query passed: the caller told us nothing, so the line states only the fact
+        # PubMed reported and asserts nothing about what the user typed.
+        r = parse_esearch(_LIVE_UNQUOTED_NONSENSE_ZERO)
+        lines = silent_zero_report(r)
+        assert any("qzxwvunonsenseterm" in ln for ln in lines)
+        assert not any("drop the quotes" in ln for ln in lines)
 
     def test_filtered_zero_names_the_filter_through_ncbi_boilerplate(self):
         # Every real zero carries `OutputMessage: No items found.` The filter line must

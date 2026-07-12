@@ -69,6 +69,16 @@ _LIVE_VALID_MESH_ZERO = (
     "</WarningList></eSearchResult>"
 )
 
+# A live capture: `--query qzxwvunonsenseterm`, sent WITHOUT quotes. PubMed quotes the
+# phrase in its own warning; QueryTranslation shows no quotes, so ATM was never off (#272).
+_LIVE_UNQUOTED_NONSENSE_ZERO = (
+    "<eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/>"
+    "<TranslationSet/>"
+    "<QueryTranslation>qzxwvunonsenseterm</QueryTranslation>"
+    "<WarningList><QuotedPhraseNotFound>\"qzxwvunonsenseterm\"</QuotedPhraseNotFound>"
+    "<OutputMessage>No items found.</OutputMessage></WarningList></eSearchResult>"
+)
+
 
 def _article(pmid, title="A paper", retracted=False):
     retr = (
@@ -242,6 +252,22 @@ class TestSilentZeroGuard:
         assert "filter was applied" not in captured.err
         assert "nonexistent MeSH" not in captured.err
         assert "OutputMessage" not in captured.err
+
+    def test_unquoted_query_is_never_told_to_drop_quotes(self, tmp_path, fake, capsys):
+        # The issue's reproduction (#272), replayed end-to-end with the body NCBI
+        # actually returned for an *unquoted* single token. The CLI must hand the raw
+        # `--query` to the guard — only the request knows whether the user quoted, and
+        # a unit test on the guard alone cannot catch that wiring being missing.
+        fake(FakePubMedClient(esearch_body=_LIVE_UNQUOTED_NONSENSE_ZERO))
+        rc = run(["pubmed-search", "--query", "qzxwvunonsenseterm",
+                  "--target", str(_kb(tmp_path))])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "qzxwvunonsenseterm" in captured.err
+        assert "drop the quotes" not in captured.err
+        assert "disables Automatic Term Mapping" not in captured.err
+        assert "Found 0 results." in captured.out
+        assert "PubMed read the query as: qzxwvunonsenseterm" in captured.out
 
     def test_zero_results_still_surfaces_the_query_translation(self, tmp_path, fake, capsys):
         # A zero is where "how did PubMed read my words" matters most; the
