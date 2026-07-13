@@ -357,10 +357,9 @@ def main() -> None:
     else:
         # The file IS there. Saying "not found" sent users looking for a file they had
         # already written, when the truth was that no line in it produced a result
-        # (#220). Say which.
-        raw = (FACTS_DIR / "query.dl").read_text(encoding="utf-8")
-        lines = [ln.strip() for ln in raw.splitlines()]
-        pending = [ln for ln in lines if ln and not ln.startswith("//")]
+        # (#220). Say which — counting the same lines the validator treats as queries,
+        # so a comment-only file reads as empty rather than as two failed queries.
+        pending = query_lines()
         if not pending:
             report.append("- facts/query.dl is empty (no queries to evaluate)")
         else:

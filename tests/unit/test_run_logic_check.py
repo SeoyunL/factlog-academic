@@ -37,6 +37,37 @@ class TestRelationResultsCommaLiteral:
         assert rows == [("A", "knows", "B")]
 
 
+class TestQueryLines:
+    """What counts as a query in facts/query.dl.
+
+    This filter decides both which lines get validated and — since the report now
+    derives its "empty vs. no result" message from it (#220) — which of those two
+    messages the user reads. A comment-only file must read as EMPTY: telling the
+    user the file "has 2 line(s) but none produced a result" sends them auditing
+    their own comments.
+    """
+
+    def _query_dl(self, tmp_path, monkeypatch, text):
+        facts_dir = tmp_path / "facts"
+        facts_dir.mkdir()
+        (facts_dir / "query.dl").write_text(text, encoding="utf-8")
+        monkeypatch.setattr(rlc, "FACTS_DIR", facts_dir)
+
+    def test_comments_and_blanks_are_not_queries(self, tmp_path, monkeypatch):
+        self._query_dl(
+            tmp_path, monkeypatch, '// a comment\n\n   \nrelation("A", "uses", "B")?\n'
+        )
+        assert rlc.query_lines() == ['relation("A", "uses", "B")?']
+
+    def test_a_comment_only_file_holds_no_queries(self, tmp_path, monkeypatch):
+        self._query_dl(tmp_path, monkeypatch, "// only comments\n// still nothing\n")
+        assert rlc.query_lines() == []
+
+    def test_an_absent_file_holds_no_queries(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(rlc, "FACTS_DIR", tmp_path / "no-such-dir")
+        assert rlc.query_lines() == []
+
+
 def _row(status):
     return {"subject": "A", "relation": "r", "object": "B", "status": status}
 
