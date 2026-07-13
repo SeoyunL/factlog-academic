@@ -99,3 +99,42 @@ class TestStatusWarnings:
         import common
 
         assert {"accepted", "superseded"} <= set(common.KNOWN_STATUSES)
+
+
+class TestPolicyQueryEntityWarning:
+    """A policy query warns about its first argument only when that argument NAMES
+    an entity the engine does not have.
+
+    The guard is a conjunction — quoted AND quoted AND unknown. Relaxing it to a
+    disjunction left the whole suite green, yet it warns on every VARIABLE first
+    argument (a variable is never in `entities`), so `retracted(P, R)?` — the
+    ordinary way to ask the question — would have reported the variable's own name
+    as a "non-engine entity".
+    """
+
+    POLICY = {"retracted"}
+    ENTITIES = {"논문A"}
+
+    def test_a_quoted_unknown_entity_warns(self):
+        errors, warnings = rlc.validate_query(
+            'retracted("논문B", "reason")?', self.ENTITIES, self.POLICY
+        )
+        assert errors == []
+        assert warnings == ["query references non-engine entity: 논문B"]
+
+    def test_a_quoted_known_entity_is_silent(self):
+        errors, warnings = rlc.validate_query(
+            'retracted("논문A", "reason")?', self.ENTITIES, self.POLICY
+        )
+        assert (errors, warnings) == ([], [])
+
+    def test_a_variable_first_argument_claims_no_entity(self):
+        errors, warnings = rlc.validate_query("retracted(P, R)?", self.ENTITIES, self.POLICY)
+        assert (errors, warnings) == ([], [])
+
+    def test_a_policy_query_of_the_wrong_arity_is_an_error_not_a_warning(self):
+        errors, warnings = rlc.validate_query('retracted("논문A")?', self.ENTITIES, self.POLICY)
+        assert errors == [
+            'policy query must have entity and reason arguments: retracted("논문A")?'
+        ]
+        assert warnings == []
