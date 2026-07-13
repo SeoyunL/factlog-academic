@@ -749,6 +749,25 @@ and go to wiki only when **every** attempt fails with a shape/vocabulary `code`
 immediately to a **verified negative** (Step 3a) — the vocabulary is already
 correct, so retrying is pointless.
 
+### Output order — evidence first (applies to Steps 3a and 3b)
+
+The engine's answer exists the moment `render`/`wiki` returns (sub-second);
+do not hold it hostage to your own prose. As soon as the command returns:
+
+1. **First**, output the verbatim block (`VERIFIED — engine` /
+   `UNVERIFIED — wiki exploration`, including any trailing `note:` /
+   `WARNING:` lines) as user-facing text — before any further analysis,
+   synthesis, or tool call.
+2. **Then**, add your synthesis as a separate paragraph *after* the block: a
+   short gloss of 2–4 sentences in the chosen output language (see "Output
+   language" above). The verbatim block is the evidence; the gloss only
+   explains what it means. Do not restate, reformat, translate, or summarise
+   the block's rows.
+
+Never buffer the block behind your full analysis into one final message — the
+user must see the engine's output at the moment it exists, with the
+comprehensive judgment following it.
+
 ### Step 3a — Engine answer (VERIFIED)
 
 ```bash
