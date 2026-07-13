@@ -153,7 +153,7 @@ _PAGE_PLACEHOLDER_RE = re.compile(r"\{\{(ENTITY|SOURCES|RELATIONS|REVIEW)\}\}")
 # (text conversions of binary originals produced by `factlog ingest`). Both are
 # valid `source` locations for extracted facts. Source discovery + text sniffing
 # (source_file_refs, is_text_source) are imported from common above, shared with
-# coverage.py.
+# source_coverage.py.
 
 
 def unconverted_binary_sources(root: Path) -> list[str]:

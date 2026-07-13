@@ -106,11 +106,11 @@ printf 'wip\n' > "$KB/sources/wip.md"
 printf -- '- wip.md\n' >> "$KB/policy/sync-ignore.md"
 printf '[{"subject":"W","relation":"rel","object":"V","source":"sources/wip.md","status":"confirmed","confidence":0.9,"note":""}]\n' > "$KB/runs/wip.json"
 "$PYTHON" tools/merge_candidates.py --wiki "$KB" >/dev/null 2>&1
-out="$("$PYTHON" tools/coverage.py --wiki "$KB" 2>&1)"
+out="$("$PYTHON" tools/source_coverage.py --wiki "$KB" 2>&1)"
 printf '%s' "$out" | grep -qF "1 excluded (sync-ignored)" && ok "coverage: ignored source counted as excluded" || bad "coverage excluded count wrong: $out"
 printf '%s' "$out" | grep -F "wip.md" | grep -qF "[excluded]" && ok "coverage: row tagged [excluded]" || bad "coverage row not tagged"
 printf '%s' "$out" | grep -qiE "GAP .*wip.md" && bad "ignored source wrongly flagged as a gap" || ok "ignored source not flagged as a gap"
-set +e; "$PYTHON" tools/coverage.py --wiki "$KB" --strict >/dev/null 2>&1; rc=$?; set -e
+set +e; "$PYTHON" tools/source_coverage.py --wiki "$KB" --strict >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -eq 0 ] && ok "coverage --strict does not fail on an ignored text source" || bad "--strict failed on ignored source"
 
 # --- an ignored source's existing facts are retained across re-merge -----------

@@ -129,7 +129,7 @@ KB3="$TMP_ROOT/kb3"
 "$PYTHON" -m factlog init --target "$KB3" >/dev/null
 printf '<html><body><p>hi</p></body></html>\n' > "$KB3/sources/page.html"
 
-COV="$(FACTLOG_ROOT="$KB3" "$PYTHON" tools/coverage.py 2>&1 || true)"
+COV="$(FACTLOG_ROOT="$KB3" "$PYTHON" tools/source_coverage.py 2>&1 || true)"
 if printf '%s' "$COV" | grep -q 'GAP (binary, run factlog ingest): sources/page.html'; then
   ok "(g) coverage calls an unconverted container a conversion gap"
 else
@@ -143,7 +143,7 @@ fi
 
 if [ "$have_html" -eq 1 ]; then
   FACTLOG_ROOT="$KB3" "$PYTHON" -m factlog ingest --scan >/dev/null 2>&1 || true
-  COV2="$(FACTLOG_ROOT="$KB3" "$PYTHON" tools/coverage.py 2>&1 || true)"
+  COV2="$(FACTLOG_ROOT="$KB3" "$PYTHON" tools/source_coverage.py 2>&1 || true)"
   if printf '%s' "$COV2" | grep -q '0 binary needing conversion'; then
     ok "(h) coverage clears the conversion gap once converted"
   else

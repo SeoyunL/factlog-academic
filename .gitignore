@@ -6,6 +6,11 @@ __pycache__/
 build/
 dist/
 
+# coverage.py run artifacts — `pytest --cov` works again as of #278
+.coverage
+.coverage.*
+htmlcov/
+
 # Virtual envs
 .venv/
 venv/

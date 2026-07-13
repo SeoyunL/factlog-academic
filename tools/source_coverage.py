@@ -23,7 +23,7 @@ Always exits 0 by default (informational, never blocks the pipeline). With
 surface silent extraction gaps.
 
 Usage:
-    python3 coverage.py [--wiki <kb>] [--strict]
+    python3 source_coverage.py [--wiki <kb>] [--strict]
 """
 
 from __future__ import annotations

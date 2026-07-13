@@ -611,7 +611,7 @@ A free-text wiki cannot tell you what it *failed* to capture. Run the coverage
 critic to surface sources the KB has not extracted any facts from:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/coverage.py" --wiki "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/source_coverage.py" --wiki "$FACTLOG_ROOT"
 ```
 
 It reports, per source file under `sources/` and `runs/sources/`, how many

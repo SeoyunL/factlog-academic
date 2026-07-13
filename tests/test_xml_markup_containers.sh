@@ -20,7 +20,7 @@ printf '<?xml version="1.0"?><root><item>data</item></root>\n' > "$KB/sources/da
 printf '<svg xmlns="http://www.w3.org/2000/svg"><text>cap</text></svg>\n' > "$KB/sources/pic.svg"
 
 # (a) none of the three is offered as an extractable text source
-COV="$(FACTLOG_ROOT="$KB" "$PY" tools/coverage.py --wiki "$KB" 2>&1 || true)"
+COV="$(FACTLOG_ROOT="$KB" "$PY" tools/source_coverage.py --wiki "$KB" 2>&1 || true)"
 printf '%s' "$COV" | grep -q '0 text gap(s)' \
   && ok "(a) coverage reports 0 text gaps — no markup is fed as prose" \
   || bad "(a) coverage still calls a markup file a text source: $COV"

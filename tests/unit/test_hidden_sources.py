@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import common
 import pytest
-from coverage import coverage_rows
+from source_coverage import coverage_rows
 
 from factlog import cli
 

@@ -29,7 +29,7 @@ The sidecar is a sibling *directory* of ``sources/``, never a file inside it::
 
 Placing it outside ``sources/`` is what makes it invisible to source
 enumeration. Every walker either resolves ``common.SOURCE_ROOTS`` (``source_files()``,
-used by ``factlog status``/coverage and ``tools/coverage.py``) or hardcodes the
+used by ``factlog status``/coverage and ``tools/source_coverage.py``) or hardcodes the
 same two names (``factlog sources`` at ``cli.py:745``, the stale-ref audit at
 ``cli.py:2422``). Either way none of them descends into a sibling directory, so a
 sidecar cannot be picked up as a source document — structurally, rather than by a

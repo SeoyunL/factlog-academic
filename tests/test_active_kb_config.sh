@@ -83,7 +83,7 @@ out="$(cd /tmp && "$PYTHON" -m factlog ingest --scan 2>&1 || true)"
 printf '%s' "$out" | grep -qF "target KB $(cd "$KB" && pwd -P) (from config)" && ok "ingest (no --target) targets active KB from another cwd" || bad "ingest did not use active KB: $out"
 
 # --- a tool (coverage) with no --wiki uses active KB -------------------------
-out="$(cd /tmp && "$PYTHON" "$PLUGIN_ROOT/tools/coverage.py" 2>&1 || true)"
+out="$(cd /tmp && "$PYTHON" "$PLUGIN_ROOT/tools/source_coverage.py" 2>&1 || true)"
 printf '%s' "$out" | grep -qF "sources/c.bin.docx" && ok "coverage (no --wiki) uses active KB" || bad "coverage did not use active KB: $out"
 
 # --- factlog use switches active KB ------------------------------------------

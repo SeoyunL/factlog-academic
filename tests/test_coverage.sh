@@ -21,7 +21,7 @@ export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB conf
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON="${PYTHON:-python3}"
-COV="$PLUGIN_ROOT/tools/coverage.py"
+COV="$PLUGIN_ROOT/tools/source_coverage.py"
 HEADER="subject,relation,object,source,status,confidence,note"
 
 pass=0
