@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import unicodedata
 from pathlib import Path
 
 _TOOLS_DIR = Path(__file__).parent
@@ -64,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     if single_valued:
         competing: dict[tuple[str, str], dict[str, int]] = {}
         for row in engine_facts(facts):
-            if row["relation"] in single_valued:
+            # single_valued is loaded NFC-normalized; the fact relation may be NFD.
+            # Fold the membership probe so an NFD-authored fact still competes (#293).
+            if unicodedata.normalize("NFC", row["relation"]) in single_valued:
                 competing.setdefault((row["subject"], row["relation"]), {})
                 key = row["object"]
                 competing[(row["subject"], row["relation"])][key] = counts.get(
