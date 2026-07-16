@@ -2312,10 +2312,23 @@ def path_query_rows(
     # two would drift -- which is the bug this function exists to end. Both callers (the
     # report and the ask router) run the engine and pass its answer.
     reachable = pairs
+    # The engine interns accepted.dl VERBATIM (an NFD-authored entity stays NFD in its
+    # path/2 pairs), but a query constant may be NFC -- so a raw compare missed, and
+    # #296's value-chokepoint fold never reached here (path decides membership against
+    # the engine pairs, not through _canonical_value). Fold BOTH the engine pair and the
+    # query constant to their canonical form at the comparison, keeping the engine pair
+    # as the truth of reachability and RENDERING the stored (verbatim) pair for
+    # provenance (#299). NFC-only data folds to itself, so the answer is unchanged.
     if all(is_quoted_string(a) for a in args):
-        start, target = arg_value(args[0]), arg_value(args[1])
-        if (start, target) not in reachable:
+        want = (canonical_value(arg_value(args[0])), canonical_value(arg_value(args[1])))
+        # canonical pair -> its stored spelling; setdefault over sorted() keeps the
+        # lexicographically smallest stored pair when several fold to one canonical.
+        stored_of: dict[tuple[str, str], tuple[str, str]] = {}
+        for (a, b) in sorted(reachable):
+            stored_of.setdefault((canonical_value(a), canonical_value(b)), (a, b))
+        if want not in stored_of:
             return []
+        start, target = stored_of[want]
         route = dependency_path(facts, start, target)
         # Reachable per the truth set but with no route through the accepted facts: a
         # policy rule in logic-policy.extra.dl put the edge there. Report the pair, not
@@ -2328,8 +2341,8 @@ def path_query_rows(
     return [
         [start, target]
         for (start, target) in sorted(reachable)
-        if (is_variable(args[0]) or arg_value(args[0]) == start)
-        and (is_variable(args[1]) or arg_value(args[1]) == target)
+        if (is_variable(args[0]) or canonical_value(arg_value(args[0])) == canonical_value(start))
+        and (is_variable(args[1]) or canonical_value(arg_value(args[1])) == canonical_value(target))
         and (not same_var or start == target)
     ]
 
@@ -2341,6 +2354,17 @@ def dependency_path(
     attr_forms: set[str] | None = None,
 ) -> list[str]:
     graph = dependency_graph(facts, attr_forms)
+    # The graph nodes are stored (verbatim) entity strings; a query endpoint may be
+    # NFC while the fact was authored NFD. Resolve each endpoint to its stored
+    # spelling (min when several share a canonical form) so the BFS compares
+    # stored-to-stored -- the graph is self-consistent -- and the rendered path
+    # carries the stored (verbatim) nodes, matching the engine's interned pairs
+    # (#299). NFC-only data resolves each node to itself, so nothing moves.
+    stored_of: dict[str, str] = {}
+    for node in sorted(set(graph) | {o for outs in graph.values() for o in outs}):
+        stored_of.setdefault(canonical_value(node), node)
+    start = stored_of.get(canonical_value(start), start)
+    target = stored_of.get(canonical_value(target), target)
     # The engine defines path/2 only over edges (path(S,O):-edge(S,O) / :-edge(S,M),
     # path(M,O)), so a path requires >= 1 edge: match `target` only AFTER at least
     # one hop. This makes a reflexive path("X","X") a verified negative unless a real
@@ -2953,7 +2977,11 @@ def classify_query(
         if not all(_is_valid_arg(arg) for arg in args):
             return False, QUERY_MALFORMED, "path arguments must be variables or quoted strings"
         for arg in args:
-            if not _is_variable(arg) and _arg_value(arg) not in entities:
+            # Same fold the matcher (path_query_rows/dependency_path) now applies, so
+            # the gate and the matcher agree on an NFD-stored entity vs an NFC query
+            # constant -- the gate/matcher parity #296 restored for relation/count,
+            # now for path too (#299). entities_c was folded once at the top.
+            if not _is_variable(arg) and canonical_value(_arg_value(arg)) not in entities_c:
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(arg)}"
         if all(_is_quoted_string(arg) for arg in args) and not dependency_path(facts, _arg_value(args[0]), _arg_value(args[1])):
             return False, QUERY_FACT_ABSENT, "path query does not match accepted facts"
