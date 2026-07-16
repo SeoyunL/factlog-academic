@@ -32,12 +32,18 @@ class TestReflexivePathIsNegative:
     def test_dependency_path_no_trivial_self_path_on_interior(self):
         assert common.dependency_path(_linear(), "claude", "claude") == []
 
-    def test_classify_reflexive_is_fact_absent(self):
+    def test_classify_reflexive_passes_the_vocabulary_gate(self):
+        # #303: the gate no longer re-derives reachability (it has no engine pairs and
+        # its python mirror cannot see policy edges). A reflexive query over an accepted
+        # entity now passes the gate as QUERY_OK -- the verified NEGATIVE is the engine's
+        # own empty result, asserted by the sibling below via ask_router.evaluate.
         ok, code, _ = common.classify_query('path("server","server")?', _linear())
-        assert code == common.QUERY_FACT_ABSENT
-        assert ok is False
+        assert code == common.QUERY_OK
+        assert ok is True
 
     def test_ask_router_reflexive_count_zero(self):
+        # This is where #256's guarantee now lives: the ENGINE emits no reflexive path
+        # without a real cycle, so evaluate() returns 0 rows -- a verified negative.
         import ask_router
 
         assert ask_router.evaluate('path("server","server")?', _linear())["count"] == 0

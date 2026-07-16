@@ -4,7 +4,11 @@
 # Proves the reason-class routing and relation evaluation of tools/ask_router.py:
 #   - matching relation            -> route=engine, negative=false
 #   - accepted vocab, fact absent  -> route=engine, negative=TRUE (verified
-#                                     negative — NEVER wiki)
+#                                     negative — NEVER wiki). RELATION only: since
+#                                     #303 a path query's reachability is the
+#                                     engine's call, so the gate never flags a path
+#                                     negative — a path verified-negative is the
+#                                     engine's empty render, not a classify flag.
 #   - unknown entity/predicate/no '?' -> route=wiki
 #   - review_required predicate    -> route=wiki
 #   - works with NO compiled policy (fresh KB), i.e. no hard exit
@@ -81,9 +85,19 @@ if printf '%s' "$neg" | grep -qF "VERIFIED — engine" && printf '%s' "$neg" | g
 # --- path routing & verified-negative (renderable for any predicate) ---
 check_field "reachable path routes engine" validate 'path("Acme API", "FastAPI")?' route engine
 check_field "unreachable path = verified negative (engine)" validate 'path("Postgres", "FastAPI")?' route engine
-check_field "unreachable path flagged negative" validate 'path("Postgres", "FastAPI")?' negative True
-pneg="$(router render 'path("Postgres", "FastAPI")?')"
-if printf '%s' "$pneg" | grep -qF "VERIFIED — engine" && printf '%s' "$pneg" | grep -qF "verified negative"; then ok "path verified-negative renders as an engine answer (not deferred/wiki)"; else bad "path verified-negative not rendered as engine answer"; fi
+# #303: the gate no longer re-derives path reachability (it has no engine pairs and
+# its python graph is a mirror the engine's fixpoint may outrun), so a path query is
+# not flagged negative at classify time -- classify.negative is False. The verified
+# NEGATIVE is proven at RENDER time by the engine's own empty result (see the render
+# assertion below, which is unchanged). relation queries still flag negative via the
+# gate's FACT_ABSENT (that path keeps a match-count check), so L58 above is untouched.
+check_field "unreachable path not flagged negative by the gate (#303: engine decides)" validate 'path("Postgres", "FastAPI")?' negative False
+# The path verified-negative RENDER assertion moved into the pyrewire guard below:
+# since #303 the gate no longer approximates path reachability, so a path negative is
+# proven by RUNNING the engine (evaluate -> run_wirelog), not by a gate shortcut. The
+# old code emitted "VERIFIED — engine" here WITHOUT the engine, which was itself
+# dishonest; with no pyrewire the answer now degrades to a wiki directive (the correct
+# "cannot verify" outcome), so the assertion belongs where the engine is available.
 
 # --- #193: uncompiled-but-authored policy warns (no silent ignore) ---
 # ask mirrors /factlog check's detection: logic-policy.dl absent + logic-policy.md
@@ -240,6 +254,12 @@ rm -f "$KB/sources/ko.md"
 if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in pyrewire.__version__.split('.')[:3]) >= (1,0,1) else 1)" >/dev/null 2>&1; then
   ppos="$(router render 'path("Acme API", "FastAPI")?')"
   if printf '%s' "$ppos" | grep -qF "VERIFIED — engine" && printf '%s' "$ppos" | grep -qF "Acme API, FastAPI"; then ok "path positive renders the dependency path as an engine answer"; else bad "path positive not rendered"; fi
+  # #303: a path verified-negative is proven by the engine's own empty result, so its
+  # render needs pyrewire (evaluate -> run_wirelog). With the engine present it renders
+  # the VERIFIED — engine verified-negative block; without it, cmd_render degrades to a
+  # wiki directive, which is why this assertion lives inside the guard.
+  pneg="$(router render 'path("Postgres", "FastAPI")?')"
+  if printf '%s' "$pneg" | grep -qF "VERIFIED — engine" && printf '%s' "$pneg" | grep -qF "verified negative"; then ok "path verified-negative renders as an engine answer (not deferred/wiki)"; else bad "path verified-negative not rendered as engine answer"; fi
   check_field "path with a variable enumerates reachable pairs" evaluate 'path("Acme API", T)?' count 2
 
   # policy-predicate evaluation needs pyrewire (run_wirelog). Compile a tiny policy first.
