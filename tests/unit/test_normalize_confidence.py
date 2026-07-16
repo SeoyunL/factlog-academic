@@ -6,7 +6,7 @@ import factlog.common as fcommon
 import pytest
 
 
-@pytest.mark.parametrize("value", ["nan", "NaN", "inf", "Inf", "-inf", "infinity", "-infinity"])
+@pytest.mark.parametrize("value", ["nan", "NaN", " nan ", "inf", "Inf", "-inf", "infinity", "-infinity"])
 def test_non_finite_falls_back_to_default(value: str) -> None:
     # Core regression: float() parses these into NaN/±inf, which must not leak
     # through the clamp as "nan"/"inf" but fall back to the neutral default.
