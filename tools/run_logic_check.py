@@ -209,6 +209,15 @@ def evaluate_queries(
             # a file that was right there -- while `ask` answered the same question
             # (#220). Shared with the ask router so the two cannot diverge (#213).
             args = query_args(line)
+            # A malformed query is not a verified negative. Without this guard a
+            # 1-arg or bare-token path query flowed into path_query_rows and the
+            # report answered it with "path results: 0 rows" -- a VERIFIED NEGATIVE --
+            # for a query validate_query (and the ask gate) reject as malformed
+            # (#284). Same criterion as validate_query's path branch (L165, L168);
+            # run before path_query_rows so malformed args never reach it.
+            if len(args) != 2 or not all(is_variable(a) or is_quoted_string(a) for a in args):
+                results.append("path query malformed — see Errors above")
+                continue
             # The ENGINE decides what is reachable; python only renders the route. The
             # first cut let the python closure decide, so on a KB with an edge rule in
             # logic-policy.extra.dl the report said "(not found)" about a pair the
@@ -238,8 +247,15 @@ def evaluate_queries(
                 results.append(f"path results: {len(rows)} rows{suffix}")
 
         elif line.startswith("relation"):
-            rows = relation_results(line, facts, hierarchy)
+            # Guard before relation_results, matching validate_query's relation branch
+            # (L151, L157). The matcher treats a bare token as a wildcard, so a 2-arg or
+            # bare-token query used to print "relation results: 0 rows" -- a VERIFIED
+            # NEGATIVE -- for a query the gate rejects as malformed (#284).
             args = query_args(line)
+            if len(args) != 3 or not all(is_variable(a) or is_quoted_string(a) for a in args):
+                results.append("relation query malformed — see Errors above")
+                continue
+            rows = relation_results(line, facts, hierarchy)
             result_values: list[str] = []
             for subject, relation, object_ in rows:
                 bindings = []
