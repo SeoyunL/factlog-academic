@@ -1023,16 +1023,17 @@ def detect_conflicts(
     through verbatim (no normalization), preserving byte-identical behaviour for
     those predicates.
 
-    When *aliases* is ``None`` or ``{}`` the raw relation string is used for
-    grouping and reporting throughout, so an NFD-authored relation name is
-    reported exactly as written (no silent NFC coercion of the displayed name).
-    The one exception is the single-valued MEMBERSHIP gate: both the declared
-    ``single_valued`` set and each fact's ``canon`` are folded to NFC only to test
-    set membership, so a declaration and a fact that disagree on Unicode form
-    (either side NFC or NFD) still match — the case where a policy-loaded (NFC)
-    declaration must catch an NFD-authored fact relation, and its mirror (#285/
-    #210). That fold never touches the grouping key or the reported name —
-    provenance is unchanged (#227).
+    When *aliases* is ``None`` or ``{}`` the relation is grouped on its NFC form,
+    so NFC- and NFD-authored spellings of one relation collapse into a single
+    ``(subject, relation)`` bucket instead of splitting a cross-spelling
+    contradiction across two that each look conflict-free (#295). The reported
+    relation name is NOT silently coerced to NFC: each folded bucket reports the
+    deterministic representative ``min(raw spellings seen)``, so provenance stays a
+    spelling that actually occurs in the data (#227). The single-valued MEMBERSHIP
+    gate likewise folds both the declared ``single_valued`` set and each fact's
+    ``canon`` to NFC, so a declaration and a fact that disagree on Unicode form
+    still match — a policy-loaded (NFC) declaration catching an NFD-authored fact
+    relation, and its mirror (#285/#210).
 
     **Typed-spec lookup (#210):** the ``typed`` dict is keyed by NFC-normalized
     names (``typed_relations`` normalizes at ``common._parse_typed_relations``).
@@ -1051,32 +1052,39 @@ def detect_conflicts(
     # (passed straight to this API), and the fact relation likewise. Only the
     # membership PROBE folds; the grouping key and reported name stay verbatim.
     sv = {unicodedata.normalize("NFC", _canonicalize(r, aliases)) for r in single_valued}
-    # (subject, canonical_relation) -> group key -> set of raw object strings.
+    # (subject, NFC-folded canonical relation) -> group key -> set of raw objects.
     by_key: dict[tuple[str, str], dict[tuple, set[str]]] = {}
+    # Same folded key -> the raw canonical spellings actually seen, so the report
+    # can name a deterministic representative (min) instead of coercing to NFC
+    # (#295 grouping fold, #227 provenance).
+    raw_canons: dict[tuple[str, str], set[str]] = {}
     for row in engine_facts(facts):
         relation = row["relation"]
         canon = _canonicalize(relation, aliases)
+        fcanon = unicodedata.normalize("NFC", canon)
         # Membership folds the fact side to NFC to match the NFC-folded ``sv``
         # above, so an NFD-authored fact relation still matches its declaration
-        # (#285/#210). The grouping and report names below keep ``canon`` verbatim,
-        # preserving provenance (#227).
-        if unicodedata.normalize("NFC", canon) not in sv:
+        # (#285/#210).
+        if fcanon not in sv:
             continue
         obj = row["object"]
         # THE shared lookup rule (NFC + alias fold), same as the projection and the
         # report use -- so a typed spec is found the same way in all three (#244).
         spec = _lookup_typed_spec(relation, typed, aliases)
         key = _group_key(obj, spec)
-        groups = by_key.setdefault((row["subject"], canon), {})
-        groups.setdefault(key, set()).add(obj)
+        gk = (row["subject"], fcanon)
+        by_key.setdefault(gk, {}).setdefault(key, set()).add(obj)
+        raw_canons.setdefault(gk, set()).add(canon)
     conflicts: dict[tuple[str, str], list[str]] = {}
-    for (subject, canon), groups in by_key.items():
+    for (subject, fcanon), groups in by_key.items():
         if len(groups) <= 1:
             continue
         values = sorted(min(raws) for raws in groups.values())
-        if _is_specialisation_chain(values, canon, hierarchy, _lookup_typed_spec(canon, typed, aliases)):
+        # typed and hierarchy dicts are NFC-keyed, so look them up on the folded
+        # name; the reported relation is the deterministic min raw spelling seen.
+        if _is_specialisation_chain(values, fcanon, hierarchy, _lookup_typed_spec(fcanon, typed, aliases)):
             continue
-        conflicts[(subject, canon)] = values
+        conflicts[(subject, min(raw_canons[(subject, fcanon)]))] = values
     return conflicts
 
 

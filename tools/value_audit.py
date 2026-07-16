@@ -142,21 +142,34 @@ def audit(
     Undeclared ⇒ categorical, so a collision is reported as a leak — noisy rather
     than silent, which is the right way to be wrong here.
     """
-    identity = identity_relations or set()
+    # Fold the declared identity set to NFC once so membership is decided on the
+    # canonical form regardless of how the declaration was authored (#295), mirror
+    # of the NFC-folded relation key below.
+    identity = {unicodedata.normalize("NFC", r) for r in (identity_relations or set())}
 
+    # Relations are bucketed on their NFC form so NFC- and NFD-authored spellings of
+    # one relation share a bucket instead of splitting a cross-spelling duplicate
+    # into two silent halves (#295). ``raw_rels`` keeps the spellings actually seen
+    # so the report can name a deterministic representative (min) — provenance (#227).
     by_relation: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     subjects: dict[tuple[str, str], set[str]] = defaultdict(set)
+    raw_rels: dict[str, set[str]] = defaultdict(set)
     for row in facts:
-        by_relation[row["relation"]][row["object"]] += 1
-        subjects[(row["relation"], row["object"])].add(row["subject"])
+        frel = unicodedata.normalize("NFC", row["relation"])
+        by_relation[frel][row["object"]] += 1
+        subjects[(frel, row["object"])].add(row["subject"])
+        raw_rels[frel].add(row["relation"])
 
     splits: list[dict[str, str]] = []
     wrappers: list[dict[str, str]] = []
     placeholders: list[dict[str, str]] = []
     duplicates: list[dict[str, str]] = []
 
-    for relation in sorted(by_relation):
-        values = by_relation[relation]
+    for frel in sorted(by_relation):
+        # frel is the NFC bucket key; rep is the deterministic representative
+        # spelling reported to a human (provenance stays a real occurrence, #227).
+        rep = min(raw_rels[frel])
+        values = by_relation[frel]
         folded: dict[str, list[str]] = defaultdict(list)
         for value in values:
             folded[_fold(value)].append(value)
@@ -165,7 +178,7 @@ def audit(
 
         for value in sorted(values):
             if unicodedata.normalize("NFC", value).strip().casefold() in _PLACEHOLDERS:
-                placeholders.append({"relation": relation, "value": value, "rows": str(values[value])})
+                placeholders.append({"relation": rep, "value": value, "rows": str(values[value])})
                 reported.add(value)
                 continue
             inner = _match_wrapper(value)
@@ -176,12 +189,12 @@ def audit(
             twin = next((v for v in values if v != value and _fold(v) == _fold(inner)), None)
             if twin is not None:
                 splits.append({
-                    "relation": relation, "value": value, "rows": str(values[value]),
+                    "relation": rep, "value": value, "rows": str(values[value]),
                     "twin": twin, "twin_rows": str(values[twin]),
                 })
             else:
                 wrappers.append({
-                    "relation": relation, "value": value, "rows": str(values[value]),
+                    "relation": rep, "value": value, "rows": str(values[value]),
                     "inner": inner,
                 })
 
@@ -192,18 +205,14 @@ def audit(
             distinct = sorted(set(folded[key]) - reported)
             if len(distinct) < 2:
                 continue
-            owners = {s for v in distinct for s in subjects[(relation, v)]}
-            # See the docstring: policy decides, not the subject count. The
-            # membership test folds to NFC so an NFD-authored fact relation still
-            # matches an identity declaration loaded (and NFC-normalized) from
-            # policy; the reported `relation` name stays verbatim (provenance).
-            kind = (
-                "duplicate_record"
-                if unicodedata.normalize("NFC", relation) in identity and len(owners) > 1
-                else "split"
-            )
+            owners = {s for v in distinct for s in subjects[(frel, v)]}
+            # See the docstring: policy decides, not the subject count. Both the
+            # relation bucket (frel) and the identity set are NFC-folded, so an
+            # NFD-authored relation still matches its identity declaration; the
+            # reported name is the deterministic representative (rep).
+            kind = "duplicate_record" if frel in identity and len(owners) > 1 else "split"
             duplicates.append({
-                "relation": relation,
+                "relation": rep,
                 "values": " / ".join(f"{v} ({values[v]})" for v in distinct),
                 "subjects": ", ".join(sorted(owners)),
                 "kind": kind,
