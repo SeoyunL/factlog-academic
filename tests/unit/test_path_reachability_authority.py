@@ -7,7 +7,7 @@ Two truth sources decided whether a path exists:
   of the STANDARD edge/path rules over the accepted facts;
 * the MATCHER (``path_query_rows``) reads ``inferred["path"]`` — the engine's fixpoint.
 
-On a pair reachable only through an edge a ``logic-policy.extra.dl`` rule proved, the
+On a pair reachable only through a fact a ``logic-policy.extra.dl`` rule/fact adds, the
 python mirror cannot see it, so the gate answered FACT_ABSENT (a *verified negative*)
 while the matcher answered "reachable" — the two contradicted on one query. And because
 ``cmd_render`` skips the engine when the classification is negative, that false negative
@@ -15,11 +15,16 @@ reached the USER's answer. The fix removes the gate's reachability guess: vocabu
 still validated (entities accepted), and whether a path EXISTS is left to the engine.
 A true negative is then the engine's own empty result, rendered verified-empty.
 
-Note on the engine-only pair: today the reserved-head guard (#226) forbids a policy from
-heading ``edge``/``path``/``relation``, so the engine's path and the python tracer are the
-SAME computation and a real KB cannot exhibit the divergence. It is therefore exercised at
-the function boundary with a stand-in engine pair (as ``test_path_query_parity`` does) —
-that is precisely the seam ``classify_query`` had no engine pairs to consult.
+This divergence is REAL and reproducible on a live KB, not merely structural. The
+reserved-head guard (#226, ``_assert_no_canonical_head``) forbids a policy from heading
+``edge``/``path``/``canonical``/``attr_rel`` — but NOT ``relation``. So a bare fact
+``relation("C", "uses", "A").`` in ``logic-policy.extra.dl`` (between two already-accepted
+entities) compiles cleanly, the engine derives the path pair (C, A), yet
+``dependency_path`` — built from ``accepted.dl`` alone, which never carries the policy
+fact — returns ``[]``. Before this change the gate called that a verified negative and
+``cmd_render`` shipped it to the user without running the engine. ``TestEngineEndToEnd``
+below reproduces exactly this over a real engine; the pure-python classes pin the same
+behaviour at the function boundary with an explicit engine pair.
 """
 from __future__ import annotations
 
@@ -104,7 +109,8 @@ class TestAskNoLongerFakesAVerifiedNegative:
 
 
 class TestGateAndMatcherAgreeOnEngineOnlyPair:
-    """The issue's scenario at the seam: an engine pair the python mirror lacks. The
+    """The issue's scenario at the seam: an engine pair the python mirror lacks (see the
+    module docstring for the live-KB form — a bare ``relation`` fact in extra.dl). The
     gate now says QUERY_OK (no reachability guess) and the matcher says reachable — they
     agree. Before the fix the gate said FACT_ABSENT while the matcher said reachable."""
 
@@ -155,7 +161,7 @@ class TestEngineEndToEnd:
     its route. This is the delegation path -- the verdict now comes from running the
     engine (evaluate), not from the gate's guess."""
 
-    def _render(self, tmp_path, query):
+    def _render(self, tmp_path, query, extra_dl=None):
         kb = tmp_path / "kb"
         subprocess.run(
             [sys.executable, "-m", "factlog", "init", "--target", str(kb)],
@@ -166,6 +172,8 @@ class TestEngineEndToEnd:
         lines = ["subject,relation,object,source,status,confidence,note"]
         lines += [f"{s},{r},{o},sources/a.md,accepted,0.9," for s, r, o in rows]
         (kb / "facts" / "candidates.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if extra_dl is not None:
+            (kb / "policy" / "logic-policy.extra.dl").write_text(extra_dl, encoding="utf-8")
         subprocess.run(
             [sys.executable, str(Path("tools") / "compile_facts.py")],
             capture_output=True,
@@ -173,7 +181,8 @@ class TestEngineEndToEnd:
             check=True,
         )
         # Replicate cmd_render's engine branch so the assertion is on the real render:
-        # classify -> (negative ? render([]) : render(evaluate.rows)).
+        # classify -> (negative ? render([]) : render(evaluate.rows)). Also report the
+        # gate/matcher pieces so a test can pin the full 4-way (gate, matcher, ask, render).
         script = r"""
 import os, sys, json
 sys.path.insert(0, os.getcwd()); sys.path.insert(0, os.path.join(os.getcwd(), "tools"))
@@ -187,7 +196,10 @@ if d["route"] == "engine" and d["negative"]:
 else:
     res = ask_router.evaluate(q, facts)
     out = ask_router.render_engine_answer(q, res["rows"])
-print(json.dumps({"decision": d, "render": out}))
+gate = c.classify_query(q, facts, policy_program=c.load_logic_policy())[1]
+matcher = c.path_query_rows(c.query_args(q), facts, c.run_wirelog()["path"])
+dep = c.dependency_path(facts, "C", "A")
+print(json.dumps({"decision": d, "render": out, "gate": gate, "matcher": matcher, "dep_path": dep}))
 """ % (query,)
         proc = subprocess.run(
             [sys.executable, "-c", script],
@@ -210,3 +222,23 @@ print(json.dumps({"decision": d, "render": out}))
         assert "VERIFIED — engine" in data["render"]
         assert "rows: 1" in data["render"]
         assert "A, B, C" in data["render"]
+
+    def test_policy_only_pair_is_no_longer_a_false_negative(self, tmp_path):
+        """The reviewer's live-KB reproduction, end to end. A bare ``relation`` fact in
+        logic-policy.extra.dl makes (C, A) reachable in the ENGINE but not in the python
+        graph (accepted.dl has no such fact). Before #303 the gate answered FACT_ABSENT
+        and cmd_render shipped a verified negative to the user; now the four views agree:
+        the gate passes (QUERY_OK), the engine proves the pair, and ask renders it
+        positive. This is the false verified-negative the fix removes -- and it is real."""
+        data = self._render(tmp_path, 'path("C", "A")?', extra_dl='relation("C", "uses", "A").\n')
+        # The seam: engine reaches (C, A), python graph does not.
+        assert data["dep_path"] == []          # python mirror sees no route
+        assert data["matcher"] == [["C", "A"]]  # engine proved the pair
+        # The gate no longer contradicts the matcher: it passes instead of FACT_ABSENT.
+        assert data["gate"] == QUERY_OK
+        assert data["decision"]["route"] == "engine"
+        assert data["decision"]["negative"] is False  # was True -> the false verified-negative
+        # And the user sees a POSITIVE engine answer naming the pair, not a fake negative.
+        assert "VERIFIED — engine" in data["render"]
+        assert "rows: 1" in data["render"]
+        assert "C, A" in data["render"]
