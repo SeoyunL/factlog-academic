@@ -1059,7 +1059,7 @@ def detect_conflicts(
         if len(groups) <= 1:
             continue
         values = sorted(min(raws) for raws in groups.values())
-        if _is_specialisation_chain(values, canon, hierarchy, typed.get(canon)):
+        if _is_specialisation_chain(values, canon, hierarchy, _lookup_typed_spec(canon, typed, aliases)):
             continue
         conflicts[(subject, canon)] = values
     return conflicts
