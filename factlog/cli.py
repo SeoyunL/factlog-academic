@@ -1887,7 +1887,9 @@ def cmd_vocab(args: argparse.Namespace) -> int:
                 t
                 for t, on in (
                     ("attribute", common.is_attribute_relation(name, attr_forms)),
-                    ("single-valued", name in sv),
+                    # sv is loaded NFC-normalized; the CSV-sourced name may be NFD.
+                    # Fold to match, homomorphic with is_attribute_relation (#293).
+                    ("single-valued", unicodedata.normalize("NFC", name) in sv),
                 )
                 if on
             ]
