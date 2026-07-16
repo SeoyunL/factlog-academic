@@ -744,7 +744,7 @@ def _relation_names_from(path: Path) -> set[str]:
         match = re.search(r"`([^`]+)`", stripped)
         name = match.group(1).strip() if match else stripped.split()[0]
         if name:
-            names.add(name)
+            names.add(unicodedata.normalize("NFC", name))
     return names
 
 
