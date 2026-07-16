@@ -133,21 +133,39 @@ def _corroboration(kb: Path) -> str:
     return proc.stdout + proc.stderr
 
 
-# object A is backed by one source under each relation spelling; B by one source.
+# A is backed by two DISTINCT sources, one under each relation spelling; B by one.
 _MIXED_ROWS = [
     f"P,{_R_NFC},A,sources/s1.md,accepted,0.9,",
     f"P,{_R_NFD},A,sources/s2.md,accepted,0.9,",
     f"P,{_R_NFC},B,sources/s3.md,accepted,0.9,",
 ]
 
+# A is backed by the SAME source under both spellings — distinct sources is 1, not
+# 2. The count comes from a UNION of sources, so it must not double-count s1.
+_SHARED_SOURCE_ROWS = [
+    f"P,{_R_NFC},A,sources/s1.md,accepted,0.9,",
+    f"P,{_R_NFD},A,sources/s1.md,accepted,0.9,",
+    f"P,{_R_NFC},B,sources/s2.md,accepted,0.9,",
+]
 
-def test_corroboration_folds_and_sums_across_spellings(tmp_path: Path):
+
+def test_corroboration_unions_distinct_sources_across_spellings(tmp_path: Path):
     out = _corroboration(_write_kb(tmp_path, _MIXED_ROWS))
 
     assert "single-valued relation(s) with competing values" in out
-    # A's support is summed across the two relation spellings (1 + 1 = 2 sources);
-    # B keeps its single source. Reported under the min representative spelling.
+    # A's support is the union of its two distinct sources (s1, s2) = 2; B keeps its
+    # single source. Reported under the min representative spelling.
     assert f"P / {_REP}: A (2 src); B (1 src)" in out
+
+
+def test_corroboration_does_not_double_count_a_shared_source(tmp_path: Path):
+    # One source backing both the NFC and the NFD row for A must count once, not
+    # twice — the distinct-sources contract. (Summing per-spelling counts, the
+    # pre-fix approach, reported "A (2 src)" here.)
+    out = _corroboration(_write_kb(tmp_path, _SHARED_SOURCE_ROWS))
+
+    assert "single-valued relation(s) with competing values" in out
+    assert f"P / {_REP}: A (1 src); B (1 src)" in out
 
 
 def test_corroboration_count_merge_is_order_independent(tmp_path: Path):

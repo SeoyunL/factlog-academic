@@ -66,34 +66,28 @@ def main(argv: list[str] | None = None) -> int:
         # Bucket the competition on the NFC-folded relation so NFC- and NFD-authored
         # spellings of one relation share a bucket instead of splitting the contest
         # (#295). ``raw_rels`` keeps the spellings seen for a deterministic reported
-        # representative (min); a value's source support is summed across spellings.
-        competing: dict[tuple[str, str], dict[str, int]] = {}
+        # representative (min). A value's source support is the UNION of the sources
+        # backing it across spellings, so one source that happens to back both an NFC
+        # and an NFD row for the same value is still counted once — the distinct-
+        # sources contract corroboration_counts guarantees. Union is order-independent.
+        sources_by: dict[tuple[str, str], dict[str, set[str]]] = {}
         raw_rels: dict[tuple[str, str], set[str]] = {}
-        seen: set[tuple[str, str, str]] = set()
         for row in engine_facts(facts):
             # single_valued is loaded NFC-normalized; the fact relation may be NFD.
             # Fold the membership probe so an NFD-authored fact still competes (#293).
             if unicodedata.normalize("NFC", row["relation"]) not in single_valued:
                 continue
-            triple = (row["subject"], row["relation"], row["object"])
-            # counts is keyed on the raw triple and already aggregates a fact's
-            # sources; visiting each distinct triple once keeps the per-value sum a
-            # sum over distinct spellings, independent of row order (deterministic).
-            if triple in seen:
-                continue
-            seen.add(triple)
             bucket = (row["subject"], unicodedata.normalize("NFC", row["relation"]))
-            obj = row["object"]
-            objs = competing.setdefault(bucket, {})
-            objs[obj] = objs.get(obj, 0) + counts.get(triple, 0)
+            objs = sources_by.setdefault(bucket, {})
+            objs.setdefault(row["object"], set()).add(row["source"])
             raw_rels.setdefault(bucket, set()).add(row["relation"])
-        contested = {k: v for k, v in competing.items() if len(v) > 1}
+        contested = {b: objs for b, objs in sources_by.items() if len(objs) > 1}
         if contested:
             print(f"\ncorroboration: {len(contested)} single-valued relation(s) with competing values")
             for bucket, objs in sorted(contested.items()):
                 subject = bucket[0]
                 relation = min(raw_rels[bucket])
-                detail = "; ".join(f"{obj} ({src} src)" for obj, src in sorted(objs.items()))
+                detail = "; ".join(f"{obj} ({len(srcs)} src)" for obj, srcs in sorted(objs.items()))
                 print(f"  {subject} / {relation}: {detail}")
     return 0
 
