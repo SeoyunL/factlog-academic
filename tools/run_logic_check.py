@@ -209,6 +209,15 @@ def evaluate_queries(
             # a file that was right there -- while `ask` answered the same question
             # (#220). Shared with the ask router so the two cannot diverge (#213).
             args = query_args(line)
+            # A malformed query is not a verified negative. Without this guard a
+            # 1-arg or bare-token path query flowed into path_query_rows and the
+            # report answered it with "path results: 0 rows" -- a VERIFIED NEGATIVE --
+            # for a query validate_query (and the ask gate) reject as malformed
+            # (#284). Same criterion as validate_query's path branch (L165, L168);
+            # run before path_query_rows so malformed args never reach it.
+            if len(args) != 2 or not all(is_variable(a) or is_quoted_string(a) for a in args):
+                results.append("path query malformed — see Errors above")
+                continue
             # The ENGINE decides what is reachable; python only renders the route. The
             # first cut let the python closure decide, so on a KB with an edge rule in
             # logic-policy.extra.dl the report said "(not found)" about a pair the
@@ -238,8 +247,15 @@ def evaluate_queries(
                 results.append(f"path results: {len(rows)} rows{suffix}")
 
         elif line.startswith("relation"):
-            rows = relation_results(line, facts, hierarchy)
+            # Guard before relation_results, matching validate_query's relation branch
+            # (L151, L157). The matcher treats a bare token as a wildcard, so a 2-arg or
+            # bare-token query used to print "relation results: 0 rows" -- a VERIFIED
+            # NEGATIVE -- for a query the gate rejects as malformed (#284).
             args = query_args(line)
+            if len(args) != 3 or not all(is_variable(a) or is_quoted_string(a) for a in args):
+                results.append("relation query malformed — see Errors above")
+                continue
+            rows = relation_results(line, facts, hierarchy)
             result_values: list[str] = []
             for subject, relation, object_ in rows:
                 bindings = []
@@ -274,7 +290,7 @@ def evaluate_queries(
     return results
 
 
-def main() -> None:
+def main() -> int | None:
     ensure_dirs()
     facts = load_accepted_facts()
     candidates = load_facts()
@@ -372,6 +388,13 @@ def main() -> None:
     out = FACTS_DIR / "logic_report.txt"
     out.write_text(text, encoding="utf-8")
     print(text)
+    # A logic-check error (arity/predicate/incomplete-row) is a hard failure the
+    # freshness gate must see: the report is written and printed first so the
+    # verbatim artifact still exists, then a non-zero exit stops the pipeline.
+    # Warnings and policy findings are informational and never fail the check.
+    if errors:
+        return 1
+    return None
 
 
 if __name__ == "__main__":
