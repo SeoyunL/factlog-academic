@@ -1023,10 +1023,16 @@ def detect_conflicts(
     through verbatim (no normalization), preserving byte-identical behaviour for
     those predicates.
 
-    When *aliases* is ``None`` or ``{}`` the function is byte-identical to the
-    pre-#227 behaviour: the raw relation string is used throughout, and an NFD-
-    authored relation name is reported exactly as written (no silent NFC coercion
-    for non-participating relations).
+    When *aliases* is ``None`` or ``{}`` the raw relation string is used for
+    grouping and reporting throughout, so an NFD-authored relation name is
+    reported exactly as written (no silent NFC coercion of the displayed name).
+    The one exception is the single-valued MEMBERSHIP gate: both the declared
+    ``single_valued`` set and each fact's ``canon`` are folded to NFC only to test
+    set membership, so a declaration and a fact that disagree on Unicode form
+    (either side NFC or NFD) still match — the case where a policy-loaded (NFC)
+    declaration must catch an NFD-authored fact relation, and its mirror (#285/
+    #210). That fold never touches the grouping key or the reported name —
+    provenance is unchanged (#227).
 
     **Typed-spec lookup (#210):** the ``typed`` dict is keyed by NFC-normalized
     names (``typed_relations`` normalizes at ``common._parse_typed_relations``).
@@ -1039,14 +1045,22 @@ def detect_conflicts(
     aliases = aliases or {}
     hierarchy = value_hierarchy() if hierarchy is None else hierarchy
     # Precompute the set of canonical single-valued relation names so the
-    # per-row membership test is O(1).
-    sv = {_canonicalize(r, aliases) for r in single_valued}
+    # per-row membership test is O(1). Folded to NFC so membership is decided on
+    # the canonical Unicode form regardless of how either side was authored: the
+    # declaration may arrive NFC (loaded and normalized from policy) or NFD
+    # (passed straight to this API), and the fact relation likewise. Only the
+    # membership PROBE folds; the grouping key and reported name stay verbatim.
+    sv = {unicodedata.normalize("NFC", _canonicalize(r, aliases)) for r in single_valued}
     # (subject, canonical_relation) -> group key -> set of raw object strings.
     by_key: dict[tuple[str, str], dict[tuple, set[str]]] = {}
     for row in engine_facts(facts):
         relation = row["relation"]
         canon = _canonicalize(relation, aliases)
-        if canon not in sv:
+        # Membership folds the fact side to NFC to match the NFC-folded ``sv``
+        # above, so an NFD-authored fact relation still matches its declaration
+        # (#285/#210). The grouping and report names below keep ``canon`` verbatim,
+        # preserving provenance (#227).
+        if unicodedata.normalize("NFC", canon) not in sv:
             continue
         obj = row["object"]
         # THE shared lookup rule (NFC + alias fold), same as the projection and the

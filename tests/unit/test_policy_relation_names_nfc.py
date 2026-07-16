@@ -2,15 +2,21 @@
 """Policy relation-name loading normalises to NFC (#285).
 
 Policy files authored on macOS are frequently stored in NFD (decomposed Hangul),
-while facts extracted elsewhere carry NFC (composed) relation names. The two are
-canonically equivalent but byte-distinct, so a relation declared in a policy file
-under NFD never matched an NFC fact: the declaration silently did nothing.
+while facts carry either NFC (composed, extracted elsewhere) or NFD relation
+names. The forms are canonically equivalent but byte-distinct, so a comparison on
+raw bytes silently fails whenever the two sides disagree.
 
-``common._relation_names_from`` is the single loader behind the one-name-per-line
-relation policies (single-valued, identity, attribute…), so normalising there
-fixes all of them at once. (Typed relation names are not loaded here; they get
-their own NFC normalisation in ``_parse_typed_relations``.) These tests pin the
-two downstream failures that motivated the fix — a missed contradiction and a
+Two comparison sites are involved. ``common._relation_names_from`` loads the
+one-name-per-line relation policies (single-valued, identity, attribute…) and
+NFC-normalises every declared name, so the policy side is always NFC. (Typed
+relation names are not loaded here; they get their own NFC normalisation in
+``_parse_typed_relations``.) But normalising only the loader breaks the case where
+BOTH sides are NFD — the declaration becomes NFC and no longer matches an NFD
+fact (the #210 real-difference regression). So the membership PROBES fold to NFC
+too: ``detect_conflicts`` and ``value_audit.audit`` normalise the fact relation
+before testing set membership, while keeping the reported/grouped name verbatim
+(provenance, #227). These tests pin all three fact spellings — NFC facts, and the
+NFD-declaration+NFD-fact case for both the missed contradiction and the
 mis-classified duplicate — plus the loader invariant itself.
 """
 from __future__ import annotations
@@ -96,3 +102,45 @@ def test_value_audit_nfd_identity_relation_classifies_duplicate_record(tmp_path:
     dup = value_audit.audit(facts, identity_relations=identity)["duplicates"][0]
 
     assert dup["kind"] == "duplicate_record"
+
+
+def test_detect_conflicts_sees_nfd_declared_and_nfd_authored_relation(tmp_path: Path):
+    # #210-homomorphic regression: when BOTH the declaration and the fact are NFD,
+    # normalising only the loader makes the declaration NFC and the NFD fact no
+    # longer matches — the real difference is missed. The membership probe must
+    # fold to NFC so this still contradicts.
+    path = tmp_path / "single-valued.md"
+    path.write_text(f"- `{_SV_NFD}`\n", encoding="utf-8")
+    single_valued = common._relation_names_from(path)
+
+    facts = [
+        _row("paperA", _SV_NFD, "2020"),
+        _row("paperA", _SV_NFD, "2021"),
+    ]
+    conflicts = common.detect_conflicts(facts, single_valued)
+
+    assert conflicts, "NFD declaration + NFD fact must still catch the conflict"
+    # The reported relation name stays verbatim (the NFD bytes of the fact),
+    # confirming the fold is confined to the membership gate (#227 provenance).
+    assert conflicts[("paperA", _SV_NFD)] == ["2020", "2021"]
+
+
+def test_value_audit_nfd_identity_relation_with_nfd_authored_facts(tmp_path: Path):
+    # Same #210-homomorphic case for the value_audit membership site: NFD identity
+    # declaration + NFD-authored fact relation must still classify a cross-subject
+    # value collision as a duplicate record, not a split.
+    policy_dir = tmp_path / "policy"
+    policy_dir.mkdir()
+    (policy_dir / "identity-relations.md").write_text(f"- `{_ID_NFD}`\n", encoding="utf-8")
+
+    identity = common.identity_relations(root=tmp_path)
+
+    facts = [
+        _row("paperA", _ID_NFD, "10.1000/X"),
+        _row("paperB", _ID_NFD, "10.1000/x"),
+    ]
+    dup = value_audit.audit(facts, identity_relations=identity)["duplicates"][0]
+
+    assert dup["kind"] == "duplicate_record"
+    # Verbatim NFD relation name in the report (provenance preserved).
+    assert dup["relation"] == _ID_NFD

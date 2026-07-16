@@ -193,8 +193,15 @@ def audit(
             if len(distinct) < 2:
                 continue
             owners = {s for v in distinct for s in subjects[(relation, v)]}
-            # See the docstring: policy decides, not the subject count.
-            kind = "duplicate_record" if relation in identity and len(owners) > 1 else "split"
+            # See the docstring: policy decides, not the subject count. The
+            # membership test folds to NFC so an NFD-authored fact relation still
+            # matches an identity declaration loaded (and NFC-normalized) from
+            # policy; the reported `relation` name stays verbatim (provenance).
+            kind = (
+                "duplicate_record"
+                if unicodedata.normalize("NFC", relation) in identity and len(owners) > 1
+                else "split"
+            )
             duplicates.append({
                 "relation": relation,
                 "values": " / ".join(f"{v} ({values[v]})" for v in distinct),
