@@ -2983,8 +2983,20 @@ def classify_query(
             # now for path too (#299). entities_c was folded once at the top.
             if not _is_variable(arg) and canonical_value(_arg_value(arg)) not in entities_c:
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(arg)}"
-        if all(_is_quoted_string(arg) for arg in args) and not dependency_path(facts, _arg_value(args[0]), _arg_value(args[1])):
-            return False, QUERY_FACT_ABSENT, "path query does not match accepted facts"
+        # Reachability is decided by the ENGINE alone, never re-derived here (#303).
+        # The gate has no engine pairs, so it once answered FACT_ABSENT from
+        # dependency_path -- a python mirror of the STANDARD edge/path rules that
+        # cannot see an edge a logic-policy.extra.dl rule proved. On a pair reachable
+        # only through such a policy edge the gate called a *verified negative* while
+        # the matcher (path_query_rows, over the engine's fixpoint pairs) answered
+        # "reachable" -- the two disagreed on the same query, and because cmd_render
+        # skips the engine when the classification is negative, that false negative
+        # reached the USER's answer. So the gate stops asserting absence: vocabulary
+        # is validated above (entities accepted), and whether a path EXISTS is left to
+        # path_query_rows over inferred["path"]. A true negative is then the engine's
+        # own empty result (#213's gate/matcher parity strengthened from an
+        # approximation to the engine's proof; the #256 reflexive-no-cycle negative is
+        # still pinned via ask_router.evaluate, which runs the engine).
         return True, QUERY_OK, "passed"
     if predicate == "count":
         # count(subject, relation)? — how many objects (subject, relation) has.

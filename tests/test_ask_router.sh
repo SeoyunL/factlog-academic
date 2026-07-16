@@ -4,7 +4,11 @@
 # Proves the reason-class routing and relation evaluation of tools/ask_router.py:
 #   - matching relation            -> route=engine, negative=false
 #   - accepted vocab, fact absent  -> route=engine, negative=TRUE (verified
-#                                     negative — NEVER wiki)
+#                                     negative — NEVER wiki). RELATION only: since
+#                                     #303 a path query's reachability is the
+#                                     engine's call, so the gate never flags a path
+#                                     negative — a path verified-negative is the
+#                                     engine's empty render, not a classify flag.
 #   - unknown entity/predicate/no '?' -> route=wiki
 #   - review_required predicate    -> route=wiki
 #   - works with NO compiled policy (fresh KB), i.e. no hard exit
@@ -81,7 +85,13 @@ if printf '%s' "$neg" | grep -qF "VERIFIED — engine" && printf '%s' "$neg" | g
 # --- path routing & verified-negative (renderable for any predicate) ---
 check_field "reachable path routes engine" validate 'path("Acme API", "FastAPI")?' route engine
 check_field "unreachable path = verified negative (engine)" validate 'path("Postgres", "FastAPI")?' route engine
-check_field "unreachable path flagged negative" validate 'path("Postgres", "FastAPI")?' negative True
+# #303: the gate no longer re-derives path reachability (it has no engine pairs and
+# its python graph is a mirror the engine's fixpoint may outrun), so a path query is
+# not flagged negative at classify time -- classify.negative is False. The verified
+# NEGATIVE is proven at RENDER time by the engine's own empty result (see the render
+# assertion below, which is unchanged). relation queries still flag negative via the
+# gate's FACT_ABSENT (that path keeps a match-count check), so L58 above is untouched.
+check_field "unreachable path not flagged negative by the gate (#303: engine decides)" validate 'path("Postgres", "FastAPI")?' negative False
 pneg="$(router render 'path("Postgres", "FastAPI")?')"
 if printf '%s' "$pneg" | grep -qF "VERIFIED — engine" && printf '%s' "$pneg" | grep -qF "verified negative"; then ok "path verified-negative renders as an engine answer (not deferred/wiki)"; else bad "path verified-negative not rendered as engine answer"; fi
 
