@@ -6,11 +6,12 @@ while facts extracted elsewhere carry NFC (composed) relation names. The two are
 canonically equivalent but byte-distinct, so a relation declared in a policy file
 under NFD never matched an NFC fact: the declaration silently did nothing.
 
-``common._relation_names_from`` is the single loader behind every relation-name
-policy (single-valued, identity, attribute, typed…), so normalising there fixes
-all of them at once. These tests pin the two downstream failures that motivated
-the fix — a missed contradiction and a mis-classified duplicate — plus the loader
-invariant itself.
+``common._relation_names_from`` is the single loader behind the one-name-per-line
+relation policies (single-valued, identity, attribute…), so normalising there
+fixes all of them at once. (Typed relation names are not loaded here; they get
+their own NFC normalisation in ``_parse_typed_relations``.) These tests pin the
+two downstream failures that motivated the fix — a missed contradiction and a
+mis-classified duplicate — plus the loader invariant itself.
 """
 from __future__ import annotations
 
