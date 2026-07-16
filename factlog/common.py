@@ -5,6 +5,7 @@ import csv
 import decimal
 import functools
 import json
+import math
 import os
 import re
 import sys
@@ -2137,6 +2138,8 @@ def normalize_confidence(value: str) -> str:
     try:
         score = float(value)
     except (TypeError, ValueError):
+        return "0.50"
+    if not math.isfinite(score):
         return "0.50"
     score = max(0.0, min(1.0, score))
     return f"{score:.2f}"
