@@ -202,7 +202,7 @@ def evaluate_queries(
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
             results.append(policy_result_line(predicate, line, inferred))
-        elif line.startswith("path"):
+        elif predicate == "path":
             # Constants AND variables. The old branch only handled two quoted
             # constants, so `path("A", X)?` appended nothing, the result list came
             # back empty, and main's fallback claimed `no facts/query.dl found` about
@@ -246,7 +246,7 @@ def evaluate_queries(
                 suffix = f"; {routes}" if routes else ""
                 results.append(f"path results: {len(rows)} rows{suffix}")
 
-        elif line.startswith("relation"):
+        elif predicate == "relation":
             # Guard before relation_results, matching validate_query's relation branch
             # (L151, L157). The matcher treats a bare token as a wildcard, so a 2-arg or
             # bare-token query used to print "relation results: 0 rows" -- a VERIFIED
@@ -265,7 +265,7 @@ def evaluate_queries(
                 result_values.append(", ".join(bindings) if bindings else f"{subject}, {relation}, {object_}")
             suffix = "; " + "; ".join(result_values) if result_values else ""
             results.append(f"relation results: {len(rows)} rows{suffix}")
-        elif line.startswith("count"):
+        elif predicate == "count":
             # count(subject, relation)? -> number of DISTINCT objects for that
             # (subject, relation) over engine facts (0 is a verified answer).
             # Same semantics as ask_router.evaluate's count branch.
@@ -283,10 +283,21 @@ def evaluate_queries(
                     if relation_row_matches([subj_q, rel_q, "O"], row, aliases, hierarchy)
                 }
                 results.append(f"count results: {len(objects)} (distinct objects)")
-        elif line.startswith("review_required"):
+        elif predicate == "review_required":
             constants = quoted_constants(line)
             question = constants[0] if constants else "(missing question)"
             results.append(f"review_required: {question}")
+        elif predicate not in QUERY_PREDICATES and predicate not in policy_query_predicates:
+            # A predicate the gate does not recognise. The dispatch used to select a
+            # branch by line.startswith(...), so `relationship(...)?` entered the
+            # `relation` branch (and, post-#284, drew "relation query malformed") for a
+            # line validate_query calls `query unknown predicate` — a section pointing
+            # at the wrong diagnosis (#294). Match validate_query's predicate test
+            # (L126) exactly and defer to the Errors section it already writes.
+            # Left as a conditional elif, not a bare else: `conflict` is a QUERY
+            # predicate with no evaluation branch (silent by design), and an else would
+            # tag it "see Errors above" for an error that is not there.
+            results.append("unknown query predicate — see Errors above")
     return results
 
 
