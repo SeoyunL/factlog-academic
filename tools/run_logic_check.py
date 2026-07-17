@@ -153,7 +153,13 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         # answer -- for a line the ask gate rejects as malformed (#319).
         if not all(is_variable(a) or is_quoted_string(a) for a in args):
             errors.append(f"count arguments must be variables or quoted strings: {line}")
-        return errors, warnings
+            return errors, warnings
+        # A well-formed count falls through to the shared vocabulary loop, exactly as
+        # `relation` and `path` do. Returning here instead skipped that loop, so
+        # `count("Nobody", "born_in")?` came back silent -- no error, no warning -- and
+        # the report then rendered "count results: 0 (distinct objects)", a zero this
+        # file documents as a verified answer. `relation`, on the same unknown subject,
+        # warns. Same criterion for count as for relation/path, warnings included (#319).
     if predicate == "relation":
         args = query_args(line)
         if len(args) != 3:
