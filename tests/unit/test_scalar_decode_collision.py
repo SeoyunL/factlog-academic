@@ -220,6 +220,23 @@ class TestGuardRejectsNonSymbolPolicyColumn:
         assert "body" in message.lower()
         assert "docs/typed-relations.md" in message
 
+    def test_error_points_at_typed_relations_for_a_real_scalar_relation(self):
+        """The body alternative is not the only one: a scalar RELATION is #116's job.
+
+        Someone declaring `.decl low_rank(subject: symbol, r: int64)` may actually
+        want a comparable scalar relation, and typed-relations.md is the supported way
+        to get one (projected into an int64 side-relation OUTSIDE the policy text, so
+        it is legitimately exempt from this guard). A message that only says "put it
+        in the body" sends that author looking for a workaround.
+        """
+        with pytest.raises(common.FactlogError) as exc:
+            common._assert_no_canonical_head(
+                ".decl low_rank(subject: symbol, r: int64)\n"
+            )
+        message = str(exc.value)
+        assert "typed-relations.md" in message
+        assert "#116" in message
+
     def test_allows_symbol_columns(self):
         """The correct form: compare in the body, head a quoted reason."""
         common._assert_no_canonical_head(

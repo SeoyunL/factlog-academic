@@ -1966,7 +1966,11 @@ def _assert_no_canonical_head(policy_text: str) -> None:
                     f"reason belongs. Keep the scalar in the rule BODY and head a "
                     f"quoted reason instead, e.g. "
                     f'`{name}(S, "rank below 5") :- priority_rank(S, R), R < 5.` '
-                    f"See docs/typed-relations.md. Fix the .decl in "
+                    f"If you need a comparable scalar RELATION to compare against, "
+                    f"declare it as a typed relation in policy/typed-relations.md "
+                    f"(#116) — factlog projects those into int64 side-relations "
+                    f"outside the policy text, which is why they are exempt from "
+                    f"this rule. See docs/typed-relations.md. Fix the .decl in "
                     f"logic-policy(.extra).dl."
                 )
     bare = re.sub(r"\.decl\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", bare)
