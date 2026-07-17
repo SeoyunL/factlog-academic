@@ -2030,12 +2030,36 @@ def cmd_status(args: argparse.Namespace) -> int:
         # run_logic_check's report (the `Errors:`/`Warnings:` headers are capitalised).
         errors = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("errors:")), "?")
         warnings = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("warnings:")), "?")
+        report_engine = next(
+            (ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("engine facts:")), None
+        )
         rep_mtime = report.stat().st_mtime
-        # The report is a function of all three run_logic_check inputs.
-        inputs = [p for p in (ctx.accepted_dl, ctx.facts_dir / "query.dl", ctx.logic_policy_dl) if p.is_file()]
+        # The report is a function of run_logic_check's inputs AND, transitively, of
+        # candidates.csv — accepted.dl is compiled from it. Without candidates.csv here,
+        # editing it without recompiling left accepted.dl (and the report) untouched, so
+        # status called a report predating the edit "fresh" (#330).
+        inputs = [
+            p
+            for p in (ctx.candidates_csv, ctx.accepted_dl, ctx.facts_dir / "query.dl", ctx.logic_policy_dl)
+            if p.is_file()
+        ]
         stale = any(p.stat().st_mtime > rep_mtime for p in inputs)
         fresh = "STALE (inputs changed since last check — run /factlog check)" if stale else "fresh"
-        print(f"  logic:      report {fresh}; errors={errors}, warnings={warnings}")
+        line = f"  logic:      report {fresh}; errors={errors}, warnings={warnings}"
+        # status prints two engine-fact counts — its own (from candidates.csv, above) and
+        # the report's `engine facts:` (from accepted.dl) — and used to never compare them,
+        # so a truncated accepted.dl (#328/#329) showed "7 engine fact(s)" one line above a
+        # report that checked 3, and still called it fresh. Compare dedup-aware (the report
+        # counts deduped accepted.dl rows, so dedup the candidate side too — legitimate
+        # duplicate triples must not false-alarm) and say so on mismatch.
+        expected_engine = len(common.dedup_engine_atoms(engine_rows))
+        if report_engine is not None and report_engine.isdigit() and int(report_engine) != expected_engine:
+            line += (
+                f"\n              ⚠ engine-input mismatch: {expected_engine} confirmed fact(s) in "
+                f"candidates.csv but the report checked {report_engine} — accepted.dl is out of "
+                "date; run /factlog check"
+            )
+        print(line)
     else:
         print("  logic:      no logic_report.txt yet (run /factlog check)")
     return 0
