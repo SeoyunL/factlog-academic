@@ -63,7 +63,7 @@ def test_prose_mid_sentence_marker_is_not_canonical() -> None:
     canonical rule; _strip_canonical_prefix returns False and the body uses
     relation(."""
     prose = "이 규칙은 {canonical} 방식을 쓴다 `결론`."
-    is_canonical, body = g._strip_canonical_prefix(prose)
+    is_canonical, body = g._strip_canonical_prefix(prose, 1)
     assert is_canonical is False
     assert body == prose
 
