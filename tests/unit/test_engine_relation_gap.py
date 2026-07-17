@@ -203,6 +203,35 @@ class TestWitnessCatchesFixpointDrop:
 
 
 @pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
+class TestPoisonedPolicyTripsGapOnRealEngine:
+    """The reviewer's measurement path, made self-standing. Poison ``load_logic_policy``
+    (a relation rule-head, which the #305 guard rejects -- but that guard LIVES inside
+    load_logic_policy, so monkeypatching the function bypasses it) so the REAL
+    ``run_wirelog`` assembles and runs the poisoned program on the engine. The witness
+    then genuinely empties at the fixpoint and ``engine_relation_gap`` fires -- the whole
+    reason the witness beats a parse-time count, pinned end to end through the production
+    run_wirelog path rather than a hand-built program."""
+
+    def test_poisoned_policy_empties_witness_and_trips_gap(self, tmp_path):
+        kb = _kb(tmp_path)
+        script = (
+            "import factlog.common as c, run_logic_check as rlc\n"
+            "poison = lambda: 'relation(X, \"d\", Y) :- relation(Y, \"e\", X).'\n"
+            "c.load_logic_policy = poison\n"       # run_wirelog reads the module global
+            "rlc.load_logic_policy = poison\n"     # run_logic_check imported the name
+            "inf = c.run_wirelog()\n"
+            "facts = c.load_accepted_facts()\n"
+            "alive = len(inf.get('relation_alive', set()))\n"
+            "gap = rlc.engine_relation_gap(facts, inf)\n"
+            "print(alive, gap is not None)\n"
+        )
+        out = _run(kb, script)
+        alive, tripped = out.stdout.split()
+        assert alive == "0", out.stdout + out.stderr       # a real fixpoint drop empties the witness
+        assert tripped == "True", out.stdout + out.stderr  # and the gap fires over the emptied engine
+
+
+@pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
 class TestNoRegressionOnDuplicates:
     """A KB whose candidates carry duplicate rows (deduped at compile) must not trip the
     gap -- the engine still holds the deduped relation atoms, so the witness is live."""
