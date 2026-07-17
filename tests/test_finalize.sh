@@ -25,13 +25,26 @@ fail=0
 ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 
+# #336: without pyrewire>=1.0.3 finalize's logic check is SKIPPED and it exits 3
+# (distinct from a verified pass=0, argparse=2, failure=1, timeout=124) so automation
+# can tell an unverified compile from an engine-checked one. With the engine present it
+# exits 0. Every "finalize exits 0" assertion below is really "0 if verified, 3 if the
+# skip fired", so key them off the actual environment.
+if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in pyrewire.__version__.split('.')[:3])>=(1,0,3) else 1)" >/dev/null 2>&1; then
+  SKIP_RC=0
+else
+  SKIP_RC=3
+fi
+
 KB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$KB" >/dev/null
 printf '# src\n\nAcme API uses FastAPI.\n' > "$KB/sources/acme.md"
 printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/acme.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB/runs/r1.json"
 
-out="$("$PYTHON" "$FINALIZE" --target "$KB" 2>&1)"; rc=$?
-[ "$rc" -eq 0 ] && ok "finalize exits 0" || bad "finalize exited $rc"
+# Capture rc under `set -e`: finalize now exits 3 on the no-pyrewire skip (#336), so a
+# bare `out=$(...); rc=$?` would abort the whole script at the assignment.
+rc=0; out="$("$PYTHON" "$FINALIZE" --target "$KB" 2>&1)" || rc=$?
+[ "$rc" -eq "$SKIP_RC" ] && ok "finalize exits $SKIP_RC (0 verified / 3 unverified skip)" || bad "finalize exited $rc (expected $SKIP_RC)"
 
 [ -s "$KB/facts/candidates.csv" ] && ok "candidates.csv produced" || bad "no candidates.csv"
 if [ -f "$KB/facts/accepted.dl" ] && grep -q 'relation("Acme API", "uses", "FastAPI")' "$KB/facts/accepted.dl"; then ok "accepted.dl compiled with the fact"; else bad "accepted.dl missing the fact"; fi
@@ -57,9 +70,9 @@ KB2="$(mktemp -d)/wiki"
 printf '# src\n\nAcme API deployed on AWS.\n' > "$KB2/sources/d.md"
 printf '[{"subject":"Acme API","relation":"deployed_on","object":"AWS","source":"sources/d.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB2/runs/r1.json"
 printf '# Logic policy\n\n## Rules\n\n- [hosting_check] 어떤 항목이 `deployed_on` 관계를 가지면 검토(review)가 필요하다.\n' > "$KB2/policy/logic-policy.md"
-"$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1; r1=$?
-"$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1; r2=$?
-if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ]; then ok "idempotent with a real policy (2nd finalize survives policy-response JSON in runs/)"; else bad "policy-rule KB: finalize not idempotent (rc1=$r1 rc2=$r2)"; fi
+r1=0; "$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1 || r1=$?
+r2=0; "$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1 || r2=$?
+if [ "$r1" -eq "$SKIP_RC" ] && [ "$r2" -eq "$SKIP_RC" ]; then ok "idempotent with a real policy (2nd finalize survives policy-response JSON in runs/)"; else bad "policy-rule KB: finalize not idempotent (rc1=$r1 rc2=$r2, expected $SKIP_RC)"; fi
 [ -f "$KB2/policy/logic-policy.dl" ] && grep -q "requires_review" "$KB2/policy/logic-policy.dl" && ok "real policy compiled (not stubbed over)" || bad "real policy not compiled"
 
 # --- #194: a policy that defines rules but FAILS to compile must NOT be stubbed
@@ -251,12 +264,21 @@ printf '# Logic policy\n\n## Rules\n\n- [c1] flag when `foo bar` occurs\n' > "$K
 # policy", finalize.py ~257) that the WARNING does not contain.
 err11="$(mktemp)"
 rc11=0; out11="$(PYTHONPATH="$SHADOW:$PYTHONPATH" "$PYTHON" "$FINALIZE" --target "$KB11" 2>"$err11")" || rc11=$?
-[ "$rc11" -eq 0 ] && ok "#219: no-pyrewire finalize completes with rc=0 (graceful skip)" || bad "#219: no-pyrewire finalize did not exit 0 (rc=$rc11)"
+# #336: the no-pyrewire skip is no longer indistinguishable from a verified pass — it
+# exits 3 (distinct from a verified 0) so automation can tell an unverified compile apart.
+[ "$rc11" -eq 3 ] && ok "#336: no-pyrewire finalize exits 3 (unverified skip, distinct from a verified 0)" || bad "#336: no-pyrewire finalize did not exit 3 (rc=$rc11)"
 printf '%s' "$out11" | grep -qF "Logic check SKIPPED" && ok "#219: no-pyrewire summary notes 'Logic check SKIPPED'" || bad "#219: missing 'Logic check SKIPPED' note on no-pyrewire path"
+# #336: the closing summary must not claim a bare "no contradictions" (which reads as
+# engine-verified) when the engine never ran — it says only the single-valued check ran.
+printf '%s' "$out11" | grep -qF "engine logic NOT run" && ok "#336: honest summary states the engine logic was NOT run" || bad "#336: summary hides that engine verification was skipped"
 printf '%s' "$out11" | grep -qF "but the policy is NOT applied (see the WARNING above)" \
   && printf '%s' "$out11" | grep -qF "gate on the policy" \
   && ok "#219: no-pyrewire STDOUT summary stays honest ('policy is NOT applied' + 'gate on the policy')" \
   || bad "#219: honest no-pyrewire summary reworded/missing on stdout (WARNING-only substring must not count)"
+# #336: --allow-unverified is the explicit opt-out that keeps rc 0 for callers that
+# knowingly accept an unverified compile.
+rc11b=0; PYTHONPATH="$SHADOW:$PYTHONPATH" "$PYTHON" "$FINALIZE" --target "$KB11" --allow-unverified >/dev/null 2>&1 || rc11b=$?
+[ "$rc11b" -eq 0 ] && ok "#336: --allow-unverified keeps rc 0 on the no-pyrewire path" || bad "#336: --allow-unverified did not restore rc 0 (rc=$rc11b)"
 rm -f "$err11"
 
 # --- #219 (gap 2): logic-policy.extra.dl interaction. A hand-authored typed

@@ -238,8 +238,12 @@ ensure `policy/logic-policy.dl` → `compile_facts` → **contradiction check** 
 `run_logic_check` — and prints a summary (candidates merged, engine facts,
 conflicts, the logic report). It is idempotent and read-only with respect to
 hand-edited inputs (only the engine scripts touch their outputs). If `pyrewire`
-is unavailable the logic check is skipped with a note; facts are still merged
-and compiled.
+is unavailable (or `< 1.0.3`) the logic check is skipped with a note; facts are
+still merged and compiled, but the engine verification did **not** run, so
+`finalize` **exits 3** — distinct from a verified pass (`0`) so automation never
+mistakes an unverified compile for a checked one. Install `pyrewire>=1.0.3` and
+run `/factlog check` to verify, or pass `--allow-unverified` to accept the
+unverified compile and keep the exit code `0`.
 
 **Contradiction detection.** Relations you list in `policy/single-valued.md`
 (one relation name per line) are treated as *functional* — at most one object
