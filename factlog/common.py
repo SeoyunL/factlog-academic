@@ -1346,7 +1346,7 @@ def relation_row_matches(
     # Declarations are written on CANONICAL relation names; rows may store a
     # surface variant. Look up under the name the QUERY used, falling back to the
     # row's own canonicalised name for a variable-relation query.
-    query_relation = _arg_value(r_arg) if not _is_variable(r_arg) else aliases.get(row["relation"], row["relation"])
+    query_relation = _arg_value(r_arg) if not _is_variable(r_arg) else aliases.get(unicodedata.normalize("NFC", row["relation"]), row["relation"])
     return object_matches(_arg_value(o_arg), row, hierarchy, _canonical_value, relation=query_relation)
 
 
