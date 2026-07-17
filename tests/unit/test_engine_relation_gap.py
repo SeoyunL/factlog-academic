@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Catch a silently-emptied engine input: disk has facts, the engine parsed none (#308).
+"""Catch a silently-emptied engine input: disk has facts, the engine holds none (#308).
 
 The logic report's `engine facts` line counts DISK rows (load_accepted_facts), so it
-cannot see the engine's own relation EDB emptying underneath it -- the blind spot behind
-#305's vacuous pass (report said `engine facts: 7` while the engine evaluated over
-nothing). `run_wirelog` now surfaces the engine's OWN parsed relation extent under
-`inferred["relation"]` (read via `preview_inline_facts`, since an EDB never appears as a
-step() delta), and `run_logic_check.engine_relation_gap` compares the two independent
-readers. It is the LAST NET: #305's guard rejects the known causes (relation rule-head /
-.decl re-declaration) loudly at policy load; this catches an unknown cause that slips
-past. Conservative: only the TOTAL-emptying (0) case fires, so a healthy KB never trips.
+cannot see the engine's own relation extent emptying underneath it -- the blind spot
+behind #305's vacuous pass (report said `engine facts: 7` while the engine evaluated over
+nothing). WIRELOG_PROGRAM now carries a WITNESS IDB, `relation_alive(S) :- relation(S,R,O)`,
+which surfaces as a step() delta (relation itself is EDB and never does) and so reflects
+the engine's POST-FIXPOINT relation extent -- empty whether the atoms were dropped at
+parse time OR at the fixpoint. `run_logic_check.engine_relation_gap` compares it against
+the disk fact count. It is the LAST NET: #305's guard rejects the known causes (relation
+rule-head / .decl re-declaration) loudly at policy load; this catches an unknown cause
+that slips past. Conservative: only the TOTAL-emptying (0) case fires.
+
+`relation_alive` is a reserved engine predicate (a policy heading it would union fake
+tuples into the witness), pinned by the reserved-vocabulary regression below.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from factlog.common import FactlogError, _assert_no_canonical_head
 from run_logic_check import engine_relation_gap
 
 
@@ -26,32 +31,51 @@ def _facts(n):
     return [{"subject": f"s{i}", "relation": "uses", "object": f"o{i}"} for i in range(n)]
 
 
+def _witness(*subjects):
+    return {(s,) for s in subjects}
+
+
 class TestEngineRelationGapHelper:
     """Pure function -- no engine, runs everywhere."""
 
-    def test_disk_facts_but_engine_zero_is_an_error(self):
-        msg = engine_relation_gap(_facts(7), {"relation": set(), "path": {("s0", "o0")}})
+    def test_disk_facts_but_empty_witness_is_an_error(self):
+        msg = engine_relation_gap(_facts(7), {"relation_alive": set(), "path": {("s0", "o0")}})
         assert msg is not None
         assert "7 accepted fact(s) on disk" in msg
         assert "0 relation atoms" in msg
 
-    def test_a_missing_relation_key_counts_as_zero(self):
-        # inferred without a "relation" key at all is still the gap (0 engine atoms).
+    def test_a_missing_witness_key_counts_as_empty(self):
         assert engine_relation_gap(_facts(3), {"path": set()}) is not None
 
-    def test_engine_has_relation_atoms_is_fine(self):
-        atoms = {("s0", "uses", "o0"), ("s1", "uses", "o1")}
-        assert engine_relation_gap(_facts(2), {"relation": atoms}) is None
+    def test_a_live_witness_is_fine(self):
+        # The witness is keyed on subject, so its size is the distinct-subject count --
+        # 1 subject can back several facts. Only its EMPTINESS matters here.
+        assert engine_relation_gap(_facts(7), {"relation_alive": _witness("s0")}) is None
 
     def test_an_empty_kb_does_not_fire(self):
-        # No disk facts -> a legitimately empty engine, not a gap.
-        assert engine_relation_gap([], {"relation": set()}) is None
+        assert engine_relation_gap([], {"relation_alive": set()}) is None
         assert engine_relation_gap([], {}) is None
 
-    def test_it_is_conservative_about_count_mismatch(self):
-        # Only the TOTAL-emptying case fires. A partial (engine < disk) is NOT flagged
-        # here -- a non-zero engine count is treated as "the engine got its input".
-        assert engine_relation_gap(_facts(7), {"relation": {("s0", "uses", "o0")}}) is None
+
+class TestWitnessIsReserved:
+    """A policy that heads the witness would poison it (union fake tuples -> a false
+    negative on the net), so it is rejected like the other engine predicates (#305 form)."""
+
+    def test_a_rule_head_on_the_witness_is_rejected(self):
+        with pytest.raises(FactlogError):
+            _assert_no_canonical_head('relation_alive(S) :- relation(S, "x", "y").')
+
+    def test_a_bare_fact_of_the_witness_is_rejected(self):
+        with pytest.raises(FactlogError):
+            _assert_no_canonical_head('relation_alive("s").')
+
+    def test_a_decl_of_the_witness_is_rejected(self):
+        with pytest.raises(FactlogError):
+            _assert_no_canonical_head(".decl relation_alive(s: symbol)\n")
+
+    def test_a_body_reference_to_the_witness_is_allowed(self):
+        # Reading the witness in a rule body (heading a user predicate) is fine.
+        _assert_no_canonical_head('flagged(S, "f") :- relation_alive(S).')
 
 
 # --- Engine-backed seam + contract -------------------------------------------
@@ -94,24 +118,21 @@ def _run(kb, script):
 
 @pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
 class TestRunLogicCheckSeam:
-    """The seam #305's guard bypasses: with the engine's relation forced empty (standing
-    in for any unknown cause), run_logic_check must error and exit non-zero -- not report
-    a vacuous 'no contradictions' over an emptied engine."""
+    """The seam #305's guard bypasses: with the witness forced empty (standing in for any
+    unknown cause), run_logic_check must error and exit non-zero -- not report a vacuous
+    'no contradictions' over an emptied engine."""
 
-    def test_emptied_engine_relation_makes_check_exit_nonzero(self, tmp_path):
+    def test_emptied_witness_makes_check_exit_nonzero(self, tmp_path):
         kb = _kb(tmp_path)
-        # Monkeypatch run_wirelog to return the real inferred but with relation emptied,
-        # simulating a silent engine-input drop the #305 guard did not catch.
         script = (
             "import run_logic_check as rlc\n"
             "_orig = rlc.run_wirelog\n"
             "def _fake():\n"
             "    inf = _orig()\n"
-            "    inf['relation'] = set()\n"
+            "    inf['relation_alive'] = set()\n"
             "    return inf\n"
             "rlc.run_wirelog = _fake\n"
-            "rc = rlc.main()\n"
-            "print('RC', rc)\n"
+            "print('RC', rlc.main())\n"
         )
         out = _run(kb, script)
         assert "RC 1" in out.stdout, out.stdout + out.stderr
@@ -129,26 +150,23 @@ class TestRunLogicCheckSeam:
 
 
 @pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
-class TestRealEngineContract:
-    """The signal only works if run_wirelog genuinely surfaces the engine's relation
-    extent. Pin that contract: a healthy KB's inferred["relation"] is non-empty and
-    matches the disk fact count (both read the same accepted.dl)."""
+class TestWitnessContract:
+    """The signal only works if the witness genuinely surfaces. Pin that contract: a
+    healthy KB's inferred["relation_alive"] is non-empty (the == 0 test is meaningful only
+    if a live engine produces a non-empty witness)."""
 
-    def test_run_wirelog_surfaces_relation_atoms(self, tmp_path):
+    def test_run_wirelog_surfaces_the_witness(self, tmp_path):
         kb = _kb(tmp_path)
         out = _run(kb, "import factlog.common as c\n"
-                       "facts = c.load_accepted_facts()\n"
                        "inf = c.run_wirelog()\n"
-                       "print(len(facts), len(inf.get('relation', set())))")
-        disk, engine = out.stdout.split()
-        assert int(engine) > 0, out.stdout + out.stderr
-        assert disk == engine  # both parse the same accepted.dl
+                       "print(len(inf.get('relation_alive', set())))")
+        assert int(out.stdout.strip()) > 0, out.stdout + out.stderr
 
 
 @pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
 class TestNoRegressionOnDuplicates:
     """A KB whose candidates carry duplicate rows (deduped at compile) must not trip the
-    gap -- the engine still holds the deduped relation atoms."""
+    gap -- the engine still holds the deduped relation atoms, so the witness is live."""
 
     def test_dedup_kb_reports_no_gap(self, tmp_path):
         kb = tmp_path / "kb"
@@ -157,7 +175,6 @@ class TestNoRegressionOnDuplicates:
             capture_output=True, check=True,
         )
         (kb / "sources" / "a.md").write_text("a\n")
-        # The same fact twice -> compile dedups to one relation atom.
         lines = ["subject,relation,object,source,status,confidence,note",
                  "A,uses,B,sources/a.md,accepted,0.9,",
                  "A,uses,B,sources/a.md,accepted,0.9,"]

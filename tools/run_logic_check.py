@@ -305,27 +305,32 @@ def engine_relation_gap(
     facts: list[dict[str, str]],
     inferred: dict[str, set[tuple[str, ...]]],
 ) -> str | None:
-    """An error string when disk has facts but the ENGINE parsed zero relation atoms.
+    """An error string when disk has facts but the ENGINE holds no relation atoms.
 
     The report's ``engine facts`` line counts the facts on DISK (load_accepted_facts),
-    so it cannot see the engine's own input silently emptying underneath it -- the
-    exact blind spot behind the vacuous-pass in #305 (report said ``engine facts: 7``
-    while the engine evaluated over nothing). ``inferred["relation"]`` is the engine's
-    OWN parsed relation extent (run_wirelog reads it via ``preview_inline_facts``). When
-    disk holds N>0 rows yet the engine parsed 0, some cause quietly swallowed the engine
-    input. This is the LAST NET: #305's guard rejects the known causes (relation
-    rule-head / .decl re-declaration) loudly at policy load, and this catches whatever
-    unknown cause slips past by comparing the two independent readers. Deliberately
-    conservative -- only the TOTAL-emptying (0) case fires, so a healthy KB, where the
-    engine holds the same rows as disk, never trips it (no count-mismatch false alarms).
+    so it cannot see the engine's own input silently emptying underneath it -- the exact
+    blind spot behind the vacuous-pass in #305 (report said ``engine facts: 7`` while the
+    engine evaluated over nothing). ``inferred["relation_alive"]`` is the engine's
+    POST-FIXPOINT relation extent: a witness IDB (``relation_alive(S) :- relation(S,R,O)``
+    in WIRELOG_PROGRAM) that surfaces as a step() delta, so its emptiness means the engine
+    genuinely holds no relation atoms -- whether they were dropped at parse time or at the
+    fixpoint. When disk holds N>0 rows yet the witness is empty, some cause quietly
+    swallowed the engine input. This is the LAST NET: #305's guard rejects the known
+    causes (relation rule-head / .decl re-declaration) loudly at policy load, and this
+    catches whatever unknown cause slips past by comparing the two independent readers.
+
+    Deliberately conservative -- only the TOTAL-emptying (0) case fires, so a healthy KB
+    never trips it (no count-mismatch false alarms). NB: ``relation_alive`` is keyed on
+    the subject alone, so its cardinality is the count of DISTINCT subjects, not of facts
+    -- used ONLY for the ``== 0`` test, never compared for equality with ``len(facts)``.
     A pure function: no I/O, never raises.
     """
     if not facts:
         return None
-    if len(inferred.get("relation", set())) == 0:
+    if len(inferred.get("relation_alive", set())) == 0:
         return (
             f"engine input gap: {len(facts)} accepted fact(s) on disk but the engine "
-            "parsed 0 relation atoms — something silently emptied the engine input. "
+            "holds 0 relation atoms — something silently emptied the engine input. "
             "Recompile with `factlog check`; if it persists, the accepted.dl the engine "
             "reads disagrees with the facts on disk."
         )
