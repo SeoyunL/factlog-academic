@@ -70,16 +70,23 @@ def main(argv: list[str] | None = None) -> int:
         # backing it across spellings, so one source that happens to back both an NFC
         # and an NFD row for the same value is still counted once — the distinct-
         # sources contract corroboration_counts guarantees. Union is order-independent.
+        # The object is ALSO keyed on its NFC form (#307), so one value authored in a
+        # mix of NFC and NFD is a single competitor rather than a false two-way
+        # contest; ``raw_objs`` keeps the spellings for a deterministic representative
+        # (min), matching how the relation is handled above (#295).
         sources_by: dict[tuple[str, str], dict[str, set[str]]] = {}
         raw_rels: dict[tuple[str, str], set[str]] = {}
+        raw_objs: dict[tuple[tuple[str, str], str], set[str]] = {}
         for row in engine_facts(facts):
             # single_valued is loaded NFC-normalized; the fact relation may be NFD.
             # Fold the membership probe so an NFD-authored fact still competes (#293).
             if unicodedata.normalize("NFC", row["relation"]) not in single_valued:
                 continue
             bucket = (row["subject"], unicodedata.normalize("NFC", row["relation"]))
+            fobj = unicodedata.normalize("NFC", row["object"])
             objs = sources_by.setdefault(bucket, {})
-            objs.setdefault(row["object"], set()).add(row["source"])
+            objs.setdefault(fobj, set()).add(row["source"])
+            raw_objs.setdefault((bucket, fobj), set()).add(row["object"])
             raw_rels.setdefault(bucket, set()).add(row["relation"])
         contested = {b: objs for b, objs in sources_by.items() if len(objs) > 1}
         if contested:
@@ -87,7 +94,10 @@ def main(argv: list[str] | None = None) -> int:
             for bucket, objs in sorted(contested.items()):
                 subject = bucket[0]
                 relation = min(raw_rels[bucket])
-                detail = "; ".join(f"{obj} ({len(srcs)} src)" for obj, srcs in sorted(objs.items()))
+                reps = sorted(
+                    (min(raw_objs[(bucket, fobj)]), len(srcs)) for fobj, srcs in objs.items()
+                )
+                detail = "; ".join(f"{obj} ({n} src)" for obj, n in reps)
                 print(f"  {subject} / {relation}: {detail}")
     return 0
 

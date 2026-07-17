@@ -987,7 +987,14 @@ def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
         scalar = literal_types.normalize(spec.type, obj, spec.units)
         if scalar is not None:
             return ("scalar", scalar)
-    return ("raw", obj)
+    # Untyped (or unparseable) values group on their NFC form, so NFC- and NFD-
+    # authored spellings of one value collapse into a single key instead of a false
+    # conflict/competition (#307). Pure NFC only — NOT canonical_value, whose amount
+    # normalization would fold amount-shaped strings of an UNTYPED relation and leak
+    # scalar equivalence into predicates that never declared it (#224/#218). The
+    # reported value stays verbatim: callers keep the raw strings per key and report
+    # a deterministic representative (min).
+    return ("raw", unicodedata.normalize("NFC", obj))
 
 
 def detect_conflicts(
