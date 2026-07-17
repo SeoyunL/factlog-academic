@@ -54,6 +54,27 @@ class TestRelationRuleHeadRejected:
         assert _rejects(text) is not None
 
 
+class TestDeclRelationRejected:
+    """A policy `.decl relation(...)` re-declares the engine's EDB and pyrewire then
+    silently drops/corrupts accepted facts (#305). Every arity is rejected."""
+
+    def test_arity_mismatched_decl_is_rejected(self):
+        # The reviewer's scenario: `.decl relation(a, b)` (arity 2 vs the engine's 3)
+        # compiles rc=0 but silently loses facts (path pairs 3 -> 2). Reject it.
+        msg = _rejects(".decl relation(a: symbol, b: symbol)\n")
+        assert msg is not None
+        assert "already declared by the engine" in msg
+
+    def test_arity_matched_decl_is_also_rejected(self):
+        # Even an arity-matching re-decl is a meaningless duplicate that only invites the
+        # mismatch failure later, so it is rejected too.
+        assert _rejects(".decl relation(subject: symbol, rel: symbol, object: symbol)\n") is not None
+
+    def test_a_decl_of_a_predicate_named_like_relation_is_allowed(self):
+        # Token match, not substring: `.decl my_relation(...)` is a user predicate.
+        assert _rejects(".decl my_relation(a: symbol, b: symbol)\n") is None
+
+
 class TestAllowedFormsUnchanged:
     def test_a_bare_relation_fact_is_allowed(self):
         # #303 depends on this: a bare fact keeps relation an EDB, no IDB flip.
@@ -81,6 +102,12 @@ class TestReservedFourStillRejected:
     @pytest.mark.parametrize("name", ["canonical", "attr_rel", "edge", "path"])
     def test_reserved_bare_fact_rejected(self, name):
         assert _rejects(f'{name}("a", "b").') is not None
+
+    @pytest.mark.parametrize("name", ["canonical", "attr_rel", "edge", "path"])
+    def test_reserved_decl_rejected(self, name):
+        # The .decl loop's rejection of the reserved four is unchanged by the new
+        # relation .decl branch, which sits after it.
+        assert _rejects(f".decl {name}(a: symbol, b: symbol)\n") is not None
 
 
 class TestLexEdgeCases:
@@ -155,6 +182,16 @@ class TestEngineEntryPointsFailLoud:
 
     def test_run_wirelog_raises(self, tmp_path):
         kb = _kb(tmp_path, REPRO_RULE)
+        out = _probe(kb, "import factlog.common as c\n"
+                         "try:\n c.run_wirelog(); print('NO_RAISE')\n"
+                         "except c.FactlogError:\n print('FACTLOG_ERROR')")
+        assert out.stdout.strip() == "FACTLOG_ERROR", out.stdout + out.stderr
+
+    def test_decl_relation_arity_mismatch_fails_loud(self, tmp_path):
+        # The reviewer's silent-data-loss scenario: `.decl relation(a, b)` compiled rc=0
+        # and dropped a KB's path pairs 3->2 with no signal. The guard now fails loud at
+        # policy load instead of letting the engine evaluate over corrupted facts.
+        kb = _kb(tmp_path, ".decl relation(a: symbol, b: symbol)\n")
         out = _probe(kb, "import factlog.common as c\n"
                          "try:\n c.run_wirelog(); print('NO_RAISE')\n"
                          "except c.FactlogError:\n print('FACTLOG_ERROR')")
