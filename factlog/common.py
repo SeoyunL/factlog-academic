@@ -2608,6 +2608,7 @@ relation_alive(S) :- relation(S, R, O).
 # for a silently-emptied engine input beyond what #305's policy-load guard rejects.
 
 
+@functools.lru_cache(maxsize=1)
 def _engine_decl_predicates() -> frozenset[str]:
     """The single source of truth for "an engine-declared predicate".
 
@@ -2620,6 +2621,10 @@ def _engine_decl_predicates() -> frozenset[str]:
     function so they cannot diverge again. ``relation`` is engine-declared but carries a
     bare-fact exception (#303/#305), so a caller that wants the FULLY reserved heads
     subtracts it explicitly rather than folding the exception in here.
+
+    Cached (maxsize=1): WIRELOG_PROGRAM is a module constant, so the parse is constant for
+    the process — this spares a re-parse on every typed-relation line and every policy
+    load. The frozenset return keeps the shared value immutable to callers.
     """
     return frozenset(
         re.findall(r"^\.decl\s+([a-z_][a-z0-9_]*)\(", WIRELOG_PROGRAM, flags=re.MULTILINE)
