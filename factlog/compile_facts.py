@@ -22,6 +22,7 @@ from factlog.common import (
     relation_aliases,
     single_valued_relations,
     typed_relations,
+    wirelog_undecodable_chars,
 )
 
 
@@ -79,6 +80,40 @@ def _reject_on_conflict(facts: list[dict[str, str]]) -> None:
     )
 
 
+def _reject_undecodable_control_chars(rows: list[dict[str, str]]) -> None:
+    """Refuse to compile a fact whose subject/relation/object carries a control character
+    dl_string would emit as a wirelog-undecodable escape (#331).
+
+    dl_string is json.dumps; the engine decodes only \\" and \\\\, so a \\t/\\n/\\uXXXX
+    escape (the C0 range U+0000–U+001F) is stored as a literal backslash+letter — python
+    holds 'Fig<TAB>2', the engine holds 'Fig\\t2', their intern ids never meet, and the
+    value is silently lost from every query (the #308 witness even decodes to a bare
+    integer). We FAIL LOUD at compile rather than (a) normalizing — that would silently
+    alter a recorded fact; a tab pasted from a PDF table is data, not noise — or (b)
+    emitting the raw escape and hoping a downstream decoder agrees, which is exactly the
+    silent identity loss this catches. candidates.csv still LOADS (the reject is here, not
+    at load), so the human gate — factlog amend/eject — can correct the row.
+    U+0085/U+2028/U+2029 round-trip and are never rejected (#255, verified).
+    """
+    for row in rows:
+        for field in ("subject", "relation", "object"):
+            bad = wirelog_undecodable_chars(row[field])
+            if not bad:
+                continue
+            shown = ", ".join(repr(c) for c in bad)
+            raise FactlogError(
+                f"control character(s) {shown} in {field} {row[field]!r} cannot be compiled: "
+                "facts/accepted.dl encodes them as JSON escapes the wirelog engine does not "
+                "decode (\\t \\n \\r \\b \\f and other U+0000–U+001F controls), so Python and the "
+                "engine would hold different strings and the value would be silently dropped "
+                "from every query (#331). This usually comes from a tab or newline pasted from a "
+                "PDF table or the web into facts/candidates.csv. Correct the row through the human "
+                "gate — factlog amend <subject> <relation> <object> --set-object <clean> (or "
+                "--set-subject) — not by writing the control character back. "
+                "(U+0085/U+2028/U+2029 are fine and never rejected.)"
+            )
+
+
 def main() -> None:
     ensure_dirs()
     facts = load_facts()
@@ -91,6 +126,10 @@ def main() -> None:
     # candidates path and is unaffected. First-occurrence keeps accepted.dl
     # byte-identical when there are no duplicate triples.
     accepted = dedup_engine_atoms(engine_facts(facts))
+    # Reject wirelog-undecodable control chars BEFORE writing: dl_string would emit JSON
+    # escapes the engine cannot decode, so the value silently diverges between Python and
+    # the engine and drops out of every query (#331). Fail loud through the human gate.
+    _reject_undecodable_control_chars(accepted)
     lines = [
         "// generated from facts/candidates.csv",
         "// only confirmed/accepted facts become engine input",

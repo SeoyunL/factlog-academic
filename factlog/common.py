@@ -542,7 +542,12 @@ def _load_accepted_facts_from(accepted_dl: Path) -> list[dict[str, str]]:
     # contain U+2028/U+2029/U+0085 (routine in text copied from PDFs/web), which
     # dl_string keeps as raw chars on one physical line and the wirelog engine
     # parses fine — but .splitlines() would break the line on them and corrupt the
-    # whole file's parse (#255). '\r' from CRLF is handled by the .strip() below.
+    # whole file's parse (#255). This round-trip guarantee is SPECIFIC to those line
+    # separators: json leaves them raw, so python and the engine hold the same string.
+    # It does NOT extend to the C0 controls \t \n \r \b \f (U+0000–U+001F) — json escapes
+    # those and wirelog cannot decode the escape, so they diverge — which is why compile
+    # rejects them up front (see wirelog_undecodable_chars, #331); they never reach this
+    # reader. '\r' from CRLF is handled by the .strip() below.
     for line in accepted_dl.read_text(encoding="utf-8").split("\n"):
         line = line.strip()
         if not line or line.startswith("//"):
@@ -2326,6 +2331,25 @@ def dl_atom(row: dict[str, str]) -> str:
 
 def dl_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+# Characters dl_string (json.dumps, ensure_ascii=False) emits as a backslash escape the
+# wirelog engine does NOT decode. wirelog's .dl parser understands only \" and \\
+# (wirelog#924); json escapes the whole C0 range U+0000–U+001F — \t \n \r \b \f and
+# \uXXXX for the rest — which the engine then stores as a LITERAL backslash+letter. So
+# python holds 'Fig<TAB>2' while the engine holds 'Fig\\t2', their intern ids never meet,
+# and the engine leaks a raw integer id into the report — including relation_alive, the
+# #308 witness, which decodes to a bare number instead of its subject (#331). Everything
+# ELSE round-trips: json leaves U+0085/U+2028/U+2029 (and U+007F, C1) raw and wirelog
+# parses them fine (#255, verified), and it correctly escapes " and \ which wirelog decodes.
+_WIRELOG_UNDECODABLE_RE = re.compile(r"[\x00-\x1f]")
+
+
+def wirelog_undecodable_chars(value: str) -> list[str]:
+    """Distinct control characters in *value* that dl_string would emit as a
+    wirelog-undecodable escape (the C0 range U+0000–U+001F). Empty when *value* is safe to
+    round-trip through accepted.dl. Pure; U+0085/U+2028/U+2029 are never flagged (#331/#255)."""
+    return sorted(set(_WIRELOG_UNDECODABLE_RE.findall(value)))
 
 
 def parse_relation_fact(line: str) -> tuple[str, str, str]:
