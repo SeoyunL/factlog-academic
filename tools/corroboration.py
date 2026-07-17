@@ -73,26 +73,33 @@ def main(argv: list[str] | None = None) -> int:
         # The object is ALSO keyed on its NFC form (#307), so one value authored in a
         # mix of NFC and NFD is a single competitor rather than a false two-way
         # contest; ``raw_objs`` keeps the spellings for a deterministic representative
-        # (min), matching how the relation is handled above (#295).
+        # (min), matching how the relation is handled above (#295). The subject axis
+        # folds the same way (#310), so a value backed under one subject spelled two
+        # ways is one row of the contest, not two.
         sources_by: dict[tuple[str, str], dict[str, set[str]]] = {}
         raw_rels: dict[tuple[str, str], set[str]] = {}
+        raw_subjects: dict[tuple[str, str], set[str]] = {}
         raw_objs: dict[tuple[tuple[str, str], str], set[str]] = {}
         for row in engine_facts(facts):
             # single_valued is loaded NFC-normalized; the fact relation may be NFD.
             # Fold the membership probe so an NFD-authored fact still competes (#293).
             if unicodedata.normalize("NFC", row["relation"]) not in single_valued:
                 continue
-            bucket = (row["subject"], unicodedata.normalize("NFC", row["relation"]))
+            bucket = (
+                unicodedata.normalize("NFC", row["subject"]),
+                unicodedata.normalize("NFC", row["relation"]),
+            )
             fobj = unicodedata.normalize("NFC", row["object"])
             objs = sources_by.setdefault(bucket, {})
             objs.setdefault(fobj, set()).add(row["source"])
             raw_objs.setdefault((bucket, fobj), set()).add(row["object"])
             raw_rels.setdefault(bucket, set()).add(row["relation"])
+            raw_subjects.setdefault(bucket, set()).add(row["subject"])
         contested = {b: objs for b, objs in sources_by.items() if len(objs) > 1}
         if contested:
             print(f"\ncorroboration: {len(contested)} single-valued relation(s) with competing values")
             for bucket, objs in sorted(contested.items()):
-                subject = bucket[0]
+                subject = min(raw_subjects[bucket])
                 relation = min(raw_rels[bucket])
                 reps = sorted(
                     (min(raw_objs[(bucket, fobj)]), len(srcs)) for fobj, srcs in objs.items()
