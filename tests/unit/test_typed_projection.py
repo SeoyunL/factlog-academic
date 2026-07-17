@@ -143,7 +143,7 @@ _RUNNER = textwrap.dedent(
     a = common.run_wirelog()
     b = common.run_wirelog()
     assert a == b, "non-deterministic engine output"
-    # after2030 rows are subject-only 1-tuples; emit the sorted subjects.
+    # after2030 rows are (subject, reason) 2-tuples; emit the sorted subjects.
     print(json.dumps(sorted(row[0] for row in a.get("after2030", set()))))
     """
 )
@@ -162,12 +162,13 @@ def _build_kb(root: Path) -> None:
         "- `정식_운영` : date as launch_date\n", encoding="utf-8"
     )
     (root / "policy" / "logic-policy.dl").write_text(
-        # Arity-1 head is intentional here: this test calls run_wirelog()
-        # directly and never touches the report path. Do NOT copy this shape
-        # into logic-policy.extra.dl — an arity-1 head crashes
-        # run_logic_check.py's 2-tuple unpack (#120 uses arity-2).
-        ".decl after2030(s: symbol)\n"
-        "after2030(S) :- launch_date(S, D), D >= 20300101.\n",
+        # Arity-2 head (subject, reason). #322 promoted the arity-2 convention to a
+        # LOAD-time guard, and run_wirelog() loads the policy through it, so the old
+        # arity-1 shape this fixture used to carry is now rejected outright — exactly
+        # the "Do NOT copy this shape" warning, now enforced instead of commented. The
+        # reason column is a constant label; this test only reads the subject.
+        '.decl after2030(s: symbol, reason: symbol)\n'
+        'after2030(S, "launched 2030+") :- launch_date(S, D), D >= 20300101.\n',
         encoding="utf-8",
     )
 

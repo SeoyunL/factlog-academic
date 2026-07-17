@@ -310,3 +310,56 @@ class TestBackslashEscapesMatchTheEngine:
     def test_a_genuinely_unterminated_string_still_fails_loudly(self):
         with pytest.raises(fcommon.FactlogError, match="unterminated string"):
             fcommon._assert_no_canonical_head('ok(X, "never closed) :- relation(X, R, O).')
+
+
+class TestPolicyPredicateArityIsTwo:
+    """#322: the report unpacks every policy row as exactly (target, reason). An
+    arity-1/arity-3 policy .decl LOADS fine and then crashes run_logic_check with a
+    ValueError the instant the predicate derives a row — it passes `factlog check` while
+    it finds nothing and dies the moment it finds the contradiction it exists to surface.
+    The arity-2 convention lived only in prose; promote it to a LOAD-time guard (#323
+    pattern), the one point that sees the whole policy. run_logic_check is untouched."""
+
+    def test_rejects_arity_one_head(self):
+        with pytest.raises(fcommon.FactlogError, match="two-column head"):
+            fcommon._assert_no_canonical_head(".decl orphan(subject: symbol)\n")
+
+    def test_rejects_arity_three_head(self):
+        with pytest.raises(fcommon.FactlogError, match="two-column head"):
+            fcommon._assert_no_canonical_head(
+                ".decl triple(a: symbol, b: symbol, c: symbol)\n"
+            )
+
+    def test_rejects_arity_zero_head(self):
+        with pytest.raises(fcommon.FactlogError, match="two-column head"):
+            fcommon._assert_no_canonical_head(".decl flag()\n")
+
+    def test_allows_arity_two_head(self):
+        """The control the report can unpack: exactly (target, reason)."""
+        fcommon._assert_no_canonical_head(
+            ".decl needs_review(subject: symbol, reason: symbol)\n"
+        )
+
+    def test_error_names_the_predicate_and_arity(self):
+        with pytest.raises(fcommon.FactlogError, match=r"'orphan'.*1 column"):
+            fcommon._assert_no_canonical_head(".decl orphan(subject: symbol)\n")
+
+    def test_the_report_crash_scenario_is_blocked_at_load(self, tmp_path):
+        """The issue's exact reproduction: an orphan/1 rule that derives rows. It must be
+        refused at LOAD, before run_logic_check ever unpacks a row."""
+        extra = (
+            ".decl orphan(subject: symbol)\n"
+            'orphan(S) :- relation(S, "cites", O), !relation(O, "cites", S).\n'
+        )
+        dl = _make_kb(tmp_path, dl_text="// generated\n", extra_text=extra)
+        with pytest.raises(fcommon.FactlogError, match="two-column head"):
+            fcommon._load_logic_policy_from(dl)
+
+    def test_arity_two_extra_dl_still_loads(self, tmp_path):
+        extra = (
+            ".decl needs_review(subject: symbol, reason: symbol)\n"
+            'needs_review(S, "low_conf") :- relation(S, "cites", _).\n'
+        )
+        dl = _make_kb(tmp_path, dl_text="// generated\n", extra_text=extra)
+        result = fcommon._load_logic_policy_from(dl)
+        assert "needs_review" in result

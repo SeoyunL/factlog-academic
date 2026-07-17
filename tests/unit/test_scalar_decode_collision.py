@@ -248,11 +248,14 @@ class TestGuardRejectsNonSymbolPolicyColumn:
         """symbol and string both map to ColumnType.STRING, so both render."""
         common._assert_no_canonical_head(".decl note(subject: symbol, t: string)\n")
 
-    def test_does_not_check_arity(self):
-        """Column TYPE only. Arity is #322's guard; keep the two independent."""
-        common._assert_no_canonical_head(
-            ".decl triple(a: symbol, b: symbol, c: symbol)\n"
-        )
+    def test_arity_three_is_now_rejected(self):
+        """#322 promoted the arity-2 convention to a load-time guard in this same pass,
+        so an arity-3 policy .decl — even one whose columns are all TYPE-valid symbols —
+        is now rejected on arity. The type check and the arity check coexist here."""
+        with pytest.raises(common.FactlogError, match="two-column head"):
+            common._assert_no_canonical_head(
+                ".decl triple(a: symbol, b: symbol, c: symbol)\n"
+            )
 
 
 class TestRunWirelogRequiresALiveSchema:

@@ -2015,6 +2015,26 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     _RENDERABLE_COL = {"symbol", "string"}
     for m in re.finditer(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)", bare):
         name, columns = m.group(1), m.group(2)
+        # The report unpacks every policy row as exactly (target, reason) — a two-column
+        # head (run_logic_check.main). An arity-1/arity-3 .decl LOADS fine and then crashes
+        # that loop with a ValueError the moment the predicate derives a row, so a KB
+        # passes `factlog check` while the predicate finds nothing and dies exactly when it
+        # finds the contradiction it exists to surface (#322). The arity-2 convention lived
+        # only in prose (a comment by _project_typed_relations, a "Do NOT copy this shape"
+        # test note); promote it to a load-time failure at the one point that sees the whole
+        # policy. Reserved engine .decls were already rejected above, so every .decl reaching
+        # here is a user policy predicate and must head exactly two columns.
+        fields = [c for c in columns.split(",") if c.strip()]
+        if len(fields) != 2:
+            raise FactlogError(
+                f"policy predicate {name!r} declares {len(fields)} column(s), but the "
+                f"report unpacks every policy row as exactly (target, reason) — a "
+                f"two-column head. An arity-{len(fields)} .decl loads without complaint "
+                f"and then crashes run_logic_check with a ValueError the moment the "
+                f"predicate derives a row (it passes silently while it finds nothing). "
+                f'Head exactly two symbol/string columns, e.g. `{name}(subject, "reason") '
+                f":- ...`. Fix the .decl in logic-policy(.extra).dl."
+            )
         for column in columns.split(","):
             if ":" not in column:
                 continue
