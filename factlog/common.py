@@ -1261,6 +1261,28 @@ def declared_ancestors(
     return found
 
 
+def policy_row_matches(args: list[str], row: tuple[str, ...]) -> bool:
+    """Does `row` satisfy a policy query's pinned entity?
+
+    THE single filtering predicate for policy-predicate extents. The report
+    (run_logic_check) and the router (ask_router) each carried their own copy and
+    drifted: the router filtered on the pinned entity while the report printed the
+    whole extent, so `needs_review("Alice", R)?` was answered with every subject's
+    rows — and for an entity with no rows at all the report presented the full
+    extent as that entity's (#213, #320). Two verification paths disagreeing is
+    worse than either being wrong. One predicate, two callers, no room to drift.
+
+    Only the first arg constrains, and only when it is a quoted string: a variable
+    there ranges over the whole extent. The comparison is RAW, not canonicalised —
+    a policy extent's column 0 is whatever the engine derived, and the router has
+    always compared it verbatim; folding here would answer a different question
+    than `/factlog ask` does.
+    """
+    if not args or not _is_quoted_string(args[0]):
+        return True
+    return bool(row) and _arg_value(args[0]) == row[0]
+
+
 def relation_row_matches(
     args: list[str],
     row: dict[str, str],
