@@ -205,16 +205,26 @@ def audit(
             distinct = sorted(set(folded[key]) - reported)
             if len(distinct) < 2:
                 continue
-            owners = {s for v in distinct for s in subjects[(frel, v)]}
+            # Owners fold to NFC so ONE subject authored in a mix of NFC and NFD is a
+            # single owner, not two — otherwise a categorical split is misread as a
+            # cross-subject duplicate_record, exempting a real query leak from the
+            # --strict gate (#314). ``subjects`` is keyed on the RAW object, and the
+            # ``distinct`` values are raw object strings from the same source, so the
+            # object axis stays raw-on-raw and needs no fold here. The stored subject
+            # spellings are kept; the report shows the deterministic min per owner.
+            folded_owners: dict[str, set[str]] = defaultdict(set)
+            for v in distinct:
+                for s in subjects[(frel, v)]:
+                    folded_owners[unicodedata.normalize("NFC", s)].add(s)
             # See the docstring: policy decides, not the subject count. Both the
             # relation bucket (frel) and the identity set are NFC-folded, so an
             # NFD-authored relation still matches its identity declaration; the
             # reported name is the deterministic representative (rep).
-            kind = "duplicate_record" if frel in identity and len(owners) > 1 else "split"
+            kind = "duplicate_record" if frel in identity and len(folded_owners) > 1 else "split"
             duplicates.append({
                 "relation": rep,
                 "values": " / ".join(f"{v} ({values[v]})" for v in distinct),
-                "subjects": ", ".join(sorted(owners)),
+                "subjects": ", ".join(sorted(min(raws) for raws in folded_owners.values())),
                 "kind": kind,
             })
 
