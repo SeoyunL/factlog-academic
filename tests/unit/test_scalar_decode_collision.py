@@ -2,9 +2,14 @@
 """An int64 scalar must not be decoded as an interned symbol (#120 prose rule).
 
 The root cause is a SECOND layer redoing the FIRST layer's job from the value alone.
-The engine's schema is the only thing that knows what a column means, and
-``EasySession.step()`` applies it before we see a row (``_decode_row``): a ``symbol``
-column arrives already decoded to ``str``, an ``int64`` column already an ``int``.
+Only the schema knows what a column means, and applying it is the engine's job:
+``EasySession.step()`` runs each row through ``_decode_row`` before we see it.
+
+That decoding takes two parties, though. ``_decode_row`` resolves a STRING column by
+intern lookup and falls back SILENTLY to the raw ``int`` on a miss, and the table it
+looks in is filled by factlog's own pre-interning (#250), not by the engine. So a
+symbol column arrives as ``str`` only because we interned it first — without the
+pre-interning it arrives as a raw id, measured below.
 
 Measured against the real engine (pyrewire 1.0.3): for
 
@@ -14,14 +19,16 @@ Measured against the real engine (pyrewire 1.0.3): for
     priority_rank(S, 3) :- relation(S, "is", "thing").
     low_rank(S, R) :- priority_rank(S, R), R < 5.
 
-``session.step()`` emits ``('low_rank', ('alpha', 3), 1)`` — ``'alpha'`` is ALREADY a
-``str`` and ``3`` is ALREADY the correct ``int``.
+``session.step()`` emits ``('low_rank', ('alpha', 3), 1)`` once the symbols are
+pre-interned — ``'alpha'`` is ALREADY a ``str`` and ``3`` is ALREADY the correct
+``int``. Skip the pre-interning and the same row is ``('int', 0), ('int', 3)``.
 
 ``decode_wirelog_value`` (``factlog/common.py``) then re-decoded that row looking only
 at the value: ``isinstance(value, int) and session._intern.contains_id(value)``. Nothing
 in that test can distinguish a SYMBOL ID from a genuine ``int64`` value — and it never
-needed to help, since a symbol column is already ``str`` and fails the ``isinstance``.
-It could only harm: it rewrote the ``3`` into ``'beta'``. The head is arity-2, so it
+needed to help a pre-interned run, since a symbol column is already ``str`` there and
+fails the ``isinstance``. It could only harm: it rewrote the ``3`` into ``'beta'``.
+The head is arity-2, so it
 renders as a normal policy finding — the report prints ``low_rank: alpha (beta)`` where
 the truth is ``low_rank: alpha (3)``: a fabricated reason string on a real subject, with
 no warning and a clean exit.
@@ -90,22 +97,25 @@ class TestScalarIsNotRewrittenAsASymbol:
 
 @pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
 class TestAgainstTheRealEngine:
-    """The authority: what the engine's schema decoding actually hands the decoder."""
+    """The authority: what a decoded row really contains, and why."""
 
-    def _session(self):
+    _PROGRAM = (
+        ".decl relation(subject: symbol, rel: symbol, object: symbol)\n"
+        ".decl priority_rank(subject: symbol, r: int64)\n"
+        ".decl low_rank(subject: symbol, r: int64)\n"
+        'relation("alpha", "is", "thing").\n'
+        'priority_rank(S, 3) :- relation(S, "is", "thing").\n'
+        "low_rank(S, R) :- priority_rank(S, R), R < 5.\n"
+    )
+
+    def _session(self, pre_intern=True):
+        """A session that pre-interns its symbols exactly as run_wirelog does (#250)."""
         from pyrewire import EasySession
 
-        program = (
-            ".decl relation(subject: symbol, rel: symbol, object: symbol)\n"
-            ".decl priority_rank(subject: symbol, r: int64)\n"
-            ".decl low_rank(subject: symbol, r: int64)\n"
-            'relation("alpha", "is", "thing").\n'
-            'priority_rank(S, 3) :- relation(S, "is", "thing").\n'
-            "low_rank(S, R) :- priority_rank(S, R), R < 5.\n"
-        )
-        session = EasySession(program)
-        for value in ["alpha", "beta", "published_year", "gamma", "delta"]:
-            session.intern(value)
+        session = EasySession(self._PROGRAM)
+        if pre_intern:
+            for value in ["alpha", "beta", "published_year", "gamma", "delta"]:
+                session.intern(value)
         return session
 
     def test_engine_emits_a_raw_int_for_an_int64_column(self):
@@ -119,24 +129,48 @@ class TestAgainstTheRealEngine:
         finally:
             session.close()
 
-    def test_engine_decodes_a_symbol_column_to_str(self):
-        """The premise of the fix: the schema, not the decoder, resolves symbols.
+    def test_a_pre_interned_symbol_column_decodes_to_str(self):
+        """The premise of the fix, and it takes TWO parties.
 
-        decode_wirelog_value passes values through because step() has ALREADY typed
-        them. If a future engine stopped decoding symbol columns and handed back raw
-        ids, that pass-through would silently print ints where names belong — so pin
-        the contract here rather than trusting the pyproject pin alone.
+        decode_wirelog_value may pass a value through because the row arrives
+        decoded — but the engine only decodes a symbol column when that symbol is in
+        the intern table, and we are the ones who put it there. If this ever fails,
+        the cause is EITHER a changed engine OR lost pre-interning; the companion
+        test below pins the other half, so the pair says which.
         """
         session = self._session()
         try:
             rows = {name: row for name, row, diff in session.step() if diff > 0}
             subject = rows["low_rank"][0]
             assert isinstance(subject, str), (
-                f"step() handed back {subject!r} ({type(subject).__name__}); the "
-                "engine no longer decodes symbol columns and decode_wirelog_value's "
-                "pass-through is no longer sound"
+                f"step() handed back {subject!r} ({type(subject).__name__}) for a "
+                "PRE-INTERNED symbol column, so pass-through no longer renders names: "
+                "either pyrewire changed how it decodes a STRING column, or the "
+                "pre-interning this session does was lost"
             )
             assert subject == "alpha"
+        finally:
+            session.close()
+
+    def test_an_un_interned_symbol_column_falls_back_to_a_raw_int(self):
+        """Why the pre-interning is load-bearing and NOT dead code.
+
+        pyrewire's _decode_row resolves a STRING column by intern lookup and falls
+        back SILENTLY to the raw int on a miss — it does not raise. So losing the
+        pre-interning would not fail loudly; reports would simply print bare ids
+        where names belong. Pin that, so a reader who sees the pass-through decoder
+        and concludes the interning is vestigial is contradicted by a test.
+        """
+        session = self._session(pre_intern=False)
+        try:
+            rows = {name: row for name, row, diff in session.step() if diff > 0}
+            subject = rows["low_rank"][0]
+            assert isinstance(subject, int) and not isinstance(subject, bool), (
+                f"expected an un-interned symbol column to fall back to a raw int, got "
+                f"{subject!r} ({type(subject).__name__}); if pyrewire now resolves "
+                "symbols without our pre-interning, run_wirelog's interning and the "
+                "notes pointing at it are stale"
+            )
         finally:
             session.close()
 
@@ -153,9 +187,13 @@ class TestAgainstTheRealEngine:
             session.close()
 
 
-@pytest.mark.skipif(not _HAVE_ENGINE, reason="pyrewire not installed")
 class TestGuardRejectsNonSymbolPolicyColumn:
-    """The cheap fix, shared with #322: reject an unrenderable head at policy load."""
+    """The cheap fix, shared with #322: reject an unrenderable head at policy load.
+
+    NOT gated on the engine: _assert_no_canonical_head is pure text parsing, and the
+    CI harness job runs without pyrewire. Inherited a skipif from the issue write-up;
+    under it the whole guard ran zero times in CI.
+    """
 
     def test_policy_load_rejects_an_int64_column(self):
         policy = (
@@ -164,3 +202,81 @@ class TestGuardRejectsNonSymbolPolicyColumn:
         )
         with pytest.raises(common.FactlogError):
             common._assert_no_canonical_head(policy)
+
+    @pytest.mark.parametrize("coltype", ["int32", "float", "unsigned"])
+    def test_policy_load_rejects_every_scalar_column_type(self, coltype):
+        """int64 is not special: no scalar column can render as a reason."""
+        with pytest.raises(common.FactlogError):
+            common._assert_no_canonical_head(f".decl p(subject: symbol, v: {coltype})\n")
+
+    def test_error_names_the_column_and_offers_the_body_alternative(self):
+        """A loud break must say what to do instead, not just what is wrong."""
+        policy = ".decl low_rank(subject: symbol, r: int64)\n"
+        with pytest.raises(common.FactlogError) as exc:
+            common._assert_no_canonical_head(policy)
+        message = str(exc.value)
+        assert "'r'" in message and "int64" in message
+        assert "body" in message.lower()
+        assert "docs/typed-relations.md" in message
+
+    def test_allows_symbol_columns(self):
+        """The correct form: compare in the body, head a quoted reason."""
+        common._assert_no_canonical_head(
+            ".decl low_rank(subject: symbol, reason: symbol)\n"
+            'low_rank(S, "rank below 5") :- priority_rank(S, R), R < 5.\n'
+        )
+
+    def test_allows_string_columns(self):
+        """symbol and string both map to ColumnType.STRING, so both render."""
+        common._assert_no_canonical_head(".decl note(subject: symbol, t: string)\n")
+
+    def test_does_not_check_arity(self):
+        """Column TYPE only. Arity is #322's guard; keep the two independent."""
+        common._assert_no_canonical_head(
+            ".decl triple(a: symbol, b: symbol, c: symbol)\n"
+        )
+
+
+class TestLoadLogicPolicyScalarColumnGuard:
+    """The guard must fire through the real loader, as every other guard here does."""
+
+    def _make_kb(self, tmp_path, *, dl_text="", extra_text=None):
+        policy_dir = tmp_path / "policy"
+        policy_dir.mkdir(parents=True, exist_ok=True)
+        dl = policy_dir / "logic-policy.dl"
+        dl.write_text(dl_text, encoding="utf-8")
+        if extra_text is not None:
+            (policy_dir / "logic-policy.extra.dl").write_text(extra_text, encoding="utf-8")
+        return dl
+
+    def test_raises_when_logic_policy_dl_has_a_scalar_column(self, tmp_path):
+        dl = self._make_kb(
+            tmp_path, dl_text=".decl low_rank(subject: symbol, r: int64)\n"
+        )
+        with pytest.raises(common.FactlogError, match="symbol/string"):
+            common._load_logic_policy_from(dl)
+
+    def test_raises_when_extra_dl_has_a_scalar_column(self, tmp_path):
+        """The realistic case: a hand-authored comparison predicate in extra.dl."""
+        dl = self._make_kb(
+            tmp_path,
+            dl_text=".decl conflict(entity: symbol, reason: symbol)\n",
+            extra_text=(
+                ".decl low_rank(subject: symbol, r: int64)\n"
+                "low_rank(S, R) :- priority_rank(S, R), R < 5.\n"
+            ),
+        )
+        with pytest.raises(common.FactlogError, match="symbol/string"):
+            common._load_logic_policy_from(dl)
+
+    def test_ok_when_every_policy_column_is_symbol(self, tmp_path):
+        dl = self._make_kb(
+            tmp_path,
+            dl_text=".decl conflict(entity: symbol, reason: symbol)\n",
+            extra_text=(
+                ".decl low_rank(subject: symbol, reason: symbol)\n"
+                'low_rank(S, "rank below 5") :- priority_rank(S, R), R < 5.\n'
+            ),
+        )
+        result = common._load_logic_policy_from(dl)
+        assert "low_rank" in result
