@@ -64,6 +64,74 @@ that path in File Explorer (Windows) or Finder (macOS).
 > like `.docx` and `.pdf` can go in `sources/` too — `/factlog sync` converts
 > them to text automatically (→ `runs/sources/`).
 
+### The first pass — where my files go, and what factlog creates
+
+Right after `/factlog setup` the KB is **nearly empty.** All setup creates is the
+folders above, a few config files under `policy/`, and `templates/pages.md`.
+`facts/` starts out as an **empty folder** — no `candidates.csv`, no `accepted.dl`
+yet.
+
+```text
+<KB>/
+├── sources/                              ← empty. This is where you start
+├── facts/                                ← empty (no facts yet)
+├── policy/
+│   ├── questions.md                      ← review questions (editable)
+│   ├── logic-policy.md                   ← policy rules (editable)
+│   ├── attribute-relations.md            ← literal-value relation declarations (editable)
+│   ├── typed-relations.md                ← comparable-literal relation declarations (editable)
+│   ├── sync-ignore.md                    ← glob patterns to exclude from sync (editable)
+│   └── prompts/                          ← the 4 extraction/query prompts
+├── pages/ · decisions/                   ← empty
+├── runs/sources/                         ← empty (where conversions will land)
+└── templates/pages.md
+```
+
+Now put the documents you want verified into `sources/`. Subfolders are fine.
+
+```text
+<KB>/sources/
+├── 2026-q1-report.docx      ← a file I added
+├── notes.md                 ← a file I added
+└── research/
+    └── paper.pdf            ← a file I added (subfolders are recognized as-is)
+```
+
+One run of `/factlog sync` and factlog fills in the rest. **`sources/` stays as it
+was** — not even conversions are written there.
+
+```text
+<KB>/
+├── sources/                             ← untouched. My originals, as they were
+├── runs/
+│   ├── sources/
+│   │   ├── 2026-q1-report.docx.md       ← (generated) the conversion. Original's full name + .md
+│   │   └── research/paper.pdf.txt       ← (generated) mirrors the subdirectory structure
+│   └── <extraction run records>.json    ← (generated) where a fact's value lives
+├── facts/
+│   ├── candidates.csv                   ← (generated) candidate facts — the review targets
+│   └── accepted.dl                      ← (generated) confirmed facts only. Engine input
+└── pages/ · decisions/                  ← (generated) not hand-edited
+```
+
+To summarize:
+
+| Path | Who writes it | Can I edit it |
+|------|---------------|---------------|
+| `sources/` | **you** | Yes — this is your space |
+| `policy/` | setup scaffolds it, then **you** | Yes — questions, policy, relation declarations |
+| `runs/sources/` | factlog (`ingest`) | No — the next sync recreates them |
+| `runs/*.json` | factlog (extraction) | No — use `factlog amend` |
+| `facts/candidates.csv` | factlog (merge) | Use `accept`/`reject`/`amend` rather than editing directly |
+| `facts/accepted.dl` | factlog (compile) | No — it is generated from `candidates.csv` |
+| `pages/`, `decisions/` | factlog | No |
+
+That `runs/*.json` is where a fact's value lives matters. merge rebuilds
+`candidates.csv` from it every time, so hand-edits to `candidates.csv` are
+overwritten and lost on the next `/factlog sync`. That is why correcting a value
+goes through [`factlog amend`](../reference/review.en.md#reviewing-facts-factlog-review--accept--reject),
+which updates both sides together.
+
 ## candidate vs accepted — the trust boundary
 
 factlog has two kinds of facts.

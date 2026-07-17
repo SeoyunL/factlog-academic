@@ -20,6 +20,62 @@ no facts on its own.
 | `.pptx` (PowerPoint) | **Auto-converted** | Built-in extractor (no external tool) — reads on-slide text from the zip's `ppt/slides/slideN.xml`, slides in order, one block per slide. Speaker notes are excluded; table cells flatten to one line per cell (row/column grouping not preserved). |
 | `.xlsx`, images | **Not converted** | No bundled converter — reported with a hint; convert by hand. |
 
+### Per-format converters and prerequisites
+
+What "auto-converted" above actually requires differs per format. Each extension
+has a **converter chain**, and factlog walks that chain in order and picks the
+**first available** converter (a built-in is always available; an external tool
+only when it is on `PATH`).
+
+| Format | Converter chain (in order) | Needs installing | Output |
+|--------|----------------------------|------------------|--------|
+| `.docx`, `.odt` | pandoc → textutil | pandoc, or macOS's textutil | `.md` (pandoc) / `.txt` (textutil) |
+| `.html`, `.htm` | pandoc → textutil | pandoc, or macOS's textutil | `.md` / `.txt` |
+| `.epub` | pandoc | pandoc | `.md` |
+| `.rtf` | textutil | **macOS only** — textutil ships with macOS | `.txt` |
+| `.pdf` | pdftotext | poppler (`pdftotext`) | `.txt` |
+| `.hwpx` | `factlog-hwpx` (built-in) | nothing — standard library only | `.md` |
+| `.pptx` | `factlog-pptx` (built-in) | nothing — standard library only | `.md` |
+| `.hwp` | `factlog-hwp` (built-in, orchestrates external tools) | **both** `hwp5html` (`pip install pyhwp`) **and** pandoc | `.md` |
+| `.xlsx`, `.png`, `.jpg`, `.jpeg` | none | — | not converted |
+
+The install hints are given per tool — pandoc as `brew install pandoc` (or
+<https://pandoc.org>), pdftotext as poppler (`brew install poppler`), and textutil
+ships with macOS.
+
+The **fallback chain** on `.docx`/`.odt`/`.html`/`.htm` matters. With no pandoc,
+macOS still converts them via textutil (but the result lands as plain `.txt`
+rather than markdown, so table structure is not preserved). `.epub`/`.rtf`/`.pdf`,
+by contrast, have a single-tool chain — without that tool they are not converted.
+
+### What happens when no converter is available
+
+Whether `ingest` treats a missing converter as a failure depends on **how the file
+was named**.
+
+| Situation | `--scan` (auto-discovered) | Explicit `ingest <file>` |
+|-----------|----------------------------|--------------------------|
+| no tool from the chain on `PATH` (e.g. `.docx` without pandoc) | counted `skipped`, **run succeeds** (exit code 0) | counted `failed`, **exit code 1** |
+| format with no converter at all (`.xlsx`, images) | `skipped`, exit code 0 | `failed`, exit code 1 |
+| built-in cannot find its external tool (`.hwp` without pyhwp/pandoc) | `skipped`, exit code 0 | `failed`, exit code 1 |
+
+Either way **the reason is always printed to stderr**, so nothing passes silently.
+
+```text
+factlog ingest: no converter on PATH for .pdf (tried: pdftotext). install poppler (e.g. `brew install poppler`)
+factlog ingest: skip y.xlsx (.xlsx): no built-in converter; export sheets to .csv and place those in sources/
+factlog ingest: 0 converted, 2 skipped, 0 failed
+```
+
+The asymmetry is deliberate. `--scan` runs as the pre-step of `/factlog sync`, so
+one unconvertible file must not fail the whole sync. Conversely, if you named a
+file yourself that is a request to process it — so not processing it is a failure.
+
+`--scan` additionally counts and surfaces two more classes separately — a file
+whose **extension is a conversion target but whose content is not binary** (e.g. a
+plaintext `.hwpx`) and a **0-byte file**. Neither is converted; both are reported
+as `ignored` (the former is read directly as text by sync if it is a valid source).
+
 `factlog ingest` writes the converted text into the KB's **`runs/sources/`**
 directory (alongside the other generated run artifacts) — **never into
 `sources/`**, which stays the user's originals. A conversion is named by the
