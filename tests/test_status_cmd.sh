@@ -78,6 +78,37 @@ for inp in "facts/accepted.dl" "facts/query.dl" "policy/logic-policy.dl"; do
   printf '%s' "$out" | grep -qF "report STALE" && ok "STALE when $inp newer than report" || bad "stale not detected for $inp"
 done
 
+# --- #330: candidates-vs-accepted engine-count drift axis --------------------
+# status prints two engine-fact counts — its own (from candidates.csv) and the
+# report's `engine facts:` (from accepted.dl). A truncated accepted.dl (#328/#329)
+# makes them disagree; status must SAY so instead of calling the report fresh.
+DKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$DKB" >/dev/null
+printf 'x\n' > "$DKB/sources/a.md"
+printf '%s\n%s\n%s\n' "$H" \
+  'A,uses,B,sources/a.md,confirmed,0.9,' \
+  'C,uses,D,sources/a.md,confirmed,0.9,' > "$DKB/facts/candidates.csv"
+# A report that checked only 1 engine fact while candidates carries 2 (deduped).
+printf 'engine facts: 1\nerrors: 0\nwarnings: 0\n' > "$DKB/facts/logic_report.txt"
+printf 'relation("A", "uses", "B").\n' > "$DKB/facts/accepted.dl"
+touch -t 205001010000 "$DKB/facts/logic_report.txt"                          # report newest
+touch -t 200001010000 "$DKB/facts/accepted.dl" "$DKB/policy/logic-policy.dl" # older
+touch -t 200001010000 "$DKB/facts/candidates.csv"                            # older -> isolate the count axis from freshness
+out="$("$PYTHON" -m factlog status --target "$DKB" 2>&1)"
+printf '%s' "$out" | grep -qF "engine-input mismatch: 2 confirmed fact(s) in candidates.csv but the report checked 1" \
+  && ok "#330: status flags candidates-vs-accepted engine mismatch" || bad "#330: mismatch not flagged: $(printf '%s' "$out" | grep -A1 'logic:')"
+
+# matching counts must NOT warn (legitimate duplicate triples dedup to the same count)
+printf 'engine facts: 2\nerrors: 0\nwarnings: 0\n' > "$DKB/facts/logic_report.txt"
+touch -t 205001010000 "$DKB/facts/logic_report.txt"
+out="$("$PYTHON" -m factlog status --target "$DKB" 2>&1)"
+printf '%s' "$out" | grep -qF "engine-input mismatch" && bad "#330: false mismatch on matching counts" || ok "#330: matching counts do not warn"
+
+# candidates.csv newer than the report -> STALE (candidates.csv was not a freshness input before #330)
+touch -t 210001010000 "$DKB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog status --target "$DKB" 2>&1)"
+printf '%s' "$out" | grep -qF "report STALE" && ok "#330: candidates.csv newer than report => STALE" || bad "#330: candidates.csv staleness not detected: $(printf '%s' "$out" | grep 'logic:')"
+
 # --- binary original counted as covered via its conversion (like coverage) -----
 PKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$PKB" >/dev/null

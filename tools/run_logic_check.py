@@ -21,6 +21,8 @@ from common import (
     typed_projection_warnings,
     QUERY_PREDICATES,
     allowed_relations,
+    dedup_engine_atoms,
+    engine_facts,
     value_hierarchy,
     value_hierarchy_warnings,
     value_set,
@@ -441,6 +443,43 @@ def engine_relation_gap(
     return None
 
 
+def engine_input_drift(
+    candidates: list[dict[str, str]],
+    facts: list[dict[str, str]],
+) -> str | None:
+    """An error string when facts/accepted.dl disagrees with the confirmed rows in
+    candidates.csv on the engine atom count — the candidates.csv → accepted.dl edge that
+    engine_relation_gap cannot see (#328).
+
+    engine_relation_gap (#308) compares two readers of the SAME file (accepted.dl):
+    load_accepted_facts and the engine's relation_alive witness. By construction they are
+    built to agree, so that axis only catches the engine emptying underneath a consistent
+    disk — never the edge that actually drifts. That edge is candidates.csv → accepted.dl:
+    a truncated write (#329) or a hand-edited candidates.csv not recompiled leaves
+    accepted.dl holding FEWER (or different) atoms than the confirmed rows it is compiled
+    from, and nobody reads it. This is that reader. The expected count is
+    ``dedup_engine_atoms(engine_facts(candidates))`` — the exact collapse compile_facts
+    applies — and the actual is ``len(facts)`` (load_accepted_facts already dedups), so the
+    comparison is dedup-aware on both sides and a freshly compiled KB never trips it.
+
+    A hard ERROR, not a warning: warnings never fail run_logic_check (#283 exit gate keys
+    on errors), and a truncated accepted.dl silently signs verified negatives — a confirmed
+    fact answering ``0 rows`` as if it were a real, checked answer (#328). Pure: no I/O.
+    """
+    expected = len(dedup_engine_atoms(engine_facts(candidates)))
+    actual = len(facts)
+    if expected == actual:
+        return None
+    return (
+        f"engine input drift: candidates.csv has {expected} engine-input fact(s) "
+        f"(confirmed/accepted, deduped) but facts/accepted.dl holds {actual} — "
+        "accepted.dl disagrees with the confirmed rows it is compiled from (a truncated "
+        "write or a hand-edited candidates.csv not recompiled). Recompile with "
+        "`factlog check`; until then a confirmed fact can be answered as a verified "
+        "'0 rows' negative."
+    )
+
+
 def main() -> int | None:
     ensure_dirs()
     facts = load_accepted_facts()
@@ -466,6 +505,13 @@ def main() -> int | None:
     gap = engine_relation_gap(facts, inferred)
     if gap:
         errors.append(gap)
+    # The candidates.csv → accepted.dl edge engine_relation_gap cannot see (#328): a
+    # truncated (#329) or hand-edited accepted.dl holding fewer atoms than the confirmed
+    # rows it is compiled from. A hard error so the #283 exit gate stops the pipeline
+    # instead of signing a verified '0 rows' over a silently shrunk engine input.
+    drift = engine_input_drift(candidates, facts)
+    if drift:
+        errors.append(drift)
     warnings.extend(status_warnings(candidates))
     # A mistyped or cyclic declaration is a SILENT no-op: the author believes the
     # broader query now catches the narrower rows, and it does not. That is the

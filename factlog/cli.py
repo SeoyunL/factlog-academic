@@ -21,24 +21,16 @@ from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
 from factlog import config as factlog_config
+from factlog.common import _atomic_write_text
 
 MIN_PYTHON = (3, 11)
 MIN_PYREWIRE = (1, 0, 3)  # bundles wirelog v0.52.0 with \" escape support (wirelog#924)
 
 
-def _atomic_write_text(path: _Path, text: str) -> None:
-    """Write *text* to *path* atomically (temp file + os.replace).
-
-    Used for run-file JSON so an interrupted/`amend`/`eject` run can never leave a
-    truncated runs/*.json behind — a corrupt run file still holds retired rows and
-    would resurrect them (or be skipped, losing the run) on the next merge. Mirrors
-    the temp+replace pattern already used for candidates.csv.
-    """
-    import os
-
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+# _atomic_write_text (temp + os.replace) now lives in factlog.common so
+# compile_facts.py can write accepted.dl atomically too (#329). Re-exported here
+# unchanged: run-file JSON writers below still call it as a module-level name, and
+# an interrupted/`amend`/`eject` run can never leave a truncated runs/*.json behind.
 
 
 def _atomic_write_csv(csv_path, rows, fieldnames) -> None:
@@ -2038,12 +2030,36 @@ def cmd_status(args: argparse.Namespace) -> int:
         # run_logic_check's report (the `Errors:`/`Warnings:` headers are capitalised).
         errors = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("errors:")), "?")
         warnings = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("warnings:")), "?")
+        report_engine = next(
+            (ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("engine facts:")), None
+        )
         rep_mtime = report.stat().st_mtime
-        # The report is a function of all three run_logic_check inputs.
-        inputs = [p for p in (ctx.accepted_dl, ctx.facts_dir / "query.dl", ctx.logic_policy_dl) if p.is_file()]
+        # The report is a function of run_logic_check's inputs AND, transitively, of
+        # candidates.csv — accepted.dl is compiled from it. Without candidates.csv here,
+        # editing it without recompiling left accepted.dl (and the report) untouched, so
+        # status called a report predating the edit "fresh" (#330).
+        inputs = [
+            p
+            for p in (ctx.candidates_csv, ctx.accepted_dl, ctx.facts_dir / "query.dl", ctx.logic_policy_dl)
+            if p.is_file()
+        ]
         stale = any(p.stat().st_mtime > rep_mtime for p in inputs)
         fresh = "STALE (inputs changed since last check — run /factlog check)" if stale else "fresh"
-        print(f"  logic:      report {fresh}; errors={errors}, warnings={warnings}")
+        line = f"  logic:      report {fresh}; errors={errors}, warnings={warnings}"
+        # status prints two engine-fact counts — its own (from candidates.csv, above) and
+        # the report's `engine facts:` (from accepted.dl) — and used to never compare them,
+        # so a truncated accepted.dl (#328/#329) showed "7 engine fact(s)" one line above a
+        # report that checked 3, and still called it fresh. Compare dedup-aware (the report
+        # counts deduped accepted.dl rows, so dedup the candidate side too — legitimate
+        # duplicate triples must not false-alarm) and say so on mismatch.
+        expected_engine = len(common.dedup_engine_atoms(engine_rows))
+        if report_engine is not None and report_engine.isdigit() and int(report_engine) != expected_engine:
+            line += (
+                f"\n              ⚠ engine-input mismatch: {expected_engine} confirmed fact(s) in "
+                f"candidates.csv but the report checked {report_engine} — accepted.dl is out of "
+                "date; run /factlog check"
+            )
+        print(line)
     else:
         print("  logic:      no logic_report.txt yet (run /factlog check)")
     return 0

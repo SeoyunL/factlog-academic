@@ -4,29 +4,132 @@
 
 from __future__ import annotations
 
+import sys
+
 from factlog.common import (
+    _atomic_write_text,
     FACTS_DIR,
+    FactlogError,
     canonical_atoms,
     corroboration_counts,
     dedup_engine_atoms,
+    detect_conflicts,
     dl_string,
     dl_atom,
     engine_facts,
     ensure_dirs,
     load_facts,
     relation_aliases,
+    single_valued_relations,
+    typed_relations,
+    wirelog_undecodable_chars,
 )
+
+
+def _reject_on_conflict(facts: list[dict[str, str]]) -> None:
+    """Refuse to compile while a single-valued contradiction stands (#327).
+
+    /factlog check is exactly compile_facts → run_logic_check (SKILL.md), and NEITHER
+    step checked contradictions: the check_conflicts gate lived only in finalize. So a
+    finalize that DELETED accepted.dl to heal a contradiction (#212) was undone by the
+    very next `/factlog check`, which recompiled the contradictory rows straight back into
+    accepted.dl and blessed them `errors: 0`. This gate makes the #212 invariant durable
+    across commands: on a contradiction, nothing is written and any stale accepted.dl (a
+    prior snapshot, or the pre-#212 poisoned file) is removed so no reader — ask/check both
+    read accepted.dl straight from disk without recompiling — can trust it. Deterministic
+    (candidates.csv only, no pyrewire); finalize's own step-3 check_conflicts stays as a
+    defence-in-depth earlier gate.
+    """
+    single_valued = single_valued_relations()
+    if not single_valued:
+        return
+    aliases = relation_aliases()
+    conflicts = detect_conflicts(facts, single_valued, typed_relations(), aliases)
+    if not conflicts:
+        return
+    canonical_names = set(aliases.values())
+    print(f"check_conflicts: {len(conflicts)} conflict(s) found", file=sys.stderr)
+    for (subject, relation), objects in sorted(conflicts.items()):
+        suffix = " (canonical; incl. surface variants)" if aliases and relation in canonical_names else ""
+        print(
+            f"  CONFLICT: single-valued '{relation}'{suffix} on '{subject}' has "
+            f"{len(objects)} values: {', '.join(objects)}",
+            file=sys.stderr,
+        )
+    out = FACTS_DIR / "accepted.dl"
+    removed = out.is_file()
+    try:
+        out.unlink(missing_ok=True)
+    except OSError as exc:  # never crash on a cleanup failure
+        print(f"compile_facts: could not remove facts/accepted.dl ({exc}).", file=sys.stderr)
+        removed = False
+    raise FactlogError(
+        "CONTRADICTIONS were found (see CONFLICT lines above); facts were NOT compiled to "
+        "facts/accepted.dl"
+        + (
+            " and the existing facts/accepted.dl was removed, so /factlog ask returns "
+            "nothing until the conflict is resolved"
+            if removed
+            else ""
+        )
+        + ". Resolve them through the human gate — factlog eject --fact SUBJECT RELATION "
+        "OBJECT to retire a row, or factlog amend ... --set-object to correct one — not by "
+        "hand-editing facts/candidates.csv. If the values are a supertype and its subtype, "
+        "neither is wrong: declare the relationship in policy/value-hierarchy.md and both "
+        "rows are kept. Then re-run before trusting the KB."
+    )
+
+
+def _reject_undecodable_control_chars(rows: list[dict[str, str]]) -> None:
+    """Refuse to compile a fact whose subject/relation/object carries a control character
+    dl_string would emit as a wirelog-undecodable escape (#331).
+
+    dl_string is json.dumps; the engine decodes only \\" and \\\\, so a \\t/\\n/\\uXXXX
+    escape (the C0 range U+0000–U+001F) is stored as a literal backslash+letter — python
+    holds 'Fig<TAB>2', the engine holds 'Fig\\t2', their intern ids never meet, and the
+    value is silently lost from every query (the #308 witness even decodes to a bare
+    integer). We FAIL LOUD at compile rather than (a) normalizing — that would silently
+    alter a recorded fact; a tab pasted from a PDF table is data, not noise — or (b)
+    emitting the raw escape and hoping a downstream decoder agrees, which is exactly the
+    silent identity loss this catches. candidates.csv still LOADS (the reject is here, not
+    at load), so the human gate — factlog amend/eject — can correct the row.
+    U+0085/U+2028/U+2029 round-trip and are never rejected (#255, verified).
+    """
+    for row in rows:
+        for field in ("subject", "relation", "object"):
+            bad = wirelog_undecodable_chars(row[field])
+            if not bad:
+                continue
+            shown = ", ".join(repr(c) for c in bad)
+            raise FactlogError(
+                f"control character(s) {shown} in {field} {row[field]!r} cannot be compiled: "
+                "facts/accepted.dl encodes them as JSON escapes the wirelog engine does not "
+                "decode (\\t \\n \\r \\b \\f and other U+0000–U+001F controls), so Python and the "
+                "engine would hold different strings and the value would be silently dropped "
+                "from every query (#331). This usually comes from a tab or newline pasted from a "
+                "PDF table or the web into facts/candidates.csv. Correct the row through the human "
+                "gate — factlog amend <subject> <relation> <object> --set-object <clean> (or "
+                "--set-subject) — not by writing the control character back. "
+                "(U+0085/U+2028/U+2029 are fine and never rejected.)"
+            )
 
 
 def main() -> None:
     ensure_dirs()
     facts = load_facts()
+    # Gate BEFORE any write: a contradiction must never reach accepted.dl, the engine's
+    # trusted input that ask/check read straight from disk without recompiling (#327/#212).
+    _reject_on_conflict(facts)
     # Collapse the same (subject, relation, object) accepted from several sources
     # to a single engine atom so accepted.dl / ask / run_logic_check use set
     # semantics. Source aggregation (sources: N, provenance) stays on the
     # candidates path and is unaffected. First-occurrence keeps accepted.dl
     # byte-identical when there are no duplicate triples.
     accepted = dedup_engine_atoms(engine_facts(facts))
+    # Reject wirelog-undecodable control chars BEFORE writing: dl_string would emit JSON
+    # escapes the engine cannot decode, so the value silently diverges between Python and
+    # the engine and drops out of every query (#331). Fail loud through the human gate.
+    _reject_undecodable_control_chars(accepted)
     lines = [
         "// generated from facts/candidates.csv",
         "// only confirmed/accepted facts become engine input",
@@ -47,7 +150,10 @@ def main() -> None:
                 lines.append(f"canonical({dl_string(s)}, {dl_string(canon)}, {dl_string(o)}).")
 
     out = FACTS_DIR / "accepted.dl"
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Atomic temp+replace: a crash mid-write must never leave a line-boundary-
+    # truncated accepted.dl, which parses cleanly yet drops confirmed facts from the
+    # engine input (#329 — the prevention half; #328 adds the detection guard).
+    _atomic_write_text(out, "\n".join(lines) + "\n")
     # Distinct-source count per collapsed triple, so the compile log surfaces the
     # multi-source provenance of a deduped atom (observability only — accepted.dl,
     # render's `sources: N`, and provenance are unchanged). Computed on the

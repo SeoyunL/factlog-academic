@@ -34,6 +34,15 @@ fail=0
 ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 
+# #336: a conflict-free finalize exits 0 with the engine present, but 3 when pyrewire is
+# absent (the logic check is SKIPPED — an unverified compile, distinct from a verified
+# pass). The conflict paths still exit non-zero at the pre-compile gate regardless.
+if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in pyrewire.__version__.split('.')[:3])>=(1,0,3) else 1)" >/dev/null 2>&1; then
+  SKIP_RC=0
+else
+  SKIP_RC=3
+fi
+
 # --- fixture: single-valued `owner` with a contradictory pair (Alice vs Bob) ------
 new_conflict_kb() {
   local kb="$1"
@@ -105,7 +114,7 @@ with p.open("w", encoding="utf-8", newline="") as fh:
     w.writerows(rows)
 PY
 rc3=0; "$PYTHON" "$FINALIZE" --target "$KB3" >/dev/null 2>&1 || rc3=$?
-[ "$rc3" -eq 0 ] && ok "recovery: finalize exits 0 once the conflict is superseded" || bad "recovery: finalize still failed after supersession (rc=$rc3)"
+[ "$rc3" -eq "$SKIP_RC" ] && ok "recovery: finalize exits $SKIP_RC once the conflict is superseded (0 verified / 3 unverified skip)" || bad "recovery: finalize failed after supersession (rc=$rc3, expected $SKIP_RC)"
 if [ -f "$KB3/facts/accepted.dl" ] \
    && grep -q 'relation("ProjectX", "owner", "Bob")' "$KB3/facts/accepted.dl" \
    && ! grep -q 'relation("ProjectX", "owner", "Alice")' "$KB3/facts/accepted.dl"; then
@@ -120,7 +129,7 @@ KB4="$(mktemp -d)/wiki"
 printf '# src\n\nAcme API uses FastAPI.\n' > "$KB4/sources/a.md"
 printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB4/runs/r1.json"
 rc4=0; "$PYTHON" "$FINALIZE" --target "$KB4" >/dev/null 2>&1 || rc4=$?
-[ "$rc4" -eq 0 ] && ok "no-conflict path: finalize exits 0" || bad "no-conflict path: finalize exited $rc4"
+[ "$rc4" -eq "$SKIP_RC" ] && ok "no-conflict path: finalize exits $SKIP_RC (0 verified / 3 unverified skip)" || bad "no-conflict path: finalize exited $rc4 (expected $SKIP_RC)"
 [ -f "$KB4/facts/accepted.dl" ] && grep -q 'relation("Acme API", "uses", "FastAPI")' "$KB4/facts/accepted.dl" \
   && ok "no-conflict path: accepted.dl compiled with the fact" || bad "no-conflict path: fact not compiled"
 

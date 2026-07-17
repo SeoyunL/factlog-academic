@@ -94,6 +94,13 @@ def main(argv: list[str] | None = None) -> int:
                 pass
     parser = argparse.ArgumentParser(prog="finalize", description="deterministic /factlog add finalize chain")
     parser.add_argument("--target", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="exit 0 even when the engine logic check is skipped (pyrewire>=1.0.3 absent). "
+        "By default that skip exits 3 so automation can distinguish an unverified compile "
+        "from an engine-verified pass (#336).",
+    )
     args = parser.parse_args(argv)
 
     root = Path(args.target).expanduser().resolve()
@@ -274,8 +281,9 @@ def main(argv: list[str] | None = None) -> int:
         print("finalize: compile_facts failed.", file=sys.stderr)
         return 1
 
-    # 5. run the deterministic logic check (needs pyrewire) — graceful skip if absent
-    if _pyrewire_ok():
+    # 5. run the deterministic logic check (needs pyrewire).
+    logic_skipped = not _pyrewire_ok()
+    if not logic_skipped:
         check = _run("run_logic_check.py", env=env)
         sys.stdout.write(check.stdout)
         if check.returncode != 0:
@@ -288,20 +296,36 @@ def main(argv: list[str] | None = None) -> int:
             "\nfinalize: Logic check SKIPPED — pyrewire>=1.0.3 not installed. "
             "Install it and run /factlog check to verify."
         )
-        checked = "compiled (logic check skipped)"
+        checked = "compiled (logic check SKIPPED — engine verification NOT run)"
 
+    # #336: a skipped logic check exits 3 — distinct from a verified pass (0), argparse
+    # misuse (2), a real failure (1) and a timeout (124) — so automation can tell an
+    # unverified compile from an engine-checked one (run_logic_check hard-fails on absent
+    # pyrewire; finalize used to exit 0 and look identical to a checked pass). The
+    # explicit --allow-unverified opt-out keeps rc 0 for callers that accept it. The engine
+    # present → unchanged (rc 0, "logic-checked").
+    unverified = logic_skipped and not args.allow_unverified
+    exit_code = 3 if unverified else 0
+    # Keep the closing claim honest: when the engine ran, "no contradictions" is
+    # engine-backed; when it was skipped, only the single-valued check_conflicts ran, so
+    # say exactly that rather than "no contradictions" (which reads as engine-verified).
+    contradiction_clause = (
+        "single-valued contradiction check passed (engine logic NOT run)"
+        if logic_skipped
+        else "no contradictions"
+    )
     if policy_uncompiled:
         # Reached only when the logic check was skipped (no pyrewire); with the
         # engine present, run_logic_check above already failed loud on the absent
         # .dl. Keep the summary honest — facts are compiled but the policy is not.
         print(
-            f"\nfinalize: done — merged, {checked}, no contradictions, "
+            f"\nfinalize: done — merged, {checked}, {contradiction_clause}, "
             "but the policy is NOT applied (see the WARNING above). Install "
             "pyrewire and run /factlog check to gate on the policy."
         )
-        return 0
-    print(f"\nfinalize: done — merged, {checked}, no contradictions.")
-    return 0
+        return exit_code
+    print(f"\nfinalize: done — merged, {checked}, {contradiction_clause}.")
+    return exit_code
 
 
 if __name__ == "__main__":
