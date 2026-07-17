@@ -9,16 +9,20 @@ Detailed documentation for factlog. For the project introduction, see the
 
 If you are new, read these in order.
 
-1. [Install](guide/install.en.md) — requirements, plugin install, `/factlog setup`
-2. [Slash command usage](reference/slash-commands.en.md) — `/factlog sync` · `query` · `check` · `repair` · `ask`
-3. [Reviewing facts](reference/review.en.md) — the gate where a human confirms candidates
-4. [Determinism & limitations](guide/determinism.en.md) — what is guaranteed and what is not
+1. [Concepts](guide/concepts.en.md) — what factlog is, what a KB folder looks like, how candidate and accepted differ
+2. [Install](guide/install.en.md) — requirements, plugin install, `/factlog setup`
+3. [Use cases](guide/use-cases.en.md) — reports, slides, papers, and wikis as real command flows
+4. [Slash command usage](reference/slash-commands.en.md) — `/factlog sync` · `query` · `check` · `repair` · `ask`
+5. [Reviewing facts](reference/review.en.md) — the gate where a human confirms candidates
+6. [Determinism & limitations](guide/determinism.en.md) — what is guaranteed and what is not
 
 ## Guides
 
 | Page | Contents |
 |--------|------|
+| [Concepts](guide/concepts.en.md) | Overview, KB folder layout, the candidate vs accepted trust boundary, commands at a glance, how-it-works diagram |
 | [Install](guide/install.en.md) | Requirements, marketplace install, local install (development), what `/factlog setup` does |
+| [Use cases](guide/use-cases.en.md) | Common workflows for reports, slides, papers, wikis, provenance tracing, and candidate cleanup |
 | [Determinism & limitations](guide/determinism.en.md) | Limits of skill discipline, AC4 stale-edit guard, scale & performance |
 
 ## Reference
