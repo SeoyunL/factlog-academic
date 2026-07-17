@@ -169,3 +169,18 @@ class TestPolicyQueryEntityWarning:
             'policy query must have entity and reason arguments: retracted("논문A")?'
         ]
         assert warnings == []
+
+    def test_a_first_argument_that_is_not_a_valid_json_string_does_not_crash(self):
+        """`"\\q"` starts and ends with a quote but is not a decodable JSON string.
+
+        The inline `startswith('"') and endswith('"')` test called it a quoted
+        constant and handed it to `arg_value`, which `json.loads`ed it and died with
+        a `JSONDecodeError` — a hard crash of the whole report over one draft line
+        (#342). The `is_quoted_string` guard the gate uses returns False for it, so
+        the warning branch is skipped and no entity claim is made about a token that
+        is not even a string.
+        """
+        errors, warnings = rlc.validate_query(
+            'retracted("\\q", R)?', self.ENTITIES, self.POLICY
+        )
+        assert (errors, warnings) == ([], [])

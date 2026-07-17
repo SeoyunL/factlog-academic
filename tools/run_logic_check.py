@@ -139,7 +139,14 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         if len(args) != 2:
             errors.append(f"policy query must have entity and reason arguments: {line}")
             return errors, warnings
-        if args[0].startswith('"') and args[0].endswith('"') and arg_value(args[0]) not in entities:
+        # `is_quoted_string`, not an inline `startswith('"') and endswith('"')`: the
+        # inline form called `"\q"` (and a bare `"`) a quoted constant and handed it
+        # to `arg_value`, which `json.loads`ed it and died with a JSONDecodeError --
+        # a hard crash of the whole report over one draft line (#342). The gate uses
+        # this same predicate (common.policy_row_matches, #320), so the report's
+        # last inline copy of the quote test now agrees with it and calls arg_value
+        # only after the guard passes.
+        if is_quoted_string(args[0]) and arg_value(args[0]) not in entities:
             warnings.append(f"query references non-engine entity: {arg_value(args[0])}")
         return errors, warnings
     if predicate == "count":
