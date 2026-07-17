@@ -73,3 +73,28 @@ To ask a comparison over a typed relation ("which subjects launched on/after
 2030?"), you write the rule yourself in `policy/logic-policy.extra.dl`. See the
 bundled factlog skill reference for the full comparison-predicate contract (head
 shape, where the threshold goes, and how its rows surface in the logic report).
+
+### A policy `.decl` uses symbol columns only; scalars stay in the body
+
+The typed side-relations above are the *only* place an `int64` column belongs.
+Your own policy predicates must declare `symbol` (or `string`) columns:
+
+```
+# rejected at load: r is a scalar column
+.decl low_rank(subject: symbol, r: int64)
+low_rank(S, R) :- priority_rank(S, R), R < 5.
+
+# correct: compare in the body, head a quoted reason
+.decl low_rank(subject: symbol, reason: symbol)
+low_rank(S, "rank below 5") :- priority_rank(S, R), R < 5.
+```
+
+The reason is that the logic report renders an emitted row by printing its
+values. A `symbol` column is renderable text; a scalar arrives as a bare number
+with nothing to say what it means, so the report would print `low_rank: alpha
+(3)` where a reason belongs. Keeping the scalar in the body lets you say *why*
+the row fired.
+
+factlog rejects a scalar-column policy `.decl` when it loads
+`logic-policy(.extra).dl`, with an error naming the column — it is a loud
+failure at load, never a wrong number in a report.

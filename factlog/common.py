@@ -1974,6 +1974,47 @@ def _assert_no_canonical_head(policy_text: str) -> None:
                 "mismatch loses them, compile stays rc=0). Remove the .decl from "
                 "logic-policy(.extra).dl."
             )
+
+    # A policy predicate may only carry symbol/string columns. The report renders an
+    # emitted row by printing its values, and only a symbol column is renderable text;
+    # a scalar column reaches the report as a bare int with no way to say what it MEANS
+    # (#323). The scalar-free-head rule used to exist only as prose next to
+    # _project_typed_relations, and a `.decl low_rank(subject: symbol, r: int64)` in
+    # extra.dl loaded fine and printed a number where a reason belongs. Fail at LOAD,
+    # the one point that sees the whole policy, instead of at render time per row.
+    #
+    # `symbol` and `string` both map to ColumnType.STRING in the engine, so both are
+    # renderable and both are allowed. Everything else (int32/int64/float/unsigned) is
+    # a scalar and is rejected.
+    #
+    # This guard reads POLICY text only. The typed side-relations (#116) legitimately
+    # declare int64 columns, but _typed_decls appends them to the program AFTER
+    # load_logic_policy has returned (see the EasySession call in run_wirelog), so they
+    # never pass through here and typed projection is untouched.
+    _RENDERABLE_COL = {"symbol", "string"}
+    for m in re.finditer(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)", bare):
+        name, columns = m.group(1), m.group(2)
+        for column in columns.split(","):
+            if ":" not in column:
+                continue
+            field, _, coltype = column.partition(":")
+            coltype = coltype.strip()
+            if coltype and coltype not in _RENDERABLE_COL:
+                raise FactlogError(
+                    f"policy predicate {name!r} declares column {field.strip()!r} as "
+                    f"{coltype!r}, but a policy .decl may use only symbol/string "
+                    f"columns. The report renders an emitted row by printing its "
+                    f"values, so a scalar column would print a bare number where a "
+                    f"reason belongs. Keep the scalar in the rule BODY and head a "
+                    f"quoted reason instead, e.g. "
+                    f'`{name}(S, "rank below 5") :- priority_rank(S, R), R < 5.` '
+                    f"If you need a comparable scalar RELATION to compare against, "
+                    f"declare it as a typed relation in policy/typed-relations.md "
+                    f"(#116) — factlog projects those into int64 side-relations "
+                    f"outside the policy text, which is why they are exempt from "
+                    f"this rule. See docs/typed-relations.md. Fix the .decl in "
+                    f"logic-policy(.extra).dl."
+                )
     bare = re.sub(r"\.decl\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", bare)
 
     for statement in _split_policy_statements(bare):
@@ -2608,27 +2649,66 @@ def policy_string_literals(text: str) -> list[str]:
     Thin wrapper over the shared _scan_policy lexer so interning tokenizes the policy the
     same way the reserved-head guard and the engine do -- a private regex here split a
     literal at `\\"`, then missed `//` comments, then over-decoded `\\n`, each reopening
-    #250. run_wirelog pre-interns these so decode_wirelog_value turns an engine-emitted
-    symbol id back into its text.
+    #250. run_wirelog pre-interns these so the ENGINE can decode an emitted symbol id
+    back into its text: pyrewire's _decode_row resolves a STRING column through the
+    session intern table and falls back silently to the raw int on a miss, so a literal
+    missing from this list renders as a bare number, not as text (measured: without
+    pre-interning a symbol column arrives as ('int', 0)).
     """
     return _scan_policy(text)[1]
 
 def decode_wirelog_value(session: EasySession, value: object) -> object:
-    """Resolve a wirelog integer ID back to its interned symbol string.
+    """Pass an already-decoded wirelog value through unchanged.
 
-    Uses the private ``session._intern`` table exposed by pyrewire's EasySession.
-    This is a private API (underscore-prefixed), intentionally pinned to
-    ``pyrewire>=1.0.3,<2.0`` in pyproject.toml to guard against breakage if the
-    internals change in a future major release.  The <2.0 upper bound in
-    requirements.txt mirrors this constraint.
+    The row reaching us is decoded ALREADY, and it is a two-party result: the
+    engine does the decoding, but only because WE filled the table it decodes
+    against. ``EasySession.step()`` runs each row through ``_decode_row``, which
+    resolves a STRING column via ``self._intern.lookup(raw)`` and -- this is the
+    part that matters -- falls back SILENTLY to the raw ``int`` when that lookup
+    misses. The engine never learns a symbol on its own; run_wirelog pre-interns
+    every policy literal, accepted-fact value and canonical atom (#250) so the
+    lookup can hit.
 
-    Python 3.11+ is required (the engine dependency ``pyrewire`` needs 3.11+;
-    see ``requires-python`` in pyproject.toml).  The ``X | Y`` unions and
-    ``tuple[...]`` annotations used here need 3.10+, which the 3.11 floor
-    satisfies.
+    Measured both ways on pyrewire 1.0.3, for
+    ``flagged(S, "needs review") :- relation(S, "is", "thing").``::
+
+        without pre-interning:  [('int', 0), ('int', 3)]              # raw ids
+        with pre-interning:     [('str', 'alpha'), ('str', 'needs review')]
+
+    So pass-through is sound because the pre-interning holds, NOT because the
+    engine is a self-sufficient authority. Break the pre-interning and symbol
+    columns arrive as raw ints and this function faithfully passes those ints on.
+    That is why the pre-interning is load-bearing and must not be mistaken for
+    dead code -- see the call sites in run_wirelog.
+
+    Both preconditions are ENFORCED, not merely written down here, because a
+    convention that only lives in prose is the exact defect #323 was filed to fix:
+    run_wirelog refuses to start when the engine has no schema to decode against
+    (the ``_schema_program is None`` guard), and the policy-load guard in
+    _assert_no_canonical_head keeps every policy column symbol/string, so a
+    pre-interned literal is all a policy row can carry.
+
+    What this layer must NOT do is guess. It used to re-decode by looking only at
+    the VALUE (``isinstance(value, int) and session._intern.contains_id(value)``),
+    a type-blind second pass over a row the schema had already typed. It could not
+    help a correctly pre-interned run -- a symbol column is already ``str`` there,
+    so the ``isinstance`` never fired -- and it could only harm: a genuine
+    ``int64`` scalar small enough to be a valid intern id was rewritten into
+    whatever symbol held that id, so a report printed ``low_rank: alpha (beta)``
+    where the truth was ``low_rank: alpha (3)`` (#323). ``bool`` being an ``int``
+    subclass meant ``True`` was looked up as id 1 by the same mistake; that dies
+    here too. Reading a value cannot recover a column's type -- only the schema
+    knows it, and the schema is the engine's to apply.
+
+    The ``pyrewire>=1.0.3,<2.0`` pin in pyproject.toml (mirrored in
+    requirements.txt) is what keeps this decoding contract stable: the >=1.0.3
+    floor is where ``step()`` decodes rows against the schema for us, and the <2.0
+    ceiling keeps a major release from changing that -- or the silent raw-int
+    fallback -- under us unnoticed.
+
+    Kept as a function, not inlined, so the "the row is already decoded" rule has
+    ONE place to live and to be re-checked against a new engine release.
     """
-    if isinstance(value, int) and session._intern.contains_id(value):
-        return session._intern.lookup(value)
     return value
 
 
@@ -2752,9 +2832,11 @@ def _project_typed_relations(session, specs, accepted, aliases=None) -> None:
 
     NB: hand-authored comparison-predicate rules (#120) use arity-2
     (subject, reason) heads with a quoted reason string; the scalar stays in
-    the body. A bare scalar in a head would be mis-decoded as an interned
-    symbol by decode_wirelog_value (it round-trips ints through the intern
-    table), so it must never appear there. Those rules live in the optional
+    the body. This is no longer prose that a policy author has to know: a policy
+    .decl with a scalar column is now REJECTED at load by
+    _assert_no_canonical_head (see the symbol/string column check there), because
+    a scalar in a head reaches the report as a bare int with nothing to say what
+    it means (#323). Those rules live in the optional
     policy/logic-policy.extra.dl, not here.
     """
     if not specs:
@@ -2805,6 +2887,32 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     # _typed_decls(specs) is "" when there is nothing projectable, so the program
     # text is byte-identical to today for a KB with no typed-relations (#116 inv.1).
     session = EasySession(base_program + _typed_decls(specs))
+    # decode_wirelog_value passes values through because step() decodes each row
+    # against this side-parsed schema. EasySession re-parses the program to build it
+    # and, if that re-parse fails (wirelog's parser disagreeing with the easy facade
+    # about what is well-formed), keeps None and runs ON — then _decode_row has no
+    # schema, every column falls back to its raw id, and a report prints
+    # `flagged: 0 (3)`: a subject that is not in the KB, asserted with rc=0. An
+    # over-claim is worse than silence, so refuse to run instead.
+    #
+    # This is enforced, not documented, on purpose: the same silent-fallback-plus-
+    # prose-convention shape is exactly what #323 was filed to remove. The pin is
+    # >=1.0.3,<2.0, so a 1.x MINOR is free to introduce such a parser disagreement
+    # and the fallback would stay quiet — a version pin cannot catch it, only this
+    # check can. Private attribute by necessity: the facade exposes no public way to
+    # ask whether decoding is live (see tools/README.md).
+    if session._schema_program is None:
+        session.close()
+        raise FactlogError(
+            "the engine could not build a schema for the logic program (pyrewire's "
+            "side parse of the assembled program failed), so it would decode every "
+            "column as a raw intern id: the report would print bare numbers where "
+            "subjects and reasons belong, with a clean exit. Refusing to run. This "
+            "is an engine/factlog parser disagreement, not a KB error — re-run "
+            "`factlog doctor`, check the pyrewire version against the "
+            "`pyrewire>=1.0.3,<2.0` pin in pyproject.toml, and report the policy "
+            "text that triggered it."
+        )
     for value in policy_string_literals(policy_program):
         session.intern(value)
     accepted = accepted_rows  # already loaded above for _attr_rel_facts
@@ -2813,9 +2921,12 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
         session.intern(row["relation"])
         session.intern(row["object"])
 
-    # Intern canonical-atom symbols so decode_wirelog_value round-trips for any
-    # canonical/3 tuple the engine emits or a rule references.  canonical/3 is
-    # pure EDB — never a rule head — so we only intern, never insert.
+    # Intern canonical-atom symbols so the ENGINE can decode any canonical/3 tuple it
+    # emits or a rule references. NOT dead code: pyrewire's _decode_row resolves a
+    # STRING column through this table and falls back silently to the raw int on a
+    # miss, so dropping an intern here does not raise — it prints a bare id where a
+    # name belongs. canonical/3 is pure EDB — never a rule head — so we only intern,
+    # never insert.
     _c_aliases = relation_aliases()
     if _c_aliases:
         for s, canon, o in canonical_atoms(accepted, _c_aliases):
