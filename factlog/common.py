@@ -1337,7 +1337,7 @@ def relation_row_matches(
         variants = canonical_variants_of(_arg_value(r_arg), aliases)
         if not (
             _canonical_value(_arg_value(r_arg)) == _canonical_value(row["relation"])
-            or row["relation"] in variants
+            or unicodedata.normalize("NFC", row["relation"]) in variants
         ):
             return False
 

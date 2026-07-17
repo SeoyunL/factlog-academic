@@ -21,7 +21,7 @@ from __future__ import annotations
 import unicodedata
 
 import pytest
-from factlog.common import relation_row_matches
+from factlog.common import QUERY_OK, classify_query, relation_row_matches
 
 nfc = lambda s: unicodedata.normalize("NFC", s)  # noqa: E731
 
@@ -78,3 +78,116 @@ class TestVariableRelationKeepsAliasSubsumption:
             STUDY_ALIASES,
             STUDY_HIERARCHY,
         )
+
+
+# --- #324: pinned-relation membership across the alias axis --------------------
+
+PUB = "게재연도"  # alias raw name; NFD is what macOS types
+PUB_ALIASES = {nfc(PUB): "published_year"}
+
+
+def _pub_row(form: str, value: str) -> dict[str, str]:
+    return {
+        "subject": "paper1",
+        "relation": unicodedata.normalize(form, PUB),
+        "object": value,
+        "status": "accepted",
+    }
+
+
+class TestPinnedCanonicalQueryMatchesAliasRow:
+    """relation("paper1", "published_year", "2020")? — the row is stored under the
+    surface variant `게재연도`. The pinned canonical name is looked up in the
+    NFC-keyed variants set (:1340); an NFD row must fold to NFC to be recognised,
+    or the query is a verified negative about a fact the engine holds (#324)."""
+
+    @pytest.mark.parametrize("form", ["NFC", "NFD"])
+    def test_pinned_canonical_matches(self, form):
+        matched = relation_row_matches(
+            ['"paper1"', '"published_year"', '"2020"'],
+            _pub_row(form, "2020"),
+            PUB_ALIASES,
+            None,
+        )
+        assert matched, (
+            f"{form}-authored alias row was a verified negative for the pinned "
+            f"canonical query — the engine proves the fact, the matcher denied it"
+        )
+
+    def test_nfc_and_nfd_agree(self):
+        args = ['"paper1"', '"published_year"', '"2020"']
+        nfc_ans = relation_row_matches(args, _pub_row("NFC", "2020"), PUB_ALIASES, None)
+        nfd_ans = relation_row_matches(args, _pub_row("NFD", "2020"), PUB_ALIASES, None)
+        assert nfc_ans == nfd_ans is True
+
+    def test_direct_canonical_name_match_unaffected(self):
+        """The direct-match clause (:1339, both sides canonicalized) is untouched:
+        a row stored under the canonical name itself still matches, so #324's fold
+        only ADDS the alias arm, never widening the direct comparison."""
+        row = {
+            "subject": "paper1",
+            "relation": unicodedata.normalize("NFD", "published_year"),
+            "object": "2020",
+            "status": "accepted",
+        }
+        assert relation_row_matches(['"paper1"', '"published_year"', '"2020"'], row, {}, None)
+
+
+class TestDetectConflictsAndMatcherAgree:
+    """The detectable asymmetry #324 names: detect_conflicts folds the alias axis
+    (via _canonicalize) and reports a cross-variant contradiction on the canonical
+    name; the matcher must SEE the very rows that conflict. Before the fold one
+    reported the conflict while the other found neither row — that disagreement was
+    the only signal the NFD row existed at all."""
+
+    def test_conflict_rows_are_matchable(self):
+        import common
+
+        facts = [_pub_row("NFD", "2020"), _pub_row("NFD", "2021")]
+        conflicts = common.detect_conflicts(facts, {"published_year"}, aliases=PUB_ALIASES)
+        assert ("paper1", "published_year") in conflicts, (
+            f"detect_conflicts folds the alias axis and should report the "
+            f"contradiction on the canonical name -> {conflicts}"
+        )
+        # The matcher must agree those rows exist under the canonical query — the
+        # symmetry #324 restores. Before the fold this side answered False.
+        assert all(
+            relation_row_matches(
+                ['"paper1"', '"published_year"', f'"{row["object"]}"'], row, PUB_ALIASES, None
+            )
+            for row in facts
+        )
+
+
+# --- gate/matcher parity (C2): the gate routes through the same predicate -------
+
+
+@pytest.fixture
+def pub_kb(tmp_path, monkeypatch):
+    """Point the lazily-resolved POLICY_DIR at a temp KB carrying the alias
+    declaration, so classify_query reads it (mirrors test_query_gate_nfc)."""
+    import factlog.common as fc
+
+    policy = tmp_path / "policy"
+    policy.mkdir()
+    (policy / "relation-aliases.md").write_text(
+        f"# relation aliases\n\n- `{nfc(PUB)}` -> `published_year`\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(fc, "POLICY_DIR", policy)
+    return tmp_path
+
+
+class TestGateAgreesWithMatcher:
+    """The pinned canonical query is accepted (QUERY_OK) by the gate for every
+    normal form of the alias row — the gate's _relation_match_count and the matcher
+    are the same predicate (the callers converge on relation_row_matches), so the
+    gate never answers a verified negative where the matcher matches. Before #324
+    the NFD row gave QUERY_FACT_ABSENT: the gate asserting no such fact about a fact
+    the engine holds."""
+
+    @pytest.mark.parametrize("form", ["NFC", "NFD"])
+    def test_pinned_query_is_query_ok(self, pub_kb, form):
+        ok, code, _ = classify_query(
+            'relation("paper1", "published_year", "2020")?', [_pub_row(form, "2020")]
+        )
+        assert (ok, code) == (True, QUERY_OK), code
