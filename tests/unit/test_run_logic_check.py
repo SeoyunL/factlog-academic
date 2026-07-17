@@ -256,3 +256,59 @@ class TestPolicyQueryArgumentFormGuard:
         ok, reason, _ = classify_query(query, facts, policy_program=policy)
         assert report_errors, "report must flag the malformed policy query"
         assert ok is False and reason == "malformed", (reason, report_errors)
+
+
+class TestUnverifiedVocabularyRender:
+    """A relation/count query naming a subject or relation-name outside the
+    accepted vocabulary is rendered "unverified", not a verified "0 rows" (#347).
+
+    The gate rejects such a query (entity_not_accepted/relation_not_accepted) and
+    never renders a result; the report used to answer it with "0 rows" — a VERIFIED
+    NEGATIVE — while warning, on the same page, that the term is not an engine
+    entity or relation. Zero rows over a vocabulary the KB never accepted is not a
+    verified "no such fact". The discriminator: a fully-accepted vocabulary with an
+    absent triple keeps the honest "0 rows".
+    """
+
+    def _evaluate(self, monkeypatch, queries, facts):
+        monkeypatch.setattr(rlc, "query_lines", lambda: queries)
+        return rlc.evaluate_queries(facts, {"path": set()}, set(), hierarchy={})
+
+    def test_unaccepted_relation_name_is_unverified_not_zero(self, monkeypatch):
+        # "Anthropic" is an accepted subject, "Claude Code" an accepted object, but
+        # "develops" is not an accepted relation (needs_review) — sample-kb q5.
+        facts = [_fact("Anthropic", "founded_by", "someone"), _fact("x", "y", "Claude Code")]
+        results = self._evaluate(
+            monkeypatch, ['relation("Anthropic", "develops", "Claude Code")?'], facts
+        )
+        assert any(
+            "relation results: unverified" in line and "develops" in line for line in results
+        ), results
+        assert not any("relation results: 0 rows" in line for line in results), results
+
+    def test_accepted_vocabulary_absent_triple_stays_zero(self, monkeypatch):
+        # sample-kb q4: subject, relation-name and object all appear in accepted
+        # facts, but this exact triple does not — a verified negative, still "0 rows".
+        facts = [_fact("factlog", "is_a", "plugin"), _fact("Claude Code", "developed_by", "Anthropic")]
+        results = self._evaluate(
+            monkeypatch, ['relation("factlog", "developed_by", "Anthropic")?'], facts
+        )
+        assert "relation results: 0 rows" in results, results
+
+    def test_unaccepted_count_relation_is_unverified(self, monkeypatch):
+        facts = [_fact("Marie Curie", "won", "Nobel Prize")]
+        results = self._evaluate(
+            monkeypatch, ['count("Marie Curie", "no_such_rel")?'], facts
+        )
+        assert any(
+            "count results: unverified" in line and "no_such_rel" in line for line in results
+        ), results
+
+    def test_accepted_count_with_no_objects_stays_zero(self, monkeypatch):
+        # "Marie Curie" and "won" are both accepted vocabulary; the (subject, relation)
+        # pair simply has no objects here — a verified zero, not unverified.
+        facts = [_fact("Marie Curie", "born_in", "Warsaw"), _fact("Einstein", "won", "Nobel Prize")]
+        results = self._evaluate(
+            monkeypatch, ['count("Marie Curie", "won")?'], facts
+        )
+        assert "count results: 0 (distinct objects)" in results, results

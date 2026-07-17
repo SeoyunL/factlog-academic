@@ -65,7 +65,11 @@ class TestWellFormedUnsatisfiedIsStillAnswered:
     its verified negative. The guard must fire on malformed input only."""
 
     def test_relation_with_no_match_keeps_zero_rows(self, monkeypatch):
-        results = _evaluate(monkeypatch, ['relation("A", "uses", "B")?'], facts=[])
+        # Accepted vocabulary (subject "A" and relation "uses" both appear in the
+        # facts), only this exact triple absent: a verified negative, "0 rows". An
+        # empty KB would make the vocabulary itself unaccepted, which #347 renders
+        # "unverified" instead — a different axis than the malformed guard here.
+        results = _evaluate(monkeypatch, ['relation("A", "uses", "B")?'], facts=[_fact("A", "uses", "C")])
         assert "relation results: 0 rows" in results
         assert "relation query malformed — see Errors above" not in results
 

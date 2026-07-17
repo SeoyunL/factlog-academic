@@ -227,6 +227,37 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
     return f"{predicate} results: {len(rows)} rows{suffix}"
 
 
+def unverified_vocabulary(constants: list[str], known: set[str]) -> str | None:
+    """The first of the given quoted query constants that is NOT accepted
+    vocabulary, or None if every one is accepted (or is a variable).
+
+    The gate (``classify_query``) rejects a relation/count query whose SUBJECT or
+    RELATION-NAME is outside the accepted vocabulary with
+    ``entity_not_accepted``/``relation_not_accepted``, so it never renders a result.
+    The report used to render such a query's empty extent as ``0 rows`` -- a VERIFIED
+    NEGATIVE -- while warning, on the same page, that the term is "not an engine
+    entity or relation". Zero rows over a vocabulary the KB never accepted is not a
+    verified "no such fact"; it is an UNVERIFIED question. This is the vocabulary
+    axis of the report/gate divergence #213 set out to close (the shape axis is the
+    malformed guards above); the report keeps the WARNING severity (a needs_review
+    vocabulary reference is a normal KB state, exit 0) but stops calling the empty
+    result a verified negative (#347).
+
+    Callers pass only the subject and relation-name positions -- the lightweight
+    #347 scope; the object axis is deferred. Membership is compared through the SAME
+    ``canonical_value`` fold ``known_constants``/validate_query's warning use, so a
+    constant that draws the warning is the constant that marks the result unverified
+    and the "(see Warnings above)" pointer is always accurate. A query whose subject
+    and relation-name are both accepted but whose triple is simply absent (sample-kb
+    q4) has no unaccepted constant here, so it keeps rendering the honest ``0 rows``
+    -- that is the discriminator between the two.
+    """
+    for arg in constants:
+        if is_quoted_string(arg) and canonical_value(arg_value(arg)) not in known:
+            return arg_value(arg)
+    return None
+
+
 def evaluate_queries(
     facts: list[dict[str, str]],
     inferred: dict[str, set[tuple[str, ...]]],
@@ -237,6 +268,10 @@ def evaluate_queries(
     if hierarchy is None:
         hierarchy = value_hierarchy()
     aliases = relation_aliases()
+    # The same accepted vocabulary validate_query warns against (known_constants):
+    # a relation/count query naming a term outside it is rendered "unverified", not
+    # a verified "0 rows" (#347). Built once for every query line.
+    known = known_constants(facts, hierarchy, aliases)
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
@@ -295,6 +330,18 @@ def evaluate_queries(
                 results.append("relation query malformed — see Errors above")
                 continue
             rows = relation_results(line, facts, hierarchy)
+            if not rows:
+                # An empty result over UNACCEPTED vocabulary is not a verified
+                # negative -- the gate rejects the same query outright (#347). Say
+                # unverified, not "0 rows". A fully-accepted vocabulary with an absent
+                # triple (q4) has no unaccepted constant and falls through to "0 rows".
+                unaccepted = unverified_vocabulary([args[0], args[1]], known)
+                if unaccepted is not None:
+                    results.append(
+                        f"relation results: unverified — '{unaccepted}' is not "
+                        "accepted vocabulary (see Warnings above)"
+                    )
+                    continue
             result_values: list[str] = []
             for subject, relation, object_ in rows:
                 bindings = []
@@ -327,6 +374,18 @@ def evaluate_queries(
                 for row in facts
                 if relation_row_matches([subj_q, rel_q, "O"], row, aliases, hierarchy)
             }
+            if not objects:
+                # Same vocabulary axis as the relation branch (#347): a count over an
+                # unaccepted subject/relation is unverified, not a verified zero -- the
+                # gate rejects it (relation_not_accepted/entity_not_accepted). An
+                # accepted subject/relation with genuinely no objects keeps "0".
+                unaccepted = unverified_vocabulary([subj_q, rel_q], known)
+                if unaccepted is not None:
+                    results.append(
+                        f"count results: unverified — '{unaccepted}' is not "
+                        "accepted vocabulary (see Warnings above)"
+                    )
+                    continue
             results.append(f"count results: {len(objects)} (distinct objects)")
         elif predicate == "review_required":
             constants = quoted_constants(line)

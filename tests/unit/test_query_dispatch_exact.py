@@ -70,7 +70,11 @@ class TestWellFormedRenderUnchanged:
         assert "relation results: 1 rows; A, uses, B" in results
 
     def test_relation_empty_is_verified_zero(self, monkeypatch):
-        results = _evaluate(monkeypatch, ['relation("A", "uses", "B")?'], facts=[])
+        # Subject "A" and relation "uses" ARE accepted vocabulary (they appear in
+        # the facts); only this exact triple is absent, so the empty result is a
+        # verified negative — "0 rows", not the unverified render #347 reserves for
+        # a subject/relation-name outside the accepted vocabulary.
+        results = _evaluate(monkeypatch, ['relation("A", "uses", "B")?'], facts=[_fact("A", "uses", "C")])
         assert "relation results: 0 rows" in results
 
     def test_path_render(self, monkeypatch):

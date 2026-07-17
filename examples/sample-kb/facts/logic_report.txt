@@ -23,6 +23,6 @@ Query evaluation:
 - relation results: 1 rows; Claude Code, uses, Claude model family
 - relation results: 1 rows; factlog, is_a, Claude Code plugin
 - relation results: 0 rows
-- relation results: 0 rows
+- relation results: unverified — 'develops' is not accepted vocabulary (see Warnings above)
 - review_required: Which steps in factlog are performed by Claude and which by deterministic scripts?
 - path results: 3 rows; factlog -> Claude Code plugin; factlog -> fact extraction; factlog -> logic checking

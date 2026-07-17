@@ -140,7 +140,7 @@ factlog status    # → facts: 8 ... [confirmed=7, accepted=1]; 8 engine fact(s)
 서술하거나 결론짓는 것이 아닙니다.
 
 > `/factlog query` 를 다시 돌리면 초안이 달라져 아래 출력(q5의 정확한 트리플
-> 문자열·0행/1행 등)과 어긋날 수 있습니다 — `sync` 와 같은 비결정 경계이며 버그가
+> 문자열·미검증/1행 등)과 어긋날 수 있습니다 — `sync` 와 같은 비결정 경계이며 버그가
 > 아닙니다. 반면 `/factlog check` 의 컴파일·로직 체크는 같은 입력이면 항상 같은
 > 결과를 냅니다.
 
@@ -153,11 +153,14 @@ factlog status    # → facts: 8 ... [confirmed=7, accepted=1]; 8 engine fact(s)
   "승인하지 않은 것은 엔진 hit 이 아니다" 를 보여 줍니다.
 - **q5 `relation("Anthropic", "develops", "Claude Code")?` 는 방금 3절에서 여러분이
   accept 한 바로 그 트리플입니다.** 저장소에 커밋된 초기 리포트(엔진 입력 7개,
-  `develops` 가 아직 needs_review)에서는 이 쿼리가 **0행** 이고, 리포트에는
-  `develops` 가 엔진 관계가 아니라는 경고까지 남습니다. 3절에서 accept 한 뒤(엔진
-  입력 8개) `/factlog check` 를 다시 돌리면 **같은 쿼리가 1행**
-  (`Anthropic, develops, Claude Code`)으로 해소되고 그 경고도 사라집니다 — 즉
-  **사람의 게이트가 엔진의 답을 바꾼 것** 입니다.
+  `develops` 가 아직 needs_review)에서는 `develops` 가 아직 accepted 어휘가 아니므로,
+  이 쿼리의 결과는 검증된 **0행(부정)** 이 아니라 **미검증(unverified)** 으로 표기되고,
+  리포트에는 `develops` 가 엔진 관계가 아니라는 경고도 함께 남습니다. KB가 승인한 적
+  없는 어휘에 대한 빈 결과는 "그런 사실이 없음(검증된 부정)"이 아니라 애초에 엔진이
+  답할 수 없는 질문이기 때문입니다 — q4 가 세 상수 모두 승인된 어휘라 검증된 **0행** 인
+  것과 정확히 대비됩니다. 3절에서 accept 한 뒤(엔진 입력 8개) `/factlog check` 를 다시
+  돌리면 **같은 쿼리가 1행** (`Anthropic, develops, Claude Code`)으로 해소되고 그 경고도
+  사라집니다 — 즉 **사람의 게이트가 엔진의 답을 바꾼 것** 입니다.
 - q6 은 accepted 관계로 답할 수 없어 `review_required` 로 사람에게 라우팅됩니다.
 
 ## 5. 한 질문에 답 받기 — `/factlog ask`
@@ -214,8 +217,8 @@ rows: 1
 > `Claude Code, developed_by, Anthropic` 이며(그 외 Claude Code 의 다른 accepted
 > 속성 몇 개도 앵커로 함께 뜹니다), 정작 여러분이 겨냥한
 > `Anthropic, develops, Claude Code` 트리플 자체는 **미검증** 으로 남습니다.
-> 4절 q5 가 리포트에서 0→1 로 바뀌었듯, 같은 **사람의 게이트** 가 ask 경로에서도
-> 이 질문의 답을 **미검증(wiki) → 검증(engine)** 으로 바꾼 것입니다.
+> 4절 q5 가 리포트에서 미검증→1행 으로 바뀌었듯, 같은 **사람의 게이트** 가 ask
+> 경로에서도 이 질문의 답을 **미검증(wiki) → 검증(engine)** 으로 바꾼 것입니다.
 
 ## 6. 사실의 출처 추적 — `factlog provenance`
 
