@@ -1,8 +1,6 @@
-# Typed relations
+# Typed relations (`policy/typed-relations.md`)
 
 > 🌐 **English** | [한국어](typed-relations.md)
-
-## Typed relations (`policy/typed-relations.md`)
 
 Some relations carry a literal object that should be **compared**, not just
 matched — so the deterministic engine can order it, threshold it, or range over

@@ -2,8 +2,6 @@
 
 > 🌐 **English** | [한국어](slash-commands.md)
 
-## Usage
-
 In a Claude Code session inside your knowledge base (the plugin is active in every session):
 
 ```

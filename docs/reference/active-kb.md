@@ -1,8 +1,6 @@
-# 활성 KB
+# 활성 KB (설정해 둔 KB를 어디서든 대상으로)
 
 > 🌐 [English](active-kb.en.md) | **한국어**
-
-## 활성 KB (설정해 둔 KB를 어디서든 대상으로)
 
 `factlog init`/`setup`(또는 `factlog use <kb>`) 이후, 선택한 KB가 **활성 KB**로
 기록됩니다. 그래서 `ingest`/`ask`/`sync` 및 도구들이 어느 작업 디렉터리에서든

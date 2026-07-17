@@ -1,8 +1,6 @@
-# Use cases
+# Use cases — common workflows
 
 > 🌐 **English** | [한국어](use-cases.md)
-
-## Use cases — common workflows
 
 The uses listed in the [overview](concepts.en.md#overview) (reports, slides,
 papers, code documentation, datasets, notes, wiki) unfold into real command flows

@@ -1,8 +1,6 @@
-# 타입 지정 관계
+# 타입 지정 관계 (`policy/typed-relations.md`)
 
 > 🌐 [English](typed-relations.en.md) | **한국어**
-
-## 타입 지정 관계 (`policy/typed-relations.md`)
 
 어떤 관계의 리터럴 객체는 단순 매칭이 아니라 **비교**되어야 합니다 — 그래야
 결정론적 엔진이 그 값을 정렬(ordering)하거나 임계값(threshold)으로 거르거나

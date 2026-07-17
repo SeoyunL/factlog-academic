@@ -2,8 +2,6 @@
 
 > 🌐 **English** | [한국어](sources.md)
 
-## Source file formats
-
 `/factlog sync` extracts facts by reading each file under `sources/` **as text,
 in-session**. The bundled engine (`merge_candidates.py`) tracks every file as a
 source *path* but never parses contents — so a file is only ingested if its text

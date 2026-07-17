@@ -1,8 +1,6 @@
-# Active KB
+# Active KB (target the set-up KB from anywhere)
 
 > 🌐 **English** | [한국어](active-kb.md)
-
-## Active KB (target the set-up KB from anywhere)
 
 After `factlog init`/`setup` (or `factlog use <kb>`), the chosen KB is recorded
 as the **active KB**, so `ingest`/`ask`/`sync` and the tools target it from any

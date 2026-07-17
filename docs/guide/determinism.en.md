@@ -2,8 +2,6 @@
 
 > 🌐 **English** | [한국어](determinism.md)
 
-## Determinism & limitations
-
 A skill is a prompt, so the model is *guided*, not *forced*, to run each step. factlog keeps every step that must be reliable — fact compilation, the wirelog logic check, policy compilation, validation — as **bundled scripts the skill is instructed to run and trust**, never as model judgment. The logic check report is always produced by the engine, never narrated by the model.
 
 ### AC4 — stale-edit guard (two levels)

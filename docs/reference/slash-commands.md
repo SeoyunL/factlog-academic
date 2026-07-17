@@ -2,8 +2,6 @@
 
 > 🌐 [English](slash-commands.en.md) | **한국어**
 
-## 사용법
-
 지식베이스 안의 Claude Code 세션에서(플러그인은 모든 세션에서 활성):
 
 *Claude Code에서 실행:*
