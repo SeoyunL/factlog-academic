@@ -78,6 +78,55 @@ class TestNoFalseDeclarationHasNoEffect:
         assert nfc == nfd, f"NFC -> {nfc}, NFD -> {nfd}"
 
 
+# A hierarchy declared on the alias RAW name (`연구유형`), not the canonical
+# (`study_type`). The facts index by canonical name, so the declaration key must
+# resolve through the alias axis or a live declaration is condemned "no effect".
+ALIAS_RAW_HIERARCHY_MD = f"- {_nfc(STUDY_TYPE)}: `코호트연구` ⊂ `관찰연구`\n"
+
+
+@pytest.fixture
+def alias_raw_kb(tmp_path):
+    def _build(form: str):
+        root = tmp_path / f"aliasraw-{form}"
+        (root / "policy").mkdir(parents=True)
+        (root / "facts").mkdir(parents=True)
+        (root / "policy" / "relation-aliases.md").write_text(ALIASES_MD, encoding="utf-8")
+        (root / "policy" / "value-hierarchy.md").write_text(ALIAS_RAW_HIERARCHY_MD, encoding="utf-8")
+        return root
+
+    return _build
+
+
+class TestHierarchyDeclaredOnAliasRawName:
+    """#344: the declared relation name is resolved through the SAME alias axis as
+    the facts. A KB declaring the hierarchy on the alias raw name `연구유형` (rather
+    than the canonical `study_type`) must not be told its live declaration has no
+    effect — following that advice deletes a working declaration (#211 inverted).
+    Independent of NFC/NFD: the fold is on the alias axis, not the Unicode form.
+    """
+
+    @pytest.mark.parametrize("form", ["NFC", "NFD"])
+    def test_alias_raw_declaration_is_not_reported_unused(self, alias_raw_kb, form):
+        root = alias_raw_kb(form)
+        warnings = common.value_hierarchy_warnings(root=root, facts=_facts(form))
+        assert not any("has no effect" in w for w in warnings), (
+            f"{form}: a hierarchy declared on the alias raw name was condemned "
+            f"though it is live -> {warnings}"
+        )
+
+    @pytest.mark.parametrize("form", ["NFC", "NFD"])
+    def test_the_condemned_declaration_would_really_be_live(self, alias_raw_kb, form):
+        """Cross-check: the declaration the checker (before #344) called inert
+        actually subsumes the facts, so the false warning would delete a live one."""
+        root = alias_raw_kb(form)
+        facts = _facts(form)
+        hierarchy = common.value_hierarchy(root)
+        aliases = common.relation_aliases(root)
+        assert common.relation_row_matches(
+            ['"p1"', f'"{_nfc(STUDY_TYPE)}"', '"관찰연구"'], facts[0], aliases, hierarchy
+        ), "the declaration the warning condemns is in fact live"
+
+
 DEAD_RELATION = "nosuch"
 DEAD_HIERARCHY_MD = f"- {DEAD_RELATION}: `코호트연구` ⊂ `관찰연구`\n"
 

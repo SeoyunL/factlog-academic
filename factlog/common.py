@@ -1221,7 +1221,13 @@ def value_hierarchy_warnings(
         )
 
     for relation, table in sorted(hierarchy.items()):
-        key = _canonical_value(relation)
+        # Resolve the DECLARED relation name through the same alias axis as the
+        # facts (via _canon_rel -> resolve_relation), not just _canonical_value: a
+        # hierarchy declared on an alias RAW name (`연구유형`, not the canonical
+        # `study_type`) otherwise keys itself under its surface name, misses the
+        # facts indexed by canonical name, and a live declaration is condemned as
+        # "no effect" (#344 — #211 inverted, independent of NFC/NFD).
+        key = _canon_rel(relation)
         if key not in values_by_relation:
             warnings.append(f"value-hierarchy: no accepted fact uses relation '{relation}' — declaration has no effect")
             continue
