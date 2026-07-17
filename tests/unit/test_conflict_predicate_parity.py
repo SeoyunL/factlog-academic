@@ -154,12 +154,17 @@ class TestCountArityFallbackKeepsPointer:
     record an error, so the report keeps its "see Errors above" pointer.
     End-to-end through the real CLI (needs the engine).
 
-    Post-#319 the pointer comes from the count branch itself ("count query malformed
-    — see Errors above") rather than main's "none produced a result" fallback: the
-    branch now guards arity and argument shape like `relation` and `path`, so it
-    emits a result line instead of silently appending nothing. The invariant under
-    test is unchanged — an error is recorded and the report points at the Errors
-    section that holds it — so this asserts the pointer, not which seam printed it.
+    Post-#319 the pointer comes from the count branch itself, which guards arity and
+    argument shape like `relation` and `path`, instead of main's "none produced a
+    result" fallback — a fallback the old branch reached only by silently appending
+    nothing.
+
+    This pins WHICH seam printed the pointer, on purpose. Both messages contain
+    "see Errors above", so asserting that substring alone would still pass if the
+    count branch regressed to appending nothing: the generic fallback would print
+    its own pointer and cover for the silence #319 removed. Asserting the branch's
+    own message keeps the #306 invariant (the pointer refers to an Errors section
+    that exists) AND fails on that regression.
     """
 
     def test_count_wrong_arity_alone_keeps_pointer(self, tmp_path):
@@ -179,5 +184,5 @@ class TestCountArityFallbackKeepsPointer:
         subprocess.run([sys.executable, str(COMPILE)], cwd=kb, check=True, capture_output=True, env=_env(kb))
         subprocess.run([sys.executable, str(CHECK)], cwd=kb, capture_output=True, text=True, env=_env(kb))
         report = (kb / "facts" / "logic_report.txt").read_text(encoding="utf-8")
-        assert "see Errors above" in report
+        assert "count query malformed — see Errors above" in report
         assert "Errors:" in report  # the section the pointer refers to exists
