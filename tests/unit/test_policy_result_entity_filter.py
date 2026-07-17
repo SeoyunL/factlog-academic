@@ -56,30 +56,37 @@ class TestPinnedEntityFiltersRows:
 
 
 class TestReportAgreesWithRouter:
-    def _router_rows(self, predicate, line):
-        """The filter ask_router.evaluate applies (tools/ask_router.py:423)."""
-        from common import arg_value, is_quoted_string
-        from common import _query_args as query_args
+    """The oracle is `ask_router.evaluate` ITSELF, run over the same extent, not a
+    hand-copy of the filter it applies. `run_wirelog` and `_policy_program_optional`
+    are module-level names (tools/ask_router.py), so monkeypatching them lets the
+    real `evaluate` run the real `policy_row_matches` on our fixture extent. The old
+    copy pinned a snapshot of the pre-#320 raw semantics, so it could not catch the
+    router drifting away from the report — a parity test that watched nothing (#346).
+    """
 
-        args = query_args(line)
-        rows = []
-        for row in sorted(_INFERRED.get(predicate, set())):
-            if args and is_quoted_string(args[0]) and (not row or arg_value(args[0]) != row[0]):
-                continue
-            rows.append(list(row))
-        return rows
+    def _router_rows(self, monkeypatch, predicate, line):
+        import ask_router
 
-    def test_row_counts_match_for_a_pinned_entity(self):
+        # A .decl is all `policy_predicates` needs to route the draft to the policy
+        # branch; the extent comes from the patched engine, not a compiled program.
+        program = f".decl {predicate}(e: symbol, r: symbol)\n"
+        monkeypatch.setattr(ask_router, "_policy_program_optional", lambda: program)
+        monkeypatch.setattr(
+            ask_router, "run_wirelog", lambda: {predicate: set(_INFERRED.get(predicate, set()))}
+        )
+        return ask_router.evaluate(line, [])["rows"]
+
+    def test_row_counts_match_for_a_pinned_entity(self, monkeypatch):
         line = 'needs_review("Alice", R)?'
-        expected = len(self._router_rows("needs_review", line))
+        expected = len(self._router_rows(monkeypatch, "needs_review", line))
         rendered = rlc.policy_result_line("needs_review", line, _INFERRED)
         assert f"{expected} rows" in rendered, (
             f"report/router divergence: router={expected}, report={rendered!r}"
         )
 
-    def test_row_counts_match_for_an_absent_entity(self):
+    def test_row_counts_match_for_an_absent_entity(self, monkeypatch):
         line = 'needs_review("Bob", R)?'
-        expected = len(self._router_rows("needs_review", line))
+        expected = len(self._router_rows(monkeypatch, "needs_review", line))
         rendered = rlc.policy_result_line("needs_review", line, _INFERRED)
         assert f"{expected} rows" in rendered, (
             f"report/router divergence: router={expected}, report={rendered!r}"
