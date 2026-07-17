@@ -80,6 +80,7 @@ from common import (  # noqa: E402
     load_logic_policy,
     logic_policy_md_has_rules,
     relation_row_matches,
+    policy_row_matches,
     policy_predicates,
     relation_aliases,
     value_hierarchy,
@@ -419,11 +420,11 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
             inferred = run_wirelog()
         except Exception as exc:  # noqa: BLE001 — engine/loader raise non-FactlogError too
             return {"rows": [], "count": 0, "policy_unevaluable": str(exc)}
-        rows = []
-        for row in sorted(inferred.get(predicate, set())):
-            if args and is_quoted_string(args[0]) and (not row or arg_value(args[0]) != row[0]):
-                continue
-            rows.append(list(row))
+        rows = [
+            list(row)
+            for row in sorted(inferred.get(predicate, set()))
+            if policy_row_matches(args, row)
+        ]
         return {"rows": rows, "count": len(rows)}
     raise NotImplementedError(f"engine evaluation of predicate '{predicate}' is not supported")
 

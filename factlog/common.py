@@ -1266,6 +1266,43 @@ def declared_ancestors(
     return found
 
 
+def policy_row_matches(args: list[str], row: tuple[str, ...]) -> bool:
+    """Does `row` satisfy a policy query's pinned entity?
+
+    THE single filtering predicate for policy-predicate extents. The report
+    (run_logic_check) and the router (ask_router) each carried their own copy and
+    drifted: the router filtered on the pinned entity while the report printed the
+    whole extent, so `needs_review("Alice", R)?` was answered with every subject's
+    rows — and for an entity with no rows at all the report presented the full
+    extent as that entity's (#213, #320). Two verification paths disagreeing is
+    worse than either being wrong. One predicate, two callers, no room to drift.
+
+    Only the first arg constrains, and only when it is a quoted string: a variable
+    there ranges over the whole extent.
+
+    BOTH sides go through `_canonical_value`, and they must stay that way. The router
+    used to compare verbatim, so an NFD extent row `("한글", "low_conf")` never met an
+    NFC query `needs_review("한글", R)?`: the pin found nothing and the answer was
+    `0 rows` — not silence, but a positive claim that a subject with rows has none,
+    the verified negative #284 forbids. Filtering an extent raw only looks safe
+    because a fabricated negative is quiet.
+
+    Parity is the means here, not the standard: two paths agreeing on `0 rows` is
+    still wrong, and worse than one of them being wrong, because their disagreement
+    was the only signal the NFD row existed at all. So the fold belongs HERE, in the
+    one predicate both callers route through — fold in the router alone and the
+    report/router divergence #320 removed comes straight back. Fold one side only and
+    a new one appears. `relation_row_matches` routes its value comparison through the
+    same function for the same reason.
+
+    `_canonical_value` folds NFC and `amount(...)` unit quoting; entity strings,
+    dates, numbers and ordinals keep their form, so this narrows nothing else.
+    """
+    if not args or not _is_quoted_string(args[0]):
+        return True
+    return bool(row) and _canonical_value(_arg_value(args[0])) == _canonical_value(row[0])
+
+
 def relation_row_matches(
     args: list[str],
     row: dict[str, str],

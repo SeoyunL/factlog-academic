@@ -13,6 +13,7 @@ from common import (
     is_variable,
     relation_aliases,
     relation_row_matches,
+    policy_row_matches,
     dependency_path,
     is_quoted_string,
     path_query_rows,
@@ -189,14 +190,19 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
 
 
 def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str:
-    rows = sorted(inferred[predicate])
     args = query_args(line)
+    # Filter BEFORE counting: `len(rows)` must count what the query asked for, not
+    # the whole extent. The same predicate the router filters with (#320) -- a pinned
+    # entity constrains the report's rows exactly as it constrains ask's.
+    rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
     values: list[str] = []
     for row in rows:
         bindings = []
         for arg, value in zip(args, row, strict=False):
-            if not (arg.startswith('"') and arg.endswith('"')):
-                bindings.append(f"{arg}={value}")
+            # A pinned arg is rendered as its value alone -- `"Alice"=Alice` reads
+            # badly -- but it IS rendered: skipping it dropped the entity column and
+            # left the reader a list of reasons with nothing to attribute them to.
+            bindings.append(value if is_quoted_string(arg) else f"{arg}={value}")
         values.append(", ".join(bindings) if bindings else ", ".join(row))
     suffix = "; " + "; ".join(values) if values else ""
     return f"{predicate} results: {len(rows)} rows{suffix}"
