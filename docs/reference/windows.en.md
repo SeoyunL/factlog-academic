@@ -30,8 +30,11 @@ $env:FACTLOG_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 ```
 
 The plugin hooks and skill commands use
-`${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh`, which resolves Python 3.11+ in
-this order: `$FACTLOG_PYTHON`, `python3`, `python`, then `py`.
+`${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh` to resolve a Python 3.11+
+executable. When `$FACTLOG_PYTHON` is set it is the only candidate: if that
+executable is not a Python 3.11+, the script **fails immediately rather than
+falling back** to `python3`/`python`/`py` (exit code 127). The `python3`,
+`python`, then `py` search applies only when `$FACTLOG_PYTHON` is unset.
 
 If your Python is externally managed (PEP 668), pip will refuse to install into it; `setup` prints venv guidance instead of forcing the install. Create and activate a venv, then re-run `setup`:
 

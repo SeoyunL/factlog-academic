@@ -76,7 +76,7 @@ python3 -m factlog init --target ~/wiki   # scaffold the KB layout
 | 설치 후에도 `/factlog …` 명령이 없음 | 현재 세션에 새 명령이 아직 로드되지 않음 | `/reload-plugins` 를 실행한 뒤 `/factlog setup` |
 | doctor: `FAIL  Python 3.x < 3.11 필요` | Python이 최소 버전 미만 | Python 3.11 이상을 설치한 뒤 다시 실행 |
 | doctor: `FAIL  pyrewire not installed` 또는 `FAIL  pyrewire X < 1.0.3` | 엔진 의존성 미설치/구버전 | `pip install -r requirements.txt` (또는 `/factlog setup` 재실행) |
-| `setup`: `이 Python은 외부 관리(PEP 668)` 안내와 함께 pip이 거부 | 배포판이 관리하는 시스템 Python (PEP 668) | venv를 만들어 활성화한 뒤 `setup` 재실행. factlog는 `--break-system-packages` 로 강행하지 않습니다 |
+| `setup`: `factlog setup: this Python is externally managed (PEP 668), so pip refused to install into it.` (*이 Python은 외부 관리 상태라 pip이 설치를 거부했습니다*) 와 함께 pip이 거부 | 배포판이 관리하는 시스템 Python (PEP 668) | venv를 만들어 활성화한 뒤 `setup` 재실행. factlog는 `--break-system-packages` 로 강행하지 않습니다 |
 | doctor: `WARN  Python 3.x (Store stub: …\WindowsApps\…)` | Windows의 Microsoft Store Python stub | python.org 정식 배포판 설치를 권장. 또는 `$FACTLOG_PYTHON` 으로 쓸 Python을 지정 |
 | doctor: `FAIL  git이 없습니다` | git 미설치 — 마켓플레이스 설치가 `git clone` 을 사용 | macOS는 `xcode-select --install`, 그 외는 패키지 매니저(예: `apt install git`), Windows는 **Git for Windows** |
 | doctor: `WARN  FACTLOG_PYTHON = … (경로 없음)` | `$FACTLOG_PYTHON` 이 없는 경로를 가리킴 | 경로를 고치거나 `unset FACTLOG_PYTHON` |
