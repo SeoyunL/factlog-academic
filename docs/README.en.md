@@ -39,4 +39,4 @@ To walk the whole flow through once without your own data, start with the
 | [Vocabulary · search · provenance](reference/search-provenance.en.md) | `factlog vocab` · `search` · `provenance` |
 | [Typed relations](reference/typed-relations.en.md) | `policy/typed-relations.md`, date · ordinal · amount · number |
 | [Excluding and removing sources](reference/ignore-eject.en.md) | `factlog ignore` (exclude from sync), `factlog eject` (undo an ingest), `--fact` |
-| [Windows](reference/windows.en.md) | Windows Python executable, PEP 668 venv guidance |
+| [Windows](reference/windows.en.md) | Windows Python executable, Git Bash, PEP 668 venv guidance |

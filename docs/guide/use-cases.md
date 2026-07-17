@@ -7,8 +7,8 @@
 [개요](concepts.md#개요)에서 나열한 사용처(보고서·슬라이드·논문·코드 문서·데이터셋·노트·wiki)를
 실제 명령 흐름으로 풀면 다음과 같습니다. 어느 경우든 골격은 같습니다 —
 `sync`/슬래시는 **후보(candidate)** 만 만들고, 터미널에서 사람이 `factlog accept` 로
-확정해야 **accepted** 가 되며, 그래야 `check`/`ask` 답변의 근거가 됩니다(위
-[신뢰 경계](concepts.md#candidate-vs-accepted--신뢰-경계) 참고). 처음이라면 자기 데이터 없이 흐름을
+확정해야 **accepted** 가 되며, 그래야 `check`/`ask` 답변의 근거가 됩니다
+([신뢰 경계](concepts.md#candidate-vs-accepted--신뢰-경계) 참고). 처음이라면 자기 데이터 없이 흐름을
 완주해 보는 [빠른 시작 튜토리얼](../../examples/sample-kb/README.md)부터 시작하세요.
 
 **보고서 검증하기**

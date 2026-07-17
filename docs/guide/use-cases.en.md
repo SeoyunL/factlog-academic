@@ -10,8 +10,8 @@ as follows. The skeleton is the same in every case — `sync`/the slash command
 only produces **candidates**, a human has to confirm them with `factlog accept`
 in the terminal to make them **accepted**, and only then do they back the answers
 from `check`/`ask` (see the
-[trust boundary](concepts.en.md#candidate-vs-accepted--the-trust-boundary)
-above). If you are new, start with the
+[trust boundary](concepts.en.md#candidate-vs-accepted--the-trust-boundary)).
+If you are new, start with the
 [quick-start tutorial](../../examples/sample-kb/README.md) (Korean only), which
 walks the whole flow through once without your own data.
 
