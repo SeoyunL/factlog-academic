@@ -99,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit 0 even when the engine logic check is skipped (pyrewire>=1.0.3 absent). "
         "By default that skip exits 3 so automation can distinguish an unverified compile "
-        "from an engine-verified pass (#336).",
+        "from an engine-verified pass (#336). A broken policy (logic-policy.md has rules "
+        "that did not compile) is NOT accepted by this flag — it always exits non-zero "
+        "(#356), because the flag tolerates engine absence, not a KB policy defect.",
     )
     args = parser.parse_args(argv)
 
@@ -306,6 +308,15 @@ def main(argv: list[str] | None = None) -> int:
     # present → unchanged (rc 0, "logic-checked").
     unverified = logic_skipped and not args.allow_unverified
     exit_code = 3 if unverified else 0
+    # #356: --allow-unverified accepts an ENGINE-ABSENT skip, not a KB policy defect.
+    # policy_uncompiled means logic-policy.md HAS rules that did NOT compile, so the
+    # policy is silently NOT applied — a correctness fault independent of pyrewire's
+    # presence. Keep it non-zero regardless of the flag; otherwise CI running finalize
+    # with --allow-unverified for no-pyrewire tolerance would also wave through a broken
+    # policy (warning on stderr only). The engine-present path fails loud earlier in
+    # run_logic_check, so this only bites the no-pyrewire path.
+    if policy_uncompiled:
+        exit_code = 3
     # Keep the closing claim honest: when the engine ran, "no contradictions" is
     # engine-backed; when it was skipped, only the single-valued check_conflicts ran, so
     # say exactly that rather than "no contradictions" (which reads as engine-verified).

@@ -275,11 +275,26 @@ printf '%s' "$out11" | grep -qF "but the policy is NOT applied (see the WARNING 
   && printf '%s' "$out11" | grep -qF "gate on the policy" \
   && ok "#219: no-pyrewire STDOUT summary stays honest ('policy is NOT applied' + 'gate on the policy')" \
   || bad "#219: honest no-pyrewire summary reworded/missing on stdout (WARNING-only substring must not count)"
-# #336: --allow-unverified is the explicit opt-out that keeps rc 0 for callers that
-# knowingly accept an unverified compile.
+# #356: --allow-unverified tolerates ENGINE ABSENCE, not a KB policy defect. KB11 has an
+# uncompilable-but-has-rules policy (policy_uncompiled), so the policy is silently NOT
+# applied — a correctness fault the flag must not wave through. It stays non-zero (rc 3)
+# EVEN with --allow-unverified. (Before #356 this asserted rc 0, which encoded the bug:
+# the flag swallowed the broken policy so CI running with it passed an unapplied policy.)
 rc11b=0; PYTHONPATH="$SHADOW:$PYTHONPATH" "$PYTHON" "$FINALIZE" --target "$KB11" --allow-unverified >/dev/null 2>&1 || rc11b=$?
-[ "$rc11b" -eq 0 ] && ok "#336: --allow-unverified keeps rc 0 on the no-pyrewire path" || bad "#336: --allow-unverified did not restore rc 0 (rc=$rc11b)"
+[ "$rc11b" -eq 3 ] && ok "#356: --allow-unverified does NOT accept a broken policy (rc 3 despite the flag)" || bad "#356: --allow-unverified swallowed policy_uncompiled (rc=$rc11b, want 3)"
 rm -f "$err11"
+
+# #356: the clean counterpart — a no-pyrewire KB with a VALID (no-rules) policy is exactly
+# the engine-absence case the flag is for, so --allow-unverified keeps rc 0 there. This
+# separates "accept engine absence" (rc 0) from "accept a policy defect" (rc 3 above) so
+# the flag can never conflate the two.
+KB11b="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB11b" >/dev/null
+printf '# src\n\nAcme API uses FastAPI.\n' > "$KB11b/sources/a.md"
+printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB11b/runs/r1.json"
+# no logic-policy.md rules authored -> nothing to compile -> policy_uncompiled stays False.
+rc11c=0; PYTHONPATH="$SHADOW:$PYTHONPATH" "$PYTHON" "$FINALIZE" --target "$KB11b" --allow-unverified >/dev/null 2>&1 || rc11c=$?
+[ "$rc11c" -eq 0 ] && ok "#356: --allow-unverified keeps rc 0 on a no-pyrewire KB with a valid policy" || bad "#356: --allow-unverified did not restore rc 0 on a clean no-rules KB (rc=$rc11c)"
 
 # --- #219 (gap 2): logic-policy.extra.dl interaction. A hand-authored typed
 # comparison predicate (#120/#152 shape: arity-2 (entity: symbol, reason: symbol)
