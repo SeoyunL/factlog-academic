@@ -15,6 +15,7 @@ nothing to attribute them to.
 from __future__ import annotations
 
 import run_logic_check as rlc
+from conftest import vocabulary
 
 
 _INFERRED = {
@@ -27,21 +28,22 @@ _INFERRED = {
 
 # Every entity these tests pin IS accepted vocabulary — the concern here is the
 # FILTER (does the pinned entity select its own rows), orthogonal to the vocabulary
-# axis #351 added. Passing an explicit `known` that admits them keeps an empty extent
-# a genuine verified zero, so Bob's "0 rows" is filtering, not an unaccepted term.
-_KNOWN = {"Alice", "Bob", "Carol", "Dave"}
+# axis #351 added. Passing a vocabulary that admits them as ENTITIES — the position
+# the gate's policy branch judges (#362) — keeps an empty extent a genuine verified
+# zero, so Bob's "0 rows" is filtering, not an unaccepted term.
+_VOCAB = vocabulary({"Alice", "Bob", "Carol", "Dave"})
 
 
 class TestPinnedEntityFiltersRows:
     def test_only_the_pinned_entitys_rows_are_counted(self):
         line = rlc.policy_result_line(
-            "needs_review", 'needs_review("Alice", R)?', _INFERRED, _KNOWN
+            "needs_review", 'needs_review("Alice", R)?', _INFERRED, _VOCAB
         )
         assert "1 rows" in line or "1 row" in line, line
 
     def test_other_entities_reasons_are_not_attributed_to_the_pinned_one(self):
         line = rlc.policy_result_line(
-            "needs_review", 'needs_review("Alice", R)?', _INFERRED, _KNOWN
+            "needs_review", 'needs_review("Alice", R)?', _INFERRED, _VOCAB
         )
         assert "stale" not in line, f"Carol's reason attributed to Alice: {line}"
         assert "no_source" not in line, f"Dave's reason attributed to Alice: {line}"
@@ -50,13 +52,13 @@ class TestPinnedEntityFiltersRows:
     def test_entity_with_no_rows_is_a_verified_zero(self):
         """The sharpest form: Bob has no rows, so the report must not claim three."""
         line = rlc.policy_result_line(
-            "needs_review", 'needs_review("Bob", R)?', _INFERRED, _KNOWN
+            "needs_review", 'needs_review("Bob", R)?', _INFERRED, _VOCAB
         )
         assert "0 rows" in line, f"fabricated rows for an entity with none: {line}"
 
     def test_free_entity_still_sees_the_whole_extent(self):
         line = rlc.policy_result_line(
-            "needs_review", "needs_review(X, R)?", _INFERRED, _KNOWN
+            "needs_review", "needs_review(X, R)?", _INFERRED, _VOCAB
         )
         assert "3 rows" in line, line
 
@@ -85,7 +87,7 @@ class TestReportAgreesWithRouter:
     def test_row_counts_match_for_a_pinned_entity(self, monkeypatch):
         line = 'needs_review("Alice", R)?'
         expected = len(self._router_rows(monkeypatch, "needs_review", line))
-        rendered = rlc.policy_result_line("needs_review", line, _INFERRED, _KNOWN)
+        rendered = rlc.policy_result_line("needs_review", line, _INFERRED, _VOCAB)
         assert f"{expected} rows" in rendered, (
             f"report/router divergence: router={expected}, report={rendered!r}"
         )
@@ -93,7 +95,7 @@ class TestReportAgreesWithRouter:
     def test_row_counts_match_for_an_absent_entity(self, monkeypatch):
         line = 'needs_review("Bob", R)?'
         expected = len(self._router_rows(monkeypatch, "needs_review", line))
-        rendered = rlc.policy_result_line("needs_review", line, _INFERRED, _KNOWN)
+        rendered = rlc.policy_result_line("needs_review", line, _INFERRED, _VOCAB)
         assert f"{expected} rows" in rendered, (
             f"report/router divergence: router={expected}, report={rendered!r}"
         )

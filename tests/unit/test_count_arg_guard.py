@@ -16,13 +16,14 @@ import pytest
 
 from common import classify_query
 import run_logic_check as rlc
+from conftest import vocabulary
 
 
 _FACTS = [
     {"subject": "Marie Curie", "relation": "born_in", "object": "Warsaw"},
     {"subject": "Marie Curie", "relation": "born_in", "object": "Poland"},
 ]
-_ENTITIES = {"Marie Curie", "Warsaw", "Poland", "born_in"}
+_VOCAB = vocabulary({"Marie Curie", "Warsaw", "Poland", "born_in"})
 
 # Each is a count query whose arguments are neither variables nor quoted strings.
 MALFORMED = [
@@ -35,13 +36,13 @@ MALFORMED = [
 class TestValidateQueryRejectsMalformedCountArgs:
     @pytest.mark.parametrize("line", MALFORMED)
     def test_reports_an_error(self, line):
-        errors, _ = rlc.validate_query(line, _ENTITIES, set())
+        errors, _ = rlc.validate_query(line, _VOCAB, set())
         assert errors, f"malformed count query accepted silently: {line}"
 
     @pytest.mark.parametrize("line", MALFORMED)
     def test_agrees_with_the_ask_gate(self, line):
         """The report and the gate must not disagree about the same line (#213)."""
-        errors, _ = rlc.validate_query(line, _ENTITIES, set())
+        errors, _ = rlc.validate_query(line, _VOCAB, set())
         ok, _status, _reason = classify_query(line, _FACTS, policy_program="")
         assert bool(errors) == (not ok), (
             f"report and gate disagree on {line!r}: "
@@ -50,7 +51,7 @@ class TestValidateQueryRejectsMalformedCountArgs:
 
     def test_wellformed_count_still_passes(self):
         errors, _ = rlc.validate_query(
-            'count("Marie Curie", "born_in")?', _ENTITIES, set()
+            'count("Marie Curie", "born_in")?', _VOCAB, set()
         )
         assert errors == []
 

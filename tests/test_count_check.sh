@@ -48,10 +48,11 @@ if "count" not in c.QUERY_PREDICATES:
     problems.append("count not in QUERY_PREDICATES")
 
 # validate_query: accepts count, flags wrong arity
-e, _ = r.validate_query('count("갑봇", "포함")?', set(), set())
+vocab = c.QueryVocabulary({"갑봇", "포함"}, {"갑봇", "포함"}, {"갑봇", "포함"}, hierarchy={}, aliases={})
+e, _ = r.validate_query('count("갑봇", "포함")?', vocab, set())
 if e:
     problems.append(f"valid count rejected: {e}")
-e2, _ = r.validate_query('count("갑봇")?', set(), set())
+e2, _ = r.validate_query('count("갑봇")?', vocab, set())
 if not any("subject and relation" in x for x in e2):
     problems.append("count arity error not raised")
 

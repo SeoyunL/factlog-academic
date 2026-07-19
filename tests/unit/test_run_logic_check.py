@@ -9,6 +9,7 @@ resolve correctly.
 from __future__ import annotations
 
 import run_logic_check as rlc
+from conftest import vocabulary
 
 
 def _fact(subject, relation, object_):
@@ -144,27 +145,27 @@ class TestPolicyQueryEntityWarning:
     """
 
     POLICY = {"retracted"}
-    ENTITIES = {"논문A"}
+    VOCAB = vocabulary({"논문A"})
 
     def test_a_quoted_unknown_entity_warns(self):
         errors, warnings = rlc.validate_query(
-            'retracted("논문B", "reason")?', self.ENTITIES, self.POLICY
+            'retracted("논문B", "reason")?', self.VOCAB, self.POLICY
         )
         assert errors == []
         assert warnings == ["query references non-engine entity: 논문B"]
 
     def test_a_quoted_known_entity_is_silent(self):
         errors, warnings = rlc.validate_query(
-            'retracted("논문A", "reason")?', self.ENTITIES, self.POLICY
+            'retracted("논문A", "reason")?', self.VOCAB, self.POLICY
         )
         assert (errors, warnings) == ([], [])
 
     def test_a_variable_first_argument_claims_no_entity(self):
-        errors, warnings = rlc.validate_query("retracted(P, R)?", self.ENTITIES, self.POLICY)
+        errors, warnings = rlc.validate_query("retracted(P, R)?", self.VOCAB, self.POLICY)
         assert (errors, warnings) == ([], [])
 
     def test_a_policy_query_of_the_wrong_arity_is_an_error_not_a_warning(self):
-        errors, warnings = rlc.validate_query('retracted("논문A")?', self.ENTITIES, self.POLICY)
+        errors, warnings = rlc.validate_query('retracted("논문A")?', self.VOCAB, self.POLICY)
         assert errors == [
             'policy query must have entity and reason arguments: retracted("논문A")?'
         ]
@@ -181,7 +182,7 @@ class TestPolicyQueryEntityWarning:
         a clean error, not a crash — exactly as the ask gate does.
         """
         errors, warnings = rlc.validate_query(
-            'retracted("\\q", R)?', self.ENTITIES, self.POLICY
+            'retracted("\\q", R)?', self.VOCAB, self.POLICY
         )
         assert errors == [
             'policy query arguments must be variables or quoted strings: retracted("\\q", R)?'
@@ -189,10 +190,10 @@ class TestPolicyQueryEntityWarning:
         assert warnings == []
 
     def test_an_nfd_query_constant_meets_an_nfc_accepted_entity(self):
-        """The `entities` set is `known_constants`, which folds every value through
-        `canonical_value` (NFC). A raw comparison of the query constant against it
-        called an NFD-typed query of an accepted entity a "non-engine entity" — a
-        claim about the KB that is false, since the entity IS in the engine (#341).
+        """The vocabulary folds every value through `canonical_value` (NFC). A raw
+        comparison of the query constant against it called an NFD-typed query of an
+        accepted entity a "non-engine entity" — a claim about the KB that is false,
+        since the entity IS in the engine (#341).
         The generic constant loop (L187) already folds; the policy branch now folds
         the same way, so the two axes of one function no longer diverge.
         """
@@ -202,7 +203,7 @@ class TestPolicyQueryEntityWarning:
         nfd = unicodedata.normalize("NFD", nfc)
         assert nfc != nfd
         errors, warnings = rlc.validate_query(
-            f'retracted("{nfd}", R)?', {nfc}, self.POLICY
+            f'retracted("{nfd}", R)?', vocabulary({nfc}), self.POLICY
         )
         assert (errors, warnings) == ([], [])
 
@@ -217,12 +218,12 @@ class TestPolicyQueryArgumentFormGuard:
     line diverged (#319 is the same omission in the count branch).
     """
 
-    ENTITIES = {"Alice", "P1"}
+    VOCAB = vocabulary({"Alice", "P1"})
     POLICY = {"needs_review"}
 
     def test_a_single_quoted_bare_token_is_an_error(self):
         errors, warnings = rlc.validate_query(
-            "needs_review('Alice', R)?", self.ENTITIES, self.POLICY
+            "needs_review('Alice', R)?", self.VOCAB, self.POLICY
         )
         assert errors == [
             "policy query arguments must be variables or quoted strings: "
@@ -232,13 +233,13 @@ class TestPolicyQueryArgumentFormGuard:
 
     def test_a_well_formed_quoted_entity_still_passes(self):
         errors, warnings = rlc.validate_query(
-            'needs_review("Alice", R)?', self.ENTITIES, self.POLICY
+            'needs_review("Alice", R)?', self.VOCAB, self.POLICY
         )
         assert (errors, warnings) == ([], [])
 
     def test_a_well_formed_variable_entity_still_passes(self):
         errors, warnings = rlc.validate_query(
-            "needs_review(X, R)?", self.ENTITIES, self.POLICY
+            "needs_review(X, R)?", self.VOCAB, self.POLICY
         )
         assert (errors, warnings) == ([], [])
 
@@ -252,7 +253,7 @@ class TestPolicyQueryArgumentFormGuard:
             'needs_review(E, "x") :- relation(E, "authored", "P1").'
         )
         query = "needs_review('Alice', R)?"
-        report_errors, _ = rlc.validate_query(query, self.ENTITIES, self.POLICY)
+        report_errors, _ = rlc.validate_query(query, self.VOCAB, self.POLICY)
         ok, reason, _ = classify_query(query, facts, policy_program=policy)
         assert report_errors, "report must flag the malformed policy query"
         assert ok is False and reason == "malformed", (reason, report_errors)

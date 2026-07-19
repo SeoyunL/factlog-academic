@@ -18,6 +18,7 @@ from __future__ import annotations
 import unicodedata
 
 import run_logic_check as rlc
+from conftest import vocabulary
 from common import policy_row_matches
 
 NFD = unicodedata.normalize("NFD", "한글")
@@ -26,10 +27,10 @@ NFC = unicodedata.normalize("NFC", "한글")
 _NFD_INFERRED = {"needs_review": {(NFD, "low_conf"), ("Carol", "stale")}}
 
 # The pinned entity is accepted vocabulary — this file exercises the NFC/NFD FOLD of
-# the pin, orthogonal to the vocabulary axis #351 added. `known` is folded through
+# the pin, orthogonal to the vocabulary axis #351 added. The vocabulary folds through
 # canonical_value, so the canonical spelling admits either normal form. Every query
 # here matches a row (non-empty extent), so this set is only for the signature.
-_KNOWN = {NFC, "Carol"}
+_VOCAB = vocabulary({NFC, "Carol"})
 
 
 def _router_rows(predicate, line, inferred):
@@ -50,19 +51,19 @@ class TestPinMeetsRowAcrossNormalisation:
         assert NFD != NFC
 
     def test_nfc_query_finds_an_nfd_row(self):
-        line = rlc.policy_result_line("needs_review", f'needs_review("{NFC}", R)?', _NFD_INFERRED, _KNOWN)
+        line = rlc.policy_result_line("needs_review", f'needs_review("{NFC}", R)?', _NFD_INFERRED, _VOCAB)
         assert "1 rows" in line, f"fabricated negative about a subject with rows: {line}"
         assert "low_conf" in line, line
 
     def test_nfd_query_finds_an_nfc_row(self):
         """The reverse direction: neither spelling is privileged."""
         inferred = {"needs_review": {(NFC, "low_conf"), ("Carol", "stale")}}
-        line = rlc.policy_result_line("needs_review", f'needs_review("{NFD}", R)?', inferred, _KNOWN)
+        line = rlc.policy_result_line("needs_review", f'needs_review("{NFD}", R)?', inferred, _VOCAB)
         assert "1 rows" in line, line
 
     def test_folding_does_not_widen_the_pin(self):
         """The fold must not drag in other subjects' rows."""
-        line = rlc.policy_result_line("needs_review", f'needs_review("{NFC}", R)?', _NFD_INFERRED, _KNOWN)
+        line = rlc.policy_result_line("needs_review", f'needs_review("{NFC}", R)?', _NFD_INFERRED, _VOCAB)
         assert "stale" not in line, f"Carol's reason attributed to 한글: {line}"
 
 
@@ -70,7 +71,7 @@ class TestReportAgreesWithRouterAcrossNormalisation:
     def test_report_and_router_agree_and_are_both_right(self):
         line = f'needs_review("{NFC}", R)?'
         expected = len(_router_rows("needs_review", line, _NFD_INFERRED))
-        rendered = rlc.policy_result_line("needs_review", line, _NFD_INFERRED, _KNOWN)
+        rendered = rlc.policy_result_line("needs_review", line, _NFD_INFERRED, _VOCAB)
         assert expected == 1, f"router fabricated a negative: {expected} rows"
         assert f"{expected} rows" in rendered, (
             f"report/router divergence: router={expected}, report={rendered!r}"
