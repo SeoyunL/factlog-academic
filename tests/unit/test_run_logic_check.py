@@ -332,3 +332,85 @@ class TestUnverifiedVocabularyRender:
             monkeypatch, ['count("Marie Curie", "won")?'], facts
         )
         assert "count results: 0 (distinct objects)" in results, results
+
+    def test_unaccepted_relation_object_is_unverified_not_zero(self, monkeypatch):
+        # subject and relation-name are accepted, but the OBJECT "Nobody" is not
+        # accepted vocabulary — the gate rejects it entity_not_accepted, so an empty
+        # result is unverified, not a verified zero. The object axis #347 deferred and
+        # #350 closes: unverified_vocabulary now receives args[2] too.
+        facts = [_fact("Anthropic", "founded_by", "someone")]
+        results = self._evaluate(
+            monkeypatch, ['relation("Anthropic", "founded_by", "Nobody")?'], facts
+        )
+        assert any(
+            "relation results: unverified" in line and "Nobody" in line for line in results
+        ), results
+        assert not any("relation results: 0 rows" in line for line in results), results
+
+    def test_declared_ancestor_object_with_empty_result_stays_zero(self, monkeypatch):
+        # "anyone" appears in no fact but is a DECLARED hierarchy ancestor
+        # (someone ⊂ anyone), so `known` admits it as accepted derived vocabulary.
+        # A subject whose rows do not match keeps the honest "0 rows" — the new object
+        # axis must not mis-flag a value the KB licenses (#350 discriminator).
+        monkeypatch.setattr(
+            rlc, "query_lines", lambda: ['relation("x", "founded_by", "anyone")?']
+        )
+        facts = [_fact("Anthropic", "founded_by", "someone"), _fact("x", "y", "z")]
+        hierarchy = {"founded_by": {"someone": {"anyone"}}}
+        results = rlc.evaluate_queries(facts, {"path": set()}, set(), hierarchy=hierarchy)
+        assert "relation results: 0 rows" in results, results
+
+
+class TestPolicyUnverifiedEntityRender:
+    """A policy-predicate query whose pinned entity is outside the accepted
+    vocabulary renders "unverified", not a verified "0 rows" (#351, the policy
+    analogue of #347).
+
+    The gate rejects such a query entity_not_accepted while the report's
+    validate_query only WARNS ('query references non-engine entity') and then rendered
+    the empty extent as a verified negative -- one line, two verdicts. The warning
+    severity and exit 0 are unchanged; only the result line stops asserting a checked
+    negative. Discriminators: an accepted entity with an empty extent keeps "0 rows",
+    and a real finding (a non-empty extent) renders normally even for a needs_review
+    entity.
+    """
+
+    POLICY = {"needs_review"}
+
+    def _evaluate(self, monkeypatch, query, facts, inferred_rows):
+        monkeypatch.setattr(rlc, "query_lines", lambda: [query])
+        inferred = {"needs_review": set(inferred_rows), "path": set()}
+        return rlc.evaluate_queries(facts, inferred, self.POLICY, hierarchy={})
+
+    def test_unaccepted_entity_empty_extent_is_unverified(self, monkeypatch):
+        facts = [_fact("Alice", "authored", "P1")]
+        results = self._evaluate(monkeypatch, 'needs_review("Bob", "reason")?', facts, set())
+        assert any(
+            "needs_review results: unverified" in line and "Bob" in line for line in results
+        ), results
+        assert not any("needs_review results: 0 rows" in line for line in results), results
+
+    def test_accepted_entity_empty_extent_stays_zero(self, monkeypatch):
+        facts = [_fact("Alice", "authored", "P1")]
+        results = self._evaluate(monkeypatch, 'needs_review("Alice", "reason")?', facts, set())
+        assert "needs_review results: 0 rows" in results, results
+
+    def test_real_finding_renders_even_for_unaccepted_entity(self, monkeypatch):
+        # The engine produced a needs_review finding for Bob: a non-empty extent is a
+        # real result, rendered normally, never overridden by the vocabulary check
+        # (the #351 no-regression case for a genuine finding).
+        facts = [_fact("Alice", "authored", "P1")]
+        results = self._evaluate(
+            monkeypatch, 'needs_review("Bob", R)?', facts, {("Bob", "low_conf")}
+        )
+        assert any(
+            "needs_review results: 1 rows" in line and "low_conf" in line for line in results
+        ), results
+        assert not any("unverified" in line for line in results), results
+
+    def test_variable_entity_is_not_flagged(self, monkeypatch):
+        # A variable pin ranges over the whole extent; it is never "unaccepted
+        # vocabulary". An empty extent renders "0 rows", not unverified.
+        facts = [_fact("Alice", "authored", "P1")]
+        results = self._evaluate(monkeypatch, "needs_review(E, R)?", facts, set())
+        assert "needs_review results: 0 rows" in results, results
