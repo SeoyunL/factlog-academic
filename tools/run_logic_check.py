@@ -228,9 +228,10 @@ def policy_result_line(
         # entity, against the SAME `known` set (run_logic_check L494), so mark the
         # result unverified and point at that warning instead of rendering a verified
         # "0 rows" -- the pointer is exact because both read one set. Only the pinned
-        # entity (args[0]) is vocabulary-checked, the position validate_query warns on
-        # and the gate's policy branch judges, so a variable pin -- which ranges over
-        # the extent -- is never flagged. Warning severity and exit 0 are unchanged: a
+        # entity (args[0]) is vocabulary-checked: that POSITION is the one
+        # validate_query warns on and the one the gate's policy branch judges. The
+        # POSITIONS agree; the SETS do not -- see the paragraph below. So a variable
+        # pin -- which ranges over the extent -- is never flagged. Warning severity and exit 0 are unchanged: a
         # needs_review entity is a normal KB state; this only stops the line asserting
         # a checked negative. A real finding (non-empty extent) never reaches here.
         #
