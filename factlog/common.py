@@ -3197,7 +3197,18 @@ def _relation_match_count(
     args = _query_args(query)
     if len(args) != 3:
         return 0
-    if aliases is None and not _is_variable(args[1]):
+    # Load the alias map on the SAME terms the matcher does — unconditionally when
+    # the caller passed none. The matcher path (relation_results, ask_router) always
+    # hands relation_row_matches a real relation_aliases(), a VARIABLE-relation query
+    # included; without this the gate did not, so a variable-relation query over an
+    # alias row whose object is a value-hierarchy descendant matched in the matcher
+    # but counted 0 here — the gate answered FACT_ABSENT, a verified negative the
+    # matcher denied (#348, the #213 gate/matcher parity for the variable-relation
+    # axis). The #242 one-read invariant holds: classify_query's relation branch
+    # already reads the map once for a NON-variable relation and threads it in
+    # (aliases is not None), so only a variable-relation query — which never triggered
+    # that read — loads it here, exactly once.
+    if aliases is None:
         aliases = relation_aliases()
     return sum(1 for row in facts if relation_row_matches(args, row, aliases, hierarchy))
 
@@ -3287,9 +3298,14 @@ def classify_query(
         # Read relation_aliases() at most once per relation query and hand it to
         # _relation_match_count below: the canonical-acceptance check here and the
         # match count were the two sites that each re-read it per relation query
-        # (#242). The read stays gated to a quoted canonical not literally in
-        # accepted.dl, so which queries can trigger its raise-on-malformed-file is
-        # unchanged (a variable/known-variant relation never reads it here).
+        # (#242). For a NON-variable relation the read happens here, gated to a
+        # quoted canonical not literally in accepted.dl, and is threaded down. A
+        # VARIABLE relation leaves _rel_aliases None and _relation_match_count loads
+        # the map itself — matching the matcher, which already reads it
+        # unconditionally on every path (relation_results/ask_router). So a
+        # variable-relation query's raise-on-malformed-file timing is unchanged: the
+        # matcher already read the file for that query, this is not a new trigger
+        # (#348).
         _rel_aliases: dict[str, str] | None = None
         if not _is_variable(relation) and canonical_value(_arg_value(relation)) not in relations_c:
             # A declared canonical name (one whose surface_variants is non-empty)

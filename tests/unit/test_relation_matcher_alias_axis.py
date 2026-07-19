@@ -191,3 +191,57 @@ class TestGateAgreesWithMatcher:
             'relation("paper1", "published_year", "2020")?', [_pub_row(form, "2020")]
         )
         assert (ok, code) == (True, QUERY_OK), code
+
+
+# --- #348: the gate loads aliases for a VARIABLE-relation query too -------------
+
+
+@pytest.fixture
+def study_kb(tmp_path, monkeypatch):
+    """A temp KB carrying BOTH the relation alias (`연구유형` -> `study_type`) and a
+    value-hierarchy declaration on the canonical relation (`코호트연구 ⊂ 관찰연구`),
+    so classify_query reads both from POLICY_DIR (mirrors pub_kb)."""
+    import factlog.common as fc
+
+    policy = tmp_path / "policy"
+    policy.mkdir()
+    (policy / "relation-aliases.md").write_text(
+        f"# relation aliases\n\n- `{nfc(STUDY_TYPE)}` -> `study_type`\n", encoding="utf-8"
+    )
+    (policy / "value-hierarchy.md").write_text(
+        f"# value hierarchy\n\n- study_type: {nfc(COHORT)} ⊂ {nfc(OBSERVATIONAL)}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fc, "POLICY_DIR", policy)
+    return tmp_path
+
+
+class TestGateLoadsAliasesForVariableRelation:
+    """relation("p1", R, "관찰연구")? — a variable relation, an alias row filed as
+    `연구유형`/`코호트연구`, and the declaration `코호트연구 ⊂ 관찰연구` on the
+    canonical name. The matcher (which always gets a real relation_aliases()) resolves
+    the row's surface name to `study_type`, finds the declaration and MATCHES. The
+    gate's _relation_match_count once called relation_row_matches with empty aliases
+    for a variable relation, so the surface name never resolved, the ancestor was
+    never seen, and the match count was 0 — the gate answered QUERY_FACT_ABSENT, a
+    verified negative the matcher denied. #348 makes the gate load the map on the
+    same terms as the matcher (unconditionally when none was threaded in), so the two
+    now agree on the same query (the #213 parity, variable-relation axis)."""
+
+    @pytest.mark.parametrize("form", ["NFC", "NFD"])
+    def test_gate_and_matcher_agree_query_ok(self, study_kb, form):
+        import factlog.common as fc
+
+        row = _study_row(form)
+        query = f'relation("p1", R, "{nfc(OBSERVATIONAL)}")?'
+        # The matcher, called with the real declarations, matches this row.
+        matched = relation_row_matches(
+            ['"p1"', "R", f'"{nfc(OBSERVATIONAL)}"'],
+            row,
+            fc.relation_aliases(),
+            fc.value_hierarchy(),
+        )
+        assert matched, "matcher baseline: the alias row subsumes 관찰연구 for R"
+        # The gate must reach the SAME verdict, not FACT_ABSENT.
+        ok, code, _ = classify_query(query, [row])
+        assert (ok, code) == (True, QUERY_OK), code
