@@ -276,7 +276,11 @@ def unverified_vocabulary(constants: list[str], known: set[str]) -> str | None:
     warning is the constant that marks the result unverified and the "(see Warnings
     above)" pointer is always accurate. ``known`` admits declared hierarchy ancestors,
     so a broad-value object matching a narrower row (코호트연구 ⊂ 관찰연구) is accepted
-    vocabulary and never flagged. A query whose constants are all accepted but whose
+    vocabulary and is not flagged. Note that ``known`` pools those ancestors across all
+    relations while the gate scopes them to the queried relation, so this under-flags
+    rather than over-flags: an ancestor declared under another relation escapes the
+    check and still renders "0 rows" where the gate rejects (#362). A query whose
+    constants are all accepted but whose
     triple is simply absent (sample-kb q4) has no unaccepted constant here, so it keeps
     rendering the honest ``0 rows`` -- that is the discriminator between the two.
     """
@@ -369,7 +373,19 @@ def evaluate_queries(
                 # verified zero (#350, the object axis #347 deferred). `known` carries
                 # value_set AND declared hierarchy ancestors, so a broad-value object
                 # that matches a narrower row (코호트연구 ⊂ 관찰연구) is accepted
-                # vocabulary and never mis-flagged.
+                # vocabulary and is not flagged — no false positive.
+                #
+                # A residual FALSE NEGATIVE remains, in the other direction, and it is
+                # not closed here: known_constants pools ancestors across EVERY relation
+                # (declared_ancestors(hierarchy, None, ...)) while the gate scopes the
+                # licence to the relation the query names. So an object declared as an
+                # ancestor under a DIFFERENT relation — relation("x", "y", "anyone")?
+                # where `anyone` is declared only under `founded_by` — is in `known`,
+                # draws no flag, and still renders "0 rows" while the gate answers
+                # entity_not_accepted. That mismatch predates #350 (the object axis was
+                # unchecked entirely before) and closing it means scoping this set by
+                # relation, a change to known_constants that also moves validate_query's
+                # warnings. Tracked separately as #362.
                 unaccepted = unverified_vocabulary([args[0], args[1], args[2]], known)
                 if unaccepted is not None:
                     results.append(

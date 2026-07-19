@@ -3301,11 +3301,18 @@ def classify_query(
         # (#242). For a NON-variable relation the read happens here, gated to a
         # quoted canonical not literally in accepted.dl, and is threaded down. A
         # VARIABLE relation leaves _rel_aliases None and _relation_match_count loads
-        # the map itself — matching the matcher, which already reads it
-        # unconditionally on every path (relation_results/ask_router). So a
-        # variable-relation query's raise-on-malformed-file timing is unchanged: the
-        # matcher already read the file for that query, this is not a new trigger
-        # (#348).
+        # the map itself, so the gate evaluates the same predicate on the same
+        # arguments as the matcher (#348).
+        #
+        # This DOES move the raise-on-malformed-aliases timing for one path. On the
+        # gate-only route (ask_router.cmd_validate calls classify() and never runs
+        # the matcher) a variable-relation query used to answer (True, 'ok') with a
+        # malformed relation-aliases.md and now raises, as the non-variable relation
+        # already did on that same route. That is deliberate: a KB whose alias file
+        # is self-contradictory cannot be soundly judged, and answering 'ok' from the
+        # one path that skipped the read was the outlier. The variable case is now
+        # aligned with the non-variable one — fail loud on both, not silently ok on
+        # one.
         _rel_aliases: dict[str, str] | None = None
         if not _is_variable(relation) and canonical_value(_arg_value(relation)) not in relations_c:
             # A declared canonical name (one whose surface_variants is non-empty)
