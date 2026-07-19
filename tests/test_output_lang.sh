@@ -59,8 +59,21 @@ out="$("$PYTHON" -m factlog lang)"
 # --- `factlog where` shows the language; --porcelain stays root-only ----------
 "$PYTHON" -m factlog where | grep -qiF "narration language: en" && ok "where shows the narration language" || bad "where did not show the language"
 porc="$("$PYTHON" -m factlog where --porcelain)"
-[ "$porc" = "$(cd "$KB" && pwd -P)" ] && ok "where --porcelain stays root-only (no lang)" || bad "porcelain = '$porc', want root only"
-printf '%s' "$porc" | grep -qiE 'narration|language|en' && bad "porcelain leaked lang: $porc" || ok "where --porcelain emits no lang"
+KB_ROOT="$(cd "$KB" && pwd -P)"
+[ "$porc" = "$KB_ROOT" ] && ok "where --porcelain stays root-only (no lang)" || bad "porcelain = '$porc', want root only"
+# Detect a narration-language LEAK, robust to a temp-KB root path that carries an
+# incidental "en" from mktemp's random suffix (e.g. /tmp/tmp.oqGEnoyAO8/wiki -> "GEn"),
+# which used to false-alarm 'lang leaked' and made the run a rerun-passes flake (#358).
+# The legitimate output is the root path itself, so strip that exact prefix and inspect
+# only the RESIDUAL — a real lang leak lands past the root, an "en" inside the root does not.
+lang_leaks() { printf '%s' "${1#"$2"}" | grep -qiE 'narration|language|en'; }
+lang_leaks "$porc" "$KB_ROOT" && bad "porcelain leaked lang: $porc" || ok "where --porcelain emits no lang"
+# #358 self-check, BOTH directions, so the flake fix cannot silently blind the detector:
+FAKE="/tmp/tmp.oqGEnoyAO8/wiki"  # mktemp-style suffix carrying "GEn" — the flake trigger
+# (a) an incidental "en" in the root path alone must NOT fire (porc == root, residual empty)
+lang_leaks "$FAKE" "$FAKE" && bad "#358: incidental 'en' in the root path false-alarmed" || ok "#358: 'en' inside the root path does not trip the leak detector"
+# (b) a real leak PAST the root prefix must still fire (detection preserved)
+lang_leaks "$FAKE"$'\nnarration language: en' "$FAKE" && ok "#358: a narration-language leak past the root is still caught" || bad "#358: leak detector went blind to a real lang leak"
 
 # --- over-length --lang is rejected symmetrically across entry points ---------
 # Guards the #269 review WARNING: `lang`, `use --lang`, and `setup --lang` must
