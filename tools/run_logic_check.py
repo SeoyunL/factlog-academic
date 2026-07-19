@@ -210,12 +210,35 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
     return errors, warnings
 
 
-def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str:
+def policy_result_line(
+    predicate: str,
+    line: str,
+    inferred: dict[str, set[tuple[str, ...]]],
+    known: set[str],
+) -> str:
     args = query_args(line)
     # Filter BEFORE counting: `len(rows)` must count what the query asked for, not
     # the whole extent. The same predicate the router filters with (#320) -- a pinned
     # entity constrains the report's rows exactly as it constrains ask's.
     rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
+    if not rows:
+        # An empty policy extent over an UNACCEPTED pinned entity is not a verified
+        # negative -- the gate rejects the same query entity_not_accepted, the policy
+        # analogue of #347 (#351). validate_query's policy branch already WARNS on this
+        # entity, against the SAME `known` set (run_logic_check L494), so mark the
+        # result unverified and point at that warning instead of rendering a verified
+        # "0 rows". Only the pinned entity (args[0]) is vocabulary-checked -- exactly
+        # what the gate's policy branch and validate_query's warning check -- so a
+        # variable pin, which ranges over the extent, is never flagged. Warning
+        # severity and exit 0 are unchanged: a needs_review entity is a normal KB
+        # state; this only stops the line asserting a checked negative. A real finding
+        # (non-empty extent) never reaches here and renders normally.
+        unaccepted = unverified_vocabulary(args[:1], known)
+        if unaccepted is not None:
+            return (
+                f"{predicate} results: unverified — '{unaccepted}' is not "
+                "accepted vocabulary (see Warnings above)"
+            )
     values: list[str] = []
     for row in rows:
         bindings = []
@@ -280,7 +303,7 @@ def evaluate_queries(
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
-            results.append(policy_result_line(predicate, line, inferred))
+            results.append(policy_result_line(predicate, line, inferred, known))
         elif predicate == "path":
             # Constants AND variables. The old branch only handled two quoted
             # constants, so `path("A", X)?` appended nothing, the result list came
