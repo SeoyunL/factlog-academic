@@ -2416,7 +2416,41 @@ _WIRELOG_UNDECODABLE_RE = re.compile(r"[\x00-\x1f]")
 def wirelog_undecodable_chars(value: str) -> list[str]:
     """Distinct control characters in *value* that dl_string would emit as a
     wirelog-undecodable escape (the C0 range U+0000–U+001F). Empty when *value* is safe to
-    round-trip through accepted.dl. Pure; U+0085/U+2028/U+2029 are never flagged (#331/#255)."""
+    round-trip through accepted.dl. Pure; U+0085/U+2028/U+2029 are never flagged (#331/#255).
+
+    Those three survive the round trip (#255, verified), so no caller rejects them; the fact
+    lives here next to the verdict rather than restated at each gate.
+
+    GATE PLACEMENT (#371). This predicate only judges; the callers reject. Where a caller
+    rejects follows three clauses:
+
+    1. Gate at the earliest point that can name the source a human must edit — the
+       candidates.csv row, the relation-aliases.md bullet, the logic-policy.md line. An error
+       naming the authoring site is repairable; the same error raised downstream describes a
+       derived string nobody wrote.
+    2. When a path has no such authoring site (an LLM draft has no line to cite), drop the
+       gate to the last point every path shares, so nothing reaches emission ungated.
+    3. "Earliest" means earliest on the EMISSION path — the path whose only outcome is
+       writing a .dl. Never gate at load, even though load is earlier and can name the same
+       source. These errors tell the reader to run factlog amend or to edit a policy bullet,
+       and those repair tools load the same file every read command loads; a load gate kills
+       the tool the message prescribes and leaves the KB unrepairable. Compile gates, not
+       load gates: candidates.csv and relation-aliases.md keep loading (status/vocabulary
+       keep working) while the compile refuses.
+
+    Whether a gate that looks redundant may be DELETED is judged per input, not per call
+    site: delete only when, for EVERY input reaching it, another gate raises first with the
+    same rc. The draft-path gate in generate_logic_policy.normalized_rules duplicates the
+    deterministic-path gate on deterministic input and still stays, because on draft input it
+    is the only defence — counting call sites would have deleted it. Keep, too, when the only
+    thing making an input unreachable is incidental strictness in an unrelated upstream parser
+    (#359): markdown_policy_items exists to define bullet syntax, not to protect the engine's
+    wire format, so whoever widens the tag grammar is making a parsing decision and has no
+    reason to suspect they opened an integrity hole.
+
+    Corollary: an emission site whose input is guaranteed to have passed a gate carries a
+    DOCUMENTED PRECONDITION, not a second gate — and that precondition states what breaks it.
+    """
     return sorted(set(_WIRELOG_UNDECODABLE_RE.findall(value)))
 
 

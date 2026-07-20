@@ -84,6 +84,8 @@ def _reject_undecodable_control_chars(rows: list[dict[str, str]]) -> None:
     """Refuse to compile a fact whose subject/relation/object carries a control character
     dl_string would emit as a wirelog-undecodable escape (#331).
 
+    Why the gate sits here and not at load: see wirelog_undecodable_chars (common.py).
+
     dl_string is json.dumps; the engine decodes only \\" and \\\\, so a \\t/\\n/\\uXXXX
     escape (the C0 range U+0000–U+001F) is stored as a literal backslash+letter — python
     holds 'Fig<TAB>2', the engine holds 'Fig\\t2', their intern ids never meet, and the
@@ -91,9 +93,8 @@ def _reject_undecodable_control_chars(rows: list[dict[str, str]]) -> None:
     integer). We FAIL LOUD at compile rather than (a) normalizing — that would silently
     alter a recorded fact; a tab pasted from a PDF table is data, not noise — or (b)
     emitting the raw escape and hoping a downstream decoder agrees, which is exactly the
-    silent identity loss this catches. candidates.csv still LOADS (the reject is here, not
-    at load), so the human gate — factlog amend/eject — can correct the row.
-    U+0085/U+2028/U+2029 round-trip and are never rejected (#255, verified).
+    silent identity loss this catches. The human gate that repairs the row is factlog
+    amend/eject.
     """
     for row in rows:
         for field in ("subject", "relation", "object"):
@@ -118,15 +119,16 @@ def _reject_undecodable_canonical_names(aliases: dict[str, str]) -> None:
     """Refuse to compile while ANY declared canonical relation name carries a control
     character dl_string would emit as a wirelog-undecodable escape (#357, widened by #363).
 
+    Why the gate sits here and not at load: see wirelog_undecodable_chars (common.py).
+
     The canonical name is DERIVED from relation-aliases.md, not from a fact row, so it never
     passed _reject_undecodable_control_chars. #357 first checked it inside the canonical/3
     emission loop, which meant the gate only fired once some fact used the alias key: a tab
     authored into a canonical name that nothing referenced yet compiled rc 0. That was never
     a leak — with no participating fact no canonical atom is emitted, so the undecodable
     string had no path to the engine — but it deferred detection to a later, unrelated commit.
-    Checking the DECLARATION surfaces the policy defect where it was authored. This is a
-    compile gate only: the policy file still LOADS (status/vocabulary keep working), and the
-    checked set is the alias values, which are few enough for the cost to be irrelevant.
+    Checking the DECLARATION surfaces the policy defect where it was authored; the checked
+    set is the alias values, which are few enough for the cost to be irrelevant.
     """
     for raw, canon in sorted(aliases.items()):
         bad = wirelog_undecodable_chars(canon)
