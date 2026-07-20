@@ -127,21 +127,44 @@ class TestParseOrdinal:
         # bare numbers, amount/date units, and words are not ordinals
         assert lt.parse_ordinal(raw) is None
 
-    # docs/reference/typed-relations.{md,en.md} teaches the accepted shape:
-    # a number followed by a rank unit (Korean 호/위/번/차/등/째 with an
-    # optional leading 제, or English st/nd/rd/th). These pin the units the
-    # docs enumerate but the cases above do not reach.
+    # The docs enumerate the full rank-unit list; 호/위/번/rd/st/th and the
+    # optional 제 are already covered above, so these are only the units that
+    # no other case reaches.
     @pytest.mark.parametrize("raw,expected", [
-        ("3차", 3), ("3등", 3), ("3째", 3), ("2nd", 2), ("4th", 4),
+        ("3차", 3), ("3등", 3), ("3째", 3), ("2nd", 2),
     ])
-    def test_accepts_every_documented_unit(self, raw, expected):
+    def test_accepts_remaining_documented_units(self, raw, expected):
         assert lt.parse_ordinal(raw) == expected
 
-    # ...and the counter-examples the docs name: without a rank unit the value
-    # does not parse, so a leading 제 alone or a prose prefix stays untyped.
-    @pytest.mark.parametrize("raw", ["제3", "rank 3", "no.3"])
-    def test_rejects_documented_counterexamples(self, raw):
+    # The docs state whitespace between the number and the unit is allowed, but
+    # that a leading 제 must sit directly against the number.
+    @pytest.mark.parametrize("raw,expected", [("3 위", 3), ("3 rd", 3), ("제3 호", 3)])
+    def test_accepts_space_before_unit(self, raw, expected):
+        assert lt.parse_ordinal(raw) == expected
+
+    def test_rejects_space_after_leading_je(self):
+        assert lt.parse_ordinal("제 3호") is None
+
+    # A bare 제 with no rank unit does not parse. (`3` and `rank 3` are the
+    # docs' other counter-examples; they are pinned by ``test_rejects`` above
+    # and by test_typed_parse_warnings.test_readme_ordinal_examples_all_parse.)
+    def test_rejects_leading_je_without_unit(self):
+        assert lt.parse_ordinal("제3") is None
+
+    # The number itself is bare digits: no sign, grouping separator or decimal.
+    @pytest.mark.parametrize("raw", ["-3위", "3,000위", "3.5위"])
+    def test_rejects_non_bare_digits(self, raw):
         assert lt.parse_ordinal(raw) is None
+
+    # The compound form is a SEPARATE branch (_ORDINAL_COMPOUND_RE, tried
+    # first) that carries no rank unit — the "unit required" rule applies to
+    # the prose form only. ``ordinal(3)`` in ``test_accepts`` is the base case;
+    # these pin the tolerances the docs rely on when calling it a separate path.
+    @pytest.mark.parametrize("raw,expected", [
+        ("ORDINAL(3)", 3), ("ordinal( 3 )", 3),
+    ])
+    def test_compound_form_needs_no_unit(self, raw, expected):
+        assert lt.parse_ordinal(raw) == expected
 
 
 class TestParseAmount:
