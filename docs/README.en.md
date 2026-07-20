@@ -40,6 +40,8 @@ To walk the whole flow through once without your own data, start with the
 | [Typed relations](reference/typed-relations.en.md) | `policy/typed-relations.md`, date · ordinal · amount · number |
 | [Relation aliases](reference/relation-aliases.en.md) | `policy/relation-aliases.md`, folding a surface name to the canonical one |
 | [Single-valued relations](reference/single-valued.en.md) | `policy/single-valued.md`, one object per subject, `CONFLICT` and how to resolve it |
+| [Value hierarchy](reference/value-hierarchy.en.md) | `policy/value-hierarchy.md`, subtype subsumption, the scope contract, cycles and warnings |
+| [Value vocabulary audit](reference/value-audit.en.md) | `tools/value_audit.py`, `--strict`, `policy/identity-relations.md` |
 | [Excluding and removing sources](reference/ignore-eject.en.md) | `factlog ignore` (exclude from sync), `factlog eject` (undo an ingest), `--fact` |
 | [Windows](reference/windows.en.md) | Windows Python executable, Git Bash, PEP 668 venv guidance |
 
