@@ -23,6 +23,6 @@ published_year
 RELATION OBJECT`, 값을 고치려면 `factlog amend SUBJECT RELATION OBJECT --set-object NEW`
 입니다. `facts/candidates.csv` 를 손으로 고치는 것은 이 KB 가 세운 사람 게이트를
 우회하므로 하지 않습니다. 두 값이 상위-하위유형이라면 어느 쪽도 틀리지 않았습니다 —
-`policy/value-hierarchy.md` 에 관계를 선언하면 두 행 모두 유지됩니다.
+[`policy/value-hierarchy.md`](value-hierarchy.md) 에 관계를 선언하면 두 행 모두 유지됩니다.
 
 `factlog init` 이 주석 처리된 예시와 함께 이 파일을 만들어 둡니다.
