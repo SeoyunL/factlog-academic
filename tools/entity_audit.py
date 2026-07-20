@@ -18,9 +18,15 @@ deterministically and informationally (always exit 0):
      ordinal) under a relation NOT yet declared in attribute-relations.md;
      suggests declaring that relation (pairs with entity-vs-literal typing).
 
-A typed literal written as a COMPOUND TERM (`date(2020)`, `number(19)`) is a
+  4. Literal used as subject — a compound term in the subject position.
+  5. Malformed typed literal — compound-term FORM the engine cannot parse.
+
+A typed literal written as a COMPOUND TERM (`date(2020,3,8)`, `number(19)`) is a
 literal by syntax alone, whatever the relation says, so it never counts as an
-entity here — see `_is_compound_term`.
+entity here — see `_compound_term_type`. It is still reported: as a declared
+literal, a literal suspect, a literal-used-as-subject, or a malformed literal.
+Excluding it from the entity set without reporting it anywhere would trade one
+blind spot for another.
 
 Usage:
     python3 entity_audit.py [--wiki <kb>]
@@ -70,18 +76,32 @@ _LITERAL_RE = re.compile(
 )
 
 
-# A typed literal written the way text-to-fact.md mandates: `date(2020)`,
-# `number(19)`, `ordinal(3)`, `amount(100,"억")`. The wrapper names come from
+# The compound-term wrapper text-to-fact.md mandates: `date(2020,3,8)`,
+# `number(2.5)`, `ordinal(3)`, `amount(100,"억")`. The wrapper NAMES come from
 # literal_types.TYPES — the single source of the notation — so this file never
 # holds a second copy of the list to drift from.
+#
+# Deliberately TIGHT, because a match REMOVES the value from the entity listing:
+# every widening here silently hides a real entity from the audit.
+#   - case-sensitive: the mandated notation is lower-case, so `Date(Time)`,
+#     `Amount(USD)` and `AMOUNT(Adjusted)` stay entities. A dataset column or an
+#     institution may legitimately be named that — same reasoning as value-audit's
+#     `ETC (electron transport chain)` (docs/reference/value-audit.md).
+#   - `[^()\n]+`: a non-empty body with no nested or spanning parens, so `date()`
+#     names nothing and `number(19) vs number(20)` is ONE entity, not a literal.
+#   - `\A`/`\Z` without DOTALL: `date(2020)\n` does NOT match. A stored value
+#     carrying a control character is not the mandated notation; flagging it as a
+#     literal would hide it, and #373 wants such values visible, not swallowed.
+# For the same reason nothing is stripped before matching: tolerating padding
+# would re-admit `date(2020)\n` through the back door. Both predicates below judge
+# the exact stored string, so neither is more permissive than the other.
 _COMPOUND_TERM_RE = re.compile(
-    r"^(?:" + "|".join(sorted(re.escape(t) for t in literal_types.TYPES)) + r")\(.*\)$",
-    re.IGNORECASE | re.DOTALL,
+    r"\A(?P<type>" + "|".join(sorted(re.escape(t) for t in literal_types.TYPES)) + r")\([^()\n]+\)\Z"
 )
 
 
-def _is_compound_term(value: str) -> bool:
-    """Is *value* a typed literal in compound-term form?
+def _compound_term_type(value: str) -> str | None:
+    """The wrapper name if *value* is written in compound-term form, else None.
 
     Syntax settles it: nothing but a literal is spelled `date(...)`. So this does
     NOT consult attribute-relations.md. It cannot, and must not wait for it — a KB
@@ -90,11 +110,33 @@ def _is_compound_term(value: str) -> bool:
     off and made `date` a token shared by every date. All C(n,2) date pairs then
     surfaced as fragmentation candidates and buried the real ones (#386).
     """
-    return bool(_COMPOUND_TERM_RE.match(value.strip()))
+    match = _COMPOUND_TERM_RE.match(value)
+    return match.group("type") if match else None
+
+
+def _is_compound_term(value: str) -> bool:
+    return _compound_term_type(value) is not None
+
+
+def _is_malformed_compound_term(value: str) -> bool:
+    """Wrapper-shaped, but the engine cannot parse it into a scalar.
+
+    `date(abc)` and `date(2020,2,30)` wear the notation without being values. They
+    must not be quietly filed as "a literal, nothing to see" — that is exactly the
+    class of row a human needs to fix, so the audit names them separately.
+
+    The parse question is delegated to literal_types (read-only), which owns the
+    strict per-type notation; re-deciding it here would be a second definition to
+    drift from. NOTE the coupling: `date(2020)` (year-only) does not parse TODAY,
+    so it reports as malformed until #385 lands year-only date support — at which
+    point it silently becomes well-formed here, with no change to this file.
+    """
+    type_tag = _compound_term_type(value)
+    return type_tag is not None and literal_types.normalize(type_tag, value) is None
 
 
 def _looks_literal(value: str) -> bool:
-    """Literal by the prose heuristic OR by compound-term syntax."""
+    """Literal by compound-term syntax OR by the prose heuristic."""
     return _is_compound_term(value) or bool(_LITERAL_RE.match(value))
 
 
@@ -119,6 +161,8 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
     statuses: dict[str, set[str]] = defaultdict(set)
     declared_literals: set[str] = set()
     literal_suspects: dict[str, set[str]] = defaultdict(set)  # relation -> {objects}
+    literal_subjects: set[str] = set()
+    malformed_literals: set[str] = set()
 
     for row in rows:
         s, rel, o, st = row["subject"], row["relation"], row["object"], row["status"]
@@ -126,9 +170,19 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
             if ent:
                 fact_count[ent] += 1
                 statuses[ent].add(st)
+        # A compound term in the SUBJECT position is reported on its own. Dropping
+        # it from `entities` without this would make it vanish from every section
+        # (declared_literals and literal_suspects only ever look at objects), and a
+        # literal leaking into the subject slot is precisely a smell this tool exists
+        # to show — losing it would be a regression in observability.
+        if s and _is_compound_term(s):
+            literal_subjects.add(s)
+        for value in (s, o):
+            if value and _is_malformed_compound_term(value):
+                malformed_literals.add(value)
         if o and is_attribute_relation(rel, literal_rels):
             declared_literals.add(o)
-        elif o and _looks_literal(o):
+        elif o and not is_attribute_relation(rel, literal_rels) and _looks_literal(o):
             literal_suspects[rel].add(o)
 
     # Fragmentation clusters among entities only. Precompute norm/tokens once per
@@ -155,6 +209,8 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
         "statuses": statuses,
         "clusters": clusters,
         "literal_suspects": literal_suspects,
+        "literal_subjects": sorted(literal_subjects),
+        "malformed_literals": sorted(malformed_literals),
     }
 
 
@@ -197,6 +253,16 @@ def main(argv: list[str] | None = None) -> int:
             vals = ", ".join(sorted(a["literal_suspects"][rel]))
             print(f"  • relation '{rel}' has literal-looking object(s): {vals}", file=sys.stderr)
             print(f"      → consider adding '{rel}' to policy/attribute-relations.md", file=sys.stderr)
+
+    if a["literal_subjects"]:
+        print("\nliteral used as subject (a typed value in the subject position):", file=sys.stderr)
+        for v in a["literal_subjects"]:
+            print(f"  • '{v}' ({fc[v]} fact(s)) — a value cannot be the thing a fact is about", file=sys.stderr)
+
+    if a["malformed_literals"]:
+        print("\nmalformed typed literal (compound-term form the engine cannot parse):", file=sys.stderr)
+        for v in a["malformed_literals"]:
+            print(f"  • '{v}' — not a value any typed relation can order or compare", file=sys.stderr)
 
     return 0
 
