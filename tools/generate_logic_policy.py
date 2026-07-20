@@ -121,12 +121,18 @@ def _reject_undecodable_policy_name(kind: str, name: str, lineno: int) -> None:
     HERE because this is the only point where the source lineno survives (normalized_rules
     knows the rule index only), so the error can name the bullet to fix.
 
+    This gate covers the DETERMINISTIC path only: it runs from fixture_policy_json, which
+    an LLM draft never calls (that path is parse_json_object -> normalized_rules). The
+    draft path is gated separately inside normalized_rules (#365); claims about what can
+    reach where hold per path, not globally.
+
     Reachability is asymmetric. RELATION_RE excludes whitespace but nothing else, so 23 C0
     characters (\\x00-\\x08, \\x0e-\\x1b) pass it and reach us. Nothing reaches us on the
     reason axis, but NOT because of REASON_RE — that runs in normalized_rules, i.e. AFTER
-    this gate, so it cannot decide what arrives here. The real boundary is the bullet tag
-    regex in markdown_policy_items (common.py), which admits no C0 character into a reason
-    tag, so such a bullet is not a policy item at all.
+    this gate, so it cannot decide what arrives here. The real boundary HERE is the bullet
+    tag regex in markdown_policy_items (common.py), which admits no C0 character into a
+    reason tag, so such a bullet is not a policy item at all. On the draft path there is no
+    bullet, and there REASON_RE is the reason axis's only defence.
 
     We gate reason anyway, because that boundary is a PARSING rule, not an integrity rule:
     markdown_policy_items exists to define bullet syntax (#190), not to protect the engine's
@@ -242,6 +248,32 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
             relation = str(condition["relation"]).strip()
             if not relation or not RELATION_RE.match(relation):
                 raise ValueError(f"rule {idx} has invalid relation name: {relation!r}")
+            # Last line of defence before emission (#365). _reject_undecodable_policy_name
+            # guards the DETERMINISTIC path, but it lives in fixture_policy_json, which the
+            # LLM draft path never calls: a draft goes parse_json_object -> here. RELATION_RE
+            # excludes whitespace and nothing else, so all 23 C0 characters that clear it
+            # (\x00-\x08, \x0e-\x1b) are wirelog-undecodable and would reach compile_policy,
+            # where dl_string writes them as escapes the engine does not decode — a rule body
+            # naming a relation no fact can hold, i.e. a silently dead policy. Every path to
+            # compile_policy passes through this function, so this is where both meet.
+            # Judged by wirelog_undecodable_chars, never by a local character set, so the
+            # verdict cannot drift from the engine's actual wire format.
+            #
+            # Do NOT widen this to U+0085/U+2028/U+2029: they round-trip through the engine
+            # (#255) and are not an integrity problem. RELATION_RE already refuses them a
+            # few lines up as whitespace, which is why the message below does not mention
+            # them — no input reaching here can involve those three, so naming them in the
+            # error would describe a situation the reader is not in.
+            undecodable = wirelog_undecodable_chars(relation)
+            if undecodable:
+                shown = ", ".join(repr(c) for c in undecodable)
+                raise ValueError(
+                    f"rule {idx} relation name {relation!r} carries control character(s) "
+                    f"{shown} that policy/logic-policy.dl would encode as JSON escapes the "
+                    "wirelog engine does not decode, so the rule would reference a name no "
+                    "fact can ever match and the policy would be silently dead (#365). "
+                    "Retype the relation as clean text."
+                )
             relations.append(relation)
         if len(set(relations)) != len(relations):
             raise ValueError(f"rule {idx} must not repeat relation names")
