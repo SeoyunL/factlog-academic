@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 from common import (
     POLICY_DIR,
     PROMPTS_DIR,
+    ROOT,
     RUNS_DIR,
     WIRELOG_PROGRAM,
     FactlogError,
@@ -355,6 +357,127 @@ def write_trace(rules: list[dict[str, Any]], output: str) -> None:
     TRACE_OUT.write_text("\n".join(trace), encoding="utf-8")
 
 
+def _escape_control(match: re.Match[str]) -> str:
+    char = match.group()
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(char)
+    if named is not None:
+        return named
+    code = ord(char)
+    return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
+
+
+def _one_line(message: str) -> str:
+    """Fold an exception message onto one line, controls shown as source escapes (#381).
+
+    This closes an axis that nothing reaches today; it is not a fix for a live bug, and
+    calling it one would be the kind of false claim the marker exists to avoid. #381
+    surveyed the failure modes past PROMPT_OUT and found OSError to be the only one whose
+    message carries OS-supplied text, and OSError.__str__ applies %r to the filenames,
+    so a newline inside a path arrives as
+    the two characters \\ and n and cannot open a heading. Measured on python3.12 with
+    OSError(21, 'Is a directory', '/a/kb\\n## Written by this run\\n\\n- forged.md\\n/x.tmp'):
+    re.findall(r'^## ', str(exc), re.M) is empty and str(exc).splitlines() has length 1.
+    (str(exc).count("## ") returns 1, but that counts substrings, not headings — #381's
+    original report used it and read a forgery that was not there.)
+
+    That safety is a property of one exception type, not of the marker. An exception
+    class that puts OS text in its message without repr would break it, so the guarantee
+    is stated here instead, and it is deliberately narrow: no message, whatever produces
+    it, can add a LINE to the marker. The set is the characters str.splitlines() splits
+    on plus the rest of C0/C1 and DEL, because the marker's readers split it into lines
+    — _section in tests/unit/test_failed_policy_run_marker.py by str.splitlines(), a
+    Markdown renderer by \\n and \\r.
+
+    What this does NOT promise is that no '## ' can appear in the message at all. A
+    message of "boom ## Written by this run" puts one there with no control character
+    involved, and no escaping can prevent it. It is harmless because both readers anchor
+    a heading to the start of a line and that text sits mid-line — which is why the
+    guarantee is phrased about lines rather than about the '## ' sequence.
+    """
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", _escape_control, message)
+
+
+def _kb_relative(name: object) -> str:
+    """One filename out of an OSError, stated relative to the KB root."""
+    try:
+        path = Path(os.fsdecode(name))
+    except TypeError:  # A filename that is not a path, e.g. a file descriptor number.
+        return str(name)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        # Outside the KB, so there is no relative form and the basename is what is left.
+        # This does NOT make such a name position-independent: the basename can itself be
+        # the varying component, e.g. the KB directory '/a/kbA' and a copy of it at
+        # '/b/kbBBBBBBBB' reduce to 'kbA' and 'kbBBBBBBBB'. Position independence is
+        # claimed only for paths INSIDE the KB, which is every path the run's own writes
+        # produce; a name from outside can still move the marker's bytes.
+        return path.name
+
+
+def _failure_message(exc: BaseException) -> str:
+    """The one-line rendering of `exc` that goes under '## Failure' (#381).
+
+    OSError is rebuilt from errno/strerror/filename/filename2 rather than parsed out of
+    str(exc), because its stringification embeds ABSOLUTE paths: the same KB under two
+    different parent directories produced two different markers, which contradicts the
+    determinism the marker is supposed to have. Reproduce on base e0cc695 by copying a
+    KB to two paths of different name length, running once cleanly, replacing
+    policy/logic-policy.dl with a directory so tmp.replace raises IsADirectoryError, and
+    comparing marker bytes: on base the two DIFFER, here they are equal. The comparison
+    is stated as an inequality on purpose — the absolute md5s depend on the temporary
+    directory the reproduction runs in, and that dependence is the defect itself, so
+    quoting fixed digests would give a number nobody else can reproduce.
+
+    Rebuilding rather than substituting str(ROOT) out of the finished message: the
+    filenames are rendered through %r, so a path holding a quote or a control character
+    reaches the message in an escaped form that a literal search for str(ROOT) misses.
+
+    Both filenames are kept. errno and strerror are kept. Losing them for determinism
+    would trade one unreadable marker for another, and it is why "keep the first line
+    only" was rejected — the rename case carries its second path there.
+
+    strerror is not the only place a message can sit. An OSError built like a plain
+    exception, `e = OSError("boom"); e.filename = ...`, leaves errno and strerror None
+    and keeps "boom" in args, so reading strerror alone dropped the whole diagnosis and
+    rendered `OSError: 'policy/x.dl'`. args is therefore consulted when errno and
+    strerror are both empty: that shape means the exception did not come from a syscall
+    result, so args holds an author-written string rather than an (errno, strerror) pair.
+
+    It does NOT mean the string is free of paths, and the difference matters. Only
+    filename and filename2 are relativized; whatever sits in args is copied through as
+    written, so `OSError("cannot copy /abs/kb/policy/a.dl to /abs/kb/policy/b.dl")` with
+    a filename set leaks the absolute path it spells out. Measured. This branch therefore
+    buys the diagnosis back without extending the determinism guarantee to it — that
+    guarantee covers filename and filename2 only.
+
+    Falling back to str(exc) in that shape does NOT work, and was measured before being
+    rejected: OSError.__str__ appends the filename whenever one is set, so
+    `OSError("boom")` with filename '/abs/kb/policy/x.dl' stringifies to
+    "[Errno None] None: '/abs/kb/policy/x.dl'" — the absolute path comes straight back
+    and takes the determinism with it. Rebuilding is what keeps both properties.
+    """
+    if isinstance(exc, OSError) and exc.filename is not None:
+        prefix = f"[Errno {exc.errno}] " if exc.errno is not None else ""
+        if exc.strerror:
+            reason = f"{exc.strerror}: "
+        elif exc.errno is None and exc.args:
+            # No errno and no strerror: this was not built from a syscall result, so args
+            # holds the author's message rather than an (errno, strerror) pair.
+            reason = f"{' '.join(str(arg) for arg in exc.args)}: "
+        else:
+            reason = ""
+        names = [repr(_kb_relative(exc.filename))]
+        if exc.filename2 is not None:
+            names.append(repr(_kb_relative(exc.filename2)))
+        return _one_line(prefix + reason + " -> ".join(names))
+    # filename is None for an OSError raised without one (raise OSError("boom")), where
+    # there is nothing to rebuild from.
+    return _one_line(str(exc))
+
+
 def failure_marker(exc: BaseException, written: list[Path]) -> str:
     """Render the accounting note a failed run leaves in runs/ (#372).
 
@@ -382,8 +505,21 @@ def failure_marker(exc: BaseException, written: list[Path]) -> str:
     sentence would be false there, so it appears only when something in runs/ is in fact
     older than this run. main() does not call this at all when the run wrote nothing.
 
-    Contains no wall-clock time and no absolute paths: the same input must produce the
-    same marker, the way every other generated artifact in this repo does.
+    Contains no wall-clock time, and the failure message goes through _failure_message
+    (#381) so that the axes below hold. The same input should produce the same marker,
+    the way every other generated artifact in this repo does.
+
+    Covered: everything the marker itself writes, and the two filenames of an OSError
+    that HAS one — those arrive KB-relative, so a KB copied to another path fails to the
+    same bytes. An OSError subclass that leaves filename None takes the same path as any
+    other exception type, and shutil.Error is a real example: it subclasses OSError but
+    carries its file pair in args[0], so nothing about it is relativized.
+    Not covered: the message text of any other exception type. #381's survey found that
+    nothing raised past PROMPT_OUT puts a path there (the other sites wrap their values
+    in !r, sit behind a regex gate, or are literals), but that is a fact about today's
+    exception set, not a property this function enforces. strerror is also OS- and locale-
+    dependent; the marker is only claimed to be stable for one machine, which is the
+    scope the test compares in.
     """
     written_names = {path.name for path in written}
     mine = [p for p in RUN_ARTIFACTS if p.name in written_names]
@@ -404,7 +540,7 @@ def failure_marker(exc: BaseException, written: list[Path]) -> str:
             "exists.",
             "",
         ]
-    message = str(exc)
+    message = _failure_message(exc)
     lines += [
         "## Failure",
         "",
