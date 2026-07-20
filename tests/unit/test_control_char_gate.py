@@ -144,6 +144,24 @@ class TestCanonicalNameControlChars:
         # The undecodable canonical atom never reaches the engine's trusted input.
         assert not (kb / "facts" / "accepted.dl").exists()
 
+    def test_compile_rejects_a_declared_but_unused_canonical_name(self, tmp_path):
+        # #363: the #357 gate lived inside the canonical/3 emission loop, so a tab-bearing
+        # canonical name whose alias key no fact uses was never visited and compile passed
+        # rc 0. Nothing leaked — no canonical atom is emitted without a participating fact —
+        # but detection was deferred to whenever such a fact appears. The declaration alone
+        # must fail loud, so the policy defect surfaces where it was authored.
+        kb = self._kb_with_alias(
+            tmp_path, "canon\tname",
+            # `mentions` is not the alias key `cites`: no fact participates in the alias.
+            ["Fig,mentions,Smith2020,sources/x.md,confirmed,0.9,"],
+        )
+        proc = _compile(kb)
+        assert proc.returncode != 0, proc.stdout + proc.stderr
+        assert "control character" in proc.stderr, proc.stderr
+        assert "canonical relation name" in proc.stderr, proc.stderr
+        assert "relation-aliases.md" in proc.stderr, proc.stderr
+        assert not (kb / "facts" / "accepted.dl").exists()
+
     def test_compile_accepts_a_clean_canonical_name(self, tmp_path):
         # A normal alias policy compiles with no regression; the canonical/3 atom is written.
         kb = self._kb_with_alias(

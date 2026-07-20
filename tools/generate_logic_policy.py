@@ -23,6 +23,7 @@ from common import (
     logic_policy_md_relations,
     markdown_policy_items,
     require_pyrewire_version,
+    wirelog_undecodable_chars,
 )
 
 try:
@@ -109,6 +110,49 @@ def render_prompt(policy_text: str) -> str:
 # _load_logic_policy_from and finalize.py) share one parser and never drift (#190).
 
 
+def _reject_undecodable_policy_name(kind: str, name: str, lineno: int) -> None:
+    """Refuse to compile a policy name carrying a control char dl_string would emit as a
+    wirelog-undecodable escape (#359, the policy-text sibling of #331/#357).
+
+    Both names below reach the .dl through dl_string (json.dumps), and the engine decodes
+    only \\" and \\\\ — so a C0 control (U+0000–U+001F) is stored as a literal backslash
+    plus letter. The rule body then names a relation no fact can ever hold: the policy is
+    silently dead rather than wrong, which is the worst failure mode for a gate. We check
+    HERE because this is the only point where the source lineno survives (normalized_rules
+    knows the rule index only), so the error can name the bullet to fix.
+
+    Reachability is asymmetric. RELATION_RE excludes whitespace but nothing else, so 23 C0
+    characters (\\x00-\\x08, \\x0e-\\x1b) pass it and reach us. Nothing reaches us on the
+    reason axis, but NOT because of REASON_RE — that runs in normalized_rules, i.e. AFTER
+    this gate, so it cannot decide what arrives here. The real boundary is the bullet tag
+    regex in markdown_policy_items (common.py), which admits no C0 character into a reason
+    tag, so such a bullet is not a policy item at all.
+
+    We gate reason anyway, because that boundary is a PARSING rule, not an integrity rule:
+    markdown_policy_items exists to define bullet syntax (#190), not to protect the engine's
+    wire format. Whoever later widens the tag grammar is making a parsing decision and has
+    no reason to suspect they are opening an engine-integrity hole — which is exactly when
+    a cheap local check at the emission site earns its keep. Contrast the canonical-name
+    check deleted from compile_facts.py in the same series: that one was pure duplication
+    (a sibling gate fired on the identical input with the identical rc), so removing it lost
+    nothing. Redundant with a gate → delete; unreachable only via an unrelated parser → keep.
+    U+0085/U+2028/U+2029 round-trip and are never rejected (#255).
+    """
+    bad = wirelog_undecodable_chars(name)
+    if not bad:
+        return
+    shown = ", ".join(repr(c) for c in bad)
+    raise FactlogError(
+        f"policy/logic-policy.md line {lineno}: control character(s) {shown} in {kind} "
+        f"{name!r} cannot be compiled: policy/logic-policy.dl would encode them as JSON "
+        "escapes the wirelog engine does not decode (\\t \\n \\r \\b \\f and other "
+        "U+0000–U+001F controls), so the generated rule would reference a name no fact can "
+        "ever match and the policy would be silently dead (#359). Correct the bullet on that "
+        f"line — retype the {kind} as clean text; do NOT write the control character back. "
+        "(U+0085/U+2028/U+2029 are fine and never rejected.)"
+    )
+
+
 def fixture_policy_json(policy_text: str) -> dict[str, Any]:
     rules: list[dict[str, Any]] = []
     rejected: list[str] = []
@@ -118,6 +162,9 @@ def fixture_policy_json(policy_text: str) -> dict[str, Any]:
         if not relations:
             rejected.append(f"line {lineno}: expected at least one backtick relation name")
             continue
+        _reject_undecodable_policy_name("reason tag", reason, lineno)
+        for relation in relations:
+            _reject_undecodable_policy_name("backtick relation name", relation, lineno)
         predicate = infer_fixture_predicate(body_sentence)
         rule: dict[str, Any] = {
             "predicate": predicate,
