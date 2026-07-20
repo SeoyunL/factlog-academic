@@ -10,8 +10,14 @@ from __future__ import annotations
 
 import re
 
-# Zotero itemType -> CSL type; anything else falls back to "document".
+from factlog.bibtex import resolve_source_type
+
+# Work type -> CSL type; anything else falls back to "document". Keyed by both
+# vocabularies `resolve_source_type` can return (Zotero itemType and OpenAlex
+# work type), mirroring `bibtex._ENTRY_TYPES` entry for entry so the two
+# exporters never disagree about what a record is.
 _CSL_TYPES = {
+    # Zotero itemType
     "journalArticle": "article-journal",
     "conferencePaper": "paper-conference",
     "book": "book",
@@ -19,13 +25,29 @@ _CSL_TYPES = {
     "report": "report",
     "thesis": "thesis",
     "preprint": "article",
+    # OpenAlex work type
+    "article": "article-journal",
+    "review": "article-journal",
+    "conference-paper": "paper-conference",
+    "book-chapter": "chapter",
+    "book-section": "chapter",
+    "dissertation": "thesis",
+    "report-component": "report",
 }
 
 _YEAR_RE = re.compile(r"\d{4}")
 
 
-def _csl_type(item_type: object) -> str:
-    return _CSL_TYPES.get(item_type, "document") if isinstance(item_type, str) else "document"
+def _csl_type(fm: dict) -> str:
+    source_type = resolve_source_type(fm)
+    csl_type = _CSL_TYPES.get(source_type, "document") if source_type else "document"
+    # A record naming a journal is a journal article, even when no key says so —
+    # this is the only signal PubMed front matter gives (#384). Unlike BibTeX
+    # this promotes "document" only: CSL's "article" (what a preprint maps to)
+    # is already a valid pairing with `container-title`.
+    if csl_type == "document" and fm.get("journal"):
+        return "article-journal"
+    return csl_type
 
 
 def _author(name: str) -> dict:
@@ -48,7 +70,7 @@ def _author(name: str) -> dict:
 
 def to_csl(fm: dict, item_id: str) -> dict:
     """Render one CSL-JSON item dict from a source's front-matter dict."""
-    item: dict = {"id": item_id, "type": _csl_type(fm.get("item_type"))}
+    item: dict = {"id": item_id, "type": _csl_type(fm)}
 
     title = fm.get("title")
     if title:

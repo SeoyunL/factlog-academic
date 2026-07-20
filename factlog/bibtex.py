@@ -15,8 +15,12 @@ from pathlib import Path
 _LIST_ITEM_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _KV_RE = re.compile(r"^([A-Za-z0-9_]+):\s*(.*)$")
 
-# Zotero itemType -> BibTeX entry type; anything else falls back to @misc.
+# Work type -> BibTeX entry type; anything else falls back to @misc. Keyed by
+# both vocabularies `resolve_source_type` can return: Zotero's camelCase
+# itemType and OpenAlex's hyphenated work type. The two never collide — where
+# they share a spelling ("book", "report", "preprint") they also share a meaning.
 _ENTRY_TYPES = {
+    # Zotero itemType
     "journalArticle": "article",
     "conferencePaper": "inproceedings",
     "book": "book",
@@ -24,6 +28,14 @@ _ENTRY_TYPES = {
     "report": "techreport",
     "thesis": "phdthesis",
     "preprint": "misc",
+    # OpenAlex work type
+    "article": "article",
+    "review": "article",
+    "conference-paper": "inproceedings",
+    "book-chapter": "incollection",
+    "book-section": "incollection",
+    "dissertation": "phdthesis",
+    "report-component": "techreport",
 }
 
 # Char-by-char LaTeX escaping (one pass, so inserted braces are not re-escaped).
@@ -107,8 +119,49 @@ def is_annotation_source(fm: dict) -> bool:
     return fm.get("source_kind") == "annotations"
 
 
-def _entry_type(item_type: object) -> str:
-    return _ENTRY_TYPES.get(item_type, "misc") if isinstance(item_type, str) else "misc"
+def resolve_source_type(fm: dict) -> str | None:
+    """Which front-matter key carries this record's work type, and what it says.
+
+    Each integration records the type under a different key, so reading only
+    Zotero's ``item_type`` dropped every OpenAlex/arXiv/PubMed record to the
+    exporter's default type (#384). Probed most-specific first:
+
+    ==========  ====================================  ===================
+    source      key                                   vocabulary
+    ==========  ====================================  ===================
+    Zotero      ``item_type``                         ``journalArticle``
+    OpenAlex    ``type``                              ``conference-paper``
+    arXiv       ``preprint: true``                    (implies a preprint)
+    PubMed      *none* — inferred by the caller from ``journal``
+    ==========  ====================================  ===================
+
+    ``item_type`` stays first so a Zotero-only KB exports exactly as before.
+    The arXiv flag is checked before any ``journal``-based inference because an
+    arXiv deposit stays a preprint even when ``journal`` records where the work
+    was later published; callers apply the ``journal`` fallback themselves,
+    since what it should promote to is a per-format decision.
+
+    Returns None when no key answers — the caller picks its own default.
+    """
+    for key in ("item_type", "type"):
+        value = fm.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    if fm.get("preprint") is True:
+        return "preprint"
+    return None
+
+
+def _entry_type(fm: dict) -> str:
+    source_type = resolve_source_type(fm)
+    entry = _ENTRY_TYPES.get(source_type, "misc") if source_type else "misc"
+    # Standard BibTeX's @misc has no `journal` field, so biber/BibTeX drops it
+    # with a warning. A record that names a journal was published in one, so
+    # cite it as @article rather than emit the invalid pairing (#384). This also
+    # types PubMed records, which carry no type key at all.
+    if entry == "misc" and fm.get("journal"):
+        return "article"
+    return entry
 
 
 def _esc(value: str) -> str:
@@ -135,7 +188,7 @@ def to_bibtex(fm: dict, cite_key: str) -> str:
     if fm.get("pmid"):
         fields.append(("note", f"PMID: {fm['pmid']}"))
 
-    lines = [f"@{_entry_type(fm.get('item_type'))}{{{safe_cite_key(cite_key)},"]
+    lines = [f"@{_entry_type(fm)}{{{safe_cite_key(cite_key)},"]
     for name, value in fields:
         lines.append(f"  {name} = {{{_esc(value)}}},")
     lines.append("}")
