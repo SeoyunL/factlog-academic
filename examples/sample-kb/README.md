@@ -12,8 +12,8 @@ query`·`/factlog ask` 같은 LLM 슬래시 단계는 다시 돌리면 결과가
 사용합니다.)
 
 이 튜토리얼은 한 번의 성공 흐름을 끝까지 따라가는 것이 목표입니다. 각 단계마다
-명령을 **어디서 실행하는지** 를 명시합니다. factlog의 명령은 [최상위
-README](../../README.md#명령-한눈에-보기--slash-command--cli-command--kb-파일) 의
+명령을 **어디서 실행하는지** 를 명시합니다. factlog의 명령은
+[개념 문서](../../docs/guide/concepts.md#명령-한눈에-보기--slash-command--cli-command--kb-파일) 의
 구분표대로 두 계층으로 나뉩니다.
 
 - **Claude Code slash command** — Claude Code 세션 안에서 `/factlog ...` 로 실행.
@@ -313,4 +313,4 @@ factlog where                          # 복원됐는지 확인
 (처음부터 `--target ./factlog-demo` 로만 실습했다면 전역 설정을 바꾸지 않았으므로
 복원 단계가 필요 없습니다 — 복사본만 지우면 됩니다.)
 
-자세한 명령 설명은 [최상위 README](../../README.md) 를 참고하세요.
+자세한 명령 설명은 [factlog 문서](../../docs/README.md) 를 참고하세요.

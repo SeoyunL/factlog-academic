@@ -1,5 +1,7 @@
 # OpenAlex 가져오기 (`factlog openalex-*`)
 
+> 🌐 [English](openalex.en.md) | **한국어**
+
 [OpenAlex](https://openalex.org)는 학술 저작(work)을 담은 공개 서지 데이터베이스입니다.
 factlog는 검색·단건 임포트·인용 그래프 탐색·메타데이터 갱신·원장 백필을 여섯 개의
 명령으로 제공합니다.

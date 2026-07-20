@@ -1,5 +1,7 @@
 # Zotero 가져오기 (`factlog zotero-import`)
 
+> 🌐 [English](zotero-import.en.md) | **한국어**
+
 Zotero 개인 라이브러리의 **서지 메타데이터**를 factlog KB의 `sources/`로 이관하는
 명령입니다. factlog는 Zotero의 대체재가 아니라 그 위에 얹히는 검증 층으로,
 Zotero는 계속 쓰면서 사실 추출·근거 추적·논리 검증만 factlog가 담당합니다.

@@ -1,7 +1,7 @@
 # Eject and conversion attribution — edge cases
 
-The README's [Removing a source](../README.md#removing-a-source-factlog-eject--the-inverse-of-ingest)
-section (한국어: [소스 제거](../README.ko.md#소스-제거-factlog-eject--ingest-의-역연산))
+The reference page [Removing a source](reference/ignore-eject.en.md#removing-a-source-factlog-eject--the-inverse-of-ingest)
+(한국어: [소스 제거](reference/ignore-eject.md#소스-제거-factlog-eject--ingest-의-역연산))
 covers everyday `factlog eject`. This document holds the attribution edge cases and
 the flat-layout migration — details that matter only when a `runs/sources/`
 conversion cannot be tied back to the original that produced it.
