@@ -124,6 +124,25 @@ def test_no_c0_character_survives_the_reason_regex():
     assert survivors == []
 
 
+# The C0 characters that clear RELATION_RE and so reach the #365 gate. Written out as an
+# explicit set rather than derived from RELATION_RE: a parametrize list computed from the
+# thing under test degrades silently — narrow RELATION_RE and the list becomes empty, and
+# pytest reports success for a test that ran zero cases. test_gate_parameters_still_cover
+# below compares this constant against the live regex, so a narrowing is a FAILURE here
+# instead of a vanishing.
+RELATION_RE_PASSING_C0 = [chr(i) for i in [*range(0x00, 0x09), *range(0x0E, 0x1C)]]
+
+
+def test_gate_parameters_still_cover_every_relation_re_passing_c0():
+    """Guard the parametrize source above against silent shrinkage."""
+    live = [chr(i) for i in range(0x20) if g.RELATION_RE.match(f"a{chr(i)}b")]
+    assert len(RELATION_RE_PASSING_C0) == 23, RELATION_RE_PASSING_C0
+    assert live == RELATION_RE_PASSING_C0, (
+        "RELATION_RE changed which C0 characters reach the gate; update the constant and "
+        "check whether the gate's coverage claim still holds"
+    )
+
+
 def _draft(relation: str, reason: str = "bad_rel") -> dict:
     """A draft as the LLM path produces it: JSON text through parse_json_object, never
     through fixture_policy_json. This is the input shape normalized_rules must defend."""
@@ -151,9 +170,7 @@ class TestDraftPathRelationControlChars:
         assert repr("cites\x00evil") in message, message
         assert "control character" in message, message
 
-    @pytest.mark.parametrize(
-        "ch", [chr(i) for i in range(0x20) if g.RELATION_RE.match(f"a{chr(i)}b")]
-    )
+    @pytest.mark.parametrize("ch", RELATION_RE_PASSING_C0)
     def test_every_relation_re_passing_c0_is_rejected(self, ch):
         # The 23 C0 characters (\x00-\x08, \x0e-\x1b) that clear RELATION_RE — it excludes
         # whitespace and nothing else. Each one is wirelog-undecodable, so each must die
@@ -170,31 +187,68 @@ class TestDraftPathRelationControlChars:
         assert rules[0]["relations"] == ["cites\x7fevil"]
 
     @pytest.mark.parametrize(
-        "ch", ["\t", "\n", "\r", "\u0085", "\u2028", "\u2029"]
+        "ch", ["\t", "\n", "\v", "\f", "\r", "\x1c", "\x1d", "\x1e", "\x1f"]
     )
-    def test_whitespace_class_still_dies_at_relation_re_not_at_the_gate(self, ch):
-        # These never reach the new gate: Python's \s covers all six, so RELATION_RE
-        # rejects them first with its own message. Pinned because #255 forbids treating
-        # U+0085/U+2028/U+2029 as undecodable — they round-trip fine, and the reason they
-        # are refused here is arity of the NAME grammar, not engine integrity.
-        assert common.wirelog_undecodable_chars(ch) == [] or ch in "\t\n\r"
+    def test_undecodable_whitespace_is_still_refused_by_relation_re_first(self, ch):
+        # The other nine C0 characters: undecodable exactly like the 23, but Python's
+        # \s covers them, so RELATION_RE refuses them one line earlier. The gate
+        # WOULD catch them — that is what the first assert states — which is precisely
+        # why the message must still be RELATION_RE's. A gate that widened to claim
+        # these would re-diagnose inputs already rejected for another reason: same rc,
+        # different explanation, a regression the rc alone would never reveal.
+        assert common.wirelog_undecodable_chars(ch), ch
         with pytest.raises(ValueError) as exc:
             g.normalized_rules(_draft(f"cites{ch}evil"))
         assert "invalid relation name" in str(exc.value), str(exc.value)
         assert "control character" not in str(exc.value), str(exc.value)
 
+    @pytest.mark.parametrize("ch", ["\u0085", "\u2028", "\u2029"])
+    def test_round_tripping_separators_are_never_called_undecodable(self, ch):
+        # #255 proper: these three round-trip through the engine, so nothing here may
+        # treat them as an integrity problem. They are still refused, but only because
+        # Python's \s puts them outside the NAME grammar — a syntax verdict, not
+        # an engine one. The `== []` is the load-bearing half; the message asserts pin
+        # which of the two verdicts the caller is being given.
+        assert common.wirelog_undecodable_chars(ch) == [], ch
+        with pytest.raises(ValueError) as exc:
+            g.normalized_rules(_draft(f"cites{ch}evil"))
+        assert "invalid relation name" in str(exc.value), str(exc.value)
+        assert "control character" not in str(exc.value), str(exc.value)
 
 def test_compile_policy_is_only_ever_fed_normalized_rules_output():
     """Why the gate belongs in normalized_rules rather than beside dl_string.
 
     Both call sites in main() — the --check branch and the write branch — build their
     program as compile_policy(normalized_rules(draft)). normalized_rules is therefore the
-    single choke point every path to emission shares, deterministic and draft alike.
-    If a future call site feeds compile_policy directly, this breaks and the gate needs
-    to move down to the emission site.
+    single choke point shared by everything DERIVED from the rules: the .dl via
+    compile_policy and the trace via write_trace, deterministic and draft alike. If a
+    future call site feeds compile_policy directly, this breaks and the gate needs to move
+    down to the emission site.
+
+    The claim stops there, and deliberately. ``RESPONSE_OUT`` is written BEFORE the gate,
+    so runs/natural-language-to-policy-response.json can still contain a control char the
+    .dl will never receive. That ordering is a decision, not an oversight: the response
+    file is the audit record of what the model actually returned, and an audit record that
+    only survives validation cannot show why validation failed. Whoever wires a real LLM
+    draft in at RESPONSE_OUT's call site should read the order as intentional and keep it.
     """
     source = Path(g.__file__).read_text(encoding="utf-8")
     calls = re.findall(r"(?<!def )compile_policy\((.*?)\)", source)
     assert len(calls) == 2, calls
     assert set(calls) == {"rules"}, calls
     assert source.count("rules = normalized_rules(draft)") == 2, source
+
+    # Pin the ordering the docstring calls intentional, so flipping it is a test failure
+    # rather than a silent change to what the audit record captures.
+    lines = source.splitlines()
+    response_at = next(i for i, ln in enumerate(lines) if "RESPONSE_OUT.write_text" in ln)
+    gate_at = next(
+        i for i, ln in enumerate(lines[response_at:], start=response_at)
+        if "rules = normalized_rules(draft)" in ln
+    )
+    trace_at = next(
+        i for i, ln in enumerate(lines)
+        if "write_trace(rules" in ln and not ln.lstrip().startswith("def ")
+    )
+    assert response_at < gate_at, (response_at, gate_at)
+    assert gate_at < trace_at, (gate_at, trace_at)

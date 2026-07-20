@@ -258,6 +258,12 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
             # compile_policy passes through this function, so this is where both meet.
             # Judged by wirelog_undecodable_chars, never by a local character set, so the
             # verdict cannot drift from the engine's actual wire format.
+            #
+            # Do NOT widen this to U+0085/U+2028/U+2029: they round-trip through the engine
+            # (#255) and are not an integrity problem. RELATION_RE already refuses them a
+            # few lines up as whitespace, which is why the message below does not mention
+            # them — no input reaching here can involve those three, so naming them in the
+            # error would describe a situation the reader is not in.
             undecodable = wirelog_undecodable_chars(relation)
             if undecodable:
                 shown = ", ".join(repr(c) for c in undecodable)
@@ -266,8 +272,7 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
                     f"{shown} that policy/logic-policy.dl would encode as JSON escapes the "
                     "wirelog engine does not decode, so the rule would reference a name no "
                     "fact can ever match and the policy would be silently dead (#365). "
-                    "Retype the relation as clean text. (U+0085/U+2028/U+2029 round-trip and "
-                    "are never rejected here — RELATION_RE stops them earlier as whitespace.)"
+                    "Retype the relation as clean text."
                 )
             relations.append(relation)
         if len(set(relations)) != len(relations):
