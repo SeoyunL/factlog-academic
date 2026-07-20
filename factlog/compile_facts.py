@@ -140,7 +140,7 @@ def _reject_undecodable_canonical_names(aliases: dict[str, str]) -> None:
             "U+0000–U+001F controls), so the canonical/3 EDB atom would silently "
             "diverge from every fact that maps to it (#357, the policy-authoring "
             "sibling of #331). This canonical name comes from policy/relation-aliases.md "
-            f"— correct the mapping there (edit the `{raw}` -> `canonical` bullet to a "
+            f"— correct the mapping there (edit the {raw!r} -> `canonical` bullet to a "
             "clean name); do NOT write the control character back. "
             "(U+0085/U+2028/U+2029 are fine and never rejected.)"
         )

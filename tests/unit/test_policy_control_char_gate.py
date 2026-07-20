@@ -12,8 +12,18 @@ where the source lineno is still known, so the error can point at the exact bull
 
 The ``reason`` axis is gated too (defence in depth: the emission site is ``dl_string``,
 and relying on a distant regex means the hole reopens quietly if that regex is relaxed),
-but it has no red test — ``REASON_RE`` (``^[a-z0-9_]+$``) plus ``.strip()`` rejects all
-32 C0 characters, so no input reaches the gate and any test would be vacuously green.
+but it has no red test because no input can reach the gate. Two defences stand in front
+of it, and only the FIRST one decides reachability:
+
+1. ``markdown_policy_items`` (common.py) requires the bullet tag to match
+   ``^\\[([a-z0-9_]+)\\]\\s+(.+)$``. A control char in the tag means the bullet is not a
+   policy item AT ALL — measured: all 32 C0 characters yield zero items. This runs
+   BEFORE the gate, so it is the boundary that actually keeps the reason axis unreachable.
+2. ``REASON_RE`` (``^[a-z0-9_]+$``) in ``normalized_rules`` rejects the same 32, but it
+   runs AFTER ``fixture_policy_json``, so it can never stop anything from reaching the gate.
+
+Both are pinned below: relaxing the tag regex would make the reason axis reachable and
+needs a red test, while relaxing REASON_RE alone would not.
 """
 from __future__ import annotations
 
@@ -65,9 +75,25 @@ class TestRelationNameControlChars:
         assert "control character" not in str(exc.value), str(exc.value)
 
 
+def test_no_c0_character_survives_the_bullet_tag_regex():
+    """Pin the boundary that actually keeps the reason axis unreachable.
+
+    markdown_policy_items runs BEFORE the gate, so this — not REASON_RE — is what stops a
+    control-char reason from ever arriving. If it ever fails, the reason axis has become
+    reachable and its gate needs a red test of its own.
+    """
+    survivors = [
+        ch
+        for ch in (chr(i) for i in range(0x20))
+        if common.markdown_policy_items(_md(f"- [retr{ch}acted] 문서가 `cites` 이면 철회."))
+    ]
+    assert survivors == []
+
+
 def test_no_c0_character_survives_the_reason_regex():
-    """Pin the premise behind the untested reason gate: if this ever fails, the reason
-    axis has become reachable and needs a red test of its own."""
+    """Second-line alarm only: REASON_RE runs in normalized_rules, i.e. AFTER the gate, so
+    it cannot make the reason axis unreachable on its own. Pinned so that a relaxation
+    here plus one in the tag regex above cannot both slip through unnoticed."""
     survivors = [
         ch for ch in (chr(i) for i in range(0x20)) if g.REASON_RE.match(f"a{ch}b".strip())
     ]
