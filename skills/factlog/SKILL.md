@@ -311,9 +311,12 @@ you supply it: `D >= 20300101` is inclusive of the boundary day (2030-01-01 is
 included). For `date`, the value is a sortable `yyyymmdd` int64 — a source object
 `2030.1` normalises to `20300101` (missing parts default to `01`), so a comparison
 threshold is also written `yyyymmdd`. The source object must be in a parseable
-form (`2030.1`, not a bare `2030`). Typed source objects may also be emitted as
+form. A **bare `2030`** is not one: with no separator and no `date(…)` wrapper it
+is indistinguishable from a number, so it stays untyped. When you only know the
+year, write the compound term `date(2030)` — it parses to `20300101`, the same
+year-start default as `2030.1`. Typed source objects may also be emitted as
 compact compound terms when that preserves structure better than prose strings:
-`date(2030,1)`, `date(2030,1,15)`, `number(2.5)`, `ordinal(3)`, or
+`date(2030)`, `date(2030,1)`, `date(2030,1,15)`, `number(2.5)`, `ordinal(3)`, or
 `amount(100,"억")`. The flat `relation/3` fact still stores that term as the
 object string, while the typed side-relation projects its comparable scalar.
 `ordinal` compares on **rank only**: the ordinal-class unit (호/위/번/차/등/째, and

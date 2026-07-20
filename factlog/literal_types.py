@@ -42,8 +42,15 @@ DEFAULT_AMOUNT_UNITS: dict[str, int] = {
 }
 
 _DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
+# The compound form is year-precision friendly: month AND day are optional, so
+# ``date(2020)`` parses (a bibliographic record normally knows only the year —
+# see #385). This mirrors the prose path, where a missing day already defaults
+# to ``01`` (``2030.1`` -> ``20300101``); a missing month now defaults the same
+# way. The bare prose ``2020`` stays UNPARSEABLE on purpose: without the ``date(…)``
+# wrapper it is indistinguishable from a plain number, so only the explicitly
+# typed compound term opts into year precision.
 _DATE_COMPOUND_RE = re.compile(
-    r"^date\(\s*(\d{4})\s*,\s*(\d{1,2})(?:\s*,\s*(\d{1,2}))?\s*\)$",
+    r"^date\(\s*(\d{4})(?:\s*,\s*(\d{1,2})(?:\s*,\s*(\d{1,2}))?)?\s*\)$",
     re.IGNORECASE,
 )
 _NUMBER_RE = re.compile(r"^-?\d[\d,]*(?:\.\d+)?$")
@@ -82,15 +89,20 @@ def _amount_unit(match: re.Match[str]) -> str:
 
 def parse_date(raw: str) -> int | None:
     """A date string -> a sortable ``yyyymmdd`` int. Missing month/day default to
-    ``01`` (e.g. ``2030.1`` -> ``20300101``, ``2030.01.15`` -> ``20300115``).
-    Accepts ``.``/``-``/``/`` separators and the compound form
-    ``date(year, month[, day])``. Returns ``None`` if out of range."""
+    ``01`` (e.g. ``2030.1`` -> ``20300101``, ``2030.01.15`` -> ``20300115``,
+    ``date(2030)`` -> ``20300101``). Accepts ``.``/``-``/``/`` separators and the
+    compound form ``date(year[, month[, day]])``. A bare ``2030`` (no ``date(…)``
+    wrapper, no separator) does NOT parse — it is not distinguishable from a
+    number. Returns ``None`` if out of range."""
     text = raw.strip()
     m = _DATE_COMPOUND_RE.match(text) or _DATE_RE.match(text)
     if not m:
         return None
     year = int(m.group(1))
-    month = int(m.group(2))
+    # Year precision (``date(2030)``) reaches here only via the compound path;
+    # ``_DATE_RE`` always captures a month. Default it to ``01``, the same way a
+    # missing day defaults, so year/month/day precision all sort consistently.
+    month = int(m.group(2)) if m.group(2) is not None else 1
     day = int(m.group(3)) if m.group(3) is not None else 1
     # A month-precision date (no day in the source) defaults day to 01, which is
     # always a valid day, so this preserves ``2030.1`` -> ``20300101``. When a day
@@ -279,7 +291,8 @@ def humanize(value: str) -> str:
     object, never in place of it (else a humanized value copied into a query
     would miss). Recognizes the unambiguous compound terms:
 
-      ``date(2030,1)`` -> ``2030-01``   ``date(2030,1,15)`` -> ``2030-01-15``
+      ``date(2030)`` -> ``2030``        ``date(2030,1)`` -> ``2030-01``
+      ``date(2030,1,15)`` -> ``2030-01-15``
       ``amount(7,"억")`` -> ``7억``       ``number(2.5)`` -> ``2.5``
 
     ``ordinal(N)`` is intentionally NOT humanized: the source unit (호/위/번) is
@@ -290,17 +303,22 @@ def humanize(value: str) -> str:
     m = _DATE_COMPOUND_RE.match(text)
     if m:
         year = int(m.group(1))
-        month = int(m.group(2))
+        month = int(m.group(2)) if m.group(2) is not None else None
         day = int(m.group(3)) if m.group(3) is not None else None
         # Reject calendar-impossible dates so we never fabricate a misleading ISO
         # display (e.g. ``date(2024,2,30)`` stays verbatim, not ``2024-02-30``).
-        # A month-precision term (no day) only needs a valid month; probe day 01,
-        # which is always valid, to reuse the same calendar check.
+        # A month-precision term (no day) only needs a valid month; a
+        # year-precision term (``date(2030)``) needs neither. Probe the missing
+        # parts with 01, always valid, to reuse the same calendar check.
         try:
-            datetime.date(year, month, day if day is not None else 1)
+            datetime.date(year, month if month is not None else 1, day if day is not None else 1)
         except ValueError:
             return value
-        iso = f"{year:04d}-{month:02d}"
+        # Render only the precision the term actually carries: padding a
+        # year-precision value to ``2030-01`` would invent a month it never had.
+        iso = f"{year:04d}"
+        if month is not None:
+            iso += f"-{month:02d}"
         if day is not None:
             iso += f"-{day:02d}"
         return iso

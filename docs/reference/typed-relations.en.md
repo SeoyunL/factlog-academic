@@ -22,7 +22,10 @@ containing spaces in backticks.
 The four types:
 
 - `date` — `2030.1` / `2030-01-15` → sortable yyyymmdd. **Engine-projectable**
-  (ordering / threshold / range).
+  (ordering / threshold / range). Missing parts default to `01`. For a
+  year-only value use the compound term `date(2030)` (→ `20300101`); a **bare
+  `2030`** does not parse, because without a separator or the `date(…)` wrapper
+  it is indistinguishable from a number.
 - `ordinal` — `3rd` / `3위` / `제3호` → int rank. **Engine-projectable**. In the
   **prose form** a rank unit must follow the number — Korean
   `호`/`위`/`번`/`차`/`등`/`째` (with an optional leading `제`), or English
@@ -42,7 +45,7 @@ The four types:
   (ROUND_HALF_UP).
 
 Extractors may emit typed literal objects as compact compound terms when that
-preserves structure better: `date(2030,1)`, `date(2030,1,15)`, `number(2.5)`,
+preserves structure better: `date(2030)`, `date(2030,1)`, `date(2030,1,15)`, `number(2.5)`,
 `ordinal(3)`, `amount(100,"억")`. The `relation/3` object stores that term as a
 string, and the typed side-relation projects the comparable scalar.
 

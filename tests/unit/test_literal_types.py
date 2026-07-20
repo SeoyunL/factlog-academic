@@ -13,14 +13,58 @@ class TestParseDate:
         ("2030.01.15", 20300115),
         ("2024/07/01", 20240701),
         ("2030.12.31", 20301231),
+        ("date(2030)", 20300101),
         ("date(2030, 1)", 20300101),
         ("date(2030, 1, 15)", 20300115),
     ])
     def test_accepts(self, raw, expected):
         assert lt.parse_date(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["2026", "not a date", "2030.13.01", "2030.1.32", "date(2030)", ""])
+    @pytest.mark.parametrize("raw", ["2026", "not a date", "2030.13.01", "2030.1.32", ""])
     def test_rejects(self, raw):
+        assert lt.parse_date(raw) is None
+
+
+class TestParseDateYearPrecision:
+    """`date(YYYY)` is a valid form in the extraction spec (text-to-fact.md), and a
+    bibliographic record normally knows only the year — so it must parse (#385)."""
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("date(2020)", 20200101),      # the spec form that used to degrade to untyped
+        ("date(2020,1)", 20200101),    # month precision: same scalar
+        ("date(2020,1,15)", 20200115),
+        ("2020.1", 20200101),          # prose path unchanged
+        ("date( 1998 )", 19980101),    # whitespace tolerated like the other arities
+        ("DATE(2020)", 20200101),      # the compound regex is case-insensitive
+    ])
+    def test_year_precision_parses(self, raw, expected):
+        assert lt.parse_date(raw) == expected
+
+    @pytest.mark.parametrize("raw", [
+        "2020",         # bare year: no wrapper, no separator — indistinguishable from a number
+        " 2020 ",       # stripping whitespace does not make a bare year a date
+        "date(20)",     # a 2-digit year is not a year
+        "date(20200)",  # a 5-digit year is not a year
+        "date()",       # no year at all
+        "date(,1)",     # month without a year
+        "date(2020,)",  # a dangling separator is malformed, not year precision
+    ])
+    def test_bare_or_malformed_year_still_rejected(self, raw):
+        assert lt.parse_date(raw) is None
+
+    def test_year_precision_sorts_before_later_months(self):
+        # The default month/day must make a year-precision value the *earliest*
+        # point in its year, so a `D >= 20200101` threshold includes it.
+        assert lt.parse_date("date(2020)") < lt.parse_date("date(2020,2)")
+        assert lt.parse_date("date(2019)") < lt.parse_date("date(2020)")
+
+    def test_year_precision_via_normalize(self):
+        # The typed projection goes through `normalize`, not `parse_date` directly.
+        assert lt.normalize("date", "date(2020)") == 20200101
+
+    @pytest.mark.parametrize("raw", ["date(0000)", "date(0)"])
+    def test_year_precision_out_of_range(self, raw):
+        # datetime.MINYEAR is 1: a year-precision term must degrade like any other.
         assert lt.parse_date(raw) is None
 
     @pytest.mark.parametrize("raw", [

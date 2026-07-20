@@ -249,6 +249,80 @@ class TestYearOnlyDateDegrade:
         assert conflicts[("기서비스", "출시")] == ["2030", "2030.1"]
 
 
+class TestDatePrecisionCollapse:
+    """#385: year precision (``date(2030)``) now parses, so it joins the date
+    precision collapse that #204 already pinned for month↔day (``2030.1`` ==
+    ``2030.01.01``). The contract is documented on ``common._group_key``: a
+    *refinement* is not a contradiction, so notations sharing a year-start
+    collapse, while genuinely rival dates still fire.
+
+    These cases are the ones a bibliographic KB actually produces — one source
+    gives a bare year, another the full date for the same work — so a change that
+    splits the key by precision (firing CONFLICT on the overlap) fails here."""
+
+    def test_year_and_month_precision_collapse(self):
+        # date(2020) ("in 2020") and date(2020,1) ("2020-01") are compatible:
+        # the second narrows the first. Both -> 20200101 -> one value.
+        facts = [
+            _fact("논문", "출시", "date(2020)"),
+            _fact("논문", "출시", "date(2020,1)"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, _TYPED_DATE)
+        assert conflicts == {}
+
+    def test_year_precision_collapses_with_prose_and_day_precision(self):
+        # All three notations of the same year-start instant are one value.
+        facts = [
+            _fact("논문", "출시", "date(2020)"),
+            _fact("논문", "출시", "2020.1"),
+            _fact("논문", "출시", "date(2020,1,1)"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, _TYPED_DATE)
+        assert conflicts == {}
+
+    def test_distinct_years_still_conflict(self):
+        # The collapse folds precision, never values: 2020 vs 2021 is rival.
+        facts = [
+            _fact("논문", "출시", "date(2020)"),
+            _fact("논문", "출시", "date(2021)"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, _TYPED_DATE)
+        assert list(conflicts) == [("논문", "출시")]
+        assert conflicts[("논문", "출시")] == ["date(2020)", "date(2021)"]
+
+    def test_year_precision_conflicts_with_a_later_month_same_year(self):
+        # date(2020) -> 20200101 vs date(2020,3) -> 20200301: distinct scalars, so
+        # this DOES fire. The collapse only reaches notations sharing a year-start,
+        # it does not make every date in a year equal.
+        facts = [
+            _fact("논문", "출시", "date(2020)"),
+            _fact("논문", "출시", "date(2020,3)"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, _TYPED_DATE)
+        assert conflicts[("논문", "출시")] == ["date(2020)", "date(2020,3)"]
+
+    def test_bare_year_still_degrades_against_year_compound(self):
+        # #224 B2 boundary, re-pinned after #385: the WRAPPER is what makes a year
+        # parseable. A bare "2020" still fails to parse -> ("raw","2020"), which is
+        # a different key from date(2020) -> ("scalar",20200101) -> CONFLICT.
+        facts = [
+            _fact("논문", "출시", "2020"),
+            _fact("논문", "출시", "date(2020)"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, _TYPED_DATE)
+        assert conflicts[("논문", "출시")] == ["2020", "date(2020)"]
+
+    def test_untyped_relation_keeps_year_notations_distinct(self):
+        # Without a typed declaration nothing collapses: the raw strings differ,
+        # so the scalar equivalence never leaks into an undeclared relation.
+        facts = [
+            _fact("논문", "출시", "date(2020)"),
+            _fact("논문", "출시", "date(2020,1)"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, {})
+        assert conflicts[("논문", "출시")] == ["date(2020)", "date(2020,1)"]
+
+
 class TestCustomUnitTableParsed:
     """#224 B1: the custom unit table declared in ``policy/typed-relations.md``
     must flow through the REAL parser (``common._parse_typed_relations``) into

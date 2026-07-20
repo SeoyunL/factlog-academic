@@ -1029,6 +1029,64 @@ def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     **separate relations**, not one single-valued ordinal relation. (Contrast
     ``amount``, where 억↔조 equivalence is the intended collapse.)
 
+    **date precision collapse (#204 / #385):** ``normalize("date", …)`` fills a
+    missing month/day with ``01``, so notations of DIFFERENT precision that share
+    a year-start collapse onto one scalar: ``2030.1`` (month precision) and
+    ``2030.01.01`` both key as ``("scalar", 20300101)`` — locked in by #204 — and
+    ``date(2030)`` (year precision) joins them since #385 made the year-only
+    compound parse. This is **by design**, on two grounds:
+
+    1. *A refinement is not a contradiction.* ``date(2020)`` ("published in 2020")
+       and ``date(2020,1)`` ("published 2020-01") are compatible claims — the
+       second narrows the first, it does not deny it. CONFLICT is reserved for
+       claims that cannot both hold (``date(2020,1)`` vs ``date(2020,3)``, which
+       still fires). Splitting the key by precision would fire on the *overlap*
+       case, and in a bibliographic KB — where one source gives a bare year and
+       another the full date for the same work — that false positive is the
+       common case, not the rare one. Conflicts nobody can act on train readers
+       to skip the section, which weakens contradiction detection far more than
+       the collapse does. This is the same principle ``_is_specialisation_chain``
+       already contracts for hierarchies (#219): a row described at **two levels
+       of precision** is not a self-contradiction, and reporting it as one gets a
+       human-checked fact discarded on no evidence.
+    2. *Consistency with the engine and with the axis already contracted.* The
+       precision axis was not opened by #385: #204 already pinned the month↔day
+       collapse. Keying year precision separately while month↔day still collapses
+       would draw a line with no principled place to stand — ``2030.1``→
+       ``2030.01.01`` and ``date(2020)``→``date(2020,1)`` are the SAME refinement
+       relation, and ``2030.1`` is itself a filled-in precision, so such a split
+       would have to call one fill-in significant and the other not. The engine
+       agrees — ``_TYPED_COL["date"]`` is a bare yyyymmdd int64 with no precision
+       column, so a precision-aware checker would diverge from the comparisons it
+       guards.
+
+    Do NOT read ground 2 as "the tests forbid it". A key carrying the full
+    precision does break #204's ``test_date_equivalent_precision_collapses_to_one_value``,
+    but a narrower variant that splits ONLY year precision passes #204 untouched
+    (measured). That design space is real and reachable; what rules it out is the
+    arbitrariness above, not a failing test. A future reader reopening this
+    decision should weigh the principle, not assume the suite blocks the door.
+
+    The cost is real and bounded, and it is a *detection* cost, not only an
+    expressiveness one:
+
+    - Expressiveness: a KB that must treat "some time in 2020" and "2020-01" as
+      rival claims cannot say so here. Same escape hatch as ``ordinal``: model
+      them as **separate relations** (a coarse ``published_year`` beside a precise
+      ``published_date``) rather than one single-valued date relation.
+    - Detection: a *mis-extraction* that invents a month — writing ``date(2020,1)``
+      for a source that only stated the year, against ``text-to-fact.md``'s rule to
+      write ``date(2020)`` — no longer collides with a correctly extracted
+      ``date(2020)``. main flagged that pair (as a side effect of the year-only
+      parse failure, not by design); here it is silent. The exposure is narrow: it
+      needs the invented value to land exactly on the year-start ``20200101``, so
+      an invented ``date(2020,3)`` still fires. Guarding the rule itself belongs to
+      extraction review, not to the conflict checker.
+
+    (Contrast the bare ``2030`` case: with no separator and no ``date(…)`` wrapper
+    it does not parse at all, so it degrades to a ``"raw"`` key and DOES fire
+    against a scalar date — #224 B2, unchanged.)
+
     **int64 divergence note (#224 C):** ``normalize`` can return a scalar wider
     than int64 (mainly ``number`` via ``parse_number_scaled``, and unbounded
     ``ordinal`` ranks — both lack a range guard; ``amount`` already degrades to raw
@@ -1070,10 +1128,13 @@ def detect_conflicts(
     deterministic representative (the lexicographically smallest raw object seen
     for it). Deterministic; never raises.
 
-    Two grouping subtleties documented on ``_group_key``: ordinal collapses
+    Three grouping subtleties documented on ``_group_key``: ordinal collapses
     cross-unit notations onto the shared rank (rank-only contract, #218/#224 A),
-    and a scalar wider than int64 groups here even though the engine skips its
-    insertion (harmless grouping-only divergence, #224 C).
+    date collapses notations of different precision that share a year-start
+    (``date(2030)``/``2030.1``/``2030.01.01`` -> 20300101; a refinement is not a
+    contradiction, #204/#385), and a scalar wider than int64 groups here even
+    though the engine skips its insertion (harmless grouping-only divergence,
+    #224 C).
 
     **Alias canonicalization (#227):** when *aliases* is provided (non-empty),
     each row's relation is canonicalized via ``_canonicalize`` before the

@@ -25,6 +25,11 @@ engine name even when the relation name is non-ASCII.
 `01`, so `2030.1` → `20300101`). A comparison threshold is written the same way and
 is inclusive of the boundary day: `D >= 20300101` includes 2030-01-01.
 
+Year precision uses the compound term `date(2030)` → `20300101` (the common case
+for a bibliographic year). A **bare `2030`** does not parse: with no separator and
+no `date(…)` wrapper it is indistinguishable from a number, so the fact stays
+untyped.
+
 ### `ordinal`
 
 `3rd` / `3위` / `제3호` → an int rank.
@@ -72,7 +77,7 @@ An extractor may emit a typed literal object as a compact compound term when tha
 preserves structure better than a prose string:
 
 ```
-date(2030,1)   date(2030,1,15)   number(2.5)   ordinal(3)   amount(100,"억")
+date(2030)   date(2030,1)   date(2030,1,15)   number(2.5)   ordinal(3)   amount(100,"억")
 ```
 
 The flat `relation/3` fact stores that term as its object string (still

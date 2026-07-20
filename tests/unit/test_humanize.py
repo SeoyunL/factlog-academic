@@ -7,6 +7,14 @@ import pytest
 
 
 class TestHumanizeDate:
+    def test_date_1arg(self):
+        # Year precision renders only the year it carries — padding it to
+        # "2030-01" would display a month the source never had (#385).
+        assert lt.humanize("date(2030)") == "2030"
+
+    def test_date_1arg_out_of_range_year_verbatim(self):
+        assert lt.humanize("date(0000)") == "date(0000)"
+
     def test_date_2arg(self):
         assert lt.humanize("date(2030,1)") == "2030-01"
 
@@ -97,6 +105,8 @@ class TestHumanizeNeverRaises:
         "Chest",
         "2005",
         "date(20xx,1)",
+        "date(2030)",
+        "date(2030,)",
         "date(2030,1)",
         "date(2030,1,15)",
         "date(2030,1,5)",
