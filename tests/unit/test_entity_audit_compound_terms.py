@@ -227,3 +227,72 @@ class TestMalformedCompoundTerms:
         # Either way it is never an entity and never loses the declare advice.
         assert found["entities"] == ["P1"]
         assert found["literal_suspects"]["published_year"] == {"date(2020)"}
+
+
+class TestFullWidthDigitLiterals:
+    """A full-width literal is a value someone must fix, so it must stay visible
+    (#388). It reaches a human by two different routes, and both are pinned here
+    because they are decided in two different files.
+    """
+
+    def test_full_width_compound_term_is_reported_as_malformed(self):
+        # literal_types rejects it, so the compound-term route reports it. This is
+        # the intended surfacing, not collateral damage: the alternative is a value
+        # that groups as equal to its ASCII twin but stores and queries differently.
+        found = entity_audit.audit([_row("P1", "when", "date(２０２０,１)")])
+
+        assert found["malformed_literals"] == ["date(２０２０,１)"]
+        # still not an entity — the wrapper form alone proves it is a value
+        assert found["entities"] == ["P1"]
+
+    def test_ascii_twin_is_not_malformed(self):
+        found = entity_audit.audit([_row("P1", "when", "date(2020,1)")])
+
+        assert found["malformed_literals"] == []
+
+    def test_full_width_prose_value_stays_a_literal_suspect(self):
+        # The OTHER route. `_LITERAL_RE` keeps the wide `\d` on purpose: it asks
+        # "should a human look?", not "does this parse?". Narrowing it to `[0-9]`
+        # for consistency with literal_types would file this as an ordinary entity
+        # and hide the row #388 exists to surface.
+        found = entity_audit.audit([_row("P1", "published_year", "２０２０.１")])
+
+        assert found["literal_suspects"]["published_year"] == {"２０２０.１"}
+
+    def test_printed_line_names_the_offending_digits(self, monkeypatch, capsys, tmp_path):
+        # A full-width literal renders almost identically to a good one, so the
+        # bare "cannot parse" line would accuse a value the human cannot tell apart.
+        csv = tmp_path / "candidates.csv"
+        csv.write_text("", encoding="utf-8")
+        monkeypatch.setattr(entity_audit, "CANDIDATES_CSV", csv)
+        # main() only prints; the KB-root check is not what is under test here.
+        monkeypatch.setattr(entity_audit, "ensure_dirs", lambda *a, **k: None)
+        monkeypatch.setattr(
+            entity_audit, "load_facts", lambda *a, **k: [_row("P1", "when", "date(２０２０,１)")]
+        )
+
+        assert entity_audit.main([]) == 0
+        err = capsys.readouterr().err
+
+        assert "malformed typed literal" in err
+        assert "non-ASCII digit" in err
+        for ch in "２０１":
+            assert ch in err
+
+    def test_printed_line_does_not_blame_digits_for_an_ordinary_failure(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        csv = tmp_path / "candidates.csv"
+        csv.write_text("", encoding="utf-8")
+        monkeypatch.setattr(entity_audit, "CANDIDATES_CSV", csv)
+        # main() only prints; the KB-root check is not what is under test here.
+        monkeypatch.setattr(entity_audit, "ensure_dirs", lambda *a, **k: None)
+        monkeypatch.setattr(
+            entity_audit, "load_facts", lambda *a, **k: [_row("P1", "when", "date(abc)")]
+        )
+
+        assert entity_audit.main([]) == 0
+        err = capsys.readouterr().err
+
+        assert "malformed typed literal" in err
+        assert "non-ASCII digit" not in err
