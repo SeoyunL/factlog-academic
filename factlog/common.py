@@ -3253,7 +3253,6 @@ class QueryVocabulary:
         self._hierarchy = hierarchy
         self._hierarchy_read = hierarchy is not None
         self._aliases = aliases
-        self._pooled: set[str] | None = None
 
     @classmethod
     def from_facts(
@@ -3322,23 +3321,13 @@ class QueryVocabulary:
         published_year object) is not an entity the policy extent ranges over."""
         return _canonical_value(value) in self._entities
 
-    def accepts_anywhere(self, value: str) -> bool:
-        """Position-agnostic: is the constant licensed in ANY position?
-
-        The weakest of the tests above, kept for the one report check that still
-        has no position of its own (the generic constant loop over `path` and
-        predicates with no evaluation branch). Callers that know the position must
-        use the position's predicate — this one cannot tell a subject from an
-        object and will pass constants the gate rejects.
-        """
-        if self._pooled is None:
-            aliases = self.aliases()
-            pooled = set(self._values) | set(self._relations)
-            pooled |= {_canonical_value(raw) for raw in aliases}
-            pooled |= {_canonical_value(canonical) for canonical in aliases.values()}
-            pooled |= declared_ancestors(self.hierarchy(), None, _canonical_value)
-            self._pooled = pooled
-        return _canonical_value(value) in self._pooled
+    # There was an `accepts_anywhere` here: the pooled union of every set above,
+    # for the one report check that had no position of its own. Its last caller was
+    # the report's generic constant loop over `path`, and being a union it admitted
+    # at a path node what no path node accepts -- a relation NAME, a hierarchy
+    # ancestor -- so the report rendered "0 rows" where the gate answers
+    # entity_not_accepted, silently (#366). Every position now names its own
+    # predicate; a new caller must pick one rather than fall back to the union.
 
 
 # Stable structured outcome codes for query classification. Callers (e.g. the
