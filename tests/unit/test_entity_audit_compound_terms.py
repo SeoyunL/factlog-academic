@@ -174,6 +174,45 @@ class TestMalformedCompoundTerms:
 
         assert found["malformed_literals"] == []
 
+    def test_amount_with_a_kb_declared_unit_is_not_malformed(self, monkeypatch):
+        # `파운드` is not in literal_types' built-in table, but the KB's
+        # typed-relations line declares it, and the engine parses the value to
+        # 8500. Judging it against the built-in table alone told a human to fix
+        # correct data — the worst failure mode for an advisory tool.
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {"예산": TypedRelSpec(type="amount", alias="budget", units={"파운드": 1700, "원": 1})},
+        )
+        found = entity_audit.audit([_row("P1", "예산", 'amount(5,"파운드")')])
+
+        assert found["malformed_literals"] == []
+
+    def test_amount_with_no_declaration_is_not_judged(self):
+        # No typed-relations line means no unit table to judge against, and the
+        # engine never parses the value either. Silence beats a false accusation.
+        found = entity_audit.audit([_row("P1", "예산", 'amount(5,"파운드")')])
+
+        assert found["malformed_literals"] == []
+        assert "amount(5,\"파운드\")" not in found["entities"]
+
+    def test_amount_outside_a_declared_unit_table_is_still_reported(self, monkeypatch):
+        # The table IS readable here, and `달러` is not in it — so the engine
+        # genuinely cannot parse this one. Skipping unjudgeable amounts must not
+        # turn into skipping every amount.
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {"예산": TypedRelSpec(type="amount", alias="budget", units={"파운드": 1700})},
+        )
+        found = entity_audit.audit([_row("P1", "예산", 'amount(5,"달러")')])
+
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+
     def test_year_only_date_tracks_literal_types(self):
         # COUPLING (#385): `date(2020)` does not parse today, so it reports as
         # malformed. When #385 lands year-only dates this assertion flips with no

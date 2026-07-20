@@ -38,6 +38,7 @@ import argparse
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -60,6 +61,9 @@ from common import (  # noqa: E402
     ensure_dirs,
     entity_set,
     load_facts,
+    relation_aliases,
+    surface_variants,
+    typed_relations,
 )
 from factlog import literal_types  # noqa: E402
 
@@ -118,7 +122,7 @@ def _is_compound_term(value: str) -> bool:
     return _compound_term_type(value) is not None
 
 
-def _is_malformed_compound_term(value: str) -> bool:
+def _is_malformed_compound_term(value: str, spec: object | None = None) -> bool:
     """Wrapper-shaped, but the engine cannot parse it into a scalar.
 
     `date(abc)` and `date(2020,2,30)` wear the notation without being values. They
@@ -130,9 +134,50 @@ def _is_malformed_compound_term(value: str) -> bool:
     drift from. NOTE the coupling: `date(2020)` (year-only) does not parse TODAY,
     so it reports as malformed until #385 lands year-only date support — at which
     point it silently becomes well-formed here, with no change to this file.
+
+    `amount` carries a UNIT, and which units exist is a per-KB declaration: a
+    `typed-relations.md` line may attach an inline table (`(파운드=1700, 원=1)`).
+    Judging it against literal_types' built-in table alone called `amount(5,"파운드")`
+    malformed while the engine parsed it to 8500 — an advisory tool telling a human
+    to fix correct data, which is worse than the noise this audit removes. So an
+    amount is judged ONLY through its relation's declared spec (*spec*); with no
+    spec we do not judge it at all. A miss beats a false accusation.
+
+    The type is taken from the WRAPPER NAME, not from the relation's declared type.
+    So `date(2020,1)` under a relation declared `number` reads as well-formed here
+    even though the engine, which parses by the DECLARED type, would reject it. That
+    mismatch is a separate check (relation type vs value type), not this one.
     """
     type_tag = _compound_term_type(value)
-    return type_tag is not None and literal_types.normalize(type_tag, value) is None
+    if type_tag is None:
+        return False
+    if type_tag == "amount":
+        units = getattr(spec, "units", None)
+        if getattr(spec, "type", None) != "amount":
+            return False
+        return literal_types.normalize(type_tag, value, units) is None
+    return literal_types.normalize(type_tag, value) is None
+
+
+def _typed_spec_by_form() -> dict[str, object]:
+    """Every SURFACE form naming a typed relation → its TypedRelSpec.
+
+    Same alias/NFC expansion as `attribute_relation_forms`: a KB that declares the
+    canonical while its facts carry an alias must still find the declaration, or the
+    `amount` unit table silently goes missing and every non-default unit reads as
+    malformed.
+    """
+    specs = typed_relations()
+    if not specs:
+        return {}
+    aliases = relation_aliases()
+    by_form: dict[str, object] = {}
+    for name, spec in specs.items():
+        nfc_name = unicodedata.normalize("NFC", name)
+        canon = aliases.get(nfc_name, nfc_name)
+        for form in {nfc_name, canon} | surface_variants(canon, aliases):
+            by_form[form] = spec
+    return by_form
 
 
 def _looks_literal(value: str) -> bool:
@@ -153,6 +198,9 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
     # Surface forms via the shared predicate: comparing raw declarations made this
     # advise declaring a relation that WAS already declared, just under its alias.
     literal_rels = attribute_relation_forms()
+    # Read once: the `amount` unit table a relation declares (see
+    # _is_malformed_compound_term).
+    typed_by_form = _typed_spec_by_form()
     # Excludes declared-literal objects; compound terms go too, since their form
     # already proves they are values and pairing them is pure noise (#386).
     entities = {e for e in entity_set(facts) if not _is_compound_term(e)}
@@ -177,9 +225,14 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
         # to show — losing it would be a regression in observability.
         if s and _is_compound_term(s):
             literal_subjects.add(s)
-        for value in (s, o):
-            if value and _is_malformed_compound_term(value):
-                malformed_literals.add(value)
+        # Only the OBJECT stands under this relation's declaration, so only the
+        # object may borrow its unit table; a subject-position amount is judged
+        # with no spec, i.e. not judged at all.
+        spec = typed_by_form.get(unicodedata.normalize("NFC", rel)) if rel else None
+        if s and _is_malformed_compound_term(s):
+            malformed_literals.add(s)
+        if o and _is_malformed_compound_term(o, spec):
+            malformed_literals.add(o)
         if o and is_attribute_relation(rel, literal_rels):
             declared_literals.add(o)
         elif o and not is_attribute_relation(rel, literal_rels) and _looks_literal(o):
@@ -231,7 +284,12 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"entity_audit: {len(ents)} entit(y/ies), {len(a['declared_literals'])} declared literal(s), "
         f"{len(a['clusters'])} fragmentation candidate(s), "
-        f"{sum(len(v) for v in a['literal_suspects'].values())} literal suspect(s)"
+        f"{sum(len(v) for v in a['literal_suspects'].values())} literal suspect(s), "
+        # Counted here too: a finding that only ever appears in a stderr section is
+        # invisible to a human scanning the summary, and to a wrapper script reading
+        # this one line. Every section the audit can print is countable here.
+        f"{len(a['literal_subjects'])} literal subject(s), "
+        f"{len(a['malformed_literals'])} malformed literal(s)"
     )
 
     print("\nentities (fact count, statuses):")
