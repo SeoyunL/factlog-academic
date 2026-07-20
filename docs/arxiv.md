@@ -1,5 +1,7 @@
 # arXiv 가져오기 (`factlog arxiv-*`)
 
+> 🌐 [English](arxiv.en.md) | **한국어**
+
 [arXiv](https://arxiv.org)는 프리프린트 저장소입니다. factlog는 단건 임포트·검색·버전
 추적·철회 종결·원장 백필을 다섯 개의 명령으로 제공합니다.
 

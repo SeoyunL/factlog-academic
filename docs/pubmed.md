@@ -1,5 +1,7 @@
 # PubMed 가져오기 (`factlog pubmed-*`)
 
+> 🌐 [English](pubmed.en.md) | **한국어**
+
 [PubMed](https://pubmed.ncbi.nlm.nih.gov)는 NCBI의 생의학 문헌 색인입니다. factlog는
 NCBI E-utilities를 통해 **읽기 전용**으로 메타데이터를 가져옵니다(P4: NCBI에는 아무것도
 쓰지 않습니다). 단건/배치 임포트·검색·갱신·철회 종결·원장 백필·MeSH 제안을 여섯 개의
