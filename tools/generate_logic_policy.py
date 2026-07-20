@@ -242,6 +242,27 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
             relation = str(condition["relation"]).strip()
             if not relation or not RELATION_RE.match(relation):
                 raise ValueError(f"rule {idx} has invalid relation name: {relation!r}")
+            # Last line of defence before emission (#365). _reject_undecodable_policy_name
+            # guards the DETERMINISTIC path, but it lives in fixture_policy_json, which the
+            # LLM draft path never calls: a draft goes parse_json_object -> here. RELATION_RE
+            # excludes whitespace and nothing else, so all 23 C0 characters that clear it
+            # (\x00-\x08, \x0e-\x1b) are wirelog-undecodable and would reach compile_policy,
+            # where dl_string writes them as escapes the engine does not decode — a rule body
+            # naming a relation no fact can hold, i.e. a silently dead policy. Every path to
+            # compile_policy passes through this function, so this is where both meet.
+            # Judged by wirelog_undecodable_chars, never by a local character set, so the
+            # verdict cannot drift from the engine's actual wire format.
+            undecodable = wirelog_undecodable_chars(relation)
+            if undecodable:
+                shown = ", ".join(repr(c) for c in undecodable)
+                raise ValueError(
+                    f"rule {idx} relation name {relation!r} carries control character(s) "
+                    f"{shown} that policy/logic-policy.dl would encode as JSON escapes the "
+                    "wirelog engine does not decode, so the rule would reference a name no "
+                    "fact can ever match and the policy would be silently dead (#365). "
+                    "Retype the relation as clean text. (U+0085/U+2028/U+2029 round-trip and "
+                    "are never rejected here — RELATION_RE stops them earlier as whitespace.)"
+                )
             relations.append(relation)
         if len(set(relations)) != len(relations):
             raise ValueError(f"rule {idx} must not repeat relation names")

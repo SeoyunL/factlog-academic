@@ -27,6 +27,10 @@ has no cue that engine integrity hangs on it. See ``_reject_undecodable_policy_n
 """
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 import pytest
 
 import common
@@ -98,3 +102,79 @@ def test_no_c0_character_survives_the_reason_regex():
         ch for ch in (chr(i) for i in range(0x20)) if g.REASON_RE.match(f"a{ch}b".strip())
     ]
     assert survivors == []
+
+
+def _draft(relation: str, reason: str = "bad_rel") -> dict:
+    """A draft as the LLM path produces it: JSON text through parse_json_object, never
+    through fixture_policy_json. This is the input shape normalized_rules must defend."""
+    payload = json.dumps(
+        {"rules": [{"predicate": "policy_match", "reason": reason,
+                    "conditions": [{"relation": relation}]}]}
+    )
+    return g.parse_json_object(payload)
+
+
+class TestDraftPathRelationControlChars:
+    """The emission-boundary gate in normalized_rules (#365).
+
+    fixture_policy_json's gate covers the deterministic path only. A draft reaches
+    compile_policy without ever touching it, so a control char in a relation name used to
+    land in the .dl as ``relation(X, "cites\\u0000evil", _).`` — measured on main.
+    """
+
+    def test_a_control_char_relation_in_a_draft_is_rejected(self):
+        with pytest.raises(ValueError) as exc:
+            g.normalized_rules(_draft("cites\x00evil"))
+        message = str(exc.value)
+        assert "rule 1" in message, message
+        # repr'd so the invisible control char is legible in the error (#363).
+        assert repr("cites\x00evil") in message, message
+        assert "control character" in message, message
+
+    @pytest.mark.parametrize(
+        "ch", [chr(i) for i in range(0x20) if g.RELATION_RE.match(f"a{chr(i)}b")]
+    )
+    def test_every_relation_re_passing_c0_is_rejected(self, ch):
+        # The 23 C0 characters (\x00-\x08, \x0e-\x1b) that clear RELATION_RE — it excludes
+        # whitespace and nothing else. Each one is wirelog-undecodable, so each must die
+        # here rather than reach dl_string.
+        assert common.wirelog_undecodable_chars(ch), ch
+        with pytest.raises(ValueError, match="control character"):
+            g.normalized_rules(_draft(f"cites{ch}evil"))
+
+    def test_delete_still_passes(self):
+        # U+007F is the one non-alphanumeric control-adjacent character that both clears
+        # RELATION_RE and round-trips through wirelog. The new gate must not sweep it up.
+        assert common.wirelog_undecodable_chars("\x7f") == []
+        rules = g.normalized_rules(_draft("cites\x7fevil"))
+        assert rules[0]["relations"] == ["cites\x7fevil"]
+
+    @pytest.mark.parametrize(
+        "ch", ["\t", "\n", "\r", "\u0085", "\u2028", "\u2029"]
+    )
+    def test_whitespace_class_still_dies_at_relation_re_not_at_the_gate(self, ch):
+        # These never reach the new gate: Python's \s covers all six, so RELATION_RE
+        # rejects them first with its own message. Pinned because #255 forbids treating
+        # U+0085/U+2028/U+2029 as undecodable — they round-trip fine, and the reason they
+        # are refused here is arity of the NAME grammar, not engine integrity.
+        assert common.wirelog_undecodable_chars(ch) == [] or ch in "\t\n\r"
+        with pytest.raises(ValueError) as exc:
+            g.normalized_rules(_draft(f"cites{ch}evil"))
+        assert "invalid relation name" in str(exc.value), str(exc.value)
+        assert "control character" not in str(exc.value), str(exc.value)
+
+
+def test_compile_policy_is_only_ever_fed_normalized_rules_output():
+    """Why the gate belongs in normalized_rules rather than beside dl_string.
+
+    Both call sites in main() — the --check branch and the write branch — build their
+    program as compile_policy(normalized_rules(draft)). normalized_rules is therefore the
+    single choke point every path to emission shares, deterministic and draft alike.
+    If a future call site feeds compile_policy directly, this breaks and the gate needs
+    to move down to the emission site.
+    """
+    source = Path(g.__file__).read_text(encoding="utf-8")
+    calls = re.findall(r"(?<!def )compile_policy\((.*?)\)", source)
+    assert len(calls) == 2, calls
+    assert set(calls) == {"rules"}, calls
+    assert source.count("rules = normalized_rules(draft)") == 2, source
