@@ -442,7 +442,7 @@ class TestNoYearAtAllReport:
         assert line.startswith("⚠ 1 result will be recorded with no year at all")
         assert "against it)" in line
 
-    def test_each_cause_gets_its_own_block(self):
+    def test_all_three_causes_get_their_own_block(self):
         # All three causes in one result set. The blocks must split three ways and no
         # explanation may attach to another cause's PMID: the electronic-date story is
         # false for a record with no ArticleDate, and the MedlineDate-span story is

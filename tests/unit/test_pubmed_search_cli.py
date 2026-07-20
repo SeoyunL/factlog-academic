@@ -366,6 +366,12 @@ class TestSilentZeroGuard:
     def test_the_missing_year_never_blocks_the_import(self, tmp_path, fake, capsys):
         # Same floor as #387: surfaced, not filtered. --all still writes the source
         # and the exit code stays 0 — no CI fails on this warning.
+        #
+        # And the warning's factual claim is checked against the file it is about:
+        # "no year at all" is a statement about the front matter that lands, so the
+        # front matter is read. Asserting only that *a* file was written would leave
+        # the claim unverified — a writer that started emitting `year: ""` would make
+        # the warning a lie with the suite still green.
         kb = _kb(tmp_path)
         fake(FakePubMedClient(
             esearch_body=_esearch(count=1, ids=["40000003"]),
@@ -375,8 +381,27 @@ class TestSilentZeroGuard:
         rc = run(["pubmed-search", "--query", "base editing", "--year", "2022-2025",
                   "--all", "--target", str(kb)])
         assert rc == 0
-        assert _sources(kb) != []
+        # The slug records the same absence the warning does: "n.d.", no year.
+        assert _sources(kb) == ["jane-doe-n-d-a-dateless-paper.md"]
+        written = (kb / "sources" / "jane-doe-n-d-a-dateless-paper.md").read_text(encoding="utf-8")
+        front_matter = written.split("---", 2)[1]
+        assert "year:" not in front_matter
         assert "no year at all" in capsys.readouterr().err
+
+    def test_the_missing_year_warning_rides_stderr_under_porcelain(self, tmp_path, fake, capsys):
+        # Parity with #387's block: --porcelain stdout must stay parseable, so this
+        # warning belongs on stderr too and no prose may leak into the result rows.
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=1, ids=["40000003"]),
+            efetch_body=_efetch(_year_less_article("40000003")),
+        ))
+        rc = run(["pubmed-search", "--query", "base editing", "--year", "2022-2025",
+                  "--porcelain", "--target", str(_kb(tmp_path))])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "no year at all" in captured.err
+        for line in captured.out.splitlines():
+            assert line.startswith(("result\t", "found\t"))
 
     def test_a_missing_year_is_not_reported_without_a_year_filter(self, tmp_path, fake, capsys):
         # The counterexample at the CLI seam: with no --year there is no range, so a
