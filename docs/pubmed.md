@@ -175,27 +175,42 @@ PubMed 것이라는 사실만 말합니다.
 #### `--year` 범위 밖의 연도가 기록될 수 있습니다
 
 `--year 2022-2025` 로 검색했는데 `year: 2026` 인 레코드가 들어올 수 있습니다. 버그가 아니라
-**PubMed가 거르는 날짜와 factlog가 기록하는 날짜가 다른 필드**이기 때문입니다.
+**PubMed가 거르는 날짜와 factlog가 기록하는 날짜가 다른 필드**이기 때문입니다. `--year` 는
+`[Date - Publication]` 절을 만들지만, front matter의 `year` 는 `Journal/JournalIssue/PubDate`
+하나에서만 옵니다. 어긋나는 경로는 둘이고, factlog는 둘을 **구분해서** 설명합니다.
 
-- 필터: `--year` 는 `[Date - Publication]` 절을 만들고, PubMed는 이 범위를 레코드의
-  **전자판 게재일**(`ArticleDate`)로도 매칭합니다.
-- 기록: front matter의 `year` 는 **지면 호의 발행 연도**(`Journal/JournalIssue/PubDate/Year`)입니다.
+1. **전자판/지면 연도 차이.** PubMed는 `[Date - Publication]` 범위를 레코드의
+   **전자판 게재일**(`ArticleDate`)로도 매칭하는데, 기록되는 값은 **지면 호의 연도**입니다.
+   `PubModel="Print-Electronic"` 문헌 — 온라인 선공개 후 이듬해 지면 게재 — 에서 어긋납니다.
+   실제 사례로 PMID 41620285는 `ArticleDate` 가 2025-04-16, 지면 호 연도가 2026입니다.
+2. **`MedlineDate` 스팬.** 호가 `<Year>` 대신 자유텍스트(`1998 Dec-1999 Jan`)를 실으면
+   factlog는 그 스팬의 **첫 연도**(1998)를 기록합니다. PubMed가 매칭한 쪽이 기록되는 쪽과
+   다를 수 있습니다. 이 레코드에는 `ArticleDate` 가 아예 없으므로 1번 설명을 붙이면
+   **거짓말**이 됩니다 — 없는 필드를 찾아 나서게 만듭니다. 그래서 경고는 원인별로 갈라지고,
+   파생된 연도는 원문 스팬을 함께 인용해 감사 가능하게 둡니다(`pub_date_raw`).
 
-`PubModel="Print-Electronic"` 문헌 — 온라인 선공개 후 이듬해 지면 게재 — 에서 둘이 어긋납니다.
-실제 사례로 PMID 41620285는 `ArticleDate` 가 2025-04-16, 지면 호 연도가 2026입니다.
+어느 쪽도 틀린 값이 아닙니다. PubMed가 매칭한 날짜가 그 레코드를 결과로 만든 근거이고,
+기록된 연도는 인용에 찍히는 값입니다. 그래서 factlog는 레코드를 버리지도(진짜 매칭을
+잃습니다), 기록 연도를 고쳐 쓰지도(저널이 낸 적 없는 날짜를 인용에 박습니다) 않고
+**사실을 알립니다** — MeSH 텀 검증이나 arXiv `--category` 사전검증과 같은 표면화+설명입니다.
 
-어느 쪽도 틀리지 않았습니다. 전자판 날짜가 그 레코드를 검색 결과로 만든 근거이고, 지면 호
-연도는 인용에 찍히는 값입니다. 그래서 factlog는 레코드를 버리지도(진짜 매칭을 잃습니다),
-기록 연도를 고쳐 쓰지도(저널이 낸 적 없는 날짜를 인용에 박습니다) 않고 **사실을 알립니다** —
-MeSH 텀 검증이나 arXiv `--category` 사전검증과 같은 표면화+설명입니다.
+경고는 **원인별로 한 블록**이고, 레코드는 한 줄에 묶고 이유 문단은 블록당 한 번만 찍습니다
+(`--limit` 기본이 25이므로 레코드마다 같은 문단을 반복하면 그 런의 다른 stderr —
+철회 경고나 silent-zero 가드 — 가 함께 묻힙니다).
 
 ```
-factlog pubmed-search: ⚠ PMID 41620285 will be recorded as year 2026, outside the
-requested --year 2022-2025. ...
+factlog pubmed-search: ⚠ 2 results will be recorded with a year outside --year 2022-2025:
+PMID 41620285 (2026), PMID 40000002 (2021).
+  PubMed's date filter also matches a record's electronic publication date, while
+  factlog records the journal issue's year — ... the exit code stays 0 ...
 ```
+
+두 원인이 한 결과 집합에 섞이면 블록도 둘로 나옵니다. `MedlineDate` 쪽 블록은 파생 근거를
+함께 싣습니다 — `PMID 1 (1998, from MedlineDate "1998 Dec-1999 Jan")`.
 
 경고는 사람 모드와 `--porcelain` 모두 stderr로 나가며(그래서 `--porcelain` stdout은 그대로
-파싱 가능합니다), 선택 전에 나오므로 아직 선택을 바꿀 수 있습니다. 수집을 막지는 않습니다.
+파싱 가능합니다), 선택 전에 나오므로 아직 선택을 바꿀 수 있습니다. 수집을 막지 않고,
+**종료코드는 0 그대로입니다** — 이 경고 때문에 실패하는 CI는 없습니다.
 
 ### `pubmed-refresh`
 

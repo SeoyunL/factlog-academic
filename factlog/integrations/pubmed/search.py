@@ -525,32 +525,70 @@ def silent_zero_report(
     return lines
 
 
+# Why a record's recorded year can sit outside --year, one paragraph per *cause*.
+# Never one paragraph for both: the electronic-date story is plainly false for a
+# record that has no ArticleDate at all, and a warning whose explanation is wrong
+# sends the operator hunting for a field that is not there — worse than no
+# explanation, because it is confidently wrong. `pub_date_raw` is what tells the
+# two apart, and `work_parser` states that is the field's purpose: it "makes a
+# derived-or-absent year auditable instead of silent". Reporting a derived year
+# without it would discard the audit trail kept for exactly this moment.
+_YEAR_CAUSE_ELECTRONIC = (
+    "PubMed's date filter also matches a record's electronic publication date, while "
+    "factlog records the journal issue's year — the two differ when a paper appears "
+    "online in one year and in print the next (PubModel=\"Print-Electronic\"). Such a "
+    "record is a genuine match, not a bug: it is imported as usual and the exit code "
+    "stays 0 — decide whether you want it in the KB."
+)
+_YEAR_CAUSE_MEDLINE = (
+    "A record whose issue carries no plain <Year> is recorded with the first year of "
+    "its free-text MedlineDate span, quoted above; a span can straddle two years, and "
+    "the half PubMed matched need not be the half that gets recorded. Such a record is "
+    "a genuine match, not a bug: it is imported as usual and the exit code stays 0 — "
+    "decide whether you want it in the KB."
+)
+
+
 def year_range_report(works, *, year: str | None = None) -> list[str]:
     """Name every result whose recorded year falls outside the requested ``--year``.
 
     **The mismatch this surfaces (#387).** ``--year`` composes a
-    ``[Date - Publication]`` clause, and PubMed matches that range against a
-    record's *electronic* publication date (``ArticleDate``) as well as its
-    journal issue date. The year factlog writes into front matter is the journal
-    issue's alone (``work_parser._pub_date``). A ``PubModel="Print-Electronic"``
-    paper — posted online in one year, carried in a print issue the next — is
-    therefore a legitimate hit for ``--year 2022-2025`` that lands in the KB as
-    ``year: 2026``. PMID 41620285 is the measured case: ``ArticleDate`` 2025-04-16,
-    ``JournalIssue/PubDate/Year`` 2026.
+    ``[Date - Publication]`` clause, and PubMed matches that range against dates the
+    front matter ``year`` is not taken from. The year factlog writes is
+    ``Journal/JournalIssue/PubDate``'s alone (``work_parser._pub_date``), so a record
+    PubMed rightly matched can still land in the KB with a year outside the range.
 
-    **Why a warning and not a fix.** Neither field is wrong: the electronic date is
-    what makes the record a match, the issue year is what a citation prints. Dropping
-    the record would discard a real result, and rewriting the recorded year would put
-    a date on a citation that its journal never carried. So this states the fact,
-    explains why the two years differ, and leaves the decision with the operator —
-    the same surface-and-explain floor the MeSH guard and arXiv's ``--category``
-    pre-flight take. Nothing here filters or blocks.
+    **Two causes, never conflated.** A ``PubModel="Print-Electronic"`` paper — posted
+    online in one year, carried in a print issue the next — matches on its
+    ``ArticleDate`` and records the later issue year (PMID 41620285 is the measured
+    case: ``ArticleDate`` 2025-04-16, ``JournalIssue/PubDate/Year`` 2026). A record
+    whose issue carries free text instead of a ``<Year>`` records the *first* year of
+    a ``MedlineDate`` span, and a span like ``"1998 Dec-1999 Jan"`` straddles two.
+    These are different facts, and ``pub_date_raw`` — non-``None`` exactly when the
+    year was derived from ``MedlineDate`` — is what separates them. Each cause gets
+    its own explanation, and the derived span is quoted, because an explanation
+    attached to the wrong record is misinformation, not help: it would send an
+    operator looking for an ``ArticleDate`` the record does not have.
 
-    Pure, duck-typed over ``.pmid``/``.year`` (no import of ``work_parser``), and
-    silent — ``[]`` — when no ``--year`` was given or every result lands inside the
-    range. A result with **no** year at all is skipped rather than reported: absence
-    is not evidence of a range mismatch, and ``work_parser`` already accounts for a
-    record whose ``PubDate`` carries no parseable year.
+    **Grouped, not one block per record.** The explanation is long and the same for
+    every record sharing a cause; at ``--limit 25`` repeating it would bury the other
+    things stderr is carrying that run (a retraction warning, the silent-zero guard).
+    So each cause yields **one** entry: a header naming every affected record on one
+    line, then the reason once, indented on a continuation line.
+
+    **Why a warning and not a fix.** No field here is wrong: the date PubMed matched
+    is what makes the record a hit, the recorded year is what a citation prints.
+    Dropping the record would discard a real result, and rewriting the year would put
+    a date on a citation its journal never carried. So this states the fact, explains
+    it, and leaves the decision with the operator — the same surface-and-explain floor
+    the MeSH guard and arXiv's ``--category`` pre-flight take. Nothing here filters or
+    blocks, and the exit code is unaffected.
+
+    Pure, duck-typed over ``.pmid``/``.year``/``.pub_date_raw`` (no import of
+    ``work_parser``), and silent — ``[]`` — when no ``--year`` was given or every
+    result lands inside the range. A result with **no** year at all is skipped rather
+    than reported: absence is not evidence of a range mismatch, and ``work_parser``
+    already accounts for a record whose ``PubDate`` carries no parseable year.
     """
     if not year:
         return []
@@ -562,17 +600,28 @@ def year_range_report(works, *, year: str | None = None) -> list[str]:
         # complaint from here.
         return []
 
-    lines: list[str] = []
+    electronic: list[str] = []
+    medline: list[str] = []
     for work in works:
         work_year = getattr(work, "year", None)
         if work_year is None or start_year <= work_year <= end_year:
             continue
+        pmid = getattr(work, "pmid", "?")
+        # Non-None exactly when `_pub_date` fell back to MedlineDate free text.
+        raw = getattr(work, "pub_date_raw", None)
+        if raw:
+            medline.append(f'PMID {pmid} ({work_year}, from MedlineDate "{raw}")')
+        else:
+            electronic.append(f"PMID {pmid} ({work_year})")
+
+    lines: list[str] = []
+    for named, reason in ((electronic, _YEAR_CAUSE_ELECTRONIC),
+                          (medline, _YEAR_CAUSE_MEDLINE)):
+        if not named:
+            continue
+        noun = "result" if len(named) == 1 else "results"
         lines.append(
-            f"⚠ PMID {getattr(work, 'pmid', '?')} will be recorded as year {work_year}, "
-            f"outside the requested --year {year}. PubMed's date filter also matches a "
-            "record's electronic publication date, while factlog records the journal "
-            "issue's year — the two differ when a paper appears online in one year and "
-            "in print the next. The result is a genuine match, not a bug; decide "
-            "whether you want it in the KB."
+            f"⚠ {len(named)} {noun} will be recorded with a year outside --year "
+            f"{year}: " + ", ".join(named) + f".\n  {reason}"
         )
     return lines

@@ -185,6 +185,32 @@ def _efetch_record(pmid: str, *, issue_year: str, article_date: str | None = Non
   </PubmedArticle>"""
 
 
+def _medline_record(pmid: str, *, medline_date: str) -> str:
+    """A record whose issue carries `<MedlineDate>` free text instead of a `<Year>`.
+
+    No `ArticleDate`, no `PubModel="Print-Electronic"` — the electronic-date story is
+    simply false here. `work_parser` records the span's *first* year and keeps the raw
+    text in `pub_date_raw`; a span like "1998 Dec-1999 Jan" therefore records 1998
+    while PubMed matched the 1999 half.
+    """
+    return f"""
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>{pmid}</PMID>
+      <Article>
+        <Journal><Title>J Test</Title>
+          <JournalIssue>
+            <PubDate><MedlineDate>{medline_date}</MedlineDate></PubDate>
+          </JournalIssue></Journal>
+        <ArticleTitle>A winter issue.</ArticleTitle>
+      </Article>
+    </MedlineCitation>
+    <PubmedData><ArticleIdList>
+      <ArticleId IdType="pubmed">{pmid}</ArticleId>
+    </ArticleIdList></PubmedData>
+  </PubmedArticle>"""
+
+
 def _works(*records):
     """Parse fixture records through the real parser, so `.year` is the recorded year."""
     xml = "<PubmedArticleSet>" + "".join(records) + "</PubmedArticleSet>"
@@ -214,6 +240,36 @@ class TestYearRangeReport:
         assert "electronic" in line
         assert "journal issue" in line
 
+    def test_a_medline_span_is_never_blamed_on_an_electronic_date(self):
+        # The counterexample that keeps the explanation honest: this record has no
+        # ArticleDate and is not Print-Electronic. Its year is out of range because
+        # `_pub_date` took the FIRST year of a MedlineDate span. Blaming an
+        # electronic publication date would send the operator hunting for a field
+        # the record does not carry — a confidently wrong explanation.
+        works = _works(_medline_record("1", medline_date="1998 Dec-1999 Jan"))
+        assert works[0].year == 1998
+        assert works[0].pub_date_raw == "1998 Dec-1999 Jan"
+        line = year_range_report(works, year="1999")[0]
+        assert "electronic" not in line
+        assert "MedlineDate" in line
+        # The raw span is quoted, so the derived year stays auditable — the stated
+        # purpose of `pub_date_raw` in work_parser.
+        assert "1998 Dec-1999 Jan" in line
+
+    def test_each_cause_gets_its_own_block(self):
+        # Both causes in one result set: two blocks, each explaining only its own
+        # records. Neither explanation may attach to the other's PMID.
+        works = _works(
+            _efetch_record("41620285", issue_year="2026", article_date="2025-04-16"),
+            _medline_record("1", medline_date="1998 Dec-1999 Jan"),
+        )
+        lines = year_range_report(works, year="2000-2025")
+        assert len(lines) == 2
+        electronic = next(line for line in lines if "41620285" in line)
+        medline = next(line for line in lines if "PMID 1 " in line)
+        assert "electronic" in electronic and "MedlineDate" not in electronic
+        assert "MedlineDate" in medline and "electronic" not in medline
+
     def test_a_record_inside_the_range_stays_silent(self):
         # The counterexample: an in-range issue year says nothing, whatever the
         # ArticleDate. A warning on every result would be noise, not a signal.
@@ -228,10 +284,27 @@ class TestYearRangeReport:
             _efetch_record("40000002", issue_year="2021", article_date="2022-01-09"),
         )
         lines = year_range_report(works, year="2022-2025")
-        assert len(lines) == 2
-        assert any("41620285" in line for line in lines)
-        assert any("40000002" in line for line in lines)
-        assert not any("40000001" in line for line in lines)
+        # One block per cause, not one per record: both share the electronic cause.
+        assert len(lines) == 1
+        assert "41620285" in lines[0] and "40000002" in lines[0]
+        assert "40000001" not in lines[0]
+
+    def test_the_explanation_is_printed_once_per_block(self):
+        # At --limit 25 a per-record paragraph would fill the screen and bury the
+        # other things stderr carries that run (retractions, the silent-zero guard).
+        works = _works(*[
+            _efetch_record(f"4000000{n}", issue_year="2026", article_date="2025-04-16")
+            for n in range(1, 6)
+        ])
+        lines = year_range_report(works, year="2022-2025")
+        assert len(lines) == 1
+        assert lines[0].count("electronic publication date") == 1
+        assert lines[0].startswith("⚠ 5 results")
+
+    def test_a_single_record_is_counted_in_the_singular(self):
+        works = _works(_efetch_record("41620285", issue_year="2026",
+                                      article_date="2025-04-16"))
+        assert year_range_report(works, year="2022-2025")[0].startswith("⚠ 1 result will")
 
     def test_a_single_year_spec_is_a_range_of_one(self):
         works = _works(_efetch_record("41620285", issue_year="2026",

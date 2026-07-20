@@ -84,6 +84,7 @@ of it).
 
 The Korean [PubMed 가져오기](pubmed.md) covers more than this page does:
 per-command options and output, how `--show-query` and `--dry-run` differ, the
-silent trap in a search query, merged and deleted PMIDs (#170), the shape of the
+silent trap in a search query, why a `--year` search can record a year outside that
+range (#387), merged and deleted PMIDs (#170), the shape of the
 generated source file and why there are two `mesh_terms` fields, the config file
 keys, and the idempotency guarantees.
