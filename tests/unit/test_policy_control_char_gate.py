@@ -4,16 +4,14 @@ escapes into policy/logic-policy.dl (#359).
 
 Same silent identity loss as #331/#357, reached through the third authoring surface:
 a backtick relation name in policy/logic-policy.md. ``RELATION_RE`` (``^[^\\s"`(),.]+$``)
-excludes only whitespace, so 22 C0 controls (\\x00-\\x08, \\x0e-\\x1b) pass it and
+excludes only whitespace, so 23 C0 controls (\\x00-\\x08, \\x0e-\\x1b) pass it and
 ``dl_string`` writes them as ``relation(X, "cites\\u0001evil", _).`` — an escape the
 engine does not decode, so the rule body can never match any fact and the policy is
 silently dead. The gate lives in ``fixture_policy_json`` because that is the only place
 where the source lineno is still known, so the error can point at the exact bullet.
 
-The ``reason`` axis is gated too (defence in depth: the emission site is ``dl_string``,
-and relying on a distant regex means the hole reopens quietly if that regex is relaxed),
-but it has no red test because no input can reach the gate. Two defences stand in front
-of it, and only the FIRST one decides reachability:
+The ``reason`` axis is gated too, but it has no red test because no input can reach the
+gate. Two defences stand in front of it, and only the FIRST one decides reachability:
 
 1. ``markdown_policy_items`` (common.py) requires the bullet tag to match
    ``^\\[([a-z0-9_]+)\\]\\s+(.+)$``. A control char in the tag means the bullet is not a
@@ -23,7 +21,9 @@ of it, and only the FIRST one decides reachability:
    runs AFTER ``fixture_policy_json``, so it can never stop anything from reaching the gate.
 
 Both are pinned below: relaxing the tag regex would make the reason axis reachable and
-needs a red test, while relaxing REASON_RE alone would not.
+needs a red test, while relaxing REASON_RE alone would not. The gate stays regardless —
+the tag regex is a PARSING rule, so whoever widens it is deciding bullet syntax (#190) and
+has no cue that engine integrity hangs on it. See ``_reject_undecodable_policy_name``.
 """
 from __future__ import annotations
 
