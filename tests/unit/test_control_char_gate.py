@@ -241,17 +241,13 @@ class TestAttrRelEmissionControlChars:
         self._declare(kb, "pub_year")
         assert common._attr_rel_facts(self._rows("pub_year")) == '\nattr_rel("pub_year").\n'
 
-    @pytest.mark.parametrize("cp", [0x7F, 0x9F])
-    def test_controls_that_round_trip_are_not_rejected(self, cp):
-        # Same rule as the predicate: json.dumps leaves these raw and wirelog parses them
-        # (upstream#255), so the gate must not touch them.
-        #
-        # U+0085/U+2028/U+2029 cannot be pinned at THIS site: _relation_names_from reads the
-        # policy file with str.splitlines(), which splits on all three, so a name containing
-        # one is never declared in the first place (measured — the parse yields '`pub' and
-        # 'year`'). TestWirelogUndecodableChars pins all three where the verdict is made.
-        assert common.wirelog_undecodable_chars(f"pub{chr(cp)}year") == []
-
+    # What the gate must NOT reject is pinned on the verdict itself, by
+    # TestWirelogUndecodableChars::test_line_separators_and_high_controls_round_trip — this
+    # gate calls that predicate and cannot disagree with it. Only the emission consequence is
+    # worth a test here, and U+007F is the character to use: U+0085/U+2028/U+2029 cannot reach
+    # this site at all, because _relation_names_from reads the policy file with
+    # str.splitlines(), which splits on all three, so such a name is never declared (measured
+    # — the parse yields '`pub' and 'year`' instead of one name).
     def test_round_tripping_control_survives_emission(self, kb):
         name = f"pub{chr(0x7F)}year"
         self._declare(kb, name)
