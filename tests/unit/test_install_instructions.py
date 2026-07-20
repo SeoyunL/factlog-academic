@@ -36,7 +36,10 @@ SEARCHED = [
     *(REPO / "factlog").rglob("*.py"),
     *(REPO / "tools").glob("*.py"),
     *REPO.glob("README*.md"),
-    *(REPO / "docs").glob("*.md"),
+    # rglob, not glob: the pip-install instructions moved into docs/guide/install.md
+    # when the docs were split out of the monolithic README, and a flat glob no longer
+    # covers where the commands a user copy-pastes actually live (#376).
+    *(REPO / "docs").rglob("*.md"),
     *(REPO / "skills").rglob("*.md"),
     *(REPO / "commands").rglob("*.md"),
     *(REPO / "hooks").rglob("*"),

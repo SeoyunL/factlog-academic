@@ -11,17 +11,23 @@
 
 ## 설치
 
-factlog는 **Claude Code 플러그인**입니다. Claude Code 세션에서 이 저장소의
+factlog-academic은 **Claude Code 플러그인**입니다. Claude Code 세션에서 이 저장소의
 마켓플레이스로부터 설치합니다.
 
 *Claude Code에서 실행:*
 
 ```
-/plugin marketplace add https://github.com/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add https://github.com/SeoyunL/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup                     # one-shot: deps + doctor + init, in-session
 ```
+
+> 업스트림 `semantic-reasoning/factlog` 가 아니라 **이 저장소**에서 설치하십시오.
+> 업스트림 플러그인에는 서지 수집 명령이 하나도 없습니다 — `factlog zotero-import`,
+> `factlog openalex-*`, `factlog arxiv-*`, `factlog pubmed-*` 는 여기에만 있습니다.
+> 설치 핸들 `factlog@seoyunl` 은 `.claude-plugin/marketplace.json` 의
+> 마켓플레이스 이름(`seoyunl`)과 플러그인 이름(`factlog`)에서 나옵니다.
 
 위 명령은 **한 줄씩 실행**하십시오. 여러 줄을 한 번에 붙여 넣으면 Claude Code가
 마켓플레이스 등록과 설치를 순서대로 처리하지 못할 수 있습니다.
@@ -46,8 +52,8 @@ Windows에서 `python` / `python3` 실행 파일 문제로 `setup` 이 실패하
 *Claude Code에서 실행:*
 
 ```
-/plugin marketplace add ~/git/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add ~/git/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup
 ```
@@ -60,10 +66,46 @@ Windows에서 `python` / `python3` 실행 파일 문제로 `setup` 이 실패하
 *터미널에서 실행:*
 
 ```bash
-pip install -r ~/git/semantic-reasoning/factlog/requirements.txt   # pyrewire>=1.0.3,<2.0
+pip install -r ~/git/factlog-academic/requirements.txt   # pyrewire>=1.0.3,<2.0
 python3 -m factlog doctor          # checks Python 3.11+ and pyrewire
 python3 -m factlog init --target ~/wiki   # scaffold the KB layout
 ```
+
+## 학술 서지 연동의 선택 의존성
+
+각 서지 연동은 extra 하나가 필요합니다. **이 저장소에서** 설치하십시오.
+
+> **PyPI의 `factlog` 는 이 프로젝트가 아닙니다.** 그 이름은 2013년의 무관한
+> 프로젝트("File ACTivity LOGger", v0.0.1)가 갖고 있습니다. pip에 그 이름을 달라고 하면
+> **그 패키지**가 설치됩니다. 게다가 그쪽엔 해당 extra가 없어 pip이 경고만 하고 exit 0
+> 으로 끝나므로, 성공 메시지와 원치 않은 패키지만 남고 pyzotero·httpx·feedparser는
+> 하나도 들어오지 않습니다. 그 뒤로 연동은 계속 실패합니다. 배포명은
+> **`factlog-academic`** 입니다 — extra 를 붙일 때 `-academic` 없는 맨이름을 쓰는 형태는
+> 이 저장소 어디에도 쓰지 않습니다. 아래 방법 중 하나로 설치하십시오.
+
+```bash
+# 이 저장소를 클론했다면 (대부분 이 경우)
+pip install -e '.[zotero]'
+
+# 클론 없이 Claude Code 플러그인으로 설치했다면. 이 변수는 Claude Code 세션 안에서만
+# 설정됩니다 — 일반 터미널에서는 /factlog 세션에서 `factlog where` 로 플러그인 경로를
+# 확인해 그 경로를 직접 넣으십시오
+pip install -e "${CLAUDE_PLUGIN_ROOT}[zotero]"
+
+# 체크아웃 없이 어디서든
+pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'
+```
+
+`zotero` 자리에 `openalex` · `arxiv` · `pubmed` 를 넣으면 됩니다.
+`pip install -e '.[zotero,arxiv]'` 처럼 한 번에 여러 개도 됩니다.
+
+> **이전 버전에서 올라오셨나요?** 배포명이 `factlog` 였습니다. 두 이름이 같은 `factlog`
+> 모듈과 같은 `factlog` 명령을 소유하므로 pip이 둘을 나란히 설치하고, 옛 것만 지우면 그
+> 공유 명령이 사라집니다. `pip uninstall factlog` 후 **반드시 재설치**하십시오. 그 상태는
+> `factlog doctor` 가 잡아 알려줍니다.
+
+각 연동의 사용법은 [Zotero](../zotero-import.md) · [OpenAlex](../openalex.md) ·
+[arXiv](../arxiv.md) · [PubMed](../pubmed.md) 문서에 있습니다.
 
 ## 설치 실패 모드 — 증상 → 원인 → 해결
 
