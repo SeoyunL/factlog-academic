@@ -497,6 +497,15 @@ def main() -> int:
         # Re-raised unchanged, so the exit code and stderr a caller sees stay exactly
         # what they were.
         raise
+    # Reported BEFORE the marker is cleared, because the files named here exist by now and
+    # clearing can fail. Printing afterwards left the unlink-failure path with empty stdout
+    # — rc=1 and not one line about the .dl it had just written, so an operator had only
+    # the error sentence to go on.
+    print(f"policy rules: {len(rules)}")
+    print(f"written: {OUTPUT_DL}" if not args.dry_run else f"dry-run: {OUTPUT_DL} not changed")
+    print(f"prompt: {PROMPT_OUT}")
+    print(f"trace: {TRACE_OUT}")
+
     # Every artifact under runs/ now comes from this run, so the accounting is settled.
     # This one is NOT swallowed, unlike the write above, and the asymmetry is the point:
     # an unwritable marker only costs a record, while an undeletable one leaves a stale
@@ -512,10 +521,6 @@ def main() -> int:
             f"this run's fresh runs/ files as another run's leftovers. Remove it by hand "
             f"and re-run."
         ) from exc
-    print(f"policy rules: {len(rules)}")
-    print(f"written: {OUTPUT_DL}" if not args.dry_run else f"dry-run: {OUTPUT_DL} not changed")
-    print(f"prompt: {PROMPT_OUT}")
-    print(f"trace: {TRACE_OUT}")
     return 0
 
 

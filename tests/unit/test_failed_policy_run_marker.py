@@ -14,7 +14,11 @@ Deleting the leftovers was rejected as the fix: it destroys the only evidence of
 failing run and still leaves a directory matching no run (the earlier run's response
 and trace, minus its prompt). So the run states the accounting instead, in
 runs/natural-language-to-policy-failed.md, and its absence is the signal that the last
-run to write anything under runs/ finished.
+run to write anything under runs/ finished. With one exception, which the code chooses
+deliberately: if writing the marker ITSELF fails the run swallows that error to keep the
+caller's diagnosis intact, so runs/ can be mixed with nothing saying so. Reproduce by
+putting a directory at the marker path. Not being told which gate fired is the worse
+outcome of the two, but the absence is not a guarantee.
 
 The marker only ever states what it can support. A run that writes nothing leaves runs/
 byte-for-byte as it found it, so it writes no marker and clears none: claiming a mismatch
@@ -257,8 +261,12 @@ def test_an_unclearable_marker_is_reported_rather_than_left_lying(kb):
     assert "could not clear" in proc.stderr, proc.stderr
     assert "Remove it by hand" in proc.stderr, proc.stderr
     assert "Traceback" not in proc.stderr, proc.stderr
-    # The run really did its job before tripping on the marker.
+    # The run really did its job before tripping on the marker, and says so: printing
+    # after the unlink left this path with empty stdout, so rc=1 came with no record of
+    # the .dl that had just been written.
     assert (kb / "policy" / "logic-policy.dl").is_file()
+    assert "logic-policy.dl" in proc.stdout, proc.stdout
+    assert "policy rules:" in proc.stdout, proc.stdout
 
 
 def test_an_exception_with_no_message_is_named_without_a_dangling_colon():
