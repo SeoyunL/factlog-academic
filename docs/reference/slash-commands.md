@@ -2,6 +2,12 @@
 
 > 🌐 [English](slash-commands.en.md) | **한국어**
 
+> **플러그인과 스킬.** 설치하는 대상은 **플러그인**(factlog-academic)이고, 그 플러그인이
+> 설치해 실행하는 프롬프트는 `/factlog` **스킬**입니다. 아래 `/factlog ...` 는 스킬을
+> 부르는 slash command 이며, 검토·승인 같은 사람의 게이트는 터미널에서 Python
+> CLI(`python3 -m factlog ...`)로 직접 실행합니다. 두 입구 모두 같은 결정론 엔진을
+> 호출합니다 — slash command · Python CLI · 검증 엔진, 이 셋이 한 도구입니다.
+
 지식베이스 안의 Claude Code 세션에서(플러그인은 모든 세션에서 활성):
 
 *Claude Code에서 실행:*
