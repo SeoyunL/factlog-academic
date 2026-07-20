@@ -1,15 +1,21 @@
-# factlog
+# factlog-academic
 
 > 🌐 **English** | [한국어](README.md)
 
 > facts + logic — a tool that turns markdown sources into **verifiable, source-backed facts**.
 > The LLM extracts; a deterministic Datalog/wirelog engine verifies.
 >
-> factlog is a [Claude Code](https://code.claude.com) **plugin**. Inside a session you
-> use it through `/factlog ...` slash commands; human gates like review and approval you
-> run yourself in the terminal through the Python CLI (`python3 -m factlog ...`). Both
-> entry points call the same deterministic engine — slash command · Python CLI ·
-> verification engine are one tool.
+> factlog-academic is a [Claude Code](https://code.claude.com) **plugin**. Inside a
+> session you use it through `/factlog ...` slash commands; human gates like review and
+> approval you run yourself in the terminal through the Python CLI
+> (`python3 -m factlog ...`). Both entry points call the same deterministic engine —
+> slash command · Python CLI · verification engine are one tool.
+
+**factlog-academic** is the scholarly-research distribution of
+[factlog](https://github.com/semantic-reasoning/factlog). It has everything upstream
+factlog has, plus commands that pull academic bibliography straight into the knowledge
+base — [Zotero](docs/zotero-import.en.md) · [OpenAlex](docs/openalex.en.md) ·
+[arXiv](docs/arxiv.en.md) · [PubMed](docs/pubmed.en.md).
 
 ![How factlog works: Claude proposes, the engine verifies, a human confirms](docs/how-it-works.svg)
 
@@ -22,14 +28,18 @@
 
 ## Install
 
-factlog is a **Claude Code plugin**. Install it from this repo's marketplace in a Claude Code session:
+factlog-academic is a **Claude Code plugin**. Install it from this repo's marketplace in a Claude Code session:
 
 ```
-/plugin marketplace add https://github.com/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add https://github.com/SeoyunL/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup                     # one-shot: deps + doctor + init, in-session
 ```
+
+> Install from **this** repository, not from upstream `semantic-reasoning/factlog`.
+> The upstream plugin has none of the bibliography commands — `factlog zotero-import`,
+> `factlog openalex-*`, `factlog arxiv-*`, and `factlog pubmed-*` exist only here.
 
 Run these commands **one line at a time**. If you paste multiple plugin commands
 at once, Claude Code may try to process the marketplace registration and install
@@ -58,6 +68,16 @@ The detailed documentation lives in [`docs/`](docs/README.en.md).
 - [Use cases](docs/guide/use-cases.en.md) — common workflows for reports, slides, papers, and wikis
 - [Determinism & limitations](docs/guide/determinism.en.md) — what is guaranteed and what is not
 - [Slash command usage](docs/reference/slash-commands.en.md) · [Source file formats](docs/reference/sources.en.md) · [Reviewing facts](docs/reference/review.en.md) — detailed reference
+
+### Academic bibliography integrations (this distribution only)
+
+Each integration needs its own extra, and imported records are still **candidates** —
+they pass the `sync → review → accept` gate like anything else.
+
+- [Zotero import](docs/zotero-import.en.md) — `factlog zotero-import`, Zotero 7 Local API
+- [OpenAlex import](docs/openalex.en.md) — `factlog openalex-*`, search · citation graph · refresh
+- [arXiv import](docs/arxiv.en.md) — `factlog arxiv-*`, version tracking, withdrawals
+- [PubMed import](docs/pubmed.en.md) — `factlog pubmed-*`, E-utilities, MeSH proposals
 
 ## License
 

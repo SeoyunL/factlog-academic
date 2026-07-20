@@ -11,14 +11,20 @@
 
 ## Install
 
-factlog is a **Claude Code plugin**. Install it from this repo's marketplace in a Claude Code session:
+factlog-academic is a **Claude Code plugin**. Install it from this repo's marketplace in a Claude Code session:
 
 ```
-/plugin marketplace add https://github.com/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add https://github.com/SeoyunL/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup                     # one-shot: deps + doctor + init, in-session
 ```
+
+> Install from **this** repository, not from upstream `semantic-reasoning/factlog`.
+> The upstream plugin has none of the bibliography commands — `factlog zotero-import`,
+> `factlog openalex-*`, `factlog arxiv-*`, and `factlog pubmed-*` exist only here.
+> The install handle `factlog@seoyunl` comes from `.claude-plugin/marketplace.json`:
+> the marketplace name is `seoyunl` and the plugin name is `factlog`.
 
 Run these commands **one line at a time**. If you paste multiple plugin commands
 at once, Claude Code may try to process the marketplace registration and install
@@ -35,8 +41,8 @@ the current session yet. Run `/reload-plugins` after `/plugin install`, then run
 To develop against a local clone, register the working tree as the marketplace instead:
 
 ```
-/plugin marketplace add ~/git/semantic-reasoning/factlog
-/plugin install factlog@semantic-reasoning
+/plugin marketplace add ~/git/factlog-academic
+/plugin install factlog@seoyunl
 /reload-plugins
 /factlog setup
 ```
@@ -46,10 +52,47 @@ To develop against a local clone, register the working tree as the marketplace i
 `setup` collapses the previously-separate post-install steps into a single command. Equivalently, by hand:
 
 ```bash
-pip install -r ~/git/semantic-reasoning/factlog/requirements.txt   # pyrewire>=1.0.3,<2.0
+pip install -r ~/git/factlog-academic/requirements.txt   # pyrewire>=1.0.3,<2.0
 python3 -m factlog doctor          # checks Python 3.11+ and pyrewire
 python3 -m factlog init --target ~/wiki   # scaffold the KB layout
 ```
+
+## Optional dependencies for the bibliography integrations
+
+Each bibliography integration needs its own extra. Install it **from this repository**.
+
+> **`factlog` on PyPI is not this project.** That name belongs to an unrelated 2013
+> project ("File ACTivity LOGger", v0.0.1). Ask pip for it and you get **that package** —
+> and because it has no such extra, pip only warns and exits 0, so you are left with a
+> success message, a package you never asked for, and none of pyzotero / httpx /
+> feedparser. The integration then keeps failing. The distribution is named
+> **`factlog-academic`** — always write the extras spec as `factlog-academic[...]`.
+> Install it one of these ways:
+
+```bash
+# if you cloned this repository (the common case)
+pip install -e '.[zotero]'
+
+# if you installed it as a Claude Code plugin without cloning. This variable is set only
+# inside a Claude Code session — from an ordinary terminal, run `factlog where` in a
+# /factlog session to find the plugin path and use that path literally
+pip install -e "${CLAUDE_PLUGIN_ROOT}[zotero]"
+
+# from anywhere, without a checkout
+pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'
+```
+
+Substitute `openalex`, `arxiv`, or `pubmed` for `zotero`. Several at once also works:
+`pip install -e '.[zotero,arxiv]'`.
+
+> **Upgrading from an older version?** The distribution used to be named `factlog`. Both
+> names own the same `factlog` module and the same `factlog` command, so pip installs
+> them side by side, and removing only the old one takes that shared command with it.
+> After `pip uninstall factlog`, **reinstall**. `factlog doctor` detects and reports this
+> state.
+
+For how to use each integration, see [Zotero](../zotero-import.en.md) ·
+[OpenAlex](../openalex.en.md) · [arXiv](../arxiv.en.md) · [PubMed](../pubmed.en.md).
 
 ## Installation failure modes — symptom → cause → fix
 

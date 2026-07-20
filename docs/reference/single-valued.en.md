@@ -24,6 +24,6 @@ Code. You resolve one with `factlog eject --fact SUBJECT RELATION OBJECT` to ret
 row, or `factlog amend SUBJECT RELATION OBJECT --set-object NEW` to correct one. Never by hand-editing
 `facts/candidates.csv`: that bypasses the gate the KB is built around. And if the two
 values are a supertype and its subtype, neither is wrong — declare the relationship in
-`policy/value-hierarchy.md` and both rows are kept.
+[`policy/value-hierarchy.md`](value-hierarchy.en.md) and both rows are kept.
 
 `factlog init` scaffolds this file with a commented example.

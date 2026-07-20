@@ -87,7 +87,6 @@ printf 'my_relation\n' > "$KB2/policy/single-valued.md"
 # The prose moved out of README.md (now an abridged index) into docs/reference/.
 grep -q "policy/single-valued.md" docs/reference/single-valued.md && ok "(e) docs document it" || bad "(e) docs do not"
 grep -q "policy/single-valued.md" docs/reference/single-valued.en.md && ok "(e) docs.en document it" || bad "(e) docs.en do not"
-grep -q "policy/single-valued.md" README.ko.md && ok "(e) README.ko documents it" || bad "(e) README.ko does not"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "single-valued scaffold: all passed"; else echo "single-valued scaffold: $fails failed"; exit 1; fi
