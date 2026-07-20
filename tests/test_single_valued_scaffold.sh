@@ -83,8 +83,10 @@ printf 'my_relation\n' > "$KB2/policy/single-valued.md"
   && ok "(g) re-running init does not overwrite an existing single-valued.md" \
   || bad "(g) init CLOBBERED the user's declarations"
 
-# README must say what goes in the file -- status points users at it.
-grep -q "policy/single-valued.md" README.md && ok "(e) README documents it" || bad "(e) README does not"
+# The docs must say what goes in the file -- status points users at it.
+# The prose moved out of README.md (now an abridged index) into docs/reference/.
+grep -q "policy/single-valued.md" docs/reference/single-valued.md && ok "(e) docs document it" || bad "(e) docs do not"
+grep -q "policy/single-valued.md" docs/reference/single-valued.en.md && ok "(e) docs.en document it" || bad "(e) docs.en do not"
 grep -q "policy/single-valued.md" README.ko.md && ok "(e) README.ko documents it" || bad "(e) README.ko does not"
 
 echo

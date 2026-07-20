@@ -37,6 +37,8 @@ factlog의 상세 문서입니다. 프로젝트 소개는 [저장소 README](../
 | [사실 검토](reference/review.md) | `factlog review` · `accept` · `reject` · `amend`, 사람의 결정이 갖는 내구성 |
 | [어휘 · 검색 · 출처 추적](reference/search-provenance.md) | `factlog vocab` · `search` · `provenance` |
 | [타입 지정 관계](reference/typed-relations.md) | `policy/typed-relations.md`, date · ordinal · amount · number |
+| [관계 별칭](reference/relation-aliases.md) | `policy/relation-aliases.md`, 표면형 이름을 정규형으로 접기 |
+| [단일값 관계](reference/single-valued.md) | `policy/single-valued.md`, subject 당 object 하나, `CONFLICT` 와 해소 방법 |
 | [소스 제외와 제거](reference/ignore-eject.md) | `factlog ignore`(sync 제외), `factlog eject`(적재 되돌리기), `--fact` |
 | [Windows](reference/windows.md) | Windows Python 실행 파일, Git Bash, PEP 668 venv 안내 |
 

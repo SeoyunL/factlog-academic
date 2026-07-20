@@ -38,6 +38,8 @@ To walk the whole flow through once without your own data, start with the
 | [Reviewing facts](reference/review.en.md) | `factlog review` · `accept` · `reject` · `amend`, durability of human decisions |
 | [Vocabulary · search · provenance](reference/search-provenance.en.md) | `factlog vocab` · `search` · `provenance` |
 | [Typed relations](reference/typed-relations.en.md) | `policy/typed-relations.md`, date · ordinal · amount · number |
+| [Relation aliases](reference/relation-aliases.en.md) | `policy/relation-aliases.md`, folding a surface name to the canonical one |
+| [Single-valued relations](reference/single-valued.en.md) | `policy/single-valued.md`, one object per subject, `CONFLICT` and how to resolve it |
 | [Excluding and removing sources](reference/ignore-eject.en.md) | `factlog ignore` (exclude from sync), `factlog eject` (undo an ingest), `--fact` |
 | [Windows](reference/windows.en.md) | Windows Python executable, Git Bash, PEP 668 venv guidance |
 

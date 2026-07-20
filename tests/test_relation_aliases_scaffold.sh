@@ -98,7 +98,9 @@ printf '%s' "$O" | grep -q "'a#b': 'c'" && ! printf '%s' "$O" | grep -q malforme
   && ok "(e) a '#' inside backticks is part of the name, not a comment" \
   || bad "(e) a backtick-internal '#' was mishandled: $O"
 
-grep -q "policy/relation-aliases.md" README.md && ok "(d) README documents it" || bad "(d) README does not"
+# The prose moved out of README.md (now an abridged index) into docs/reference/.
+grep -q "policy/relation-aliases.md" docs/reference/relation-aliases.md && ok "(d) docs document it" || bad "(d) docs do not"
+grep -q "policy/relation-aliases.md" docs/reference/relation-aliases.en.md && ok "(d) docs.en document it" || bad "(d) docs.en do not"
 grep -q "policy/relation-aliases.md" README.ko.md && ok "(d) README.ko documents it" || bad "(d) README.ko does not"
 
 echo
