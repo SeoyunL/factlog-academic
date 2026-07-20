@@ -27,8 +27,20 @@ is inclusive of the boundary day: `D >= 20300101` includes 2030-01-01.
 
 ### `ordinal`
 
-`3rd` / `3위` / `제3호` → an int rank. The value must **start** with the number:
-`rank 3` does not parse.
+`3rd` / `3위` / `제3호` → an int rank.
+
+In the **prose form** the number must be followed by a rank unit — Korean
+`호`/`위`/`번`/`차`/`등`/`째` (with an optional leading `제`), or English
+`st`/`nd`/`rd`/`th`. Whitespace between the number and the unit is allowed
+(`3 위`, `3 rd`); a leading `제` must sit directly against the number, so
+`제 3호` does not parse. The number itself is bare digits — no sign, grouping
+separator or decimal point (`-3위`, `3,000위` and `3.5위` all fail).
+
+A prose value with no rank unit does not parse and stays untyped: `3`, `제3` and
+`rank 3` all fail.
+
+The compound term `ordinal(3)` is a separate path that carries no unit, so the
+rule above does not apply to it.
 
 ### `amount`
 
