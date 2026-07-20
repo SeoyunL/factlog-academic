@@ -20,7 +20,13 @@ worst of them: the pooled set carried the RELATION names too, so
 
 Both sides now route every one of those decisions through `common.QueryVocabulary`,
 so the five positions are tested here as one property: for each query, the gate's
-accept/reject and the report's `0 rows`/`unverified` must agree.
+accept/reject and the report's `0 rows`/`unverified` must agree — WHEN THE ENGINE
+EXTENT IS EMPTY. A pair the engine PROVED stays `reachable` whatever the vocabulary
+says, and there the two deliberately part: reachability is the engine's to decide,
+never re-derived from the accepted facts (#303). So the vocabulary check lives
+INSIDE `if not rows:`; moving it ahead of `path_query_rows` would satisfy the
+parity property above and silently deny a proved path. `TestTheEngineKeepsItsProof`
+is the test that forbids that refactor.
 """
 from __future__ import annotations
 
@@ -80,11 +86,18 @@ def _gate_accepts(query: str) -> bool:
     return code != QUERY_ENTITY_NOT_ACCEPTED and code != "relation_not_accepted"
 
 
-def _report_line(kb, query: str) -> str:
+def _report_line(kb, query: str, path_pairs: set[tuple[str, str]] | None = None) -> str:
+    """The report's one line for `query`.
+
+    `path_pairs` is the ENGINE's path extent. It defaults to empty because the
+    vocabulary property below is about what the report says when the engine proved
+    nothing — but it must be settable, or no test can reach the branch where an
+    unaccepted node has a proved path and the two sides part on purpose (#303).
+    """
     (kb / "facts" / "query.dl").write_text(query + "\n", encoding="utf-8")
     results = rlc.evaluate_queries(
         FACTS,
-        {"path": set(), "needs_review": {("Alice", "low_conf")}},
+        {"path": set(path_pairs or ()), "needs_review": {("Alice", "low_conf")}},
         {"needs_review"},
     )
     assert len(results) == 1, results
@@ -128,6 +141,13 @@ class TestTheFivePositionsAgree:
             'path("founded_by", X)?',
             # The two-constant form takes the same check; only the label differs.
             'path("2020", "Alice")?',
+            # BOTH nodes are checked, not just the first. Every case above pins the
+            # unaccepted constant at args[0], so dropping args[1] from the path
+            # checks passes the whole suite while the report goes back to answering
+            # `path("Alice", "2020")? -> (not found)` — a verified negative the gate
+            # refuses (#366). The target position and the variable-first form.
+            'path("Alice", "2020")?',
+            'path(X, "2020")?',
         ],
     )
     def test_a_constant_its_position_rejects_is_rejected_on_both_sides(self, kb, query):
@@ -173,6 +193,8 @@ class TestTheFivePositionsAgree:
             'path("anyone", X)?',
             'path("founded_by", X)?',
             'path("2020", "Alice")?',
+            'path("Alice", "2020")?',
+            'path(X, "2020")?',
             'path("Alice", X)?',
             # The discriminator belongs in the parity set too: accepted vocabulary
             # with an absent triple must be accepted by BOTH, not just by the report.
@@ -225,6 +247,65 @@ class TestTheDiscriminatorSurvives:
     def test_an_accepted_path_variable_with_no_pairs_is_still_zero_rows(self, kb):
         assert _report_line(kb, 'path("Alice", X)?') == "path results: 0 rows"
 
+    def test_an_empty_kb_path_query_is_unverified_not_not_found(self, kb, monkeypatch):
+        """Over a KB with no facts at all, NOTHING is accepted vocabulary — so a path
+        query there is unverified, not a verified `(not found)`.
+
+        Two tests used to pin `(not found)` for `path("A","C")?` over `facts=[]`,
+        which read as "a well-formed unsatisfied query still gets its negative" but
+        rested on the empty KB accidentally: no vocabulary check existed. They were
+        given accepting facts (as #350 gave the relation siblings theirs), so the
+        empty-KB case itself is pinned here instead of being dropped.
+        """
+        monkeypatch.setattr(rlc, "query_lines", lambda: ['path("A", "C")?'])
+        line = rlc.evaluate_queries([], {"path": set()}, set(), hierarchy={})[0]
+        assert line == (
+            "path A -> C: unverified — 'A' is not accepted vocabulary "
+            "(see Warnings above)"
+        ), line
+
+
+class TestTheEngineKeepsItsProof:
+    """Reachability is the ENGINE's verdict, and vocabulary never overturns it (#303).
+
+    This is the class that forbids one specific refactor. The issue body proposed
+    checking the vocabulary BEFORE `path_query_rows`; the check lives inside
+    `if not rows:` instead, because a node outside the accepted vocabulary can still
+    have a path the engine PROVED — a rule in logic-policy.extra.dl puts the edge
+    there. Checking first would deny that proof on vocabulary grounds and hand
+    reachability back to python, the exact regression #303 closed.
+
+    Every other test in this file leaves the engine extent EMPTY, so the early-check
+    refactor passes all of them: it renders `unverified` for queries that had no rows
+    anyway. Only a non-empty `inferred["path"]` can tell the two designs apart, and
+    that is what these two tests supply.
+    """
+
+    PROVED = {("2020", "Alice")}
+
+    def test_a_proved_pair_over_an_unaccepted_node_stays_reachable(self, kb):
+        # "2020" is an attribute literal — not accepted at a path node, and warned
+        # about. The engine proved the pair anyway, so the report must report the
+        # proof, not deny it.
+        line = _report_line(kb, 'path("2020", "Alice")?', path_pairs=self.PROVED)
+        assert line == (
+            "path 2020 -> Alice: reachable (engine); no route through the accepted facts"
+        ), line
+        assert "unverified" not in line
+
+    def test_a_proved_pair_over_an_unaccepted_node_still_binds_a_variable(self, kb):
+        line = _report_line(kb, 'path("2020", X)?', path_pairs=self.PROVED)
+        assert line == "path results: 1 rows; 2020 -> Alice", line
+        assert "unverified" not in line
+
+    def test_the_warning_is_still_raised_for_the_unaccepted_node(self, kb):
+        """The proof survives, and so does the warning: the reader is told the node
+        is not accepted vocabulary AND that the engine proved a path through it.
+        Neither statement is suppressed by the other."""
+        assert _warns('path("2020", "Alice")?') == [
+            "query references non-engine entity or relation: 2020"
+        ]
+
 
 class TestTheWarningPointerIsExact:
     """`unverified — '...' (see Warnings above)` must point at a warning that is
@@ -240,6 +321,8 @@ class TestTheWarningPointerIsExact:
             ('path("anyone", X)?', "anyone"),
             ('path("founded_by", X)?', "founded_by"),
             ('path("2020", "Alice")?', "2020"),
+            ('path("Alice", "2020")?', "2020"),
+            ('path(X, "2020")?', "2020"),
         ],
     )
     def test_every_unverified_result_has_its_warning(self, kb, query, constant):
