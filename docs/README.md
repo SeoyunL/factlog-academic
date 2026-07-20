@@ -39,3 +39,18 @@ factlog의 상세 문서입니다. 프로젝트 소개는 [저장소 README](../
 | [타입 지정 관계](reference/typed-relations.md) | `policy/typed-relations.md`, date · ordinal · amount · number |
 | [소스 제외와 제거](reference/ignore-eject.md) | `factlog ignore`(sync 제외), `factlog eject`(적재 되돌리기), `--fact` |
 | [Windows](reference/windows.md) | Windows Python 실행 파일, Git Bash, PEP 668 venv 안내 |
+
+## 학술 서지 연동
+
+각 연동은 별도 extra 설치가 필요하고(`pip install 'factlog-academic[<이름>] @ git+...'`),
+가져온 레코드는 여전히 **후보**입니다 — `sync → review → accept` 게이트를 거칩니다.
+
+| 페이지 | 내용 |
+|--------|------|
+| [Zotero 가져오기](zotero-import.md) | `factlog zotero-import`, Zotero 7 Local API, `--pdf` · `--annotations` |
+| [OpenAlex 가져오기](openalex.md) | `factlog openalex-*`, 검색 · 인용 그래프 · 갱신 · 백필, 크레딧 예산 |
+| [arXiv 가져오기](arxiv.md) | `factlog arxiv-*`, 단건·검색 임포트, 버전 추적, 철회(withdrawal) |
+| [PubMed 가져오기](pubmed.md) | `factlog pubmed-*`, E-utilities 임포트 · 검색 · 갱신 · MeSH 제안 |
+
+영문 요약본도 있습니다 ([Zotero](zotero-import.en.md) · [OpenAlex](openalex.en.md) ·
+[arXiv](arxiv.en.md) · [PubMed](pubmed.en.md)).

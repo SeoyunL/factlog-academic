@@ -1,7 +1,7 @@
 # Typed relations — full reference
 
-The README's [Typed relations](../README.md#typed-relations-policytyped-relationsmd)
-section (한국어: [타입 지정 관계](../README.ko.md#타입-지정-관계-policytyped-relationsmd))
+The reference page [Typed relations](reference/typed-relations.en.md)
+(한국어: [타입 지정 관계](reference/typed-relations.md))
 covers the declaration format and the four types at a glance. This document holds
 the details you need only when you actually author comparison thresholds: per-type
 value normalisation, the `amount` unit table, and the compound-term form an

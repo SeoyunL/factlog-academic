@@ -40,3 +40,19 @@ To walk the whole flow through once without your own data, start with the
 | [Typed relations](reference/typed-relations.en.md) | `policy/typed-relations.md`, date · ordinal · amount · number |
 | [Excluding and removing sources](reference/ignore-eject.en.md) | `factlog ignore` (exclude from sync), `factlog eject` (undo an ingest), `--fact` |
 | [Windows](reference/windows.en.md) | Windows Python executable, Git Bash, PEP 668 venv guidance |
+
+## Academic bibliography integrations
+
+Each integration needs its own extra (`pip install 'factlog-academic[<name>] @ git+...'`)
+and imports records as **candidates** — they still pass the `sync → review → accept` gate.
+
+| Page | Contents |
+|--------|------|
+| [Zotero import](zotero-import.en.md) | `factlog zotero-import`, Zotero 7 Local API, `--pdf` · `--annotations` |
+| [OpenAlex import](openalex.en.md) | `factlog openalex-*`, search · citation graph · refresh · backfill, credit budget |
+| [arXiv import](arxiv.en.md) | `factlog arxiv-*`, id and search import, version tracking, withdrawals |
+| [PubMed import](pubmed.en.md) | `factlog pubmed-*`, E-utilities import · search · refresh · MeSH proposals |
+
+The Korean pages ([Zotero](zotero-import.md) · [OpenAlex](openalex.md) ·
+[arXiv](arxiv.md) · [PubMed](pubmed.md)) are the fuller reference: per-command
+options and output, generated source file layout, and config file keys.
