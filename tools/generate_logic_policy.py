@@ -107,7 +107,7 @@ def render_prompt(policy_text: str) -> str:
 
 # markdown_policy_items lives in factlog/common.py so this compiler and the
 # "does this .md define rules?" check (common.logic_policy_md_has_rules, used by
-# _load_logic_policy_from and finalize.py) share one parser and never drift (#190).
+# _load_logic_policy_from and finalize.py) share one parser and never drift (upstream#190).
 
 
 def _reject_undecodable_policy_name(kind: str, name: str, lineno: int) -> None:

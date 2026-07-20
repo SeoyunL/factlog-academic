@@ -98,8 +98,8 @@ def _reject_undecodable_control_chars(rows: list[dict[str, str]]) -> None:
     through csv.DictReader rather than load_facts, and they WRITE the correction before
     recompiling. Their recompile step does reach the shared loader (_recompile_accepted
     subprocesses factlog.compile_facts, whose main calls load_facts), but a failure there
-    costs only accepted.dl — amend says so itself, "the edit WAS saved to candidates.csv/runs"
-    — so the edit is durable and the next compile picks it up (#371).
+    costs only accepted.dl — the command still exits 1, yet it says the edit WAS saved to
+    candidates.csv/runs — so the edit is durable and the next compile picks it up (#371).
     """
     for row in rows:
         for field in ("subject", "relation", "object"):
