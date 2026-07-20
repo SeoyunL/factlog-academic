@@ -137,8 +137,8 @@ def _reject_undecodable_policy_name(kind: str, name: str, lineno: int) -> None:
     bullet, and there REASON_RE is the reason axis's only defence.
 
     We gate reason anyway, because that boundary is a PARSING rule, not an integrity rule:
-    markdown_policy_items exists to define bullet syntax (#190), not to protect the engine's
-    wire format. Whoever later widens the tag grammar is making a parsing decision and has
+    markdown_policy_items exists to define bullet syntax (upstream#190), not to protect the
+    engine's wire format. Whoever later widens the tag grammar is making a parsing decision and has
     no reason to suspect they are opening an engine-integrity hole — which is exactly when
     a cheap local check at the emission site earns its keep.
     """

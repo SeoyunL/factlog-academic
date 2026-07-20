@@ -94,9 +94,12 @@ def _reject_undecodable_control_chars(rows: list[dict[str, str]]) -> None:
     alter a recorded fact; a tab pasted from a PDF table is data, not noise — or (b)
     emitting the raw escape and hoping a downstream decoder agrees, which is exactly the
     silent identity loss this catches. The human gate that repairs the row is factlog
-    amend/eject, and those two work on a KB this gate has rejected because they read
-    candidates.csv through csv.DictReader directly — they never call load_facts, so nothing
-    added to the shared loader can take the repair path down with the compile (measured, #371).
+    amend/eject, and both keep working on a KB this gate rejects: they read candidates.csv
+    through csv.DictReader rather than load_facts, and they WRITE the correction before
+    recompiling. Their recompile step does reach the shared loader (_recompile_accepted
+    subprocesses factlog.compile_facts, whose main calls load_facts), but a failure there
+    costs only accepted.dl — amend says so itself, "the edit WAS saved to candidates.csv/runs"
+    — so the edit is durable and the next compile picks it up (#371).
     """
     for row in rows:
         for field in ("subject", "relation", "object"):
