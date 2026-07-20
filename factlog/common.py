@@ -2409,14 +2409,68 @@ def dl_string(value: str) -> str:
 # and the engine leaks a raw integer id into the report — including relation_alive, the
 # #308 witness, which decodes to a bare number instead of its subject (#331). Everything
 # ELSE round-trips: json leaves U+0085/U+2028/U+2029 (and U+007F, C1) raw and wirelog
-# parses them fine (#255, verified), and it correctly escapes " and \ which wirelog decodes.
+# parses them fine (upstream#255, verified), and it correctly escapes " and \ which wirelog
+# decodes.
 _WIRELOG_UNDECODABLE_RE = re.compile(r"[\x00-\x1f]")
 
 
 def wirelog_undecodable_chars(value: str) -> list[str]:
     """Distinct control characters in *value* that dl_string would emit as a
     wirelog-undecodable escape (the C0 range U+0000–U+001F). Empty when *value* is safe to
-    round-trip through accepted.dl. Pure; U+0085/U+2028/U+2029 are never flagged (#331/#255)."""
+    round-trip through accepted.dl. Pure; U+0085/U+2028/U+2029 never flagged (#331/upstream#255).
+
+    Those three survive the round trip (upstream#255, verified), so no caller rejects them;
+    the fact lives here next to the verdict rather than restated at each gate.
+
+    GATE PLACEMENT (#371). This predicate only judges; the callers reject. Where a caller
+    rejects follows three clauses:
+
+    1. Gate at the last point where a value is still ATTRIBUTABLE to the artefact a human
+       edits. Not "the earliest point that names the source" — by the time the gates below
+       run, some of that is already gone, and how much survives differs per gate: the policy
+       gate still holds the logic-policy.md lineno and cites the exact bullet; the canonical
+       gate holds only the alias key (relation_aliases returns a dict and keeps no line
+       number, though the file is one bullet per mapping and could supply one); the fact gate
+       holds the accepted row — the triple plus its `source` — but no candidates.csv row index
+       or line number, and after dedup the retained source is only the first of several for a
+       repeated triple. Its message cites none of that today and can only say the tab LOOKS
+       pasted from a PDF table. The rule is to spend what attribution is left; where a gate
+       cites less than it holds that is a choice, not a limit.
+    2. When a path has no authoring artefact at all (an LLM draft has no bullet to cite), drop
+       the gate to the last point every path shares, so nothing reaches emission ungated.
+    3. "Earliest" means earliest on the EMISSION path — the path whose only outcome is writing
+       a .dl. Never gate at load, even though load is earlier and would see more attribution.
+       The shared loaders (load_facts, relation_aliases) are read by every read path — ask
+       routing, run_logic_check, vocab/status, schema_context, conflict and coverage tools —
+       so a load gate spends all of them to stop one compile: the KB becomes unreadable rather
+       than merely uncompilable. Compile gates, not load gates: candidates.csv and
+       relation-aliases.md keep loading (status/vocabulary keep working) while the compile
+       refuses.
+
+    Whether a gate that looks redundant may be DELETED is judged per input, not per call site:
+    delete only when, for EVERY input reaching it, another gate raises first with the same rc
+    AND an equally actionable message (rc alone is too coarse — the policy gate raises
+    FactlogError with a line to fix, the draft gate a bare ValueError with a traceback; both
+    exit 1, and only one of them tells the reader what to do). #363 is the deletion case: the
+    per-atom canonical check in compile_facts went, because the declaration gate fires first
+    on every input it could ever see, with the identical rc and the same relation-aliases.md
+    mapping to fix. The draft-path gate in generate_logic_policy.normalized_rules is the same
+    test coming out the other way: it duplicates the deterministic-path gate on deterministic
+    input and still stays, because on draft input it is the only defence — counting call sites
+    rather than inputs would have deleted it.
+
+    A gate that NO input reaches is a separate case, and emptiness is not a deletion argument
+    — it makes the test above vacuously true, so ask WHY nothing can reach. Another gate
+    stopping it is a reason to delete; an unrelated parser stopping it by accident is a reason
+    to keep. The reason axis of the policy gate is the second kind (#359): no C0 character
+    reaches it, but only because markdown_policy_items admits none into a tag, and that
+    function exists to define bullet syntax (upstream#190), not to protect the engine's wire
+    format. Whoever widens the tag grammar is making a parsing decision and has no reason to
+    suspect they opened an integrity hole.
+
+    Corollary: an emission site whose input is guaranteed to have passed a gate carries a
+    DOCUMENTED PRECONDITION, not a second gate — and that precondition states what breaks it.
+    """
     return sorted(set(_WIRELOG_UNDECODABLE_RE.findall(value)))
 
 

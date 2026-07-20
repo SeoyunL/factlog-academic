@@ -107,12 +107,14 @@ def render_prompt(policy_text: str) -> str:
 
 # markdown_policy_items lives in factlog/common.py so this compiler and the
 # "does this .md define rules?" check (common.logic_policy_md_has_rules, used by
-# _load_logic_policy_from and finalize.py) share one parser and never drift (#190).
+# _load_logic_policy_from and finalize.py) share one parser and never drift (upstream#190).
 
 
 def _reject_undecodable_policy_name(kind: str, name: str, lineno: int) -> None:
     """Refuse to compile a policy name carrying a control char dl_string would emit as a
     wirelog-undecodable escape (#359, the policy-text sibling of #331/#357).
+
+    Placement and keep/delete rules: see wirelog_undecodable_chars (factlog/common.py).
 
     Both names below reach the .dl through dl_string (json.dumps), and the engine decodes
     only \\" and \\\\ — so a C0 control (U+0000–U+001F) is stored as a literal backslash
@@ -135,14 +137,10 @@ def _reject_undecodable_policy_name(kind: str, name: str, lineno: int) -> None:
     bullet, and there REASON_RE is the reason axis's only defence.
 
     We gate reason anyway, because that boundary is a PARSING rule, not an integrity rule:
-    markdown_policy_items exists to define bullet syntax (#190), not to protect the engine's
-    wire format. Whoever later widens the tag grammar is making a parsing decision and has
+    markdown_policy_items exists to define bullet syntax (upstream#190), not to protect the
+    engine's wire format. Whoever later widens the tag grammar is making a parsing decision and has
     no reason to suspect they are opening an engine-integrity hole — which is exactly when
-    a cheap local check at the emission site earns its keep. Contrast the canonical-name
-    check deleted from compile_facts.py in the same series: that one was pure duplication
-    (a sibling gate fired on the identical input with the identical rc), so removing it lost
-    nothing. Redundant with a gate → delete; unreachable only via an unrelated parser → keep.
-    U+0085/U+2028/U+2029 round-trip and are never rejected (#255).
+    a cheap local check at the emission site earns its keep.
     """
     bad = wirelog_undecodable_chars(name)
     if not bad:
@@ -257,7 +255,10 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
             # naming a relation no fact can hold, i.e. a silently dead policy. Every path to
             # compile_policy passes through this function, so this is where both meet.
             # Judged by wirelog_undecodable_chars, never by a local character set, so the
-            # verdict cannot drift from the engine's actual wire format.
+            # verdict cannot drift from the engine's actual wire format. Placement and
+            # keep/delete rules: see that predicate's docstring (factlog/common.py) — this
+            # gate duplicates the deterministic-path one on deterministic input yet stays,
+            # because on draft input it is the only defence.
             #
             # Do NOT widen this to U+0085/U+2028/U+2029: they round-trip through the engine
             # (#255) and are not an integrity problem. RELATION_RE already refuses them a
