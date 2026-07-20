@@ -174,6 +174,87 @@ class TestCanonicalNameControlChars:
         assert "canonical(" in accepted and "cited_by_paper" in accepted, accepted
 
 
+class TestAttrRelEmissionControlChars:
+    """#373: the attr_rel emission site gates its own input, on BOTH branches.
+
+    _attr_rel_facts writes a declared attribute relation name into the engine program.
+    The name is a relation symbol read back out of accepted.dl, so the standing argument
+    was that compile_facts' gate had already cleared it. Measurement says otherwise on
+    both branches: `accepted=` lets a caller substitute rows the gate never saw, and the
+    default branch reads accepted.dl straight from disk — compile_facts' gate ran in some
+    earlier process, which describes that process and not these bytes.
+
+    These are pure-function tests, so they monkeypatch the module paths the loaders read
+    (the idiom in test_attribute_path_nodes.py) instead of driving a CLI in a subprocess
+    as the compile tests above do.
+    """
+
+    @pytest.fixture
+    def kb(self, tmp_path, monkeypatch):
+        (tmp_path / "policy").mkdir()
+        (tmp_path / "facts").mkdir()
+        monkeypatch.setattr(common, "POLICY_DIR", tmp_path / "policy")
+        monkeypatch.setattr(common, "ACCEPTED_DL", tmp_path / "facts" / "accepted.dl")
+        return tmp_path
+
+    def _declare(self, kb, name):
+        # Backtick-quoted: _relation_names_from falls back to stripped.split()[0] for a
+        # bare token, which would cut the name at the tab and never declare it.
+        (kb / "policy" / "attribute-relations.md").write_text(
+            f"# Attribute relations\n- `{name}`\n", encoding="utf-8"
+        )
+
+    @staticmethod
+    def _rows(name):
+        return [{"subject": "A", "relation": name, "object": "2020", "status": "accepted"}]
+
+    def test_rejects_a_tab_in_rows_passed_through_the_accepted_argument(self, kb):
+        self._declare(kb, "pub\tyear")
+        # Premise first: without a matching declaration the function returns "" early and
+        # a green result would mean nothing.
+        assert common.attribute_relation_forms() == {"pub\tyear"}
+        with pytest.raises(common.FactlogError) as exc:
+            common._attr_rel_facts(self._rows("pub\tyear"))
+        message = str(exc.value)
+        assert "control character" in message, message
+        assert "attribute relation name" in message, message
+        assert "'\\t'" in message, message  # shown with !r so the tab stays visible
+        assert "#373" in message, message
+
+    def test_rejects_a_tab_reaching_the_default_branch_from_disk(self, kb):
+        # No argument: rows come from load_accepted_facts(), which reads accepted.dl as it
+        # is on disk. A hand-edited, truncated or externally generated file gets here with
+        # no gate between it and the engine program.
+        self._declare(kb, "pub\tyear")
+        (kb / "facts" / "accepted.dl").write_text(
+            'relation("A", "pub\\tyear", "2020").\n', encoding="utf-8"
+        )
+        # Premise: the JSON escape on disk decodes back to a real tab in Python.
+        assert common.load_accepted_facts() == [
+            {"subject": "A", "relation": "pub\tyear", "object": "2020"}
+        ]
+        with pytest.raises(common.FactlogError) as exc:
+            common._attr_rel_facts()
+        assert "control character" in str(exc.value), str(exc.value)
+
+    def test_a_clean_name_emits_byte_identical_output(self, kb):
+        self._declare(kb, "pub_year")
+        assert common._attr_rel_facts(self._rows("pub_year")) == '\nattr_rel("pub_year").\n'
+
+    # What the gate must NOT reject is pinned on the verdict itself, by
+    # TestWirelogUndecodableChars::test_line_separators_and_high_controls_round_trip — this
+    # gate calls that predicate and cannot disagree with it. Only the emission consequence is
+    # worth a test here, and U+007F is the character to use: U+0085/U+2028/U+2029 cannot reach
+    # this site at all, because _relation_names_from reads the policy file with
+    # str.splitlines(), which splits on all three, so such a name is never declared (measured
+    # — the parse yields '`pub' and 'year`' instead of one name).
+    def test_round_tripping_control_survives_emission(self, kb):
+        name = f"pub{chr(0x7F)}year"
+        self._declare(kb, name)
+        assert common.attribute_relation_forms() == {name}
+        assert common._attr_rel_facts(self._rows(name)) == f'\nattr_rel("{name}").\n'
+
+
 # --- Engine-backed reproduction: WHY the gate exists -------------------------
 try:
     import pyrewire  # noqa: F401

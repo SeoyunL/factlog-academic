@@ -2445,7 +2445,12 @@ def wirelog_undecodable_chars(value: str) -> list[str]:
        so a load gate spends all of them to stop one compile: the KB becomes unreadable rather
        than merely uncompilable. Compile gates, not load gates: candidates.csv and
        relation-aliases.md keep loading (status/vocabulary keep working) while the compile
-       refuses.
+       refuses. Assembling the ENGINE PROGRAM counts as emission too, even though nothing is
+       written to disk: run_wirelog concatenates its program in memory and hands it to the
+       session, so the #373 gate sits on a path check/ask reach rather than before a file
+       write. The clause still holds because it is not a load gate — the shared loaders keep
+       returning the row, and on a KB this gate rejects `factlog status` and `factlog vocab`
+       both still exit 0 while only the engine-backed paths refuse (measured).
 
     Whether a gate that looks redundant may be DELETED is judged per input, not per call site:
     delete only when, for EVERY input reaching it, another gate raises first with the same rc
@@ -2470,6 +2475,32 @@ def wirelog_undecodable_chars(value: str) -> list[str]:
 
     Corollary: an emission site whose input is guaranteed to have passed a gate carries a
     DOCUMENTED PRECONDITION, not a second gate — and that precondition states what breaks it.
+
+    Whether that antecedent HOLDS is judged by bypassability, not by counting call sites. A
+    REQUIRED argument whose only ordinary producer carries the gate keeps the corollary:
+    compile_policy(rules) is reached as compile_policy(normalized_rules(draft)) by every
+    caller it has, so skipping the gate means deliberately constructing some other value. An
+    OPTIONAL parameter that substitutes a gated DEFAULT does not: _attr_rel_facts(accepted=None)
+    reads accepted.dl when omitted and whatever the caller holds when passed. A call site may
+    well say WHICH — the one production caller does, run_wirelog passing rows it loaded two
+    lines above — but that is not the guarantee the corollary needs: knowing a value came from
+    load_accepted_facts says it came off disk, not that anything gated those bytes. So the
+    antecedent fails even where the source is legible. That is clause 2's shape for the passed
+    path, which has no authoring artefact to attribute at all — an in-memory list came from
+    wherever its caller got it — so the gate drops to the point both paths share. (The default
+    path does have one, accepted.dl, and the message names it.) #373 is the case, and its
+    parameter is not a test seam: run_wirelog passes rows to REUSE an accepted.dl it already
+    read (the `already loaded above` comment there), added with the function in #237. The
+    sibling idiom already carries ungated rows — cli.py hands entity_set/value_set its
+    ctx.load_facts(), candidates.csv before any gate — and _attr_rel_facts is the only member
+    of it that emits into the engine program.
+
+    A GENERATED artefact also guarantees only TEMPORALLY, not structurally. accepted.dl is
+    written behind the fact gate, but run_wirelog re-reads it from disk with no recompile, so
+    "it passed the gate" describes an earlier process rather than this input — hand editing,
+    truncation and an external generator all reach emission ungated, and #373's default branch,
+    which takes no argument at all, is breached exactly that way. Read a gate as covering the
+    bytes it saw, never the file it once produced.
     """
     return sorted(set(_WIRELOG_UNDECODABLE_RE.findall(value)))
 
@@ -2812,6 +2843,15 @@ def _attr_rel_facts(accepted: list[dict[str, str]] | None = None) -> str:
     the python tracer (which does normalize) said otherwise. Matching on the stored
     symbol keeps the two in step under any normalization, and leaves accepted.dl
     byte-identical.
+
+    *accepted* takes rows in the shape load_accepted_facts returns; omitted, they are
+    loaded from accepted.dl. It exists to REUSE an accepted.dl the caller already read
+    (run_wirelog does, see the comment at its `accepted = accepted_rows`), added with the
+    function itself in #237 — a hot path, not a test seam. So it carries no guarantee that
+    compile_facts' gate ever saw these rows, and neither does the default branch, which
+    reads whatever is on disk now. The control-char gate below therefore runs on BOTH
+    branches; see wirelog_undecodable_chars for why this is a gate and not a documented
+    precondition (#373).
     """
     forms = attribute_relation_forms()
     if not forms:
@@ -2822,10 +2862,66 @@ def _attr_rel_facts(accepted: list[dict[str, str]] | None = None) -> str:
     )
     if not names:
         return ""
+    _reject_undecodable_attr_rel_names(names)
     # dl_string, not an f-string: a name carrying a quote emitted `attr_rel(""x"")`
     # and the engine failed to parse the whole program, killing `factlog check` on
     # a KB that worked before the declaration existed.
     return "\n" + "\n".join(f"attr_rel({dl_string(name)})." for name in names) + "\n"
+
+
+def _reject_undecodable_attr_rel_names(names: list[str]) -> None:
+    """Refuse to build an engine program while any attr_rel name carries a control
+    character dl_string would emit as a wirelog-undecodable escape (#373).
+
+    Reaching here means the name got past compile_facts' gate, which rejects the same
+    characters in a fact's relation field — so accepted.dl was hand-edited, truncated,
+    externally generated, or handed in through *accepted*. Fail loud rather than emit a
+    symbol Python and the engine spell differently (#331).
+
+    The message prescribes RECOMPILE, not amend. amend never consults accepted.dl (no
+    ACCEPTED_DL, no load_accepted_facts in cmd_amend), so on the case this gate actually
+    catches — accepted.dl dirty, candidates.csv clean — the row it is told to correct is not
+    there and it answers `no fact matches`. Recompiling rebuilds accepted.dl from
+    candidates.csv and fixes that case outright. When the compile refuses instead, this
+    message hands off the row-level fix but names the flag the compile gate omits: that gate
+    reports the offending `relation` field yet suggests only --set-object/--set-subject.
+
+    It does NOT say WHERE the character is when the compile refuses, because compile_facts
+    has TWO control-char gates — _reject_undecodable_control_chars on the fact rows and
+    _reject_undecodable_canonical_names on the alias-derived canonical names. Since
+    attribute_relation_forms expands aliases through surface_variants, a mapping in
+    relation-aliases.md can produce the very form this gate fires on while candidates.csv
+    holds no control character at all (measured, #373). Both compile gates name their own
+    file and bullet, so the message defers to whichever one spoke.
+
+    Cleaning the declaration is a SEPARATE repair, not a redundant one: `names` is the
+    intersection of accepted relations and declared forms, so recompiling alone silences this
+    gate while leaving a declaration that matches no row and has silently stopped marking the
+    relation as an attribute (measured, #373).
+    """
+    for name in names:
+        bad = wirelog_undecodable_chars(name)
+        if not bad:
+            continue
+        shown = ", ".join(repr(c) for c in bad)
+        raise FactlogError(
+            f"control character(s) {shown} in attribute relation name {name!r} cannot be "
+            "emitted: the engine program encodes them as JSON escapes wirelog does not decode "
+            "(\\t \\n \\r \\b \\f and other U+0000–U+001F controls), so Python and the engine "
+            "would hold different strings for this relation and the value would be silently "
+            "lost from every query (#331/#373). tools/compile_facts.py rejects such a row, so "
+            "facts/accepted.dl was edited, truncated or generated outside it. Two repairs, "
+            "both needed: (1) rebuild the engine input — tools/compile_facts.py — which "
+            "restores facts/accepted.dl from facts/candidates.csv; if the compile itself "
+            "refuses, its message says which file holds the character — a facts/candidates.csv "
+            "row (correct it with factlog amend, using --set-relation for this field) or a "
+            "policy/relation-aliases.md mapping — so follow that message, then rerun the "
+            "compile. (2) clean the declaration carrying this name in "
+            "policy/attribute-relations.md (or the policy/relation-aliases.md mapping that "
+            "produces this form) — step 1 alone silences this error but leaves a declaration "
+            "that matches no fact and no longer marks the relation as an attribute. "
+            "(U+0085/U+2028/U+2029 are fine and never rejected.)"
+        )
 
 
 def policy_string_literals(text: str) -> list[str]:
