@@ -172,6 +172,31 @@ MeSH·저널 색인에 매핑해 함께 검색하는데, 이것이 대개 의도
 따옴표를 빼라는 안내는 하지 않습니다. 인용하지 않은 구에는 못 찾았다는 사실과 그 따옴표가
 PubMed 것이라는 사실만 말합니다.
 
+#### `--year` 범위 밖의 연도가 기록될 수 있습니다
+
+`--year 2022-2025` 로 검색했는데 `year: 2026` 인 레코드가 들어올 수 있습니다. 버그가 아니라
+**PubMed가 거르는 날짜와 factlog가 기록하는 날짜가 다른 필드**이기 때문입니다.
+
+- 필터: `--year` 는 `[Date - Publication]` 절을 만들고, PubMed는 이 범위를 레코드의
+  **전자판 게재일**(`ArticleDate`)로도 매칭합니다.
+- 기록: front matter의 `year` 는 **지면 호의 발행 연도**(`Journal/JournalIssue/PubDate/Year`)입니다.
+
+`PubModel="Print-Electronic"` 문헌 — 온라인 선공개 후 이듬해 지면 게재 — 에서 둘이 어긋납니다.
+실제 사례로 PMID 41620285는 `ArticleDate` 가 2025-04-16, 지면 호 연도가 2026입니다.
+
+어느 쪽도 틀리지 않았습니다. 전자판 날짜가 그 레코드를 검색 결과로 만든 근거이고, 지면 호
+연도는 인용에 찍히는 값입니다. 그래서 factlog는 레코드를 버리지도(진짜 매칭을 잃습니다),
+기록 연도를 고쳐 쓰지도(저널이 낸 적 없는 날짜를 인용에 박습니다) 않고 **사실을 알립니다** —
+MeSH 텀 검증이나 arXiv `--category` 사전검증과 같은 표면화+설명입니다.
+
+```
+factlog pubmed-search: ⚠ PMID 41620285 will be recorded as year 2026, outside the
+requested --year 2022-2025. ...
+```
+
+경고는 사람 모드와 `--porcelain` 모두 stderr로 나가며(그래서 `--porcelain` stdout은 그대로
+파싱 가능합니다), 선택 전에 나오므로 아직 선택을 바꿀 수 있습니다. 수집을 막지는 않습니다.
+
 ### `pubmed-refresh`
 
 KB의 provenance 원장(`<kb>/source-provenance/**/*.json`)에 있는 PubMed 레코드와 front

@@ -100,6 +100,29 @@ def _article(pmid, title="A paper", retracted=False):
     )
 
 
+def _print_electronic_article(pmid, *, issue_year, article_date, title="A paper"):
+    """A `PubModel="Print-Electronic"` record: online one year, in a print issue later.
+
+    Shaped after PMID 41620285 (#387). `<ArticleDate DateType="Electronic">` is what
+    PubMed's [Date - Publication] filter matched; `JournalIssue/PubDate/Year` is what
+    reaches front matter. Their disagreement is the case under test, so both are real
+    elements here rather than a preset `.year` on a stub.
+    """
+    year, month, day = article_date.split("-")
+    return (
+        "<PubmedArticle><MedlineCitation>"
+        f"<PMID Version='1'>{pmid}</PMID>"
+        "<Article PubModel='Print-Electronic'>"
+        f"<ArticleTitle>{title}</ArticleTitle>"
+        "<AuthorList><Author><LastName>Doe</LastName><ForeName>Jane</ForeName></Author></AuthorList>"
+        "<Journal><Title>Nature</Title><JournalIssue CitedMedium='Internet'>"
+        f"<PubDate><Year>{issue_year}</Year></PubDate></JournalIssue></Journal>"
+        f"<ArticleDate DateType='Electronic'><Year>{year}</Year>"
+        f"<Month>{month}</Month><Day>{day}</Day></ArticleDate>"
+        "</Article></MedlineCitation></PubmedArticle>"
+    )
+
+
 def _efetch(*articles):
     return f"<PubmedArticleSet>{''.join(articles)}</PubmedArticleSet>"
 
@@ -240,6 +263,68 @@ class TestSilentZeroGuard:
         assert "'Sepsis'" in captured.err and "'1810'" in captured.err
         assert "OutputMessage" not in captured.err
         assert "No items found" not in captured.err
+
+    def test_a_recorded_year_outside_the_requested_range_is_surfaced(
+            self, tmp_path, fake, capsys):
+        # #387 end-to-end: --year 2022-2025 matched PMID 41620285 on its electronic
+        # date (2025-04-16), but the issue year it will be recorded with is 2026.
+        # The operator hears about it before the file lands, on stderr.
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=1, ids=["41620285"]),
+            efetch_body=_efetch(_print_electronic_article("41620285", issue_year="2026",
+                                                          article_date="2025-04-16")),
+        ))
+        rc = run(["pubmed-search", "--query", "base editing", "--year", "2022-2025",
+                  "--target", str(_kb(tmp_path))])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "41620285" in err
+        assert "2026" in err and "2022-2025" in err
+        # It must read as an explanation, not as a factlog bug.
+        assert "electronic" in err and "journal issue" in err
+
+    def test_the_out_of_range_year_never_blocks_the_import(self, tmp_path, fake, capsys):
+        # The record is a genuine match; surfacing it must not drop it. --all still
+        # writes the file, and the exit code stays a success.
+        kb = _kb(tmp_path)
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=1, ids=["41620285"]),
+            efetch_body=_efetch(_print_electronic_article("41620285", issue_year="2026",
+                                                          article_date="2025-04-16")),
+        ))
+        rc = run(["pubmed-search", "--query", "base editing", "--year", "2022-2025",
+                  "--all", "--target", str(kb)])
+        assert rc == 0
+        assert _sources(kb) != []
+        assert "41620285" in capsys.readouterr().err
+
+    def test_the_warning_rides_stderr_under_porcelain(self, tmp_path, fake, capsys):
+        # --porcelain stdout must stay parseable: the warning belongs on stderr, and
+        # no prose may leak into the result rows.
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=1, ids=["41620285"]),
+            efetch_body=_efetch(_print_electronic_article("41620285", issue_year="2026",
+                                                          article_date="2025-04-16")),
+        ))
+        rc = run(["pubmed-search", "--query", "base editing", "--year", "2022-2025",
+                  "--porcelain", "--target", str(_kb(tmp_path))])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "41620285" in captured.err
+        for line in captured.out.splitlines():
+            assert line.startswith(("result\t", "found\t"))
+
+    def test_a_result_inside_the_range_triggers_no_year_warning(self, tmp_path, fake, capsys):
+        # The counterexample at the CLI seam: an in-range issue year stays quiet.
+        fake(FakePubMedClient(
+            esearch_body=_esearch(count=1, ids=["40000001"]),
+            efetch_body=_efetch(_print_electronic_article("40000001", issue_year="2024",
+                                                          article_date="2023-11-02")),
+        ))
+        rc = run(["pubmed-search", "--query", "base editing", "--year", "2022-2025",
+                  "--target", str(_kb(tmp_path))])
+        assert rc == 0
+        assert "will be recorded as year" not in capsys.readouterr().err
 
     def test_honest_empty_set_prints_no_guard_warning(self, tmp_path, fake, capsys):
         # No filter, no diagnostic — only the boilerplate every zero carries. Neither the

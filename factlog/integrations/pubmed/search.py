@@ -79,12 +79,14 @@ __all__ = [
     "PUBMED_EPOCH_YEAR",
     "PubMedSearchValidationError",
     "validate_field_tags",
+    "parse_year_range",
     "build_year_filter",
     "mesh_clause",
     "compose_query",
     "EsearchResult",
     "parse_esearch",
     "silent_zero_report",
+    "year_range_report",
 ]
 
 # factlog policy, not an API constraint. The default result count is the issue's
@@ -190,16 +192,18 @@ def validate_field_tags(query: str) -> str:
     return query.strip()
 
 
-def build_year_filter(year_spec: str) -> str:
-    """Turn ``--year`` (``YYYY`` or ``YYYY-YYYY``) into a ``[Date - Publication]`` clause.
+def parse_year_range(year_spec: str) -> tuple[int, int]:
+    """Read ``--year`` (``YYYY`` or ``YYYY-YYYY``) into validated ``(start, end)``.
 
     A reversed or out-of-range span is a typo, and PubMed answers a typo'd date
     with a zero rather than an error — the same silent lie the field-tag and MeSH
     guards exist for — so the start must not exceed the end and each year must
-    fall within PubMed's range (:data:`PUBMED_EPOCH_YEAR` .. next year). The
-    bounds are emitted in PubMed's documented quoted ``[Date - Publication]`` form.
+    fall within PubMed's range (:data:`PUBMED_EPOCH_YEAR` .. next year).
 
-    Returns e.g. ``("2020"[Date - Publication] : "2025"[Date - Publication])``.
+    Split out of :func:`build_year_filter` so the composed clause and the
+    after-the-fact range check (:func:`year_range_report`) read the operator's
+    ``--year`` through *one* parser. Two readings of the same spec is exactly the
+    two-sources-of-truth split #387 is about; one is enough.
     """
     if not isinstance(year_spec, str) or not year_spec.strip():
         raise PubMedSearchValidationError("--year must be a year or range, e.g. 2023 or 2020-2025.")
@@ -226,6 +230,26 @@ def build_year_filter(year_spec: str) -> str:
             f"--year range {start_year}-{end_year} runs backwards; PubMed answers a "
             "reversed range with zero results rather than an error."
         )
+    return start_year, end_year
+
+
+def build_year_filter(year_spec: str) -> str:
+    """Turn ``--year`` into a ``[Date - Publication]`` clause.
+
+    The bounds :func:`parse_year_range` validated are emitted in PubMed's
+    documented quoted form, e.g.
+    ``("2020"[Date - Publication] : "2025"[Date - Publication])``.
+
+    Note what this tag matches, because it is *not* the year factlog records:
+    ``[Date - Publication]`` matches a record on its **electronic** publication
+    date too (``ArticleDate``), while the front matter ``year`` comes from the
+    journal issue's ``PubDate`` (``work_parser._pub_date``). For a
+    ``PubModel="Print-Electronic"`` paper — online one year, in print the next —
+    those disagree. factlog keeps the idiomatic PubMed filter and surfaces the
+    disagreement instead of silently narrowing the search or rewriting the
+    recorded year: see :func:`year_range_report` (#387).
+    """
+    start_year, end_year = parse_year_range(year_spec)
     return (
         f'("{start_year}"[Date - Publication] : "{end_year}"[Date - Publication])'
     )
@@ -497,5 +521,58 @@ def silent_zero_report(
             "PubMed answers a nonexistent MeSH term (or an out-of-range year) with a "
             "silent zero, not an error — confirm each filter matches something before "
             "reading this as 'no such literature exists'."
+        )
+    return lines
+
+
+def year_range_report(works, *, year: str | None = None) -> list[str]:
+    """Name every result whose recorded year falls outside the requested ``--year``.
+
+    **The mismatch this surfaces (#387).** ``--year`` composes a
+    ``[Date - Publication]`` clause, and PubMed matches that range against a
+    record's *electronic* publication date (``ArticleDate``) as well as its
+    journal issue date. The year factlog writes into front matter is the journal
+    issue's alone (``work_parser._pub_date``). A ``PubModel="Print-Electronic"``
+    paper — posted online in one year, carried in a print issue the next — is
+    therefore a legitimate hit for ``--year 2022-2025`` that lands in the KB as
+    ``year: 2026``. PMID 41620285 is the measured case: ``ArticleDate`` 2025-04-16,
+    ``JournalIssue/PubDate/Year`` 2026.
+
+    **Why a warning and not a fix.** Neither field is wrong: the electronic date is
+    what makes the record a match, the issue year is what a citation prints. Dropping
+    the record would discard a real result, and rewriting the recorded year would put
+    a date on a citation that its journal never carried. So this states the fact,
+    explains why the two years differ, and leaves the decision with the operator —
+    the same surface-and-explain floor the MeSH guard and arXiv's ``--category``
+    pre-flight take. Nothing here filters or blocks.
+
+    Pure, duck-typed over ``.pmid``/``.year`` (no import of ``work_parser``), and
+    silent — ``[]`` — when no ``--year`` was given or every result lands inside the
+    range. A result with **no** year at all is skipped rather than reported: absence
+    is not evidence of a range mismatch, and ``work_parser`` already accounts for a
+    record whose ``PubDate`` carries no parseable year.
+    """
+    if not year:
+        return []
+    try:
+        start_year, end_year = parse_year_range(year)
+    except PubMedSearchValidationError:
+        # An unparseable --year is the caller's error to report before spending a
+        # request (the CLI validates it up front). Never a second, contradictory
+        # complaint from here.
+        return []
+
+    lines: list[str] = []
+    for work in works:
+        work_year = getattr(work, "year", None)
+        if work_year is None or start_year <= work_year <= end_year:
+            continue
+        lines.append(
+            f"⚠ PMID {getattr(work, 'pmid', '?')} will be recorded as year {work_year}, "
+            f"outside the requested --year {year}. PubMed's date filter also matches a "
+            "record's electronic publication date, while factlog records the journal "
+            "issue's year — the two differ when a paper appears online in one year and "
+            "in print the next. The result is a genuine match, not a bug; decide "
+            "whether you want it in the KB."
         )
     return lines

@@ -4869,7 +4869,11 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     ``ErrorList``/``WarningList`` (``PhraseNotFound`` / ``QuotedPhraseNotFound`` /
     ``FieldNotFound``) is surfaced verbatim; and a *filtered* zero is surfaced with
     the ``--year``/``--mesh`` filters named — see
-    :mod:`factlog.integrations.pubmed.search`. ``--show-query`` prints the composed
+    :mod:`factlog.integrations.pubmed.search`. The same surfacing principle covers a
+    result whose *recorded* year falls outside ``--year``: PubMed's date filter also
+    matches an electronic publication date, so a Print-Electronic paper is a genuine
+    hit that lands with a later issue year, and ``year_range_report`` names it rather
+    than letting it appear in the KB unannounced (#387). ``--show-query`` prints the composed
     ``term`` and sends nothing; ``--dry-run`` sends the search and declines to write
     (they are different, per the issue).
     """
@@ -4887,6 +4891,7 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
         parse_esearch,
         silent_zero_report,
         validate_field_tags,
+        year_range_report,
     )
     from factlog.integrations.pubmed.work_parser import (
         PubMedParseError,
@@ -4995,6 +5000,17 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     if porcelain:
         for warning in _pubmed_search_retraction_warnings(works):
             print(warning, file=sys.stderr)
+
+    # A result whose recorded year falls outside --year (#387). PubMed's
+    # [Date - Publication] filter also matches a record's electronic publication
+    # date, while front matter carries the journal issue's year, so a
+    # Print-Electronic paper legitimately matches --year 2022-2025 and lands as
+    # `year: 2026`. Surfaced, never blocked: the record is a real match and the
+    # operator decides. On stderr in both modes — like the silent-zero guard — so
+    # --porcelain stdout stays parseable, and before selection so the fact is
+    # known while there is still a choice to make.
+    for line in year_range_report(works, year=args.year):
+        print(f"factlog pubmed-search: {line}", file=sys.stderr)
 
     # Selection, then import through #166's importer. A command that cannot ask must
     # not guess: --all is the explicit opt-in a non-interactive run needs, and a
