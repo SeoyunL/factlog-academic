@@ -80,8 +80,8 @@ python3 -m factlog init --target ~/wiki   # scaffold the KB layout
 > **그 패키지**가 설치됩니다. 게다가 그쪽엔 해당 extra가 없어 pip이 경고만 하고 exit 0
 > 으로 끝나므로, 성공 메시지와 원치 않은 패키지만 남고 pyzotero·httpx·feedparser는
 > 하나도 들어오지 않습니다. 그 뒤로 연동은 계속 실패합니다. 배포명은
-> **`factlog-academic`** 입니다 — extra 를 붙일 때 `-academic` 없는 맨이름을 쓰는 형태는
-> 이 저장소 어디에도 쓰지 않습니다. 아래 방법 중 하나로 설치하십시오.
+> **`factlog-academic`** 입니다 — extra 는 반드시 `factlog-academic[...]` 로 적으십시오.
+> 아래 방법 중 하나로 설치하십시오.
 
 ```bash
 # 이 저장소를 클론했다면 (대부분 이 경우)

@@ -66,8 +66,8 @@ Each bibliography integration needs its own extra. Install it **from this reposi
 > and because it has no such extra, pip only warns and exits 0, so you are left with a
 > success message, a package you never asked for, and none of pyzotero / httpx /
 > feedparser. The integration then keeps failing. The distribution is named
-> **`factlog-academic`** — an extras spec written on the bare name, without `-academic`,
-> appears nowhere in this repo. Install it one of these ways:
+> **`factlog-academic`** — always write the extras spec as `factlog-academic[...]`.
+> Install it one of these ways:
 
 ```bash
 # if you cloned this repository (the common case)
