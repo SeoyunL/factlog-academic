@@ -3213,6 +3213,134 @@ def _relation_match_count(
     return sum(1 for row in facts if relation_row_matches(args, row, aliases, hierarchy))
 
 
+class QueryVocabulary:
+    """The accepted-vocabulary test the gate applies, ONE PREDICATE PER POSITION.
+
+    A query constant is not judged against "the vocabulary"; it is judged against
+    the vocabulary of the POSITION it occupies. A subject must be an entity, a
+    relation name must be an accepted (or declared-alias) relation, a relation
+    object may be a literal value or an ancestor DECLARED UNDER THE QUERIED
+    RELATION, and a policy query's pinned entity must be an entity. The four sets
+    are genuinely different — entity_set excludes the object literals of attribute
+    relations, and a hierarchy declaration is scoped to its relation — so any
+    caller that pools them decides differently from the gate.
+
+    That is what this class exists to prevent. The gate (``classify_query``) and
+    the report (run_logic_check) both route every vocabulary decision through
+    these predicates, so the report can no longer render a *verified negative*
+    ("0 rows") for a query the gate rejects ``entity_not_accepted`` — the residual
+    false negative of #362, and the drift #213/#296/#319/#320/#321/#341/#348 each
+    had to re-close because the two sides re-implemented one judgement twice.
+
+    ``hierarchy`` and ``aliases`` load LAZILY (and at most once), at the same
+    points in a query's evaluation the gate used to read them: a KB with a
+    malformed relation-aliases.md fails on exactly the queries it failed on before.
+    The set builders (``entity_set``/``value_set``/``allowed_relations``) stay raw;
+    the canonical fold the matcher uses lives here, in the gate, as #296 requires.
+    """
+
+    def __init__(
+        self,
+        entities: set[str],
+        values: set[str],
+        relations: set[str],
+        hierarchy: dict[str, dict[str, set[str]]] | None = None,
+        aliases: dict[str, str] | None = None,
+    ) -> None:
+        self._entities = {_canonical_value(e) for e in entities}
+        self._values = {_canonical_value(v) for v in values}
+        self._relations = {_canonical_value(r) for r in relations}
+        self._hierarchy = hierarchy
+        self._hierarchy_read = hierarchy is not None
+        self._aliases = aliases
+        self._pooled: set[str] | None = None
+
+    @classmethod
+    def from_facts(
+        cls,
+        facts: list[dict[str, str]],
+        hierarchy: dict[str, dict[str, set[str]]] | None = None,
+        aliases: dict[str, str] | None = None,
+    ) -> "QueryVocabulary":
+        """The vocabulary the given accepted facts license, per position."""
+        return cls(
+            entity_set(facts),
+            value_set(facts),
+            allowed_relations(facts),
+            hierarchy,
+            aliases,
+        )
+
+    def hierarchy(self) -> dict[str, dict[str, set[str]]] | None:
+        if not self._hierarchy_read:
+            self._hierarchy = value_hierarchy()
+            self._hierarchy_read = True
+        return self._hierarchy
+
+    def aliases(self) -> dict[str, str]:
+        if self._aliases is None:
+            self._aliases = relation_aliases()
+        return self._aliases
+
+    def aliases_if_read(self) -> dict[str, str] | None:
+        """The alias map only when it is already in hand, else None.
+
+        Lets the relation branch thread its one read down to the matcher without
+        forcing a read of its own — the #242 read-once invariant, preserved.
+        """
+        return self._aliases
+
+    def accepts_subject(self, value: str) -> bool:
+        """A relation/count subject (and a path node): a true entity."""
+        return _canonical_value(value) in self._entities
+
+    def accepts_relation(self, name: str) -> bool:
+        """A relation NAME: accepted in the facts, or a declared canonical whose
+        surface variants are what the facts actually store."""
+        if _canonical_value(name) in self._relations:
+            return True
+        return bool(canonical_variants_of(name, self.aliases()))
+
+    def accepts_object(self, value: str, relation: str | None) -> bool:
+        """A relation OBJECT under ``relation`` (None for a variable relation).
+
+        Literal values count (an attribute relation's objects are not entities),
+        and so does a value declared as an ancestor under THAT relation even when
+        no fact carries it — the point of `코호트연구 ⊂ 관찰연구`. The licence stays
+        scoped: pooling every relation's declarations would let a declaration on
+        one relation make the value queryable everywhere, turning "not our
+        vocabulary" into a verified negative under an unrelated relation.
+        """
+        folded = _canonical_value(value)
+        if folded in self._values:
+            return True
+        return folded in declared_ancestors(self.hierarchy(), relation, _canonical_value)
+
+    def accepts_policy_entity(self, value: str) -> bool:
+        """A policy query's pinned entity: entity_set, NOT the value set. An
+        attribute literal (`needs_review("2020", R)?` where 2020 is a
+        published_year object) is not an entity the policy extent ranges over."""
+        return _canonical_value(value) in self._entities
+
+    def accepts_anywhere(self, value: str) -> bool:
+        """Position-agnostic: is the constant licensed in ANY position?
+
+        The weakest of the tests above, kept for the one report check that still
+        has no position of its own (the generic constant loop over `path` and
+        predicates with no evaluation branch). Callers that know the position must
+        use the position's predicate — this one cannot tell a subject from an
+        object and will pass constants the gate rejects.
+        """
+        if self._pooled is None:
+            aliases = self.aliases()
+            pooled = set(self._values) | set(self._relations)
+            pooled |= {_canonical_value(raw) for raw in aliases}
+            pooled |= {_canonical_value(canonical) for canonical in aliases.values()}
+            pooled |= declared_ancestors(self.hierarchy(), None, _canonical_value)
+            self._pooled = pooled
+        return _canonical_value(value) in self._pooled
+
+
 # Stable structured outcome codes for query classification. Callers (e.g. the
 # ask router) route on these codes, NOT on the human-readable reason text, so a
 # reworded message — or an entity/relation constant that happens to contain a
@@ -3264,25 +3392,18 @@ def classify_query(
         return False, QUERY_UNKNOWN_PREDICATE, f"unknown predicate: {predicate}"
 
     args = _query_args(query)
-    entities = entity_set(facts)
-    # Relation OBJECTS may be literal values (attribute relations), which are not
-    # in entity_set; validate them against the broader value_set so a fact about
-    # a literal stays queryable. Subjects/path nodes/count subjects must be true
-    # entities, so those keep using entity_set.
-    values = value_set(facts)
-    relations = allowed_relations(facts)
-    # Gate membership compared through the SAME fold the matcher uses
-    # (relation_row_matches -> _canonical_value), so a query constant and an
-    # NFD-stored fact meet in the GATE exactly as they do in the MATCHER. Without
-    # this the two disagreed: an NFD fact matched the row but the gate called the
-    # constant "not accepted" (route=wiki), breaking the gate/matcher parity #213
-    # guarantees for NFD-authored facts (#296). Folded in the gate ONLY — the set
-    # builders (entity_set/value_set/allowed_relations) stay raw so the engine
-    # emitter, dependency_graph, vocab and display provenance are byte-unchanged.
+    # ONE per-position vocabulary, shared with the report (run_logic_check builds
+    # the same object), so the two cannot judge a constant differently. Relation
+    # OBJECTS may be literal values (attribute relations), which are not in
+    # entity_set; subjects/path nodes/count subjects/policy entities must be true
+    # entities. Membership is compared through the SAME fold the matcher uses
+    # (relation_row_matches -> _canonical_value), inside QueryVocabulary, so a
+    # query constant and an NFD-stored fact meet in the GATE exactly as they do in
+    # the MATCHER (#296). The set builders stay raw so the engine emitter,
+    # dependency_graph, vocab and display provenance are byte-unchanged.
     # (path stays raw on BOTH sides — self-consistent there — and is out of scope,
     # tracked as #299.)
-    entities_c = {canonical_value(e) for e in entities}
-    relations_c = {canonical_value(r) for r in relations}
+    vocab = QueryVocabulary.from_facts(facts)
     if predicate == "review_required":
         if len(args) != 1 or len(_quoted_constants(query)) != 1:
             return False, QUERY_MALFORMED, "review_required must include the original question string"
@@ -3293,7 +3414,7 @@ def classify_query(
         if not all(_is_valid_arg(arg) for arg in args):
             return False, QUERY_MALFORMED, "relation arguments must be variables or quoted strings"
         subject, relation, object_ = args
-        if not _is_variable(subject) and canonical_value(_arg_value(subject)) not in entities_c:
+        if not _is_variable(subject) and not vocab.accepts_subject(_arg_value(subject)):
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation subject is not an accepted entity: {_arg_value(subject)}"
         # Read relation_aliases() at most once per relation query and hand it to
         # _relation_match_count below: the canonical-acceptance check here and the
@@ -3313,14 +3434,14 @@ def classify_query(
         # one path that skipped the read was the outlier. The variable case is now
         # aligned with the non-variable one — fail loud on both, not silently ok on
         # one.
-        _rel_aliases: dict[str, str] | None = None
-        if not _is_variable(relation) and canonical_value(_arg_value(relation)) not in relations_c:
-            # A declared canonical name (one whose surface_variants is non-empty)
-            # counts as accepted even though the canonical itself may not appear
-            # literally in accepted.dl — the stored facts use surface variants.
-            _rel_aliases = relation_aliases()
-            if not canonical_variants_of(_arg_value(relation), _rel_aliases):
-                return False, QUERY_RELATION_NOT_ACCEPTED, f"relation name is not accepted: {_arg_value(relation)}"
+        # A declared canonical name (one whose surface_variants is non-empty) counts
+        # as accepted even though the canonical itself may not appear literally in
+        # accepted.dl — the stored facts use surface variants. accepts_relation reads
+        # the alias map only when the literal test fails, so the read stays gated
+        # exactly as it was, and aliases_if_read hands that one read down.
+        if not _is_variable(relation) and not vocab.accepts_relation(_arg_value(relation)):
+            return False, QUERY_RELATION_NOT_ACCEPTED, f"relation name is not accepted: {_arg_value(relation)}"
+        _rel_aliases: dict[str, str] | None = vocab.aliases_if_read()
         # The gate must know the value hierarchy too. A broader value may be a
         # legitimate query object while appearing in NO accepted fact — that is
         # the whole point of declaring `코호트연구 ⊂ 관찰연구`. Judged by the raw
@@ -3329,25 +3450,14 @@ def classify_query(
         # logic report was happily returning (#211). An assertion that is wrong is
         # worse than the silent omission this feature set out to fix, so the gate,
         # the evaluator and the report all read the same declarations.
-        _hierarchy = value_hierarchy()
+        _hierarchy = vocab.hierarchy()
         if not _is_variable(object_):
             _object_value = _arg_value(object_)
-            _accepted_objects = {_canonical_value(v) for v in values}
-            # A declared ancestor is a legitimate query object even when it appears
-            # in no accepted fact — that is the point of `코호트연구 ⊂ 관찰연구`.
-            # But the licence is SCOPED TO ITS RELATION. Pooling every relation's
-            # ancestors into one vocabulary would let a declaration on one relation
-            # make the value "known" everywhere, so a query naming it under an
-            # UNRELATED relation would stop being "not our vocabulary" (route=wiki)
-            # and become a *verified negative* — the engine asserting "no such fact"
-            # about a term the KB never adopted there. A wrong assertion is worse
-            # than an honest "cannot express".
-            _declared = _canonical_value(_object_value) in declared_ancestors(
-                _hierarchy,
-                None if _is_variable(relation) else _arg_value(relation),
-                _canonical_value,
-            )
-            if _canonical_value(_object_value) not in _accepted_objects and not _declared:
+            # Scoped to the queried relation (None for a variable relation, which
+            # really can range over every relation) — see accepts_object.
+            if not vocab.accepts_object(
+                _object_value, None if _is_variable(relation) else _arg_value(relation)
+            ):
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation object is not an accepted entity: {_object_value}"
         if _relation_match_count(query, facts, _rel_aliases, _hierarchy) == 0:
             return False, QUERY_FACT_ABSENT, "relation query does not match accepted facts"
@@ -3361,8 +3471,9 @@ def classify_query(
             # Same fold the matcher (path_query_rows/dependency_path) now applies, so
             # the gate and the matcher agree on an NFD-stored entity vs an NFC query
             # constant -- the gate/matcher parity #296 restored for relation/count,
-            # now for path too (#299). entities_c was folded once at the top.
-            if not _is_variable(arg) and canonical_value(_arg_value(arg)) not in entities_c:
+            # now for path too (#299). A path node is a true entity, so it takes the
+            # subject predicate.
+            if not _is_variable(arg) and not vocab.accepts_subject(_arg_value(arg)):
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(arg)}"
         # Reachability is decided by the ENGINE alone, never re-derived here (#303).
         # The gate has no engine pairs, so it once answered FACT_ABSENT from
@@ -3388,21 +3499,17 @@ def classify_query(
         if not all(_is_valid_arg(arg) for arg in args):
             return False, QUERY_MALFORMED, "count arguments must be variables or quoted strings"
         subject, relation = args
-        if not _is_variable(subject) and canonical_value(_arg_value(subject)) not in entities_c:
+        if not _is_variable(subject) and not vocab.accepts_subject(_arg_value(subject)):
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"count subject is not an accepted entity: {_arg_value(subject)}"
-        if not _is_variable(relation) and canonical_value(_arg_value(relation)) not in relations_c:
-            # A declared canonical name (one whose surface_variants is non-empty)
-            # counts as accepted even though the canonical itself may not appear
-            # literally in accepted.dl — the stored facts use surface variants.
-            if not canonical_variants_of(_arg_value(relation), relation_aliases()):
-                return False, QUERY_RELATION_NOT_ACCEPTED, f"count relation is not accepted: {_arg_value(relation)}"
+        if not _is_variable(relation) and not vocab.accepts_relation(_arg_value(relation)):
+            return False, QUERY_RELATION_NOT_ACCEPTED, f"count relation is not accepted: {_arg_value(relation)}"
         return True, QUERY_OK, "passed"
     if predicate in policy_query_predicates:
         if len(args) != 2:
             return False, QUERY_BAD_ARITY, "policy query must have entity and reason arguments"
         if not all(_is_valid_arg(arg) for arg in args):
             return False, QUERY_MALFORMED, "policy query arguments must be variables or quoted strings"
-        if not _is_variable(args[0]) and canonical_value(_arg_value(args[0])) not in entities_c:
+        if not _is_variable(args[0]) and not vocab.accepts_policy_entity(_arg_value(args[0])):
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"policy query entity is not accepted: {_arg_value(args[0])}"
         return True, QUERY_OK, "passed"
     return False, QUERY_UNSUPPORTED, "unsupported query"

@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from common import (
     attribute_relation_forms,
     FACTS_DIR,
     KNOWN_STATUSES,
-    canonical_value,
-    declared_ancestors,
+    QueryVocabulary,
     is_valid_arg,
+    is_variable,
     relation_aliases,
     relation_row_matches,
     policy_row_matches,
@@ -20,12 +22,10 @@ from common import (
     typed_policy_warnings,
     typed_projection_warnings,
     QUERY_PREDICATES,
-    allowed_relations,
     dedup_engine_atoms,
     engine_facts,
     value_hierarchy,
     value_hierarchy_warnings,
-    value_set,
     ensure_dirs,
     load_accepted_facts,
     load_facts,
@@ -99,30 +99,53 @@ def relation_results(
     ]
 
 
-def known_constants(
-    facts: list[dict[str, str]],
-    hierarchy: dict[str, dict[str, set[str]]] | None = None,
-    aliases: dict[str, str] | None = None,
-) -> set[str]:
-    """Every constant a query may legitimately name, canonicalised.
+def vocabulary_checks(
+    kind: str,
+    args: list[str],
+    vocab: QueryVocabulary,
+) -> list[tuple[str, Callable[[str], bool]]]:
+    """The (argument, accepts) pairs the GATE vocabulary-checks for this query kind,
+    in the gate's own order.
 
-    Judging a query against the RAW accepted values made the report contradict
-    itself: it returned rows for `relation(P, "연구유형", ...)` in an aliased KB
-    (the rows store the surface variant) while warning, on the same page, that
-    `연구유형` is "not an engine relation" (#213). The vocabulary a query may use
-    is the vocabulary the matcher accepts — canonical names, their declared surface
-    variants, declared hierarchy ancestors, and amount literals in either quoting.
+    The report used to judge every position against ONE pooled set of constants,
+    which admitted more than the gate does at any single position: an attribute
+    literal in a policy pin, or a hierarchy ancestor declared under a DIFFERENT
+    relation, passed here while `classify_query` answered `entity_not_accepted`.
+    The report then rendered the empty extent as a verified negative ("0 rows") for
+    a question the gate refuses to answer — the false negative of #362, the #284
+    class. Positions and predicates are named together here, once, so the report and
+    the gate cannot pick different sets for the same argument.
     """
-    aliases = aliases if aliases is not None else relation_aliases()
-    known = {canonical_value(v) for v in value_set(facts)}
-    known |= {canonical_value(r) for r in allowed_relations(facts)}
-    known |= {canonical_value(raw) for raw in aliases}
-    known |= {canonical_value(canonical) for canonical in aliases.values()}
-    known |= declared_ancestors(hierarchy, None, canonical_value)
-    return known
+    if kind == "relation":
+        # The object licence is scoped to the queried relation, and a VARIABLE
+        # relation widens to every relation — the gate's own rule, argument for
+        # argument (common.classify_query's relation branch).
+        relation = None if is_variable(args[1]) else arg_value(args[1])
+        return [
+            (args[0], vocab.accepts_subject),
+            (args[1], vocab.accepts_relation),
+            (args[2], lambda value: vocab.accepts_object(value, relation)),
+        ]
+    if kind == "count":
+        return [(args[0], vocab.accepts_subject), (args[1], vocab.accepts_relation)]
+    if kind == "policy":
+        # Only the pinned entity: a variable there ranges over the extent.
+        return [(args[0], vocab.accepts_policy_entity)]
+    raise ValueError(f"unknown query kind: {kind}")
 
 
-def validate_query(line: str, entities: set[str], policy_query_predicates: set[str]) -> tuple[list[str], list[str]]:
+def unaccepted_constants(checks: list[tuple[str, Callable[[str], bool]]]) -> list[str]:
+    """The quoted constants among `checks` that their own position rejects."""
+    return [
+        arg_value(arg)
+        for arg, accepts in checks
+        if is_quoted_string(arg) and not accepts(arg_value(arg))
+    ]
+
+
+def validate_query(
+    line: str, vocab: QueryVocabulary, policy_query_predicates: set[str]
+) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     predicate = line.split("(", 1)[0]
@@ -156,12 +179,12 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         # a hard crash of the whole report over one draft line (#342). The gate uses
         # this same predicate (common.policy_row_matches, #320), so the report's
         # last inline copy of the quote test now agrees with it and calls arg_value
-        # only after the guard passes. Membership is compared through canonical_value,
-        # the same fold the generic constant loop (L187) and known_constants use, so
-        # an NFD-typed query of an NFC-stored engine entity is no longer falsely
-        # warned as a "non-engine entity" -- the two axes of one function agree (#341).
-        if is_quoted_string(args[0]) and canonical_value(arg_value(args[0])) not in entities:
-            warnings.append(f"query references non-engine entity: {arg_value(args[0])}")
+        # only after the guard passes. Membership is compared through canonical_value
+        # inside the vocabulary, the same fold the gate applies, so an NFD-typed query
+        # of an NFC-stored engine entity is no longer falsely warned as a "non-engine
+        # entity" -- the two axes of one function agree (#341).
+        for constant in unaccepted_constants(vocabulary_checks("policy", args, vocab)):
+            warnings.append(f"query references non-engine entity: {constant}")
         return errors, warnings
     if predicate == "count":
         # count(subject, relation)? — engine-verified aggregate (see evaluate_queries).
@@ -176,12 +199,16 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         if not all(is_valid_arg(a) for a in args):
             errors.append(f"count arguments must be variables or quoted strings: {line}")
             return errors, warnings
-        # A well-formed count falls through to the shared vocabulary loop, exactly as
-        # `relation` and `path` do. Returning here instead skipped that loop, so
-        # `count("Nobody", "born_in")?` came back silent -- no error, no warning -- and
-        # the report then rendered "count results: 0 (distinct objects)", a zero this
-        # file documents as a verified answer. `relation`, on the same unknown subject,
-        # warns. Same criterion for count as for relation/path, warnings included (#319).
+        # A well-formed count IS vocabulary-checked, as `relation` and `path` are.
+        # Warning nothing here left `count("Nobody", "born_in")?` silent -- no error,
+        # no warning -- and the report then rendered "count results: 0 (distinct
+        # objects)", a zero this file documents as a verified answer (#319). It is
+        # checked per POSITION rather than by the generic loop below, and returns, so
+        # subject and relation name each meet the set the gate uses for them and no
+        # constant is warned about twice (#362).
+        for constant in unaccepted_constants(vocabulary_checks("count", args, vocab)):
+            warnings.append(f"query references non-engine entity or relation: {constant}")
+        return errors, warnings
     if predicate == "relation":
         args = query_args(line)
         if len(args) != 3:
@@ -193,6 +220,13 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         if not all(is_valid_arg(a) for a in args):
             errors.append(f"relation arguments must be variables or quoted strings: {line}")
             return errors, warnings
+        # Position by position (subject / relation name / relation-scoped object),
+        # then return: the generic loop below would judge the same three constants
+        # against one pooled vocabulary -- weaker than the gate at every one of them
+        # (#362) -- and warn a second time about a constant already reported here.
+        for constant in unaccepted_constants(vocabulary_checks("relation", args, vocab)):
+            warnings.append(f"query references non-engine entity or relation: {constant}")
+        return errors, warnings
     if predicate == "path":
         # The same guard `relation` has, and for the same reason: without it the report
         # answered a malformed path query with "0 rows" -- a VERIFIED NEGATIVE -- while
@@ -204,8 +238,12 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         if not all(is_valid_arg(a) for a in args):
             errors.append(f"path arguments must be variables or quoted strings: {line}")
             return errors, warnings
+    # What is left: `path`, and a QUERY predicate with no evaluation branch. Neither
+    # has a per-position check yet, so they keep the position-agnostic union -- which
+    # only ever admits MORE than a position would, so nothing that used to be warned
+    # about falls silent here.
     for constant in quoted_constants(line):
-        if constant and canonical_value(constant) not in entities and constant not in {"S", "R", "O", "X", "Q"}:
+        if constant and not vocab.accepts_anywhere(constant) and constant not in {"S", "R", "O", "X", "Q"}:
             warnings.append(f"query references non-engine entity or relation: {constant}")
     return errors, warnings
 
@@ -214,7 +252,7 @@ def policy_result_line(
     predicate: str,
     line: str,
     inferred: dict[str, set[tuple[str, ...]]],
-    known: set[str],
+    vocab: QueryVocabulary,
 ) -> str:
     args = query_args(line)
     # Filter BEFORE counting: `len(rows)` must count what the query asked for, not
@@ -224,28 +262,24 @@ def policy_result_line(
     if not rows:
         # An empty policy extent over an UNACCEPTED pinned entity is not a verified
         # negative -- the gate rejects the same query entity_not_accepted, the policy
-        # analogue of #347 (#351). validate_query's policy branch already WARNS on this
-        # entity, against the SAME `known` set (run_logic_check L494), so mark the
+        # analogue of #347 (#351). validate_query's policy branch WARNS on this entity
+        # through the SAME predicate (vocabulary_checks("policy", ...)), so mark the
         # result unverified and point at that warning instead of rendering a verified
-        # "0 rows" -- the pointer is exact because both read one set. Only the pinned
-        # entity (args[0]) is vocabulary-checked: that POSITION is the one
-        # validate_query warns on and the one the gate's policy branch judges. The
-        # POSITIONS agree; the SETS do not -- see the paragraph below. So a variable
-        # pin -- which ranges over the extent -- is never flagged. Warning severity and exit 0 are unchanged: a
-        # needs_review entity is a normal KB state; this only stops the line asserting
-        # a checked negative. A real finding (non-empty extent) never reaches here.
+        # "0 rows" -- the pointer is exact because both read one predicate. Only the
+        # pinned entity (args[0]) is vocabulary-checked: that POSITION is the one
+        # validate_query warns on and the one the gate's policy branch judges, and a
+        # variable pin -- which ranges over the extent -- is never flagged. Warning
+        # severity and exit 0 are unchanged: a needs_review entity is a normal KB
+        # state; this only stops the line asserting a checked negative. A real finding
+        # (non-empty extent) never reaches here.
         #
-        # The SET this is judged against matches validate_query, NOT the gate. The gate's
-        # policy branch tests entity_set (common.py), while `known` is known_constants,
-        # which also carries value_set -- and entity_set deliberately excludes the object
-        # literals of attribute relations. So known is a strict superset of the gate's
-        # entities, and a query pinning an attribute literal -- needs_review("2020", R)?
-        # where 2020 is a published_year object -- passes silently here (no warning
-        # either, since validate_query reads the same set) while the gate answers
-        # entity_not_accepted. Closing that axis means changing which set the report
-        # reads, which also moves validate_query's warnings, so it is scoped out with
-        # the relation-object axis under #362.
-        unaccepted = unverified_vocabulary(args[:1], known)
+        # The SET is now the gate's too: `accepts_policy_entity` is entity_set, which
+        # deliberately excludes the object literals of attribute relations. Judged
+        # against the old pooled constants (which carried value_set), a query pinning
+        # an attribute literal -- needs_review("2020", R)? where 2020 is a
+        # published_year object -- passed silently while the gate answered
+        # entity_not_accepted (#362, closed).
+        unaccepted = unverified_vocabulary(vocabulary_checks("policy", args, vocab))
         if unaccepted is not None:
             return (
                 f"{predicate} results: unverified — '{unaccepted}' is not "
@@ -264,9 +298,9 @@ def policy_result_line(
     return f"{predicate} results: {len(rows)} rows{suffix}"
 
 
-def unverified_vocabulary(constants: list[str], known: set[str]) -> str | None:
-    """The first of the given quoted query constants that is NOT accepted
-    vocabulary, or None if every one is accepted (or is a variable).
+def unverified_vocabulary(checks: list[tuple[str, Callable[[str], bool]]]) -> str | None:
+    """The first quoted query constant its own POSITION does not accept, or None if
+    every one is accepted (or is a variable).
 
     The gate (``classify_query``) rejects a relation/count query whose SUBJECT or
     RELATION-NAME is outside the accepted vocabulary with
@@ -280,26 +314,24 @@ def unverified_vocabulary(constants: list[str], known: set[str]) -> str | None:
     vocabulary reference is a normal KB state, exit 0) but stops calling the empty
     result a verified negative (#347).
 
-    Callers pass whichever positions the gate vocabulary-checks: the relation branch
-    now passes subject, relation-name AND object (#350 closes the object axis #347's
-    lightweight scope deferred), count passes subject and relation-name, policy passes
-    the pinned entity. Membership is compared through the SAME ``canonical_value`` fold
-    ``known_constants``/validate_query's warning use, so a constant that draws the
-    warning is the constant that marks the result unverified and the "(see Warnings
-    above)" pointer is always accurate. ``known`` admits declared hierarchy ancestors,
-    so a broad-value object matching a narrower row (코호트연구 ⊂ 관찰연구) is accepted
-    vocabulary and is not flagged. Note that ``known`` pools those ancestors across all
-    relations while the gate scopes them to the queried relation, so this under-flags
-    rather than over-flags: an ancestor declared under another relation escapes the
-    check and still renders "0 rows" where the gate rejects (#362). A query whose
-    constants are all accepted but whose
-    triple is simply absent (sample-kb q4) has no unaccepted constant here, so it keeps
-    rendering the honest ``0 rows`` -- that is the discriminator between the two.
+    Callers pass ``vocabulary_checks(...)``: the same positions, in the same order,
+    with the same accepting predicate the gate applies to each -- relation passes
+    subject, relation-name and relation-scoped object (#350), count passes subject and
+    relation-name, policy passes the pinned entity. validate_query warns off that one
+    list too, so a constant that draws the warning is the constant that marks the
+    result unverified and the "(see Warnings above)" pointer cannot dangle.
+
+    The object position admits values declared as ancestors UNDER THE QUERIED
+    RELATION, so a broad-value object matching a narrower row (코호트연구 ⊂ 관찰연구)
+    is accepted vocabulary and is not flagged -- while an ancestor declared only under
+    a different relation is flagged, as the gate flags it (#362; the pooled set used
+    to let it through and render "0 rows"). A query whose constants are all accepted
+    but whose triple is simply absent (sample-kb q4) has no unaccepted constant here,
+    so it keeps rendering the honest ``0 rows`` -- that is the discriminator between
+    the two.
     """
-    for arg in constants:
-        if is_quoted_string(arg) and canonical_value(arg_value(arg)) not in known:
-            return arg_value(arg)
-    return None
+    unaccepted = unaccepted_constants(checks)
+    return unaccepted[0] if unaccepted else None
 
 
 def evaluate_queries(
@@ -312,14 +344,15 @@ def evaluate_queries(
     if hierarchy is None:
         hierarchy = value_hierarchy()
     aliases = relation_aliases()
-    # The same accepted vocabulary validate_query warns against (known_constants):
-    # a relation/count query naming a term outside it is rendered "unverified", not
-    # a verified "0 rows" (#347). Built once for every query line.
-    known = known_constants(facts, hierarchy, aliases)
+    # The same per-position vocabulary validate_query warns against, and the same one
+    # the gate judges with: a query naming a term its position does not accept is
+    # rendered "unverified", not a verified "0 rows" (#347, #362). Built once for
+    # every query line.
+    vocab = QueryVocabulary.from_facts(facts, hierarchy, aliases)
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
-            results.append(policy_result_line(predicate, line, inferred, known))
+            results.append(policy_result_line(predicate, line, inferred, vocab))
         elif predicate == "path":
             # Constants AND variables. The old branch only handled two quoted
             # constants, so `path("A", X)?` appended nothing, the result list came
@@ -382,25 +415,18 @@ def evaluate_queries(
                 # All THREE positions, object included: the gate rejects a relation
                 # query whose object is outside the accepted vocabulary with
                 # entity_not_accepted too, so an empty result there is unverified, not a
-                # verified zero (#350, the object axis #347 deferred). `known` carries
-                # value_set AND declared hierarchy ancestors, so a broad-value object
+                # verified zero (#350, the object axis #347 deferred). The object
+                # position admits declared hierarchy ancestors, so a broad-value object
                 # that matches a narrower row (코호트연구 ⊂ 관찰연구) is accepted
                 # vocabulary and is not flagged — no false positive.
                 #
-                # A residual FALSE NEGATIVE remains, in the other direction, and it is
-                # not closed here: known_constants pools ancestors across EVERY relation
-                # (declared_ancestors(hierarchy, None, ...)) while the gate scopes the
-                # licence to the relation the query names. So an object declared as an
-                # ancestor under a DIFFERENT relation — relation("x", "y", "anyone")?
-                # where `anyone` is declared only under `founded_by` — is in `known`,
-                # draws no flag, and still renders "0 rows" while the gate answers
-                # entity_not_accepted. That mismatch predates #350 (the object axis was
-                # unchecked entirely before) and closing it means scoping this set by
-                # relation, a change to known_constants that also moves validate_query's
-                # warnings. #362 tracks that scoping work, and covers the second place
-                # the report's `known` and the gate's sets disagree: the policy-entity
-                # axis in policy_result_line, where known_constants outruns entity_set.
-                unaccepted = unverified_vocabulary([args[0], args[1], args[2]], known)
+                # Each position is judged by the gate's own set (#362). The pooled set
+                # this used to read admitted ancestors from EVERY relation, so an object
+                # declared under a DIFFERENT relation — relation("x", "y", "anyone")?
+                # where `anyone` is declared only under `founded_by` — drew no flag and
+                # rendered "0 rows" while the gate answered entity_not_accepted. The
+                # licence is now scoped to the queried relation here as it is there.
+                unaccepted = unverified_vocabulary(vocabulary_checks("relation", args, vocab))
                 if unaccepted is not None:
                     results.append(
                         f"relation results: unverified — '{unaccepted}' is not "
@@ -444,7 +470,7 @@ def evaluate_queries(
                 # unaccepted subject/relation is unverified, not a verified zero -- the
                 # gate rejects it (relation_not_accepted/entity_not_accepted). An
                 # accepted subject/relation with genuinely no objects keeps "0".
-                unaccepted = unverified_vocabulary([subj_q, rel_q], known)
+                unaccepted = unverified_vocabulary(vocabulary_checks("count", args, vocab))
                 if unaccepted is not None:
                     results.append(
                         f"count results: unverified — '{unaccepted}' is not "
@@ -550,11 +576,12 @@ def main() -> int | None:
     inferred = run_wirelog()
     policy_program = load_logic_policy()
     policy_query_predicates = policy_predicates(policy_program)
-    # value_set (entities + literal values) so a query naming a literal object of
-    # an attribute relation is not falsely warned as a non-engine entity.
+    # One vocabulary, judged per position exactly as the ask gate judges it, so a
+    # literal object of an attribute relation is not falsely warned as a non-engine
+    # entity and a constant the gate rejects is not silently accepted here (#362).
     hierarchy = value_hierarchy()
     aliases = relation_aliases()
-    entities = known_constants(facts, hierarchy, aliases)
+    vocab = QueryVocabulary.from_facts(facts, hierarchy, aliases)
     errors: list[str] = []
     warnings: list[str] = []
     policy_findings: list[str] = []
@@ -594,11 +621,11 @@ def main() -> int | None:
             policy_findings.append(f"{predicate}: {target} ({reason})")
 
     for line in query_lines():
-        query_errors, query_warnings = validate_query(line, entities, policy_query_predicates)
+        query_errors, query_warnings = validate_query(line, vocab, policy_query_predicates)
         errors.extend(query_errors)
-        # No post-filter: known_constants() already admits relation names (and
-        # their aliases, and declared hierarchy ancestors), so a warning that
-        # survives validate_query is a genuinely unknown constant.
+        # No post-filter: the vocabulary already admits relation names (and their
+        # aliases, and hierarchy ancestors declared for that position), so a warning
+        # that survives validate_query is a genuinely unaccepted constant.
         warnings.extend(query_warnings)
 
     report = [

@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 import run_logic_check as rlc
+from conftest import vocabulary
 from factlog.common import QUERY_UNKNOWN_PREDICATE, classify_query
 
 
@@ -57,7 +58,7 @@ class TestUndeclaredConflictParity:
 
     def test_undeclared_conflict_is_unknown_on_all_three(self, monkeypatch):
         # validate_query: an Errors-section entry.
-        errors, _ = rlc.validate_query(self.QUERY, set(), set())
+        errors, _ = rlc.validate_query(self.QUERY, vocabulary(set()), set())
         assert errors == [f"query unknown predicate: {self.QUERY}"]
 
         # evaluate_queries: the Query-evaluation line, same as any unknown predicate.
@@ -79,7 +80,7 @@ class TestDeclaredConflictEvaluates:
     POLICY_DECL = ".decl conflict(a: symbol, b: symbol)"
 
     def test_report_validates_and_renders_policy_result(self, monkeypatch):
-        errors, _ = rlc.validate_query(self.QUERY, {"A"}, {"conflict"})
+        errors, _ = rlc.validate_query(self.QUERY, vocabulary({"A"}), {"conflict"})
         assert errors == []
         results = _evaluate(
             monkeypatch,
@@ -116,7 +117,6 @@ class TestFallbackErrorPointer:
         monkeypatch.setattr(rlc, "policy_predicates", lambda program: set())
         monkeypatch.setattr(rlc, "value_hierarchy", lambda: {})
         monkeypatch.setattr(rlc, "relation_aliases", lambda: {})
-        monkeypatch.setattr(rlc, "known_constants", lambda *a, **k: set())
         monkeypatch.setattr(rlc, "review_facts", lambda candidates: [])
         monkeypatch.setattr(rlc, "status_warnings", lambda candidates: [])
         monkeypatch.setattr(rlc, "value_hierarchy_warnings", lambda **k: [])

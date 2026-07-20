@@ -20,3 +20,16 @@ if str(_TOOLS) not in sys.path:
 
 # Bind FACTLOG_ROOT to an isolated empty dir before any tool module is imported.
 os.environ.setdefault("FACTLOG_ROOT", tempfile.mkdtemp(prefix="factlog-unit-"))
+
+
+def vocabulary(constants: set[str]) -> "QueryVocabulary":  # noqa: F821
+    """A ``QueryVocabulary`` that licenses `constants` in every query position.
+
+    For the tests that vary something other than the position axis. The empty
+    hierarchy and alias map keep them off the filesystem; a test that means to
+    exercise a single position (subject vs relation object vs policy entity)
+    builds the vocabulary itself with the sets it wants to tell apart.
+    """
+    from common import QueryVocabulary
+
+    return QueryVocabulary(constants, constants, constants, hierarchy={}, aliases={})
