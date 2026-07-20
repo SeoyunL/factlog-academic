@@ -227,3 +227,89 @@ class TestMalformedCompoundTerms:
         # Either way it is never an entity and never loses the declare advice.
         assert found["entities"] == ["P1"]
         assert found["literal_suspects"]["published_year"] == {"date(2020)"}
+
+
+class TestConflictingTypedDeclarations:
+    """#393 — two declarations claiming one surface form must not silently win.
+
+    The canonical and its alias each carrying their OWN unit table made both lines
+    expand onto both forms; the last written overwrote the first, so a value written
+    under the CANONICAL was judged against the ALIAS's table and falsely reported
+    malformed. The parser accepts the pair (exit 0), so nothing else told the author.
+    """
+
+    @staticmethod
+    def _two_tables(monkeypatch):
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units={"달러": 1300}),
+            },
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+
+    def test_the_issues_reproduction_is_no_longer_a_false_accusation(self, monkeypatch):
+        self._two_tables(monkeypatch)
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "게재연도", 'amount(5,"파운드")'),
+        ])
+
+        assert found["malformed_literals"] == []
+
+    def test_the_conflict_is_reported_not_just_swallowed(self, monkeypatch):
+        # Dropping the form alone would fix the false accusation while leaving the
+        # author with no way to learn why the table stopped applying.
+        self._two_tables(monkeypatch)
+        found = entity_audit.audit([_row("P1", "published_year", 'amount(9,"파운드")')])
+
+        assert found["typed_form_conflicts"] == {
+            "published_year": ["published_year", "게재연도"],
+            "게재연도": ["published_year", "게재연도"],
+        }
+
+    def test_agreeing_declarations_are_not_a_conflict(self, monkeypatch):
+        # Same spec on both lines: nothing is contested, so the table still applies
+        # and an out-of-table unit is still reported.
+        from common import TypedRelSpec
+
+        spec = TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700})
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {"published_year": spec, "게재연도": spec},
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "published_year", 'amount(5,"달러")'),
+        ])
+
+        assert found["typed_form_conflicts"] == {}
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+
+    def test_an_unrelated_declaration_keeps_its_table(self, monkeypatch):
+        # The conflict must be scoped to the contested form, not disable typing.
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units={"달러": 1300}),
+                "예산": TypedRelSpec(type="amount", alias="a3", units={"파운드": 1700}),
+            },
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+        found = entity_audit.audit([
+            _row("P1", "예산", 'amount(5,"달러")'),
+            _row("P2", "예산", 'amount(5,"파운드")'),
+        ])
+
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+        assert "예산" not in found["typed_form_conflicts"]

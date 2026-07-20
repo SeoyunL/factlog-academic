@@ -107,6 +107,32 @@ printf '%s' "$out" | grep -qF "• 'date(abc)'" && ok "unparsable compound term 
 printf '%s' "$out" | grep -qE "1 literal subject\(s\)" && ok "summary counts literal subjects" || bad "summary omits literal subject count"
 printf '%s' "$out" | grep -qE "[0-9]+ malformed literal\(s\)" && ok "summary counts malformed literals" || bad "summary omits malformed literal count"
 
+# --- conflicting typed declarations (#393) ------------------------------------
+# Canonical and alias declared on separate lines with DIFFERENT unit tables. The
+# later line used to overwrite the canonical's, so a value written under the
+# canonical was judged against the alias's table and falsely accused.
+KB4="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB4" >/dev/null 2>&1
+printf 'x\n' > "$KB4/sources/a.md"
+printf -- '- `published_year`\n- `게재연도`\n' > "$KB4/policy/attribute-relations.md"
+printf -- '- `게재연도` -> `published_year`\n' > "$KB4/policy/relation-aliases.md"
+printf -- '`published_year` : amount as a1 (파운드=1700)\n`게재연도` : amount as a2 (달러=1300)\n' \
+  > "$KB4/policy/typed-relations.md"
+printf '%s\n%s\n%s\n' "$H" \
+  'P1,published_year,"amount(9,""파운드"")",sources/a.md,accepted,0.9,' \
+  'P2,게재연도,"amount(5,""파운드"")",sources/a.md,accepted,0.9,' > "$KB4/facts/candidates.csv"
+set +e; out="$("$PYTHON" "$AUDIT" --wiki "$KB4" 2>&1)"; rc=$?; set -e
+
+[ "$rc" -eq 0 ] && ok "conflicting-declaration KB exits 0" || bad "conflicting-declaration KB exit $rc"
+printf '%s' "$out" | grep -qF '• '"'"'amount(9,"파운드")'"'" && bad "canonical-relation amount falsely accused (#393)" || ok "no false accusation under the canonical relation"
+# Match the SECTION header, not the bare phrase: the summary line carries the same
+# words, so a loose grep passed even with conflict detection removed entirely.
+printf '%s' "$out" | grep -qF "conflicting typed declaration (one relation form, two declarations):" && ok "conflicting-declaration section printed" || bad "conflicting-declaration section missing"
+printf '%s' "$out" | grep -qF "'published_year' is declared by" && ok "contested form named with its claimants" || bad "contested form not named"
+# Both expanded forms are contested here, so the count is exact — an assertion of
+# "some number" would hold at zero.
+printf '%s' "$out" | grep -qE "2 conflicting typed declaration\(s\)" && ok "summary counts conflicting typed declarations" || bad "summary omits conflicting declaration count"
+
 echo ""
 echo "========================================"
 echo "test_entity_audit: $pass passed, $fail failed"
