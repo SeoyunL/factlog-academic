@@ -84,6 +84,15 @@ class TestWellFormedUnsatisfiedIsStillAnswered:
         assert any(line.startswith("relation results: 1 rows") for line in results)
 
     def test_path_not_found_is_preserved(self, monkeypatch):
-        results = _evaluate(monkeypatch, ['path("A", "C")?'], facts=[])
+        # BOTH nodes are accepted entities and no path joins them: the verified
+        # negative "(not found)" is for. The facts matter since #366 — over an empty
+        # KB "A" is not accepted vocabulary at all, and the empty extent is then
+        # unverified rather than a checked "no", the same axis as the relation test
+        # above.
+        results = _evaluate(
+            monkeypatch,
+            ['path("A", "C")?'],
+            facts=[_fact("A", "uses", "B"), _fact("C", "uses", "D")],
+        )
         assert "path A -> C: (not found)" in results
         assert "path query malformed — see Errors above" not in results

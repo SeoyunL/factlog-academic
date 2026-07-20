@@ -84,7 +84,15 @@ class TestWellFormedRenderUnchanged:
         assert "relation results: 0 rows" in results
 
     def test_path_render(self, monkeypatch):
-        results = _evaluate(monkeypatch, ['path("A", "C")?'], facts=[])
+        # Both nodes accepted, no path between them — the verified negative. Since
+        # #366 a path node is vocabulary-checked like a subject, so an empty KB would
+        # render "unverified" here for the same reason the relation test above needs
+        # its constants to appear in the facts.
+        results = _evaluate(
+            monkeypatch,
+            ['path("A", "C")?'],
+            facts=[_fact("A", "uses", "B"), _fact("C", "uses", "D")],
+        )
         assert "path A -> C: (not found)" in results
 
     def test_count_render(self, monkeypatch):

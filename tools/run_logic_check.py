@@ -128,6 +128,14 @@ def vocabulary_checks(
         ]
     if kind == "count":
         return [(args[0], vocab.accepts_subject), (args[1], vocab.accepts_relation)]
+    if kind == "path":
+        # Both nodes take the SUBJECT predicate: a path argument is a true entity,
+        # which is the predicate the gate's path branch applies to each of them
+        # (common.classify_query, #299). Judged against the old pooled set instead,
+        # a relation NAME in a node position (`path("founded_by", X)?`) passed
+        # silently -- no warning at all -- and the report rendered "0 rows" for a
+        # query the gate refuses entity_not_accepted (#366).
+        return [(args[0], vocab.accepts_subject), (args[1], vocab.accepts_subject)]
     if kind == "policy":
         # Only the pinned entity: a variable there ranges over the extent.
         return [(args[0], vocab.accepts_policy_entity)]
@@ -238,13 +246,21 @@ def validate_query(
         if not all(is_valid_arg(a) for a in args):
             errors.append(f"path arguments must be variables or quoted strings: {line}")
             return errors, warnings
-    # What is left: `path`, and a QUERY predicate with no evaluation branch. Neither
-    # has a per-position check yet, so they keep the position-agnostic union -- which
-    # only ever admits MORE than a position would, so nothing that used to be warned
-    # about falls silent here.
-    for constant in quoted_constants(line):
-        if constant and not vocab.accepts_anywhere(constant) and constant not in {"S", "R", "O", "X", "Q"}:
+        # Per position (both nodes against entity_set), then return -- the last
+        # predicate to leave the position-agnostic union behind. That union pooled
+        # the relation names and the declared hierarchy ancestors in with the
+        # entities, so it admitted at a path node what no path node accepts: it
+        # warned about nothing for `path("founded_by", X)?` while the report printed
+        # "0 rows", a VERIFIED NEGATIVE for a query the gate rejects (#366).
+        for constant in unaccepted_constants(vocabulary_checks("path", args, vocab)):
             warnings.append(f"query references non-engine entity or relation: {constant}")
+        return errors, warnings
+    # Not reached: every QUERY_PREDICATES member (relation / path / count /
+    # review_required) and every policy predicate returns above, and anything else
+    # returned at the unknown-predicate guard. What used to be here was a fallback
+    # vocabulary check over the POOLED constants, and that fallback is exactly how a
+    # path node came to be judged by a set no path node accepts (#366) -- so the tail
+    # of this function warns about nothing rather than warning by the wrong set.
     return errors, warnings
 
 
@@ -381,7 +397,23 @@ def evaluate_queries(
                 # drawn over the same graph the engine used, not an ambient default.
                 route = dependency_path(facts, start, target, attribute_relation_forms())
                 if not rows:
-                    value = "(not found)"
+                    # Inside `if not rows:`, never before path_query_rows: a pair the
+                    # ENGINE proved reachable stays reachable whatever the vocabulary
+                    # says, and denying it on vocabulary grounds would put python back
+                    # in charge of reachability (#303). An empty extent over an
+                    # unaccepted node, though, is not a verified negative -- the gate
+                    # answers the same query entity_not_accepted -- so it is
+                    # unverified, not "(not found)" (#366, the path axis of #347).
+                    # Two accepted entities with no path keep "(not found)": that is
+                    # the negative this branch exists to render.
+                    unaccepted = unverified_vocabulary(vocabulary_checks("path", args, vocab))
+                    if unaccepted is not None:
+                        value = (
+                            f"unverified — '{unaccepted}' is not accepted "
+                            "vocabulary (see Warnings above)"
+                        )
+                    else:
+                        value = "(not found)"
                 elif route:
                     value = " -> ".join(route)
                 else:
@@ -393,6 +425,17 @@ def evaluate_queries(
                     value = "reachable (engine); no route through the accepted facts"
                 results.append(f"path {start} -> {target}: {value}")
             else:
+                if not rows:
+                    # The variable form of the same judgement: no pair, and a pinned
+                    # node its position rejects, is an unverified question rather
+                    # than a verified "0 rows" (#366).
+                    unaccepted = unverified_vocabulary(vocabulary_checks("path", args, vocab))
+                    if unaccepted is not None:
+                        results.append(
+                            f"path results: unverified — '{unaccepted}' is not "
+                            "accepted vocabulary (see Warnings above)"
+                        )
+                        continue
                 routes = "; ".join(f"{start} -> {target}" for start, target in rows)
                 suffix = f"; {routes}" if routes else ""
                 results.append(f"path results: {len(rows)} rows{suffix}")
