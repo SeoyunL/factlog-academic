@@ -10,8 +10,10 @@ factlog enforces freshness through two distinct mechanisms:
 
 | Level | Mechanism | What it guarantees |
 |-------|-----------|-------------------|
-| **Hook-enforced** | `PreToolUse` hook denies any `Write`/`Edit` to `facts/accepted.dl` or `facts/query.dl` when `facts/logic_report.txt` is missing or older than those files (run `/factlog check` → `run_logic_check.py` to refresh) | The engine's compiled inputs cannot be overwritten when the logic report is stale — the hook blocks the tool call before the file is touched |
+| **Hook-enforced** | `PreToolUse` hook denies any `Write`/`Edit` to `facts/accepted.dl` or `facts/query.dl` when `facts/logic_report.txt` is missing or older than those files (run `/factlog check` → `run_logic_check.py` to refresh), subject to the bootstrap exception below | The engine's compiled inputs cannot be overwritten when the logic report is stale — the hook blocks the tool call before the file is touched |
 | **SKILL discipline (best-effort)** | `SKILL.md` instructs Claude to run `run_logic_check.py` and show `facts/logic_report.txt` verbatim before stating any conclusion | The model is *guided* to surface the engine report; it cannot be *forced* (R10: "cannot fully guarantee") — human review of the raw report is the final verification step |
+
+**Bootstrap exception.** A missing report is not by itself a denial. The hook allows the write when the report is missing **and** the target file does not yet exist on disk. A freshly `factlog init`ed KB seeds neither `facts/logic_report.txt` nor `facts/query.dl`, so the first creation of an engine input cannot possibly be preceded by a report. The test is made **per target file**, not against the KB as a whole — with no report present, a write creating a not-yet-existing `facts/accepted.dl` is allowed even when `facts/query.dl` already exists. If the target itself already exists and no report supersedes it (e.g. the report was deleted), the write to that target is still denied. The hook's predicate is written out in `hooks/gate_check.sh` as three ALLOW branches (A/B/C), and `tests/test_gate_check.sh` pins it in both directions: bootstrap is allowed, and the stale-guard still denies.
 
 These two levels are complementary: the hook closes the deterministic gap; the SKILL discipline covers the narration layer where engineering enforcement is not possible.
 

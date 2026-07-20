@@ -23,7 +23,14 @@ The four types:
 
 - `date` — `2030.1` / `2030-01-15` → sortable yyyymmdd. **Engine-projectable**
   (ordering / threshold / range).
-- `ordinal` — `rank 3` / `3rd` → int rank. **Engine-projectable**.
+- `ordinal` — `3rd` / `3위` / `제3호` → int rank. **Engine-projectable**. In the
+  **prose form** a rank unit must follow the number — Korean
+  `호`/`위`/`번`/`차`/`등`/`째` (with an optional leading `제`), or English
+  `st`/`nd`/`rd`/`th`. Whitespace between the number and the unit is allowed
+  (`3 위`, `3 rd`). A prose value with no unit does not parse and stays untyped:
+  `3`, `제3` and `rank 3` all fail. The compound term `ordinal(3)` described
+  below is a **separate path** that carries no unit and is not bound by this
+  constraint.
 - `amount` — `100억` / `1,000원` → integer base unit. **Engine-projectable**.
   Needs a unit table; supply one inline at the end of the line:
   `: amount as <alias> (억=1e8, 만=1e4, 원=1)` (values must be positive ints).

@@ -181,6 +181,13 @@ touch_file "$KB_STALE/facts/query.dl"
 # query.dl now exists; no logic_report.txt → must DENY (not bootstrap).
 run_case "existing query.dl, report absent — deny (stale-guard, not bootstrap)" \
   "$KB_STALE" "$KB_STALE/facts/query.dl" 2
+# Branch B tests the *target* file's existence, not the KB's overall state: in
+# this very same KB (query.dl present, report absent) a write creating the
+# not-yet-existing accepted.dl is still bootstrap and is ALLOWED. This pins the
+# per-target reading that docs/guide/determinism.{md,en.md} documents, and
+# together with the DENY above proves the two verdicts differ by target alone.
+run_case "same KB, absent accepted.dl — allow (bootstrap is per target file)" \
+  "$KB_STALE" "$KB_STALE/facts/accepted.dl" 0
 rm -rf "$KB_STALE"
 
 # ---------------------------------------------------------------------------
