@@ -1,0 +1,212 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Both ``normalize_pmid`` validators reject non-ASCII digit spellings (#427).
+
+``str.isdigit`` is true of every Unicode decimal digit, so the shared guard
+``candidate.isdigit()`` admitted full-width, Arabic-Indic and Devanagari ids —
+and, being wider than ``Nd``, also category-``No`` characters like ``²`` and
+``①``. Two consequences these tests pin: a full-width id also slipped the
+leading-zero rule (``lstrip("0")`` strips only ASCII ``0``), and a user-typed
+full-width ``--pmid`` reached the transport.
+
+The two functions share the **digit** policy and nothing else — the surface forms
+they accept differ by design, which ``test_only_the_digit_axis_is_shared`` pins so
+the agreement is not read more widely than it holds. Their *roles* also differ,
+which the two path classes pin: ``pubmed.client``'s callers are all request-side,
+while ``openalex``'s single caller sits on the write path behind ``_optional``, so
+rejection there leaves the record with no pmid at all.
+"""
+from __future__ import annotations
+
+import pytest
+
+from factlog import cli
+from factlog.integrations.openalex.api_client import OpenAlexError
+from factlog.integrations.openalex.api_client import normalize_pmid as openalex_pmid
+from factlog.integrations.openalex.work_parser import parse_work
+from factlog.integrations.pubmed.client import PubMedClient, PubMedError
+from factlog.integrations.pubmed.client import normalize_pmid as pubmed_pmid
+from factlog.integrations.pubmed.config import PubMedConfig
+from factlog.text_norm import fold_decimal_digits
+
+
+def recording_client():
+    """A client whose transport records the call and then refuses to answer it.
+
+    Reaching the transport at all is the failure this file is about, so there is
+    no canned body to succeed on: a request that gets through raises
+    ``AssertionError``, which ``pytest.raises(PubMedError)`` does not catch, so the
+    test dies at the moment of the send and says why.
+    """
+    calls = []
+
+    def transport(endpoint, params):
+        calls.append((endpoint, params))
+        raise AssertionError("a request was sent for a full-width PMID")
+
+    api = PubMedClient(
+        config=PubMedConfig(email="dev@example.edu"),
+        transport=transport,
+        sleep=lambda _s: None,
+        warn=lambda _m: None,
+    )
+    return api, calls
+
+
+def kb(tmp_path):
+    """A temp KB with the contact email ``_pubmed_prepare`` requires."""
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "policy").mkdir()
+    (tmp_path / "policy" / "pubmed-config.toml").write_text(
+        '[client]\nemail = "test@example.com"\n', encoding="utf-8"
+    )
+    return tmp_path
+
+# Every one of these satisfies ``str.isdigit()`` and so passed both gates before
+# the ASCII guard. The last two are category ``No``: ``isdigit()`` is true but
+# ``isdecimal()`` is false, which is why folding could not have covered them.
+NON_ASCII_DIGITS = [
+    pytest.param("１２３４５６７８", id="fullwidth"),
+    pytest.param("٢٢٢٢", id="arabic-indic"),
+    pytest.param("२२२२", id="devanagari"),
+    pytest.param("۱۲۳۴", id="extended-arabic-indic"),
+    pytest.param("１2３4", id="mixed-ascii-and-fullwidth"),
+    pytest.param("０１２３", id="fullwidth-leading-zero"),
+    pytest.param("²²", id="superscript-No"),
+    pytest.param("①", id="circled-No"),
+]
+
+NORMALIZERS = [
+    pytest.param(openalex_pmid, OpenAlexError, id="openalex"),
+    pytest.param(pubmed_pmid, PubMedError, id="pubmed"),
+]
+
+
+@pytest.mark.parametrize("normalize,error", NORMALIZERS)
+@pytest.mark.parametrize("raw", NON_ASCII_DIGITS)
+def test_non_ascii_digits_are_rejected(normalize, error, raw):
+    with pytest.raises(error, match="invalid PMID"):
+        normalize(raw)
+
+
+@pytest.mark.parametrize("normalize", [openalex_pmid, pubmed_pmid], ids=["openalex", "pubmed"])
+@pytest.mark.parametrize("raw", ["32738937", "1", "16354850"])
+def test_ascii_pmids_still_pass(normalize, raw):
+    assert normalize(raw) == raw
+
+
+@pytest.mark.parametrize("raw", NON_ASCII_DIGITS)
+def test_the_two_normalizers_agree_on_digits(raw):
+    """A digit spelling must not mean different things in different commands."""
+    with pytest.raises(OpenAlexError):
+        openalex_pmid(raw)
+    with pytest.raises(PubMedError):
+        pubmed_pmid(raw)
+
+
+@pytest.mark.parametrize(
+    "raw,openalex_takes_it",
+    [
+        ("pmid:16354850", False),
+        ("https://pubmed.ncbi.nlm.nih.gov/32738937", True),
+        ("32738937/", True),
+    ],
+)
+def test_only_the_digit_axis_is_shared(raw, openalex_takes_it):
+    """The *surface forms* the two accept differ, and are meant to.
+
+    Each takes the spelling its own source produces — OpenAlex a resolver URL,
+    PubMed a ``pmid:`` label — so agreement is claimed for the digit policy only.
+    Pinned because "the two normalizers agree" is otherwise easy to read as a
+    claim about every input, which it is not.
+    """
+    if openalex_takes_it:
+        assert openalex_pmid(raw) == "32738937"
+        with pytest.raises(PubMedError):
+            pubmed_pmid(raw)
+    else:
+        assert pubmed_pmid(raw) == "16354850"
+        with pytest.raises(OpenAlexError):
+            openalex_pmid(raw)
+
+
+class TestWhatTheGuardRestsOn:
+    """Two properties of the defect itself, kept as executable claims.
+
+    Neither decided the fold-vs-reject policy — that argument is recorded on #427.
+    They pin why ``isdigit()`` was the wrong predicate and why the leading-zero
+    rule beside it did not compensate.
+    """
+
+    @pytest.mark.parametrize("raw", ["²²", "①"])
+    def test_category_No_survives_a_fold_and_still_satisfies_isdigit(self, raw):
+        # ``fold_decimal_digits`` is exactly as wide as ``Nd`` by design, so these
+        # survive it unchanged. A fold-then-``isdigit`` check would keep admitting
+        # them. (An ``isdecimal`` guard would reject them — but not ``１２３``, whose
+        # ``isdecimal()`` is true, so it is no substitute either.)
+        assert fold_decimal_digits(raw) == raw
+        assert raw.isdigit() and not raw.isdecimal()
+
+    def test_fullwidth_zero_also_slipped_the_leading_zero_rule(self):
+        # ``lstrip("0")`` strips ASCII ``0`` only, so the pre-existing rejection of
+        # zero-padded ids never applied to a full-width spelling of one.
+        assert "０１２３".lstrip("0") == "０１２３"
+
+
+class TestPubMedGuardsTheRequest:
+    """All three callers are request-side; nothing may reach the transport."""
+
+    def test_a_full_width_id_never_reaches_the_transport(self):
+        api, calls = recording_client()
+        with pytest.raises(PubMedError, match="invalid PMID"):
+            api.efetch(["１２３４５６７８"])
+        assert calls == []
+
+    def test_pubmed_import_rejects_before_spending_a_request(self, tmp_path, monkeypatch):
+        target = kb(tmp_path)
+
+        # If the id is rejected at validation time the command never builds a
+        # client at all, so no network is reachable even in principle. Assert that
+        # by failing loudly if one is ever asked for.
+        def refuse(config):  # pragma: no cover - only runs if the guard regresses
+            raise AssertionError("a client was built for a full-width PMID")
+
+        monkeypatch.setattr(cli, "_make_pubmed_client", refuse)
+        args = cli.build_parser().parse_args(
+            ["pubmed-import", "--pmid", "１２３４５６７８", "--target", str(target)]
+        )
+        assert args.func(args) == 1
+        assert list((target / "sources").glob("*.md")) == []
+
+    def test_acknowledge_retraction_rejects_the_id(self, tmp_path, capsys):
+        target = kb(tmp_path)
+        args = cli.build_parser().parse_args(
+            ["pubmed-acknowledge-retraction", "--id", "１２３４５６７８", "--target", str(target)]
+        )
+        assert args.func(args) == 1
+        assert "invalid PMID" in capsys.readouterr().err
+
+
+class TestOpenAlexGuardsTheStoredValue:
+    """The single caller is the write path, wrapped in ``_optional``."""
+
+    def test_a_full_width_ids_pmid_is_dropped_not_stored(self):
+        work = {
+            "id": "https://openalex.org/W123",
+            "display_name": "A paper",
+            "publication_year": 2020,
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/１２３４５６７８"},
+        }
+        parsed = parse_work(work)
+        # Rejected, and degraded to None by ``_optional`` rather than aborting the
+        # import: the record survives, minus a pmid it could not trust.
+        assert parsed.pmid is None
+        assert parsed.title == "A paper"
+
+    def test_an_ascii_ids_pmid_is_still_stored(self):
+        work = {
+            "id": "https://openalex.org/W123",
+            "display_name": "A paper",
+            "publication_year": 2020,
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/32738937"},
+        }
+        assert parse_work(work).pmid == "32738937"

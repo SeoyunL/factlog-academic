@@ -307,14 +307,26 @@ def normalize_cross_id(kind: str, value: str) -> str:
 
     No current write path produces one otherwise — OpenAlex takes its PMID from
     the API's ``ids.pmid`` and PubMed from the response ``<PMID>``, both ASCII
-    upstream. **Neither is guarded against one**, and not in the same way: the
-    OpenAlex value passes ``api_client.normalize_pmid``, which would *admit* a
-    full-width id because ``str.isdigit`` is true of every Unicode decimal digit,
-    while the PubMed value passes no validator at all — ``pubmed.client``'s
-    ``normalize_pmid`` guards the **outgoing request** (``_id_param``, plus the two
-    CLI entry points taking a user-typed id), never the response. "Both ASCII
-    upstream" is therefore the only thing holding the PubMed path up. Both are
-    latent gaps (#427), not routes a value travels today.
+    upstream. The two paths guard that PMID differently, and only one guards it at
+    all:
+
+    - **OpenAlex — guarded** (#427). ``openalex.api_client.normalize_pmid``
+      requires ASCII digits, so a full-width ``ids.pmid`` is rejected and, through
+      ``openalex.work_parser._optional``, stored as ``None`` rather than written.
+    - **PubMed — unguarded for the PMID specifically.** ``pubmed.work_parser``
+      does validate the response *DOI*: it imports the shared ``normalize_doi``
+      and applies it to the efetch payload through its own ``_optional``-style
+      wrapper. It applies nothing to the response ``<PMID>``. The PMID validator
+      that exists, ``pubmed.client.normalize_pmid``, guards the **outgoing
+      request** (``_id_param``, plus the two CLI entry points taking a user-typed
+      id) and never the response, so "both ASCII upstream" is the only thing
+      holding this path up.
+
+    The fold below is therefore not what keeps a full-width PMID out of a file on
+    the OpenAlex path — that validator is — and it remains the only thing that
+    makes an already-written one *match*, on either path. Check a claim in this
+    paragraph by reading the two functions it names rather than by trusting it: it
+    describes code elsewhere, and has needed correcting once per adjacent change.
 
     An ``arxiv_id`` is canonicalised the way :func:`normalize_arxiv_id` does —
     version stripped, subject class dropped, archive lowercased — so

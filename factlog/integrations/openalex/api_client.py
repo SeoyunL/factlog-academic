@@ -179,6 +179,31 @@ def normalize_pmid(value: str) -> str:
 
     OpenAlex reports ``ids.pmid`` as a full URL; §7.1 duplicate detection and the
     PubMed integration both need the bare number.
+
+    **ASCII digits only** (#427). ``str.isdigit`` is true of every Unicode decimal
+    digit, so on its own it admitted ``１２３`` (full-width), ``٢٢٢`` (Arabic-Indic)
+    and ``२२२`` (Devanagari) — and, being wider still than ``Nd``, also ``²²`` and
+    ``①``, which are category ``No``. Full-width slipped the leading-zero rule
+    below too, because ``lstrip("0")`` strips only ASCII ``0`` and leaves ``０``.
+
+    The **digit** policy is identical to ``pubmed.client.normalize_pmid``'s on
+    purpose, so one id cannot mean different things in different commands. Only
+    that axis is shared: the two accept different surface forms by design, each
+    taking what its own callers hand it — this one the ``pubmed.ncbi.nlm.nih.gov``
+    URL the API returns in ``ids.pmid``, that one a ``pmid:`` label or a bare
+    ``int``, which are conveniences for the user and the Python caller rather than
+    anything NCBI emits. Rejecting was chosen over folding the digits; the argument
+    is recorded on #427 and is not restated here.
+
+    **What rejecting costs.** The sole caller is ``openalex.work_parser`` on
+    ``ids.pmid`` — a write path — where ``_optional`` turns a rejected id into
+    ``None`` rather than aborting an otherwise usable record. So the id is not
+    respelled, it is *absent*, and ``pmid`` is a ``CROSS_SOURCE_IDS`` join key that
+    duplicate detection skips when it has no value: a full-width id that reached
+    ``sources/`` would previously still collide with its ASCII form through #421's
+    fold, and now offers no pmid route to that match. Accepted because OpenAlex is
+    ASCII upstream, so the trade is a dedup route on an input this path does not
+    produce, against a guarantee about what gets written.
     """
     if not isinstance(value, str) or not value.strip():
         raise OpenAlexError("PMID must be a non-empty string.")
@@ -186,8 +211,14 @@ def normalize_pmid(value: str) -> str:
     if candidate.lower().startswith(_PMID_URL_PREFIX):
         candidate = candidate[len(_PMID_URL_PREFIX):]
     candidate = candidate.strip("/")
-    if not candidate.isdigit() or candidate.lstrip("0") != candidate:
-        raise OpenAlexError(f"invalid PMID {value!r}; expected a positive integer.")
+    if (
+        not candidate.isascii()
+        or not candidate.isdigit()
+        or candidate.lstrip("0") != candidate
+    ):
+        raise OpenAlexError(
+            f"invalid PMID {value!r}; expected a positive integer in ASCII digits."
+        )
     return candidate
 
 
