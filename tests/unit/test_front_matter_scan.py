@@ -277,9 +277,10 @@ class TestChunking:
         moves the fixture with it instead of silently aiming at nothing. They span
         the fence split across the boundary (-3..-1) and the fence landing at the
         head of the second chunk, where the ``[3:]`` slice would swallow it (0..2).
-        ``+3`` is the control: there the fence sits wholly inside the second chunk
-        with nothing sliced away, so it is the one offset a latest-chunk-only loop
-        also gets right.
+        ``+3`` is the control: it is the offset where nothing is sliced away, so a
+        latest-chunk-only loop gets that one right too. How many of the others it
+        also survives depends on the shape of the mutation, which is the point of
+        keeping the whole span rather than a single case.
         """
         path = tmp_path / f"straddle{offset}.md"
         path.write_text(self._fenced_at(FRONT_MATTER_CHUNK_CHARS + offset), encoding="utf-8")
@@ -375,10 +376,16 @@ class TestUnclosedBlockCarriesNothing:
             assert read_scalar(path, "zotero_key", ANNOTATION_MARKER_RE) == ""
 
     def test_a_closed_block_is_unaffected_by_its_body(self, tmp_path):
-        """The counterpart: closing the fence restores every one of those reads.
+        """The counterpart: close the fence and every one of those reads works.
 
         Without this the tests above would also pass if the reader had simply
         stopped working.
+
+        This is a control, not a repaired case. A closed block never contained its
+        body under *any* version of the reader — the marker below the fence has
+        never been reachable by `ignore_re`, and this assertion held before the
+        fence-terminated read and before fail-closed alike. The only behaviour
+        `read_scalar` changed here is on the unclosed files above.
         """
         path = tmp_path / "closed.md"
         path.write_text(

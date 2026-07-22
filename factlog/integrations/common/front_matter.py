@@ -82,10 +82,11 @@ def front_matter_block(path: Path) -> str | None:
     out of it cannot be told from a body line. The cost is the other direction —
     a genuinely tool-written source whose fence a human deleted now reads as "not
     imported", so re-importing writes a second ``.md`` instead of updating the
-    first (read off the registration path above rather than reproduced end to end).
-    That is a visible, recoverable duplicate; silently binding a stranger's note to
-    a paper's identity is neither, which is why the trade is taken in this
-    direction. Restoring the old value for such a file is not the goal — the old
+    first — measured, not inferred: an import that reports ``skipped`` against the
+    intact source reports ``imported`` once the closing fence is deleted, leaving a
+    ``…-2.md`` beside it. That is a visible, recoverable duplicate; silently binding
+    a stranger's note to a paper's identity is neither, which is why the trade is
+    taken in this direction. Restoring the old value for such a file is not the goal — the old
     reader answered from where the offending line happened to sit, and an answer
     decided by an offset is the defect, not the behaviour to preserve.
 
