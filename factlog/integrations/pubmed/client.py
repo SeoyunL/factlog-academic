@@ -140,17 +140,38 @@ class _Response:
 def normalize_pmid(value: object) -> str:
     """Return the bare PMID string for a PMID, or raise before a request is spent.
 
-    A PMID is a positive integer. ``0`` and any leading-zero form are rejected
-    here rather than sent: ``0`` answers HTTP 400 live (spike §5), and this keeps
-    obviously-malformed ids off the wire. Mirrors OpenAlex's ``normalize_pmid``.
+    A PMID is a positive integer in ASCII digits. ``0``, any leading-zero form and
+    any non-ASCII spelling are rejected here rather than sent: ``0`` answers HTTP
+    400 live (spike §5), and this keeps obviously-malformed ids off the wire.
+    Mirrors OpenAlex's ``normalize_pmid``, whose note carries the reasoning for the
+    ASCII guard and for rejecting where a fold was possible (#427).
+
+    That guard matters more here, because **every caller of this function is
+    request-side** and none sees a response: :meth:`PubMedClient._id_param` builds
+    the outgoing ``id`` param, and the two CLI entry points (``pubmed-import``'s
+    ``--pmid``, ``pubmed-acknowledge-retraction``'s ``--id``) take an id the user
+    typed — exactly the case the codebase refuses rather than normalizes, upstream
+    data being the case it folds (``zotero.item_parser.extract_year``, #398). A
+    full-width id reaching here is a typo to report, not a spelling to repair. It
+    also reached the transport before this guard, which is what the mirrored
+    ``0``/leading-zero rejections exist to prevent (that it reached the transport
+    is measured; what NCBI answers to one is not, no live call having been made).
+    The response side is unguarded by design: ``pubmed.work_parser`` never imports
+    this function, so tightening it does not change what a record stores.
     """
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise PubMedError(f"PMID must be a string or int, got {type(value).__name__}")
     candidate = str(value).strip()
     if candidate.lower().startswith("pmid:"):
         candidate = candidate[len("pmid:"):].strip()
-    if not candidate.isdigit() or candidate.lstrip("0") != candidate:
-        raise PubMedError(f"invalid PMID {value!r}; expected a positive integer.")
+    if (
+        not candidate.isascii()
+        or not candidate.isdigit()
+        or candidate.lstrip("0") != candidate
+    ):
+        raise PubMedError(
+            f"invalid PMID {value!r}; expected a positive integer in ASCII digits."
+        )
     return candidate
 
 

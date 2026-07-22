@@ -179,6 +179,29 @@ def normalize_pmid(value: str) -> str:
 
     OpenAlex reports ``ids.pmid`` as a full URL; §7.1 duplicate detection and the
     PubMed integration both need the bare number.
+
+    **ASCII digits only** (#427). ``str.isdigit`` is true of every Unicode decimal
+    digit, so on its own it admitted ``１２３`` (full-width), ``٢٢٢`` (Arabic-Indic)
+    and ``२२२`` (Devanagari) — and, being wider still than ``Nd``, also ``²²`` and
+    ``①``, which are category ``No``. Full-width slipped the leading-zero rule
+    below too, because ``lstrip("0")`` strips only ASCII ``0`` and leaves ``０``.
+
+    Rejecting rather than folding, though a PMID is by definition decimal and
+    :func:`~factlog.text_norm.fold_decimal_digits` could respell one. This is a
+    strict normalizer in the sense :func:`~factlog.integrations.openalex.work_parser._optional`
+    names, and tolerance for API payloads is supplied by *that wrapper*, which
+    degrades a rejected id to ``None`` rather than aborting an otherwise usable
+    record — so the sole caller (``work_parser`` on ``ids.pmid``, a write path)
+    stores no pmid instead of storing a respelled one. Folding here would rewrite
+    what OpenAlex said; the repository folds on the *derived comparison key*
+    instead (:func:`~factlog.integrations.common.source_writer.normalize_cross_id`,
+    #421), which is also the only thing that reaches full-width ids already on
+    disk. Folding would not close this hole anyway: ``fold_decimal_digits`` leaves
+    ``²`` and ``①`` untouched by design, and ``"²²".isdigit()`` is still true after.
+
+    Mirrored by ``pubmed.client``'s ``normalize_pmid``, whose callers are all
+    request-side; the two share this policy so one id cannot mean different things
+    in different commands.
     """
     if not isinstance(value, str) or not value.strip():
         raise OpenAlexError("PMID must be a non-empty string.")
@@ -186,8 +209,14 @@ def normalize_pmid(value: str) -> str:
     if candidate.lower().startswith(_PMID_URL_PREFIX):
         candidate = candidate[len(_PMID_URL_PREFIX):]
     candidate = candidate.strip("/")
-    if not candidate.isdigit() or candidate.lstrip("0") != candidate:
-        raise OpenAlexError(f"invalid PMID {value!r}; expected a positive integer.")
+    if (
+        not candidate.isascii()
+        or not candidate.isdigit()
+        or candidate.lstrip("0") != candidate
+    ):
+        raise OpenAlexError(
+            f"invalid PMID {value!r}; expected a positive integer in ASCII digits."
+        )
     return candidate
 
 
