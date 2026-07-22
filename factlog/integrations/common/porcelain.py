@@ -19,9 +19,10 @@ under a second name, which is how the two integrations drifted apart in the firs
 
 **Not every porcelain emitter is gated.** That was true when #396 wrote it, it stayed true
 after #406 closed three ``result`` rows, and it is the right thing to assume now. #416
-closed fourteen more. The last AST sweep found **105 tab-carrying f-strings under
-``factlog/``, with no ungated caller-influenced field among them** — read that as a
-measurement with a date on it, never as "the set is closed".
+closed fourteen more. The last AST sweep found **111 tab-carrying interpolation sites
+under ``factlog/`` — 105 f-strings and 6 ``.format()`` calls — with no ungated
+caller-influenced field among them**. Read that as a measurement with a date on it, never
+as "the set is closed".
 
 An earlier revision of this paragraph did write it as a closed set, in those words, and
 was wrong when it said so: three emitters were open at the time, and the review that
@@ -32,10 +33,20 @@ to print. All three misses were ``rows.append``; the ``candidate`` row #406 miss
 comprehension. A shape-based search finds the shape it already knows, and reports silence
 as absence.
 
-So the instruction is: **walk the AST for f-strings whose literal parts contain a tab, and
-check each interpolated field for a gate call.** ``print(f"`` is not the search, it is one
-spelling of one shape. Do not trust a count in this note — the 105 included — without
-re-running that sweep.
+So the instruction is: **walk the AST for string literals containing a tab, and for each
+one check every field interpolated into it — whatever syntax does the interpolating —
+for a gate call.** f-string, ``.format()``, ``"\\t".join(...)``, ``+`` concatenation,
+``%``: the literal is what marks the row, the syntax is incidental.
+
+Say it that way and not "f-strings", because the narrower version was the *first* thing
+written here after ``print(f"`` failed, and it repeats the same mistake one level up: it
+cannot see the 6 ``.format()`` rows. They are all clean today (each was read field by
+field), so nothing is hiding behind that wording right now — but a row added tomorrow with
+``.format()`` would be invisible to it, which is precisely how the three ``rows.append``
+rows survived two issues. Widening a search by one shape is not the same as not searching
+by shape.
+
+Do not trust a count in this note — the 111 included — without re-running that sweep.
 
 What #416 closed, with the evidence for each, because the strengths are not equal:
 
@@ -52,10 +63,13 @@ What #416 closed, with the evidence for each, because the strengths are not equa
   missed the other *in the same command*.
 * Three of the four dry-run ``item``/``work`` rows — the fourth, ``_pubmed_finish``'s, was
   already gated by #141, which is why this shape existed four times with one checked.
-  **Measured for two:** a tab-carrying Zotero key (no validator stands between the Zotero
-  API and this row), and — through that pubmed sibling — a tab-carrying PMID from a real
-  efetch body, which arrives and is neutralized to a space, so that gate is doing visible
-  work rather than guarding an unreachable path.
+  Of the **four** rows, exactly **two have a measured route**, and they fall on either side
+  of what #416 touched: the zotero ``item`` row, which #416 gated (no validator stands
+  between the Zotero API and it), and the pubmed ``work`` row, which #141 had gated — a
+  tab-carrying PMID from a real efetch body arrives there and is neutralized to a space, so
+  that gate is doing visible work rather than guarding an unreachable path. Read this as
+  "two of the four", not "two of the three": #416 closed three rows and only one of *those*
+  three has a route.
 
   **Gated but with no route found: the arXiv and OpenAlex ``work`` rows.** For arXiv,
   ``versioned_id`` is only ever built from an ``arxiv_id`` that came through
