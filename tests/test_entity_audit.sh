@@ -193,12 +193,17 @@ printf '%s' "$out" | grep -qF '• '"'"'amount(5,"달러")'"'" && ok "out-of-tab
 # Three lines on one canonical where the first two AGREE and the third differs.
 # Reporting only the disagreeing pair drops an agreeing line and sends the author
 # to edit the wrong ones, so all three names must appear on the conflict line.
+#
+# DECLARATION ORDER IS DELIBERATELY NOT ALPHABETICAL (출판연도, published_year,
+# 게재연도). Claimants keep declaration order while forms are sorted, so a fixture
+# declared in sorted order cannot tell the two apart and a claimant re-sort would
+# go unnoticed here.
 KB6="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$KB6" >/dev/null 2>&1
 printf 'x\n' > "$KB6/sources/a.md"
 printf -- '- `published_year`\n- `게재연도`\n- `출판연도`\n' > "$KB6/policy/attribute-relations.md"
 printf -- '- `게재연도` -> `published_year`\n- `출판연도` -> `published_year`\n' > "$KB6/policy/relation-aliases.md"
-printf -- '`published_year` : amount as a1 (파운드=1700)\n`게재연도` : amount as a2 (파운드=1700)\n`출판연도` : amount as a3 (달러=1300)\n' \
+printf -- '`출판연도` : amount as a3 (달러=1300)\n`published_year` : amount as a1 (파운드=1700)\n`게재연도` : amount as a2 (파운드=1700)\n' \
   > "$KB6/policy/typed-relations.md"
 printf '%s\n%s\n' "$H" \
   'P1,published_year,"amount(9,""파운드"")",sources/a.md,accepted,0.9,' > "$KB6/facts/candidates.csv"
@@ -206,9 +211,22 @@ set +e; out="$("$PYTHON" "$AUDIT" --wiki "$KB6" 2>&1)"; rc=$?; set -e
 
 [ "$rc" -eq 0 ] && ok "three-claimant KB exits 0" || bad "three-claimant KB exit $rc"
 line="$(printf '%s' "$out" | { grep -F "'published_year' is declared by" || true; })"
+# Cut the "• 'published_year' is declared by" PREFIX off before inspecting the
+# claimant list. Grepping the whole line was VACUOUS for the canonical: the form
+# name leads the line, so `grep "'published_year'"` matched the prefix and passed
+# even with that name missing from the claimant list — a mutant dropping it kept
+# the shell at 42/42 while pytest failed three tests. Only the text AFTER the
+# marker is the claim being asserted.
+claim="${line#*is declared by }"
+claim="${claim%%—*}"                       # drop the trailing " — amounts ... unjudged"
+claim="$(printf '%s' "$claim" | sed 's/[[:space:]]*$//')"
 for n in published_year 게재연도 출판연도; do
-  printf '%s' "$line" | grep -qF "'$n'" && ok "conflict names claimant '$n'" || bad "conflict omits claimant '$n'"
+  printf '%s' "$claim" | grep -qF "'$n'" && ok "conflict names claimant '$n'" || bad "conflict omits claimant '$n' (claim: $claim)"
 done
+# Exact list, in declaration order: strictly stronger than the presence checks
+# above, and the only assertion here that pins claimant ORDER.
+[ "$claim" = "'출판연도', 'published_year', '게재연도'" ] \
+  && ok "claimants listed in declaration order" || bad "claimant list/order wrong (got: $claim)"
 
 echo ""
 echo "========================================"

@@ -314,6 +314,27 @@ class TestAmountShapeIsJudgedWithoutADeclaration:
         assert found["malformed_literals"] == []
 
 
+def test_judged_fields_covers_every_typed_rel_spec_field():
+    """Tripwire: `_judged_fields` names a FIXED subset of TypedRelSpec's fields.
+
+    It compares `type` and `units` and deliberately ignores `alias` (an engine-side
+    name that never reaches a verdict, and one common.py forbids two lines from
+    sharing — comparing it made every pair differ, #393). That subset is only
+    correct as long as the field list is what it is today: add a field that
+    `_is_malformed_compound_term` goes on to read, and conflict detection silently
+    stops noticing declarations that disagree about it.
+
+    Nothing else fails in that case, so this asserts the field list itself. On
+    failure, decide explicitly whether the new field changes a verdict and either
+    add it to `_judged_fields` or extend the expected set here with a reason.
+    """
+    import dataclasses
+
+    from common import TypedRelSpec
+
+    assert {f.name for f in dataclasses.fields(TypedRelSpec)} == {"type", "alias", "units"}
+
+
 class TestConflictingTypedDeclarations:
     """#393 — two declarations claiming one surface form must not silently win.
 
