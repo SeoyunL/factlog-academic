@@ -211,8 +211,8 @@ Each closing command takes exactly one `--id`; there is no `--all` and no wildca
 Each checks the ledger *before* spending a request, so a paper with no ledger is
 refused without any network call and pointed at the backfill command.
 
-In **all three** closing commands, **`--yes` can record a retraction but never clear
-one** (#106): upstream going quiet is not the same as upstream reversing itself. For
+In **all three** closing commands, **`--yes` can record a retraction or withdrawal but
+never clear one** (#106): upstream going quiet is not the same as upstream reversing itself. For
 arXiv it may be a withdrawal sentence that could not be read; for PubMed, a marker not
 yet emitted. OpenAlex's `is_retracted` is a structured boolean with no such reading
 failure, but OpenAlex is a known false-positive source (it flags works PubMed does

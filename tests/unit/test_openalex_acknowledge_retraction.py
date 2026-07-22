@@ -299,6 +299,11 @@ class TestAcknowledgeCommand:
                     "--target", str(tmp_path)])
         out = capsys.readouterr().out
         assert code == 0
+        # The note comes FIRST, before the prompt: it is the whole reason `--yes` may not
+        # clear (#106/#414). If it stopped being printed, the interactive path would ask a
+        # human to confirm a clear they were never shown, and the gate would guard nothing.
+        assert "no longer flags W1 as retracted" in out
+        assert out.index("no longer flags") < out.index("Cleared the retraction")
         assert "Cleared the retraction" in out
         # The clear REMOVES the key — never a literal False or "".
         record = _ledger_record(tmp_path, "W1")
@@ -607,9 +612,10 @@ class TestYesCannotClear:
         assert _ledger_is_retracted(tmp_path, "W1") is True
 
     def test_yes_on_an_already_matching_clear_is_not_refused(self, tmp_path, fake, capsys):
-        # Ledger records no retraction and OpenAlex flags none: there is nothing to clear,
-        # so this exits 0 without the refusal (the gate keys on a recorded retraction, not
-        # on OpenAlex answering False).
+        # Ledger records no retraction and OpenAlex flags none. This input never reaches the
+        # gate at all — the "nothing to acknowledge" equality check above it returns 0 first
+        # — so what this pins is only that agreement still exits 0 quietly under `--yes`,
+        # not anything about how the gate discriminates.
         _seed(tmp_path, "W1", is_retracted=False)
         fake(FakeClient({"W1": _raw_work("W1", is_retracted=False)}))
         code = run(["openalex-acknowledge-retraction", "--id", "W1",
