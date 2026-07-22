@@ -172,12 +172,14 @@ class TestPmidAndDoi:
         # OpenAlex/PubMed imports (always ASCII) then fail to match in silence.
         #
         # Pre-existing, out of scope for #398 (which fixes the producer of the
-        # #388 warnings), tracked as #405. #405 fixes it at the join-key site
-        # (`normalize_cross_id`) so already-imported DOIs collide too, which
-        # means only the SECOND assertion below inverts when it lands: this
-        # module keeps emitting the full-width spelling either way, because
-        # neither `_DOI_CORE_RE` nor the raw `DOI` field is paired with a fold
-        # the way `_YEAR_RE`/`_PMID_RE` are (#410).
+        # #388 warnings), tracked as #405. That issue leaves the site open — its
+        # stated preference is the join-key site (`normalize_cross_id`), with a
+        # fold here at `_DOI_CORE_RE` listed as the alternative. On the preferred
+        # outcome only the `normalize_cross_id` assertion below inverts, because
+        # this module goes on emitting the full-width spelling: neither
+        # `_DOI_CORE_RE` nor the raw `DOI` field is paired with a fold the way
+        # `_YEAR_RE`/`_PMID_RE` are (#410). If #405 lands on the import site
+        # instead, the two `parse_item` assertions invert as well.
         out = parse_item(_item(DOI="10.１２３４/abc"))
         assert out["doi"] == "10.１２３４/abc"
         # Same on the `extra` fallback path, so the leak is not specific to one

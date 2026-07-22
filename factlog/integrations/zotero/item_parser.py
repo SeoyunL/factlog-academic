@@ -61,12 +61,22 @@ from factlog.text_norm import fold_decimal_digits
 #   suffix is opaque and must not be folded.
 #
 # The consequence a non-ASCII ``doi`` has — a full-width and an ASCII spelling of
-# one paper taking different cross-source join keys, so it imports twice — belongs
-# to the join-key site, and #405 folds it there (``normalize_cross_id``) so that
-# already-imported DOIs collide too, not only newly-imported ones. Until #405 lands
-# the split is live and pinned in ``tests/unit/test_zotero_item_parser.py``. Either
-# way it is not work queued against this module: what ``_DOI_CORE_RE`` captures
-# leaves here as captured, and that is the intended contract, not a gap.
+# one paper taking different cross-source join keys, so it imports twice — is
+# tracked as #405. That issue lists TWO candidate sites and leaves the choice open:
+# folding the prefix here at ``_DOI_CORE_RE``, or folding at the join-key site
+# (``normalize_cross_id``). Its stated preference is the join-key site, because a
+# join key is a derived comparison value rather than a stored one, so normalizing
+# there also collides already-imported DOIs instead of only newly-imported ones. If
+# it lands that way this module keeps emitting the full-width spelling; if it lands
+# on the import site instead, the fold belongs right here. Until then the split is
+# live and pinned in ``tests/unit/test_zotero_item_parser.py``.
+#
+# On the join-key outcome, the verbatim spelling that stays in ``doi`` is NOT a
+# residual defect — it is provenance. The join key is the thing that had to be
+# normalized; the stored value keeping the source's own spelling is what lets a
+# reader see what Zotero actually held. Whether to fold the stored value anyway is
+# a separate question with its own worth-it judgement, and it is #420, not a gap
+# this module is silently leaving open.
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
 # A DOI in `extra` is taken only from a line that carries a DOI label, and only
