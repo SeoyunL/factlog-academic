@@ -186,44 +186,22 @@ def normalize_pmid(value: str) -> str:
     ``①``, which are category ``No``. Full-width slipped the leading-zero rule
     below too, because ``lstrip("0")`` strips only ASCII ``0`` and leaves ``０``.
 
-    Rejecting rather than folding, though a PMID is by definition decimal and
-    :func:`~factlog.text_norm.fold_decimal_digits` could respell one. This is a
-    strict normalizer in the sense :func:`~factlog.integrations.openalex.work_parser._optional`
-    names, and tolerance for API payloads is supplied by *that wrapper*, which
-    degrades a rejected id to ``None`` rather than aborting an otherwise usable
-    record. Folding here would instead rewrite what OpenAlex said; the repository
-    folds on the *derived comparison key*
-    (:func:`~factlog.integrations.common.source_writer.normalize_cross_id`, #421),
-    which is also the only thing that reaches full-width ids already on disk.
+    The **digit** policy is identical to ``pubmed.client.normalize_pmid``'s on
+    purpose, so one id cannot mean different things in different commands. Only
+    that axis is shared: the two accept different surface forms by design (this one
+    a ``pubmed.ncbi.nlm.nih.gov`` URL, that one a ``pmid:`` prefix and an ``int``),
+    each taking the spelling its own source produces. Rejecting was chosen over
+    folding the digits; the argument is in #427 and is not restated here.
 
-    **What rejecting costs, stated plainly.** The sole caller is ``work_parser`` on
-    ``ids.pmid`` — a write path — so a rejected id is not merely "not respelled",
-    it is *absent*: ``pmid`` is a ``CROSS_SOURCE_IDS`` join key, and duplicate
-    detection skips a key it has no value for. Before this guard the full-width id
-    was stored as received and #421's fold still collided it with the ASCII form;
-    now the pmid route to that match is gone and only ``doi``/``arxiv_id`` remain.
-    Accepted because OpenAlex is ASCII upstream, so this trades a dedup route on an
-    unreachable input for a guarantee about what gets written — but it is a trade,
-    not a free win.
-
-    **Why folding lost, in order of weight.** The deciding grounds are the two
-    above: ``_optional`` already classes this function as a strict normalizer for
-    user input and layers the tolerance in the *wrapper*, and the codebase folds
-    upstream data it cannot ask anyone to fix while refusing what a person typed
-    (``zotero.item_parser.extract_year``, #398), folding on the derived key rather
-    than on the value it stores. Those hold against *any* folding variant.
-
-    A third, narrower observation is easy to overstate, so its scope is written
-    here: folding does not close this hole **as the issue proposed it** — fold,
-    then the existing ``isdigit()`` — because ``fold_decimal_digits`` is exactly as
-    wide as ``Nd`` by design and leaves ``²`` and ``①`` alone, so ``"²²".isdigit()``
-    is still true after. A fold followed by an ASCII check *would* close it. So
-    this point defeats one formulation of folding, not folding as such; it is not
-    why the option lost.
-
-    Mirrored by ``pubmed.client``'s ``normalize_pmid``, whose callers are all
-    request-side; the two share this policy so one id cannot mean different things
-    in different commands.
+    **What rejecting costs.** The sole caller is ``openalex.work_parser`` on
+    ``ids.pmid`` — a write path — where ``_optional`` turns a rejected id into
+    ``None`` rather than aborting an otherwise usable record. So the id is not
+    respelled, it is *absent*, and ``pmid`` is a ``CROSS_SOURCE_IDS`` join key that
+    duplicate detection skips when it has no value: a full-width id that reached
+    ``sources/`` would previously still collide with its ASCII form through #421's
+    fold, and now offers no pmid route to that match. Accepted because OpenAlex is
+    ASCII upstream, so the trade is a dedup route on an input this path does not
+    produce, against a guarantee about what gets written.
     """
     if not isinstance(value, str) or not value.strip():
         raise OpenAlexError("PMID must be a non-empty string.")

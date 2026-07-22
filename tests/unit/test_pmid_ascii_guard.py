@@ -6,15 +6,14 @@
 and, being wider than ``Nd``, also category-``No`` characters like ``²`` and
 ``①``. Two consequences these tests pin: a full-width id also slipped the
 leading-zero rule (``lstrip("0")`` strips only ASCII ``0``), and a user-typed
-full-width ``--pmid`` spent a live request that NCBI can only answer emptily.
+full-width ``--pmid`` reached the transport.
 
-The two functions are deliberately identical in *policy* and different in
-*role* — the parity test states the first, and the two path tests the second:
-``pubmed.client``'s callers are all request-side, while ``openalex``'s single
-caller sits on the write path behind ``_optional``, so rejection there means the
-record stores no pmid rather than a respelled one. Neither folds; see the
-``api_client.normalize_pmid`` docstring for why the repository folds on the
-derived join key (#421) instead of at these gates.
+The two functions share the **digit** policy and nothing else — the surface forms
+they accept differ by design, which ``test_only_the_digit_axis_is_shared`` pins so
+the agreement is not read more widely than it holds. Their *roles* also differ,
+which the two path classes pin: ``pubmed.client``'s callers are all request-side,
+while ``openalex``'s single caller sits on the write path behind ``_optional``, so
+rejection there leaves the record with no pmid at all.
 """
 from __future__ import annotations
 
@@ -96,12 +95,38 @@ def test_ascii_pmids_still_pass(normalize, raw):
 
 
 @pytest.mark.parametrize("raw", NON_ASCII_DIGITS)
-def test_the_two_normalizers_agree(raw):
-    """One id must not mean different things in an OpenAlex and a PubMed command."""
+def test_the_two_normalizers_agree_on_digits(raw):
+    """A digit spelling must not mean different things in different commands."""
     with pytest.raises(OpenAlexError):
         openalex_pmid(raw)
     with pytest.raises(PubMedError):
         pubmed_pmid(raw)
+
+
+@pytest.mark.parametrize(
+    "raw,openalex_takes_it",
+    [
+        ("pmid:16354850", False),
+        ("https://pubmed.ncbi.nlm.nih.gov/32738937", True),
+        ("32738937/", True),
+    ],
+)
+def test_only_the_digit_axis_is_shared(raw, openalex_takes_it):
+    """The *surface forms* the two accept differ, and are meant to.
+
+    Each takes the spelling its own source produces — OpenAlex a resolver URL,
+    PubMed a ``pmid:`` label — so agreement is claimed for the digit policy only.
+    Pinned because "the two normalizers agree" is otherwise easy to read as a
+    claim about every input, which it is not.
+    """
+    if openalex_takes_it:
+        assert openalex_pmid(raw) == "32738937"
+        with pytest.raises(PubMedError):
+            pubmed_pmid(raw)
+    else:
+        assert pubmed_pmid(raw) == "16354850"
+        with pytest.raises(OpenAlexError):
+            openalex_pmid(raw)
 
 
 class TestWhyRejectAndNotFold:

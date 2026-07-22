@@ -143,21 +143,22 @@ def normalize_pmid(value: object) -> str:
     A PMID is a positive integer in ASCII digits. ``0``, any leading-zero form and
     any non-ASCII spelling are rejected here rather than sent: ``0`` answers HTTP
     400 live (spike §5), and this keeps obviously-malformed ids off the wire.
-    Mirrors OpenAlex's ``normalize_pmid``, whose note carries the reasoning for the
-    ASCII guard and for rejecting where a fold was possible (#427).
+    Shares the **digit** policy with OpenAlex's ``normalize_pmid`` so one id cannot
+    mean different things in different commands; #427 argues the choice. Only that
+    axis is shared — the surface forms differ by design (a ``pmid:`` prefix and an
+    ``int`` here, a ``pubmed.ncbi.nlm.nih.gov`` URL there).
 
-    That guard matters more here, because **every caller of this function is
-    request-side** and none sees a response: :meth:`PubMedClient._id_param` builds
-    the outgoing ``id`` param, and the two CLI entry points (``pubmed-import``'s
-    ``--pmid``, ``pubmed-acknowledge-retraction``'s ``--id``) take an id the user
-    typed — exactly the case the codebase refuses rather than normalizes, upstream
-    data being the case it folds (``zotero.item_parser.extract_year``, #398). A
-    full-width id reaching here is a typo to report, not a spelling to repair. It
-    also reached the transport before this guard, which is what the mirrored
-    ``0``/leading-zero rejections exist to prevent (that it reached the transport
-    is measured; what NCBI answers to one is not, no live call having been made).
-    The response side is unguarded by design: ``pubmed.work_parser`` never imports
-    this function, so tightening it does not change what a record stores.
+    **Every caller of this function is request-side** and none sees a response:
+    :meth:`PubMedClient._id_param` builds the outgoing ``id`` param, and the two
+    CLI entry points (``pubmed-import``'s ``--pmid``,
+    ``pubmed-acknowledge-retraction``'s ``--id``) take an id the user typed. A
+    full-width id here is therefore a typo to report, not a spelling to repair,
+    and it reached the transport before this guard — which is what the mirrored
+    ``0``/leading-zero rejections exist to prevent. (That it reached the transport
+    is measured; what NCBI answers to one is not, no live call having been made.)
+
+    The response side is unguarded: ``pubmed.work_parser`` never imports this
+    function, so tightening it does not change what a record stores.
     """
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise PubMedError(f"PMID must be a string or int, got {type(value).__name__}")
