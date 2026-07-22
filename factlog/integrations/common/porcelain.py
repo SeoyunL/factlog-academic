@@ -17,44 +17,113 @@ Porcelain named the rule; it is not the only place that needs it. A stderr warni
 second contract (#396) — and such a caller reuses this rule rather than growing a near-copy
 under a second name, which is how the two integrations drifted apart in the first place.
 
-**Not every porcelain emitter is gated.** That was true when #396 wrote it and it is
-still true; #406 closed three of the holes, not the set. ``_openalex_show_results``,
-``_arxiv_show_results`` and ``_pubmed_show_results`` (``cli.py``) printed their ``result``
-rows with bare f-strings until #406 routed the id and title through this function — but
-at least ten positional emitters remain open (#416), measured on the tree that closed
-those three:
+**Not every porcelain emitter is gated.** That was true when #396 wrote it, it stayed true
+after #406 closed three ``result`` rows, and it is the right thing to assume now. #416
+closed fourteen more. The last AST sweep found **111 tab-carrying interpolation sites
+under ``factlog/`` — 105 f-strings and 6 ``.format()`` calls — with no ungated
+caller-influenced field among them**. Read that as a measurement with a date on it, never
+as "the set is closed".
 
-* ``cli.py`` lines 4739 and 4954, ``print(f"query\\t{composed}")`` — carries the user's
-  own ``--query`` argument. Measured: ``arxiv-search --query $'a\\tb' --show-query
-  --porcelain`` emits ``query\\ta\\tb``, three columns where the contract says two.
-* ``cli.py`` lines 3278, 3468 and 3802, the dry-run ``item``/``work`` rows — print
-  ``outcome.key`` and ``name`` ungated. Their fourth sibling at line 3990 (pubmed) *is*
-  gated, so the same row shape is emitted four times with one of them checked, which is
-  exactly the drift one shared definition exists to prevent.
-* ``cli.py`` lines 3292, 3474, 3808, 3998 and 4206, ``print(f"target\\t{...}")`` — print a
-  path derived from the user's ``--target`` argument, and a POSIX filename may contain a
-  tab outright. Their siblings at 5718, 5858 and 6392 emit the same row through ``_f(...)``
-  and are gated: the same split as the bullet above, here eight emissions of one row shape
-  with three of them checked. Recorded from a grep, unlike the two above — no tab-carrying
-  path was run end to end through these five, so "reaches this row unneutralized" is
-  inference, not measurement.
+An earlier revision of this paragraph did write it as a closed set, in those words, and
+was wrong when it said so: three emitters were open at the time, and the review that
+caught them reproduced all three end to end. *Why* it was wrong outlasts the claim. It
+rested on grepping ``print(f"``, and **that search cannot see a row built any other way**
+— ``rows.append(f"…")``, a list comprehension, a row assembled and handed to someone else
+to print. All three misses were ``rows.append``; the ``candidate`` row #406 missed was a
+comprehension. A shape-based search finds the shape it already knows, and reports silence
+as absence.
 
-Those line numbers are a starting point, not an inventory; grep the bare ``print(f"``
-porcelain rows before trusting any count here, including this one. That warning earned
-itself immediately: the ``target`` bullet is a sixth group found *after* this paragraph
-first claimed five, which is why the count above is a floor and reads "at least". The
-point of keeping the note in the present tense is that a reader must not mistake an
-ungated path for a checked one — which is what an earlier revision of this paragraph,
-rewritten entirely into the past tense once #406 landed, quietly did.
+So the instruction is: **walk the AST for string literals containing a tab, and for each
+one check every field interpolated into it — whatever syntax does the interpolating —
+for a gate call.** f-string, ``.format()``, ``"\\t".join(...)``, ``+`` concatenation,
+``%``: the literal is what marks the row, the syntax is incidental.
 
-Note what kind of gap that is, because this module has seen both kinds. The ones above
-are **ungated** — no neutralization at all. The three ``*-backfill-provenance`` commands
+Say it that way and not "f-strings", because the narrower version was the *first* thing
+written here after ``print(f"`` failed, and it repeats the same mistake one level up: it
+cannot see the 6 ``.format()`` rows. They are all clean today (each was read field by
+field), so nothing is hiding behind that wording right now — but a row added tomorrow with
+``.format()`` would be invisible to it, which is precisely how the three ``rows.append``
+rows survived two issues. Widening a search by one shape is not the same as not searching
+by shape.
+
+Do not trust a count in this note — the 111 included — without re-running that sweep.
+
+What #416 closed, with the evidence for each, because the strengths are not equal:
+
+* Both ``query`` rows (``arxiv-search``, ``pubmed-search``) — the user's own ``--query``,
+  the most caller-influenced value on any row here. **Measured:** ``--query $'a\\tb'
+  --show-query --porcelain`` emitted ``query\\ta\\tb``, three columns against a contract
+  of two.
+* **Eight ``target`` rows**, all **measured**, by putting the KB in a directory whose name
+  carries the character: five in ``cli.py``, and three more built by ``rows.append`` in
+  ``pubmed/refresh.py``, ``openalex/refresh.py`` and ``arxiv/check_versions.py``. A path
+  from the user's ``--target``, and a POSIX directory name may hold a tab outright. The
+  last three are the ones the ``print(f"`` search could not see; note that
+  ``pubmed-refresh`` emits **two** of these rows, and #416's first pass gated one and
+  missed the other *in the same command*.
+* Three of the four dry-run ``item``/``work`` rows — the fourth, ``_pubmed_finish``'s, was
+  already gated by #141, which is why this shape existed four times with one checked.
+  Of the **four** rows, exactly **two have a measured route**, and they fall on either side
+  of what #416 touched: the zotero ``item`` row, which #416 gated (no validator stands
+  between the Zotero API and it), and the pubmed ``work`` row, which #141 had gated — a
+  tab-carrying PMID from a real efetch body arrives there and is neutralized to a space, so
+  that gate is doing visible work rather than guarding an unreachable path. Read this as
+  "two of the four", not "two of the three": #416 closed three rows and only one of *those*
+  three has a route.
+
+  **Gated but with no route found: the arXiv and OpenAlex ``work`` rows.** For arXiv,
+  ``versioned_id`` is only ever built from an ``arxiv_id`` that came through
+  ``normalize_arxiv_id``/``parse_entry_id``, and an exhaustive run — every character this
+  module neutralizes, at every insertion point — carries none of them through. For
+  OpenAlex, ``normalize_work_id`` is the same story, and a hostile title is slugified
+  before it can reach the filename column. Both are gated anyway: ``outcome.key`` *is*
+  ``work.openalex_id``/``work.versioned_id``, the values ``_openalex_show_results`` and
+  ``_arxiv_show_results`` gate one row over, and a caller gates its value rather than
+  reasoning about what its own parser admits. An earlier revision of this note called the
+  arXiv one "measured" on the strength of a test that handed the row a fabricated id
+  through a fake client — which fixes the emitter and shows nothing about reachability.
+* The ``candidate`` row (``_candidate_porcelain_lines``, #75) — **not in the list #406
+  wrote**, and found only by re-running the sweep rather than trusting that list. Its two
+  columns differ and the note keeps them apart: ``existing_path.name`` is **measured** (the
+  path comes from a scan of ``sources/``, so renaming a real source file to hold a tab puts
+  one there — five columns without the gate, four with it), while ``key`` has **no route
+  found**, for the ``normalize_work_id`` reason above.
+
+Line numbers are deliberately absent. Every earlier revision carried them, every
+revision's numbers went stale within a merge or two, and the last set was stale on
+arrival — so the sweep, not the list, is the durable part. It has now earned itself three
+times: the ``target`` group turned up after this paragraph claimed five emitters, the
+``candidate`` row after it claimed ten, and three ``rows.append`` rows after it claimed
+the set was closed. Each time the list was wrong and re-running the search was right.
+
+Two habits this note asks of the next person, both learned the hard way:
+
+**Say which strength of evidence you have.** "Measured" and "gated, no route found" are
+different claims, and #416 got this wrong before review caught it — twice labelling as
+measured a row whose value had been injected through a fake client or a test helper that
+bypassed the real normalizer. Fixing an emitter and reaching an emitter are different
+experiments; a test that hands a row a fabricated value proves the first and is silent on
+the second. **Gating a value you cannot show is reachable is right** — that is what these
+gates are for. Calling it measured is what is wrong.
+
+**Do not upgrade a hedge without an experiment that earns it.** Before #416 this note
+read "at least ten" and "the count above is a floor". Those were correct. #416 replaced
+them with an absolute claim that was false on the day it was written. A hedge is not
+clutter to be tidied away; it is the part of the sentence carrying what is not known.
+
+Note what kind of gap those were, because this module has seen both kinds. The ones above
+were **ungated** — no neutralization at all. The three ``*-backfill-provenance`` commands
 were something worse to review: **stale, not ungated**. Each kept its own local copy of
 the tab/CR/LF rule, which *looked* checked while silently falling behind when #396 widened
 the shared set, so eight characters it now neutralizes still split those rows in two. They
 were converted to call this function (#396). A near-copy does not stay correct by being
 correct once, which is the whole argument for one definition; an obvious gap at least
 announces itself — provided a note like this one keeps announcing it.
+
+Qualify that last clause with what #416 found, though: a gap announces itself *to a search
+that can see it*. The three ``rows.append`` rows were as ungated as any bullet above and
+stayed invisible through two issues, because both searched for a shape they did not have.
+"Obvious" is a property of the search, not of the gap.
 """
 from __future__ import annotations
 

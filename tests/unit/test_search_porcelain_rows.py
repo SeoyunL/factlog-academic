@@ -7,9 +7,11 @@ upstream `title` added a column and a line break split the row, silently, in exa
 the commands used most.
 
 Scope, stated exactly, because an earlier draft of this docstring overreached: what is
-covered below is the three `result` rows and nothing else. It is *not* a claim that
-every porcelain emitter is gated — measured, several are not (`porcelain.py` lists
-them). Read this file as "these three rows hold their shape", never as a survey.
+covered below is the three `result` rows and nothing else. It is *not* a survey of the
+porcelain emitters — the eleven this file leaves out were still ungated when it landed,
+and #416 closed them in `test_dry_run_porcelain_rows.py`. `porcelain.py` remains the one
+place that records what is and is not gated; read that note, not this one, for the state
+of the set. Read this file as "these three rows hold their shape".
 
 The three are tested together because the bug was one bug in three copies: the rows
 share a shape (`result\\t<index>\\t<id>\\t<flag>\\t<title>`), so they share the

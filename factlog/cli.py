@@ -3175,6 +3175,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     from factlog.integrations.zotero.api_client import ZoteroConnectionError, ZoteroError
     from factlog.integrations.zotero.config import ZoteroConfigError, load_config
     from factlog.integrations.zotero.importer import import_items
+    from factlog.integrations.common.porcelain import porcelain_field
 
     porcelain = getattr(args, "porcelain", False)
     dry_run = getattr(args, "dry_run", False)
@@ -3271,11 +3272,16 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         #   item\t<status>\t<zotero_key>\t<would-be filename>
         # On a hard error (connection/config) nothing is written to stdout and the
         # exit code is non-zero — the error goes to stderr.
+        # The key and the filename go through :func:`porcelain_field` so a stray
+        # tab/newline can never split a row (#416).
         convert_rc = _run_conversion(quiet=True)
         if dry_run:
             for outcome in report.outcomes:
                 name = outcome.path.name if outcome.path is not None else ""
-                print(f"item\t{outcome.status}\t{outcome.key}\t{name}")
+                print(
+                    f"item\t{outcome.status}\t{porcelain_field(outcome.key)}\t"
+                    f"{porcelain_field(name)}"
+                )
         print(f"imported\t{report.imported}")
         print(f"skipped\t{report.skipped}")
         print(f"errors\t{report.errors}")
@@ -3289,7 +3295,7 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
             print(f"annotations_skipped\t{report.annotations_skipped}")
             print(f"annotation_errors\t{report.annotation_errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
-        print(f"target\t{target / 'sources'}")
+        print(f"target\t{porcelain_field(str(target / 'sources'))}")
         return 1 if (report.errors or report.pdf_errors or report.annotation_errors or convert_rc) else 0
 
     verb = "Would import" if dry_run else "Imported"
@@ -3416,9 +3422,17 @@ def _candidate_porcelain_lines(report) -> list[str]:
     One ``candidate`` row per surfaced pair, in report order, then the count. Nothing
     is emitted through the per-work status ternary — a candidate is never a status
     (the #65 trap, where an unhandled status fell to ``error`` with a ``?`` glyph).
+
+    The key and the existing filename go through :func:`porcelain_field`: both are
+    upstream data (``o.key`` is the same ``openalex_id``/``versioned_id`` the search
+    ``result`` row already gates), and a tab in either added a column here (#416,
+    measured). The score is formatted from a float, so it needs no gate.
     """
+    from factlog.integrations.common.porcelain import porcelain_field
+
     lines = [
-        f"candidate\t{o.key}\t{o.candidate.existing_path.name}\t{o.candidate.score:.4f}"
+        f"candidate\t{porcelain_field(o.key)}\t"
+        f"{porcelain_field(o.candidate.existing_path.name)}\t{o.candidate.score:.4f}"
         for o in report.candidates
     ]
     lines.append(f"candidates\t{len(report.candidates)}")
@@ -3453,7 +3467,13 @@ def _candidate_notes(report) -> list[str]:
 
 
 def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning: str) -> int:
-    """Emit the shared summary for an openalex import and return the exit code."""
+    """Emit the shared summary for an openalex import and return the exit code.
+
+    Every caller-influenced field on a porcelain row goes through
+    :func:`porcelain_field` so a stray tab/newline can never split a row (#416).
+    """
+    from factlog.integrations.common.porcelain import porcelain_field
+
     notes = _openalex_placeholder_warnings(report) + _candidate_notes(report)
     if porcelain:
         # Stable machine contract, tab-separated, LF-terminated. Order-independent
@@ -3465,13 +3485,16 @@ def _openalex_finish(report, target, *, dry_run: bool, porcelain: bool, warning:
         if dry_run:
             for outcome in report.outcomes:
                 name = outcome.path.name if outcome.path is not None else ""
-                print(f"work\t{outcome.status}\t{outcome.key}\t{name}")
+                print(
+                    f"work\t{outcome.status}\t{porcelain_field(outcome.key)}\t"
+                    f"{porcelain_field(name)}"
+                )
         print(f"imported\t{report.imported}")
         print(f"skipped\t{report.skipped}")
         print(f"merged\t{report.merged}")
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
-        print(f"target\t{target / 'sources'}")
+        print(f"target\t{porcelain_field(str(target / 'sources'))}")
         # Surfaced merge candidates (#75): a new token on stdout, after the six
         # summary lines those stay byte-unchanged.
         for line in _candidate_porcelain_lines(report):
@@ -3787,8 +3810,11 @@ def _arxiv_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -
 
     Mirrors :func:`_openalex_finish`'s porcelain contract exactly; the only
     difference is the warning source (withdrawal notes, not placeholder titles or
-    a credit budget — arXiv is free).
+    a credit budget — arXiv is free), and it mirrors the :func:`porcelain_field`
+    gate on every caller-influenced field with it (#416).
     """
+    from factlog.integrations.common.porcelain import porcelain_field
+
     if porcelain:
         # Stable machine contract, tab-separated, LF-terminated. Order-independent
         # (parse by first field):
@@ -3799,13 +3825,16 @@ def _arxiv_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) -
         if dry_run:
             for outcome in report.outcomes:
                 name = outcome.path.name if outcome.path is not None else ""
-                print(f"work\t{outcome.status}\t{outcome.key}\t{name}")
+                print(
+                    f"work\t{outcome.status}\t{porcelain_field(outcome.key)}\t"
+                    f"{porcelain_field(name)}"
+                )
         print(f"imported\t{report.imported}")
         print(f"skipped\t{report.skipped}")
         print(f"merged\t{report.merged}")
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
-        print(f"target\t{target / 'sources'}")
+        print(f"target\t{porcelain_field(str(target / 'sources'))}")
         # Surfaced merge candidates (#75): a new token on stdout, after the six
         # summary lines those stay byte-unchanged.
         for line in _candidate_porcelain_lines(report):
@@ -3973,6 +4002,11 @@ def _pubmed_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) 
     caller-influenced field in a porcelain row (the PMID, which comes from the
     efetch XML, and the would-be/existing filename) is passed through
     :func:`porcelain_field` so a stray tab/newline can never split a row (#141).
+
+    That sentence read "every" before the ``target`` row below was gated, while the
+    row printed a path built from the user's ``--target`` — a POSIX filename may hold
+    a tab outright, and one did, measured (#416). A docstring claiming a gate is worse
+    than no docstring: it is the ungated path a reader mistakes for a checked one.
     """
     from factlog.integrations.common.porcelain import porcelain_field
 
@@ -3995,7 +4029,7 @@ def _pubmed_finish(report, target, *, dry_run: bool, porcelain: bool, warnings) 
         print(f"merged\t{report.merged}")
         print(f"errors\t{report.errors}")
         print(f"dry_run\t{'1' if dry_run else '0'}")
-        print(f"target\t{target / 'sources'}")
+        print(f"target\t{porcelain_field(str(target / 'sources'))}")
         for line in _candidate_porcelain_lines(report):
             print(line)
         for warning in warnings:
@@ -4203,7 +4237,10 @@ def cmd_pubmed_refresh(args: argparse.Namespace) -> int:
             print(f"would_check\t{len(to_check)}")
             print(f"skipped\t{len(skipped)}")
             print("dry_run\t1")
-            print(f"target\t{target}")
+            # Gated on the same terms as the two rows above it: the path comes from
+            # the user's --target and a POSIX filename may hold a tab (#416, measured
+            # — a tab-carrying --target reached this row and added a column).
+            print(f"target\t{porcelain_field(str(target))}")
         else:
             print(
                 f"\nDry run: would refresh retraction status for {len(to_check)} PubMed "
@@ -4661,6 +4698,7 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
 
     from factlog.integrations.arxiv.importer import import_works
+    from factlog.integrations.common.porcelain import porcelain_field
     from factlog.integrations.arxiv.client import (
         ArxivConnectionError,
         ArxivError,
@@ -4736,7 +4774,13 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
     if args.show_query:
         composed = compose_search_query(args.query, categories, args.year)
         if porcelain:
-            print(f"query\t{composed}")
+            # The most caller-influenced value on any porcelain row: it is the user's
+            # own --query, so an arbitrary tab or line break goes in by hand rather
+            # than arriving from upstream (#416, measured — `--query $'a\tb'` emitted
+            # three columns where the contract says two). Only the porcelain branch
+            # is gated; the human branch below prints prose, whose shape carries no
+            # meaning a break could destroy.
+            print(f"query\t{porcelain_field(composed)}")
         else:
             print("Would search arXiv (no request sent):")
             print(f"  search_query: {composed}")
@@ -4897,6 +4941,7 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     ``term`` and sends nothing; ``--dry-run`` sends the search and declines to write
     (they are different, per the issue).
     """
+    from factlog.integrations.common.porcelain import porcelain_field
     from factlog.integrations.pubmed.client import (
         PubMedConnectionError,
         PubMedError,
@@ -4951,7 +4996,10 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     # before `_pubmed_prepare` (which requires both for a request-spending run).
     if args.show_query:
         if porcelain:
-            print(f"query\t{composed}")
+            # Same gate, same reason as `arxiv-search`'s query row (#416): the value
+            # is the user's own --query, and both rows were measured emitting three
+            # columns for a tab-carrying one.
+            print(f"query\t{porcelain_field(composed)}")
         else:
             print("Would search PubMed (no request sent):")
             print(f"  term:   {composed}")
