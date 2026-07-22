@@ -53,10 +53,17 @@ from factlog.text_norm import fold_decimal_digits
 #
 # - ``_YEAR_RE`` / ``_PMID_RE`` -> ``extract_year`` / ``extract_pmid`` fold their
 #   whole capture, so ``year`` and ``pmid`` leave here ASCII (#398).
-# - ``doi`` leaves here with an **ASCII prefix and an untouched suffix** (#420).
-#   Under ISO 26324 only the ``10.<registrant>`` prefix is a decimal number; the
-#   suffix is opaque, and respelling a character in it would name a different
-#   paper. So ``10.１２３４/abc１`` becomes ``10.1234/abc１`` and not more.
+# - ``doi``, **for a value the fold recognises as a DOI**, leaves here with an
+#   ASCII prefix and an untouched suffix (#420). Under ISO 26324 only the
+#   ``10.<registrant>`` prefix is a decimal number; the suffix is opaque, and
+#   respelling a character in it would name a different paper. So
+#   ``10.１２３４/abc１`` becomes ``10.1234/abc１`` and not more.
+#
+#   The condition is not a formality. ``fold_doi_prefix`` returns a head it does
+#   not recognise unchanged rather than rewriting it, so a wrapped value — and
+#   ``https://doi.org/10.１２３４/abc`` is common in a real library — is stored
+#   full-width, prefix included (measured). This module still does NOT promise
+#   ASCII digits in ``doi``.
 #
 # The fold is applied on **both** DOI paths, which are independent: the raw ``DOI``
 # item field never passes through ``_DOI_CORE_RE``, so pairing that pattern alone
@@ -65,11 +72,20 @@ from factlog.text_norm import fold_decimal_digits
 # What this fold is and is not for. The *join key* was the thing that had to be
 # normalized, and #405 did that at ``normalize_cross_id`` — a derived value, so it
 # collides DOIs already sitting in ``sources/`` too, which no import-boundary fold
-# can. This module's fold is about the **stored** value instead, because two
-# consumers read it raw: ``csl.py`` puts it straight into exported CSL JSON, where
-# a citation processor cannot resolve a full-width DOI, and ``openalex/refresh.py``
-# compares it to the upstream value with ``!=``, which reports a false drift on
-# every refresh, forever. Neither is reachable through the join key.
+# can. This module's fold is about the **stored** value instead, and the consumer
+# that makes it worth doing is ``csl.py``: it puts the stored DOI straight into
+# exported CSL JSON, where a citation processor cannot resolve a full-width one.
+# That path is reached from the front matter dict alone, so it does not care which
+# integration wrote the file, and the join key never touches it.
+#
+# ``openalex/refresh.py``'s raw ``!=`` drift compare was originally cited here as a
+# second such consumer. It is not one, measured: a Zotero-written full-width DOI
+# does not reach it. When OpenAlex imports the same paper the result is a *merge*,
+# which records OpenAlex's own ASCII DOI in the provenance ledger and never opens
+# the ``.md``, so ``recorded_doi`` is ASCII on the ledger branch; and the front
+# matter branch is gated on an ``openalex_id`` the merge does not add. A source
+# carrying its own ``openalex_id`` was written by the OpenAlex integration, whose
+# DOI is ASCII upstream.
 #
 # It repairs new imports ONLY. Values already written stay as they are; fixing
 # those is #428's, at the consumers.

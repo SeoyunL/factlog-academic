@@ -40,7 +40,15 @@ class TestSuffixIsPreserved:
 
     def test_only_the_first_slash_splits(self):
         # A suffix may contain slashes, and all of them are the opaque half.
-        assert fold_doi_prefix("10.1002/x/１") == "10.1002/x/１"
+        #
+        # The prefix is full-width on purpose. With an all-ASCII prefix this
+        # assertion passes under a `partition` -> `rpartition` mutant for the
+        # wrong reason: the head becomes `10.1002/x`, fails the guard, and the
+        # value comes back unchanged — which is what was expected anyway. A
+        # prefix that must *change* makes the mutant produce an unfolded value,
+        # so the assertion fails, as its name promises.
+        assert fold_doi_prefix("10.１２３４/x/y") == "10.1234/x/y"
+        assert fold_doi_prefix("10.１２３４/x/１") == "10.1234/x/１"
 
     def test_case_is_preserved(self):
         # Callers that want a comparison form lowercase around this; a caller

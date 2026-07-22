@@ -188,7 +188,22 @@ class TestPmidAndDoi:
         # The DOI Handbook (2.2.2) lets a registrant subdivide its code, and each
         # part is still decimal. A prefix grammar of `10\.[0-9]+` alone would stop
         # at the first dot, fail its own guard, and leave the value full-width.
+        #
+        # RAW FIELD PATH ONLY. The `extra` path cannot reach this case at all:
+        # `_DOI_CORE_RE` is `10\.\d+/`, which stops at the second dot and matches
+        # nothing, so a subdivided DOI in `extra` is dropped entirely — both
+        # spellings alike. That is a pre-existing limit of the extraction regex,
+        # not of the fold, and is out of #420's scope; it is pinned below so the
+        # asymmetry between the two paths is stated rather than implied.
         assert parse_item(_item(DOI="10.１０００.１０/abc"))["doi"] == "10.1000.10/abc"
+
+    def test_the_extra_path_drops_a_subdivided_registrant_code_either_spelling(self):
+        # Characterization, not an endorsement: `_DOI_CORE_RE` never matches a
+        # subdivided code, so `extra` yields "" here. Pinned because the fold is
+        # what a reader would otherwise suspect, and because the two spellings
+        # agreeing (both "") is the property that keeps this out of #420.
+        assert parse_item(_item(extra="DOI: 10.1000.10/xyz"))["doi"] == ""
+        assert parse_item(_item(extra="DOI: 10.１０００.１０/xyz"))["doi"] == ""
 
     def test_a_head_that_is_not_a_doi_prefix_is_not_rewritten(self):
         # The guard, and an example that actually depends on it: folding this
