@@ -21,7 +21,7 @@ under a second name, which is how the two integrations drifted apart in the firs
 still true; #406 closed three of the holes, not the set. ``_openalex_show_results``,
 ``_arxiv_show_results`` and ``_pubmed_show_results`` (``cli.py``) printed their ``result``
 rows with bare f-strings until #406 routed the id and title through this function — but
-at least five positional emitters remain open (#416), measured on the tree that closed
+at least ten positional emitters remain open (#416), measured on the tree that closed
 those three:
 
 * ``cli.py`` lines 4739 and 4954, ``print(f"query\\t{composed}")`` — carries the user's
@@ -31,9 +31,17 @@ those three:
   ``outcome.key`` and ``name`` ungated. Their fourth sibling at line 3990 (pubmed) *is*
   gated, so the same row shape is emitted four times with one of them checked, which is
   exactly the drift one shared definition exists to prevent.
+* ``cli.py`` lines 3292, 3474, 3808, 3998 and 4206, ``print(f"target\\t{...}")`` — print a
+  path derived from the user's ``--target`` argument, and a POSIX filename may contain a
+  tab outright. Their three siblings at 5718, 5858 and 6392 emit the same row through
+  ``_f(...)`` and are gated: the same four-times-one-checked drift as the bullet above.
+  Recorded from a grep, unlike the two above — no tab-carrying path was run end to end
+  through these five, so "reaches this row unneutralized" is inference, not measurement.
 
 Those line numbers are a starting point, not an inventory; grep the bare ``print(f"``
-porcelain rows before trusting any count here, including this one. The point of keeping
+porcelain rows before trusting any count here, including this one. That warning earned
+itself immediately: the ``target`` bullet is a sixth group found *after* this paragraph
+first claimed five, which is why the count above is a floor and reads "at least". The point of keeping
 the note in the present tense is that a reader must not mistake an ungated path for a
 checked one — which is what an earlier revision of this paragraph, rewritten entirely
 into the past tense once #406 landed, quietly did.

@@ -25,14 +25,23 @@ from factlog import cli
 from factlog.integrations.common.porcelain import _LINE_BREAKS
 
 
-# Exactly the set the gate covers — tab plus every `_LINE_BREAKS` character — and one
-# space, which the gate deliberately leaves alone and which therefore rides along as a
-# negative control (it must stay green under a disabled gate; measured). The issue names
-# tab, newline and U+2028: all three are already in that set, so none is added here.
-# U+2028 is the pointed member — legal XML, legal JSON, not a control character by any
-# C0 reading, and `str.splitlines()` breaks on it, so a "strip control characters" gate
-# would have let it through.
-HOSTILE = sorted({"\t", " ", *_LINE_BREAKS})
+# Exactly the set the gate covers — tab plus every `_LINE_BREAKS` character — plus U+0020
+# SPACE, which it does not. The space is a negative control: it must stay green even with
+# the gate disabled, which is what shows the rest of the suite goes red for the gate and
+# not because these assertions reject everything. Twelve members; U+0020 is the twelfth.
+#
+# Write that space as a literal space and check it stayed one. An earlier revision of this
+# line held U+2028 where the space belongs — it renders as a space in a terminal, so the
+# comment above it described a control that did not exist, and the "measured" evidence for
+# it (no U+0020 among the failures) held only because no U+0020 case was ever collected.
+# Verify by code point, never by eye: `[hex(ord(c)) for c in HOSTILE]` is 12 long and
+# contains 0x20. Mistaking an unchecked path for a checked one is this file's own subject.
+#
+# The issue names tab, newline and U+2028: all three are in `_LINE_BREAKS` or added by the
+# tab above, so none needs adding here. U+2028 is the pointed member — legal XML, legal
+# JSON, not a control character by any C0 reading, and `str.splitlines()` breaks on it, so
+# a "strip control characters" gate would have let it through.
+HOSTILE = sorted({"\t", " ", *_LINE_BREAKS})
 
 
 def _openalex(title, work_id="W1"):
