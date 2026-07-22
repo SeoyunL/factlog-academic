@@ -700,35 +700,52 @@ class TestExportPathOnDisk:
         assert read_front_matter(tmp_path / "does-not-exist.md") == {}
 
     @staticmethod
-    def _fenced_at(offset: int) -> str:
+    def _fenced_at(offset: int, body: str = "") -> str:
         """A source whose closing fence starts exactly at byte `offset`."""
         head = '---\ntitle: "T"\n'
         pad = "p: " + "x" * (offset - len(head) - 4) + "\n"
         assert len(head + pad) == offset
-        return head + pad + '\n---\n\nLEAK: leaked\n'
+        return head + pad + '\n---\n\nLEAK: leaked\n' + body
 
     @pytest.mark.parametrize("offset", range(-3, 4))
-    def test_fence_straddling_a_chunk_boundary_is_found(self, tmp_path, offset):
-        """The closing fence is found even when it spans two reads.
+    def test_fence_straddling_a_chunk_boundary_stops_within_two_chunks(
+        self, tmp_path, monkeypatch, offset,
+    ):
+        """A fence spanning two reads ends the loop there, not at the cap.
 
         `read_front_matter` pulls `_FRONT_MATTER_CHUNK_CHARS` at a time, so a
-        `\\n---` sitting astride a boundary is split across them. The loop
-        re-scans the *accumulated* text rather than the latest chunk for exactly
-        this reason, and nothing else here pins that: the 200-author block
-        (7904B) fits in the first read, so its loop never iterates at all.
+        `\\n---` sitting astride a boundary is split across them. The loop scans
+        the *accumulated* text rather than the latest chunk for exactly this
+        reason, and nothing else here pins that: the 200-author block (7904B)
+        fits in the first read, so its loop never iterates at all.
 
-        Without the accumulation the fence is missed, `title` vanishes with the
-        discarded chunk, and body keys past the fence leak into the front matter.
+        What the accumulation buys is the read budget, not the find.
+        `parse_front_matter` searches all of `head`, so scanning only the latest
+        chunk yields the same dict from the same block — it just keeps reading to
+        get there: on this fixture out to EOF (~248,000 chars against 16,384),
+        and on a file past the cap, 1,048,576 against 16,384. That is why the
+        read count is asserted and not only the keys: measured against both
+        latest-chunk rewrites, the two key assertions below still hold.
 
         The offsets are computed *from the constant*, so retuning the chunk size
         moves the fixture with it instead of silently aiming at nothing.
         """
         path = tmp_path / f"straddle{offset}.md"
-        path.write_text(self._fenced_at(_FRONT_MATTER_CHUNK_CHARS + offset), encoding="utf-8")
+        path.write_text(
+            self._fenced_at(_FRONT_MATTER_CHUNK_CHARS + offset, "filler line\n" * 20_000),
+            encoding="utf-8",
+        )
+        # Guards the guard: the file has to outrun the budget asserted below, or
+        # reading the whole body would stay under it and pin nothing.
+        assert path.stat().st_size > 10 * _FRONT_MATTER_CHUNK_CHARS
 
+        read = self._chars_read(monkeypatch)
         fm = read_front_matter(path)
         assert fm["title"] == "T"
         assert "LEAK" not in fm, "body key past the closing fence leaked in"
+        assert read[0] <= 2 * _FRONT_MATTER_CHUNK_CHARS, (
+            f"read {read[0]} chars for a fence that ends in the second chunk"
+        )
 
     def test_chunk_size_must_cover_the_opening_fence(self, tmp_path):
         """A chunk under 3 chars cannot see `---`, so every source reads as empty.
