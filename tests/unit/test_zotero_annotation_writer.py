@@ -185,7 +185,10 @@ class TestWrite:
         # once, never updated again, and the skip reason ("not a zotero notes file")
         # is false. Left as-is because reaching it needs a ~4000-character title and
         # the alternative — a wider head — puts real user files back at risk of
-        # being overwritten (see _HEAD_SCAN_BYTES). Follow-up: #430.
+        # being overwritten (see _HEAD_SCAN_BYTES). Follow-up: #430, which proposes
+        # capping the emitted title so the trade-off disappears. This test pins the
+        # current behaviour, so fixing #430 must flip it rather than delete it: the
+        # over-long case should then assert "updated", not "skipped".
         probe_len = 100
         probe = render_annotations({"zotero_key": "K", "title": "T" * probe_len}, [_hl()], [])
         # Accepted while the whole "\n---" fence fits in the head, so the last title
