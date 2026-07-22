@@ -19,10 +19,11 @@ both idempotent and fresh:
 
 "ours" is detected by a ``source_kind: annotations`` line inside the front-matter
 block (not anywhere in the body). Deciding that needs two things inside the
-scanned head, and only the first is under our control: we write the *marker* on
-the line right after the opening fence, but the *closing fence* sits wherever the
-front matter ends. A file whose block does not close inside the head is therefore
-never ours, however early its marker appears. Writes are atomic (temp+os.replace).
+scanned head: we write the *marker* on the line right after the opening fence,
+and we cap the emitted title so the *closing fence* cannot be pushed out of the
+head by a long title. A file whose block does not close inside the head is never
+ours, however early its marker appears — that still holds for hand-edited front
+matter. Writes are atomic (temp+os.replace).
 """
 from __future__ import annotations
 
@@ -46,8 +47,14 @@ from factlog.integrations.zotero._textio import (
 # user file whose *own front matter* carries the marker line close inside the head
 # and so be claimed as ours and overwritten — measured at 65536, a file with the
 # fence at 4844 goes from "skipped" back to "updated". The narrow window costs an
-# over-rejection for absurdly long front matter instead (see _is_ours).
+# over-rejection for absurdly long front matter instead (see _not_ours_reason).
 _HEAD_SCAN_BYTES = 4096
+
+# Appended to a title we had to cut so the cut is visible in the file itself.
+_TRUNCATED_SUFFIX = "…"
+
+_NOT_OURS = "target exists and is not a zotero notes file"
+_UNTERMINATED = "target exists and its front matter does not close inside the scanned head"
 
 # Strip script/style/comment *contents* (not just the tags) before removing tags.
 _DROP_CONTENT_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>|<!--.*?-->")
@@ -110,6 +117,29 @@ def _format_highlight(data: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _fit_scalar(value: str, budget: int) -> str:
+    """Longest prefix of ``value`` whose *emitted* scalar stays within ``budget``.
+
+    Counted on the emitted width, not the input length: yaml_scalar turns one
+    backslash/quote/tab into two characters, so a cap on input characters would
+    still let the front matter grow past the budget.
+    """
+    if len(yaml_scalar(value)) - 2 <= budget:
+        return value
+    budget -= len(yaml_scalar(_TRUNCATED_SUFFIX)) - 2  # the marker itself has to fit
+    if budget < 0:
+        return ""
+    used = 0
+    kept = 0
+    for ch in value:
+        width = len(yaml_scalar(ch)) - 2
+        if used + width > budget:
+            break
+        used += width
+        kept += 1
+    return value[:kept] + _TRUNCATED_SUFFIX
+
+
 def render_annotations(parsed_bib: dict, annotations: list[dict], notes: list[dict]) -> str:
     """The full markdown (front matter + body), or "" if there is nothing to write."""
     highlight_blocks = [b for b in (_format_highlight(_ad(a)) for a in annotations) if b]
@@ -119,11 +149,16 @@ def render_annotations(parsed_bib: dict, annotations: list[dict], notes: list[di
 
     title = _clean(parsed_bib.get("title")) or "Untitled"
     # Marker first so it is always near the top of the scanned head.
-    lines = ["---", _MARKER]
-    lines.append(f"zotero_key: {yaml_scalar(_clean(parsed_bib.get('zotero_key')))}")
-    lines.append(f"title: {yaml_scalar(title)}")
-    lines.append("imported_from: zotero")
-    lines.append("---\n")
+    head = ["---", _MARKER, f"zotero_key: {yaml_scalar(_clean(parsed_bib.get('zotero_key')))}"]
+    tail = ["imported_from: zotero", "---"]
+    # Spend whatever the rest of the block leaves on the title, so the closing
+    # fence lands inside the head _is_ours scans however long the title is. The
+    # budget is derived from the block we are about to emit rather than hardcoded:
+    # adding a field or a longer zotero_key narrows the title instead of silently
+    # pushing the fence back out of the window (#430).
+    overhead = len("\n".join([*head, 'title: ""', *tail[:-1]]))
+    title = _fit_scalar(title, _HEAD_SCAN_BYTES - len("\n---") - overhead)
+    lines = [*head, f"title: {yaml_scalar(title)}", *tail, ""]
     lines.append(f"# Annotations — {title}\n")
 
     if highlight_blocks:
@@ -137,28 +172,35 @@ def render_annotations(parsed_bib: dict, annotations: list[dict], notes: list[di
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _is_ours(path: Path) -> bool:
-    """True only if the file's front-matter block carries the annotations marker."""
+def _not_ours_reason(path: Path) -> str:
+    """Empty if the file's front-matter block carries our marker, else why it does not.
+
+    The two refusals are reported apart because they mean different things to
+    whoever reads the skip: one is someone else's file, the other is a file we
+    cannot classify at all — possibly one of ours whose front matter was hand-
+    grown past the head. Saying "not a zotero notes file" for the second was a
+    false report (#430).
+    """
     try:
         with path.open("r", encoding="utf-8") as fh:
             head = fh.read(_HEAD_SCAN_BYTES)
     except OSError:
-        return False
+        return _NOT_OURS
     if not head.startswith("---"):
-        return False
+        return _NOT_OURS
     rest = head[3:]
     end = rest.find("\n---")
     if end == -1:
         # The closing fence is missing or past the scanned head, so we cannot tell
         # front matter from body. Claiming ownership here would let a marker line
         # in a user's *body* pass the overwrite gate and destroy their file. The
-        # opposite error costs a silent skip: one of our own files stops being
-        # updated, and reports "not a zotero notes file" while it does so. That is
-        # bad but recoverable, and it needs front matter over _HEAD_SCAN_BYTES to
-        # happen at all. Not knowing where the block ends means not ours.
-        return False
+        # opposite error costs a silent skip, which is bad but recoverable. Not
+        # knowing where the block ends means not ours. Our own writes stay clear of
+        # this by capping the title (see render_annotations), so reaching it now
+        # takes front matter someone lengthened by hand.
+        return _UNTERMINATED
     block = rest[:end]
-    return _MARKER_LINE_RE.search(block) is not None
+    return "" if _MARKER_LINE_RE.search(block) else _NOT_OURS
 
 
 def write_annotations(
@@ -187,8 +229,9 @@ def write_annotations(
     path = sources_dir / f"{base_stem}-notes.md"
 
     if path.exists():
-        if not _is_ours(path):
-            return AnnotationResult(path, "skipped", "target exists and is not a zotero notes file")
+        refusal = _not_ours_reason(path)
+        if refusal:
+            return AnnotationResult(path, "skipped", refusal)
         try:
             if path.read_text(encoding="utf-8") == content:
                 return AnnotationResult(path, "skipped", "unchanged")
