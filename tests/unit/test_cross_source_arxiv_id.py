@@ -29,6 +29,7 @@ from factlog.integrations.common.source_writer import (
 )
 from factlog.integrations.openalex.source_writer import OpenAlexSourceWriter
 from factlog.integrations.openalex.work_parser import ParsedWork
+from factlog.integrations.zotero.item_parser import extract_pmid
 from factlog.integrations.zotero.source_writer import SourceWriter as ZoteroWriter
 
 
@@ -82,7 +83,9 @@ class TestNormalizeCrossId:
     def test_doi_is_lowercased(self):
         assert normalize_cross_id("doi", "10.1/ABC") == "10.1/abc"
 
-    def test_pmid_passes_through(self):
+    def test_an_ascii_pmid_is_only_stripped(self):
+        # Digit spelling is handled in TestPmidDigitSpelling; an ASCII id is
+        # untouched apart from the strip.
         assert normalize_cross_id("pmid", " 32738937 ") == "32738937"
 
     def test_arxiv_id_is_in_the_cross_source_set(self):
@@ -219,6 +222,124 @@ class TestDoiDigitSpelling:
         assert second.path == first.path
         assert [p.name for p in sorted((tmp_path / "sources").glob("*.md"))] == \
             [first.path.name]
+
+
+class TestPmidDigitSpelling:
+    """A PMID folds whole, because it has no opaque half (#421).
+
+    A PMID is a positive decimal integer by definition, so a non-ASCII spelling is
+    a rendering of the same PubMed record and must produce the same join key. That
+    is the DOI argument (#405) without the suffix caveat: there is no part of a
+    PMID where respelling a character would name a *different* record, so the fold
+    covers the value rather than a leading part of it.
+
+    The Zotero parser folds a PMID at the import boundary already (#398), so what
+    these pin is the reachable remainder: values that path wrote *before* #398 and
+    does not repair, and hand-edited files. Both are read off disk by the index,
+    which is where a boundary-only fold can never reach them. The guard is pinned
+    separately from the outcome, because a mutant that drops it survives every
+    case where the value is well-formed.
+    """
+
+    def test_full_width_collides_with_ascii(self):
+        assert normalize_cross_id("pmid", "１２３４５６７８") == "12345678"
+
+    def test_non_latin_digit_scripts_fold(self):
+        # The counter-case for NFKC, as in the parser: `\d` matches these but
+        # NFKC does not fold them.
+        assert normalize_cross_id("pmid", "٢٣٤") == "234"  # Arabic-Indic
+        assert normalize_cross_id("pmid", "२३४") == "234"  # Devanagari
+        assert normalize_cross_id("pmid", "１2٣") == "123"  # mixed
+
+    def test_the_strip_and_the_fold_compose(self):
+        # The fold runs on the stripped value, so a padded full-width id still
+        # lands on the bare ASCII key rather than on " 123 " or "１２３".
+        assert normalize_cross_id("pmid", " １２３ ") == "123"
+
+    def test_the_guard_leaves_a_value_that_is_not_a_bare_pmid_alone(self):
+        # These pin the *guard*: each carries a non-ASCII digit, so dropping the
+        # "is the folded value a bare PMID?" check would rewrite it. A labelled or
+        # URL-shaped value is something this function does not claim to
+        # understand, and it says so by not touching it.
+        assert normalize_cross_id("pmid", "pmid:１２３") == "pmid:１２３"
+        assert normalize_cross_id("pmid", "https://pubmed.ncbi.nlm.nih.gov/１２３") == \
+            "https://pubmed.ncbi.nlm.nih.gov/１２３"
+        assert normalize_cross_id("pmid", "１２３abc") == "１２３abc"
+
+    def test_non_digit_lookalikes_do_not_fold(self):
+        # `²` and `①` are category `No`, never matched by `\d`, so the folded value
+        # is not a bare PMID and the guard returns the original untouched.
+        assert normalize_cross_id("pmid", "1２²") == "1２²"
+        assert normalize_cross_id("pmid", "①②③") == "①②③"
+
+    def test_full_width_and_ascii_pmid_import_as_one_file(self, tmp_path):
+        # End-to-end: a source carrying the full-width PMID a pre-#398 Zotero
+        # import wrote (measured: that `extract_pmid` returned `１２３４５６７８`
+        # verbatim), then the same paper arriving with the ASCII id. Before this
+        # fix these wrote kim-2020-paper-one.md and kim-2020-paper-one-2.md.
+        def item(key, pmid):
+            return {
+                "zotero_key": key,
+                "title": "Paper One",
+                "pmid": pmid,
+                "authors": [{"last": "Kim", "first": "A"}],
+                "year": "2020",
+            }
+
+        first = ZoteroWriter().write(item("K1", "１２３４５６７８"), tmp_path)
+        second = ZoteroWriter().write(item("K2", "12345678"), tmp_path)
+        assert first.status == "imported"
+        assert second.status == "skipped"
+        assert "duplicate PMID" in second.reason
+        assert second.path == first.path
+        assert [p.name for p in sorted((tmp_path / "sources").glob("*.md"))] == \
+            [first.path.name]
+
+    def test_a_hand_edited_full_width_pmid_matches_an_openalex_import(self, tmp_path):
+        # The other reachable half: an existing file's full-width `pmid:` is read
+        # by the index, so the fold has to happen on the derived key — folding at
+        # an import boundary alone would never reach this file.
+        _write_source_file(tmp_path / "sources", "existing.md",
+                           {"zotero_key": "K1", "pmid": "１２３４５６７８",
+                            "imported_from": "zotero", "title": "Paper One"})
+        result = OpenAlexSourceWriter().write(
+            _openalex(openalex_id="W1", pmid="12345678"), tmp_path)
+        assert result.status == "merged"
+        assert "duplicate PMID" in result.reason
+        assert "already in existing.md" in result.reason
+
+    def test_two_different_pmids_stay_distinct(self, tmp_path):
+        # The fold must not collapse unrelated records into one file.
+        w = OpenAlexSourceWriter()
+        a = w.write(_openalex(openalex_id="W1", pmid="12345678"), tmp_path)
+        b = w.write(_openalex(openalex_id="W2", pmid="１２３４５６７９",
+                              title="Another Paper"), tmp_path)
+        assert a.status == b.status == "imported"
+        assert a.path != b.path
+
+
+class TestPmidImportBoundaryIsUnaffected:
+    """The path that already folds (#398) keeps behaving exactly as before."""
+
+    def test_extract_pmid_still_folds_at_the_boundary(self):
+        # The fold on the derived key is additive: the value written to the file
+        # is still the ASCII one the parser produced.
+        assert extract_pmid("PMID: １２３４５６７８") == "12345678"
+
+    def test_a_folded_import_writes_the_ascii_pmid_and_dedups_on_it(self, tmp_path):
+        item = {
+            "zotero_key": "K1",
+            "title": "Paper One",
+            "pmid": extract_pmid("PMID: １２３４５６７８"),
+            "authors": [{"last": "Kim", "first": "A"}],
+            "year": "2020",
+        }
+        first = ZoteroWriter().write(item, tmp_path)
+        fm = parse_front_matter(first.path.read_text(encoding="utf-8"))
+        assert fm["pmid"] == "12345678"
+        second = ZoteroWriter().write({**item, "zotero_key": "K2"}, tmp_path)
+        assert second.status == "skipped"
+        assert "duplicate PMID" in second.reason
 
 
 class TestProbeCases:

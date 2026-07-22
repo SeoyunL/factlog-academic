@@ -271,6 +271,33 @@ def _normalize_doi(value: str) -> str:
     return f"{folded}{slash}{suffix}"
 
 
+# A PMID, ASCII-spelled: decimal digits and nothing else. ``\d`` would behave
+# identically here — measured — because this is matched against an already-folded
+# value, which by construction holds no ``Nd`` character outside ``[0-9]``. The
+# ASCII class is written anyway, so the guard states its own intent instead of
+# resting on what the caller happens to have done first.
+_PMID_RE = re.compile(r"[0-9]+")
+
+
+def _normalize_pmid(value: str) -> str:
+    """Comparison form of a PMID: decimal digits folded to ASCII.
+
+    A PMID is by definition a positive decimal integer — the same fact that lets
+    the Zotero parser fold one at the import boundary (:func:`extract_pmid`, #398)
+    — so ``１２３`` is a *spelling* of ``123`` and both name one PubMed record.
+    Unlike a DOI there is **no opaque half**: nothing here can be respelled into a
+    different identifier, so the whole value folds rather than a leading part of it.
+
+    Folded only when the folded value is entirely ASCII digits; anything else (a
+    ``pmid:`` label or a URL left in a hand-edited file, plain junk) is returned
+    unchanged, for the same reason the DOI path refuses to rewrite a head it does
+    not recognise: a value this function does not understand must fail to match
+    rather than be quietly rewritten into something that might.
+    """
+    folded = fold_decimal_digits(value)
+    return folded if _PMID_RE.fullmatch(folded) else value
+
+
 def normalize_cross_id(kind: str, value: str) -> str:
     """Canonical comparison form for a cross-source identifier.
 
@@ -281,6 +308,25 @@ def normalize_cross_id(kind: str, value: str) -> str:
     join key looks like. The import paths keep writing the DOI they were given;
     normalizing here, on the derived key, means an *already imported* full-width
     DOI collides too, which a fix at ``_DOI_CORE_RE`` would not achieve.
+
+    A ``pmid`` is folded whole (:func:`_normalize_pmid`) for that same reason and
+    with less hesitation, having no opaque half to preserve (#421). The Zotero
+    parser already folds one at the import boundary (#398), so this is not about
+    *new* imports: it is about the full-width PMIDs that path wrote **before**
+    #398 and does not repair, and hand-edited files. Both reach the index through
+    :meth:`BaseSourceWriter._index`, which reads whatever a file on disk says, so
+    a boundary-only fold could never have touched them.
+
+    No current write path produces one otherwise — OpenAlex takes its PMID from
+    the API's ``ids.pmid`` and PubMed from the response ``<PMID>``, both ASCII
+    upstream. **Neither is guarded against one**, and not in the same way: the
+    OpenAlex value passes ``api_client.normalize_pmid``, which would *admit* a
+    full-width id because ``str.isdigit`` is true of every Unicode decimal digit,
+    while the PubMed value passes no validator at all — ``pubmed.client``'s
+    ``normalize_pmid`` guards the **outgoing request** (``_id_param``, plus the two
+    CLI entry points taking a user-typed id), never the response. "Both ASCII
+    upstream" is therefore the only thing holding the PubMed path up. Both are
+    latent gaps (#427), not routes a value travels today.
 
     An ``arxiv_id`` is canonicalised the way :func:`normalize_arxiv_id` does —
     version stripped, subject class dropped, archive lowercased — so
@@ -303,6 +349,8 @@ def normalize_cross_id(kind: str, value: str) -> str:
     normalized = value.strip()
     if kind == "doi":
         return _normalize_doi(normalized)
+    if kind == "pmid":
+        return _normalize_pmid(normalized)
     if kind == "arxiv_id":
         try:
             return normalize_arxiv_id(normalized).base
