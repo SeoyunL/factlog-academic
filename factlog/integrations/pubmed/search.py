@@ -71,6 +71,8 @@ import re
 from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
+from factlog.integrations.common.porcelain import porcelain_field
+
 __all__ = [
     "SEARCH_FIELD_TAGS",
     "MESH_FIELD",
@@ -607,6 +609,32 @@ def year_range_report(works, *, year: str | None = None) -> list[str]:
     too: ``pub_date_raw`` exists to keep a "derived-**or-absent**" year auditable,
     and a season with no year in it is the absent half.
 
+    **The quoted text passes the line-break gate (#396).** A block is one line of
+    claim plus one indented continuation, and ``MedlineDate`` is *free text PubMed
+    hands us* — a line break inside it splits the block and lets the record's own
+    bytes appear where factlog's warning line belongs, prefixed ``⚠`` and
+    indistinguishable from something factlog said. So the interpolated ``pmid`` and
+    ``MedlineDate`` go through
+    :func:`~factlog.integrations.common.porcelain.porcelain_field`, reused rather
+    than re-derived here: its guarantee — no tab and no line break survives, each
+    becoming one space — is exactly the guarantee this block needs.
+
+    Which characters that covers is **that function's** business, not a fact this
+    caller may restate. An earlier cut of this docstring derived the set from "XML
+    1.0 admits no C0 character but tab/CR/LF" and shipped a hole: U+0085, U+2028 and
+    U+2029 are not C0, are legal XML, and split a line under ``str.splitlines()``.
+    The lesson is not "check XML harder" — it is that a caller gates its value and
+    does not reason about what its parser admits.
+
+    ``work_year`` is interpolated *without* the gate, and that is a precondition, not
+    an omission: this function has already required it to satisfy
+    ``start_year <= work_year <= end_year``, which raises ``TypeError`` on a string.
+    Whoever loosens that comparison — a ``str(work_year)`` coercion, a try/except
+    around it — takes on gating it here.
+
+    The gate sits at the single point where all three blocks assemble their entries,
+    not per block, so a fourth cause added later cannot be added ungated.
+
     Pure, duck-typed over ``.pmid``/``.year``/``.pub_date_raw`` (no import of
     ``work_parser``), and silent — ``[]`` — when no ``--year`` was given (there is no
     range to check anything against, missing year included) or every result lands
@@ -627,10 +655,12 @@ def year_range_report(works, *, year: str | None = None) -> list[str]:
     unknown: list[str] = []
     for work in works:
         work_year = getattr(work, "year", None)
-        pmid = getattr(work, "pmid", "?")
+        pmid = porcelain_field(str(getattr(work, "pmid", "?")))
         # Non-None exactly when `_pub_date` read MedlineDate free text — whether or
         # not a year could be derived from it.
         raw = getattr(work, "pub_date_raw", None)
+        if raw:
+            raw = porcelain_field(str(raw))
         if work_year is None:
             unknown.append(f'PMID {pmid} (MedlineDate "{raw}")' if raw else f"PMID {pmid}")
             continue

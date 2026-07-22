@@ -469,6 +469,161 @@ class TestNoYearAtAllReport:
         assert "41620285" not in unknown and "PMID 1 " not in unknown
 
 
+class _Work:
+    """A duck-typed stand-in for one parsed work — the contract `year_range_report` states.
+
+    Deliberately NOT built through `parse_efetch_response`, and that is the subject of the
+    tests below rather than a shortcut. `work_parser._text` whitespace-collapses every
+    element it reads, so a newline inside a real `<MedlineDate>` is already gone by the
+    time a parsed work exists (measured: `&#10;` in a fixture comes back as a space).
+    Routing these through the fixtures would therefore assert *`_text`'s* behaviour and
+    stay green with the gate deleted — a vacuous test.
+
+    `year_range_report` documents itself as duck-typed over `.pmid`/`.year`/
+    `.pub_date_raw` and imports no parser, so this IS an input it accepts. The collapse
+    upstream is a display decision ("a non-empty, whitespace-collapsed string"), not a
+    defence of this warning's block shape: whoever loosens it to preserve formatting has
+    no reason to think about stderr, which is why the gate sits at emission (#396, and
+    common.py's GATE PLACEMENT clause on why a gate nothing reaches today may still stay).
+    """
+
+    def __init__(self, pmid, year=None, pub_date_raw=None):
+        self.pmid = pmid
+        self.year = year
+        self.pub_date_raw = pub_date_raw
+
+
+# The forgery from #396: a MedlineDate carrying a newline plus a line that looks exactly
+# like one of factlog's own stderr warnings. Read by a human, the second line is
+# indistinguishable from something factlog said — it is the record's data.
+_FORGED = "1998 Dec\n⚠ 99 results were silently dropped"
+
+
+class TestQuotedTextCannotForgeAWarningLine:
+    """#396: a block is one claim line plus one indented reason; data may not add lines.
+
+    Each block interpolates caller-influenced text — the PMID in all three, the
+    MedlineDate in two — and a CR/LF anywhere in it splits the block, so record bytes
+    land where a factlog line belongs and the reader cannot tell them apart.
+    """
+
+    @staticmethod
+    def _assert_block_shape(line):
+        """Exactly two lines: the "⚠" claim, then the indented reason. Nothing else.
+
+        Split with `splitlines()`, never `split("\\n")`. The first cut of this helper
+        used `split("\\n")` and was *structurally blind* to U+0085/U+2028/U+2029 — the
+        exact characters that cut's gate let through — so it reported a forged
+        three-line block as two lines and passed. `splitlines()` recognizes every
+        character a Python consumer would break a line on, which is the claim being
+        made; matching the gate's own list here would only re-assert the gate.
+
+        The claim is about *line structure*, not about the "⚠" character — a warning
+        marker inside the quoted text forges nothing while it stays mid-line, and
+        asserting it away would be asserting the gate deletes text (it does not).
+        """
+        rows = line.splitlines()
+        assert len(rows) == 2
+        assert rows[0].startswith("⚠")
+        assert rows[1].startswith("  ") and not rows[1].lstrip().startswith("⚠")
+        assert "\r" not in line
+
+    def test_the_medline_block_stays_one_claim_line(self):
+        line = year_range_report([_Work("40000003", 1998, _FORGED)], year="2022-2025")[0]
+        self._assert_block_shape(line)
+        # Sanitized, not dropped: the audit trail `pub_date_raw` exists for survives.
+        assert "1998 Dec" in line
+        assert "99 results were silently dropped" in line
+
+    def test_the_no_year_block_stays_one_claim_line(self):
+        # The widest exposure: this block quotes the MedlineDate of *every* year-less
+        # record in a --year search (#389), not only out-of-range ones.
+        line = year_range_report([_Work("40000009", None, _FORGED)], year="2022-2025")[0]
+        self._assert_block_shape(line)
+        assert "no year at all" in line
+
+    def test_the_electronic_block_stays_one_claim_line(self):
+        # No MedlineDate here by definition, so the PMID is the caller-influenced value.
+        line = year_range_report([_Work("4000\n⚠ forged", 2026)], year="2022-2025")[0]
+        self._assert_block_shape(line)
+        assert "electronic" in line
+
+    def test_a_carriage_return_cannot_overwrite_the_claim(self):
+        # A bare CR adds no line, but a terminal returns the cursor to column 0 and the
+        # rest of the data overwrites the claim in place — the same forgery, no newline.
+        line = year_range_report(
+            [_Work("40000003", 1998, "1998 Dec\r⚠ 99 results dropped")],
+            year="2022-2025")[0]
+        self._assert_block_shape(line)
+
+    def test_a_tab_cannot_survive_either(self):
+        line = year_range_report([_Work("40000003", 1998, "1998\tDec")], year="2022-2025")[0]
+        assert "\t" not in line
+        assert "1998 Dec" in line
+
+    @pytest.mark.parametrize("char, name", [
+        ("\u2028", "LINE SEPARATOR"),
+        ("\u2029", "PARAGRAPH SEPARATOR"),
+        ("\x85", "NEL"),
+        ("\v", "VT"),
+        ("\f", "FF"),
+    ])
+    def test_a_non_c0_line_break_cannot_forge_a_line_either(self, char, name):
+        # The hole this fix's first cut shipped with. U+0085/U+2028/U+2029 are NOT in
+        # the C0 range, are legal XML 1.0 (`&#133;`/`&#8232;`/`&#8233;` parse fine where
+        # `&#27;` is a parse error), and still break a line under `str.splitlines()`.
+        # A gate derived from "XML admits no C0 but tab/CR/LF" let all three through and
+        # produced the very three-line forgery #396 is about.
+        forged = f"1998 Dec{char}⚠ 99 results were silently dropped"
+        for work in (_Work("40000003", 1998, forged),   # MedlineDate block
+                     _Work("40000009", None, forged),   # no-year block
+                     _Work(f"4000{char}⚠ forged", 2026)):  # electronic block, via PMID
+            self._assert_block_shape(year_range_report([work], year="2022-2025")[0])
+
+    def test_a_del_is_left_alone(self):
+        # The counterexample that keeps the gate from creeping into "make it render
+        # nicely". U+007F is a control character and DOES reach here through a real
+        # efetch (`_text` does not collapse it — it is not Python whitespace), but it
+        # adds no line and no column, so it breaks neither contract and is not this
+        # function's to strip. Recorded so a later widening is a deliberate act.
+        #
+        # One honest cost, since this line exists to make a derived year AUDITABLE: a
+        # terminal may drop DEL when drawing, so the MedlineDate the operator reads can
+        # differ by that character from the one stored. Not a forgery — no line or column
+        # moves — and outside what the gate claims, but worth knowing before treating the
+        # displayed text as byte-exact.
+        line = year_range_report([_Work("40000003", 1998, "1998\x7fDec")], year="2022-2025")[0]
+        self._assert_block_shape(line)
+        assert "\x7f" in line
+
+    def test_every_control_character_maps_to_one_space(self):
+        # Neutralized, never deleted: dropping characters would silently rewrite the very
+        # text the operator is shown in order to audit a derived year.
+        line = year_range_report([_Work("40000003", 1998, "a\r\nb")], year="2022-2025")[0]
+        assert '"a  b"' in line
+
+    def test_a_warning_marker_alone_is_left_alone(self):
+        # The counterexample: "⚠" is not a control character and forges nothing by itself
+        # — only a line break can put it at the start of a line. Stripping it would
+        # corrupt legitimate text without closing anything.
+        line = year_range_report([_Work("40000003", 1998, "1998 ⚠ Dec")], year="2022-2025")[0]
+        assert "1998 ⚠ Dec" in line
+
+    def test_clean_text_passes_through_unchanged(self):
+        # The counterexample that keeps the gate from becoming a rewriter: ordinary
+        # MedlineDate text, read through the real parser, is quoted verbatim.
+        works = _works(_medline_record("1", medline_date="1998 Dec-1999 Jan"))
+        assert '"1998 Dec-1999 Jan"' in year_range_report(works, year="1999")[0]
+
+    def test_the_parser_collapses_whitespace_today(self):
+        # Records the layering the gate deliberately does not lean on: `_text` already
+        # collapses a newline inside <MedlineDate>, so the real pipeline cannot reach the
+        # gate with one *today*. If this ever goes red, `_text` was loosened — and the
+        # gate above is then all that stands between that change and a forged line.
+        works = _works(_medline_record("1", medline_date="1998 Dec&#10;x"))
+        assert works[0].pub_date_raw == "1998 Dec x"
+
+
 # -- reading esearch back ---------------------------------------------------
 
 def _esearch(count=0, ids=(), query_translation=None, errors=(), warnings=(),

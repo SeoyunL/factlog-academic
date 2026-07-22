@@ -5676,12 +5676,19 @@ def cmd_arxiv_backfill_provenance(args: argparse.Namespace) -> int:
         #
         # EVERY field a caller can influence is neutralized at emission, not just `reason`:
         # `entry_id` is an arxiv_id read verbatim from front matter, `ledger` is a filename,
-        # and `target` is `--target` — any of them can carry a tab, CR or LF that would
+        # and `target` is `--target` — any of them can carry a tab or a line break that would
         # otherwise shift or split the columns after it (the #111 column-shift, whose danger
         # is that a *document* — an `arxiv_id: "x<TAB>y"` — not just an exotic filename can
         # drive it). Neutralizing only the last column leaves the earlier ones exploitable.
+        # Delegates to the shared rule rather than restating it: a local copy is how the
+        # gate silently narrows. These three backfill emitters each carried their own
+        # tab/CR/LF copy and were left behind when #396 widened the shared set to every
+        # line break, so the eight characters porcelain_field had started neutralizing
+        # still split these rows in two (measured).
+        from factlog.integrations.common.porcelain import porcelain_field
+
         def _f(value: object) -> str:
-            return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+            return porcelain_field(str(value))
 
         for r in results:
             print(
@@ -5810,11 +5817,18 @@ def cmd_pubmed_backfill_provenance(args: argparse.Namespace) -> int:
         #
         # EVERY field a caller can influence is neutralized at emission, not just `reason`:
         # `entry_id` is a pmid read verbatim from front matter, `ledger` is a filename, and
-        # `target` is `--target` — any of them can carry a tab, CR or LF that would otherwise
+        # `target` is `--target` — any of them can carry a tab or a line break that would otherwise
         # shift or split the columns after it (the #111 column-shift). Neutralizing only the
         # last column leaves the earlier ones exploitable.
+        # Delegates to the shared rule rather than restating it: a local copy is how the
+        # gate silently narrows. These three backfill emitters each carried their own
+        # tab/CR/LF copy and were left behind when #396 widened the shared set to every
+        # line break, so the eight characters porcelain_field had started neutralizing
+        # still split these rows in two (measured).
+        from factlog.integrations.common.porcelain import porcelain_field
+
         def _f(value: object) -> str:
-            return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+            return porcelain_field(str(value))
 
         for r in results:
             print(
@@ -6335,13 +6349,20 @@ def cmd_openalex_backfill_provenance(args: argparse.Namespace) -> int:
         #
         # EVERY field a caller can influence is neutralized at emission, not just `reason`:
         # `entry_id` is an openalex_id read verbatim from front matter, `ledger` is a
-        # filename, and `target` is `--target` — any of them can carry a tab, CR or LF that
+        # filename, and `target` is `--target` — any of them can carry a tab or a line break that
         # would otherwise shift or split the columns after it (the #111 column-shift, whose
         # danger is that a *document* — an `openalex_id: "x<TAB>y"` — not just an exotic
         # filename can drive it). Neutralizing only the last column leaves the earlier ones
         # exploitable.
+        # Delegates to the shared rule rather than restating it: a local copy is how the
+        # gate silently narrows. These three backfill emitters each carried their own
+        # tab/CR/LF copy and were left behind when #396 widened the shared set to every
+        # line break, so the eight characters porcelain_field had started neutralizing
+        # still split these rows in two (measured).
+        from factlog.integrations.common.porcelain import porcelain_field
+
         def _f(value: object) -> str:
-            return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+            return porcelain_field(str(value))
 
         for r in results:
             print(
