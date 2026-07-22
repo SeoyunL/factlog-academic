@@ -157,30 +157,72 @@ class TestPmidAndDoi:
         assert extract_pmid("PMID: １23４567") == "1234567"
         assert literal_types.parse_number(extract_pmid("PMID: １２３４５６７")) == 1234567
 
-    def test_doi_is_stored_as_given_and_folded_only_in_the_join_key(self):
-        # The parser stores the DOI the library gave it, unchanged. Folding at
-        # `_DOI_CORE_RE` would fix only *newly* imported records, so #405 put the
-        # fold at the join-key site (`normalize_cross_id`) instead, where a
-        # full-width DOI already sitting in `sources/` collides too. This pins
-        # that division of labour: parser preserves, join key normalizes.
+    def test_doi_prefix_is_folded_on_the_raw_field_path(self):
+        # #420. Until then this assertion ran the other way, pinning the leak as
+        # characterization; the fold now repairs the *stored* value, because two
+        # consumers read it raw (`csl.py` exports it, `openalex/refresh.py`
+        # compares it with `!=`) and neither goes through the join key.
         #
-        # Until #405 this was a "CHARACTERIZATION, NOT AN ENDORSEMENT" pin
-        # asserting the two spellings were *different* join keys — the defect
-        # that imported one paper as two files. They now collide.
+        # The raw `DOI` item field never passes `_DOI_CORE_RE`, so this path is
+        # folded in `parse_item` itself and needs its own assertion.
+        assert parse_item(_item(DOI="10.１２３４/abc"))["doi"] == "10.1234/abc"
+
+    def test_doi_prefix_is_folded_on_the_extra_path(self):
+        # The second, independent path (#420). A fold at either site alone leaves
+        # the other leaking, so this is deliberately not folded into the test
+        # above: each site must be pinned by an assertion that fails when only
+        # *that* fold is removed.
+        assert parse_item(_item(extra="DOI: 10.１２３４/abc"))["doi"] == "10.1234/abc"
+
+    def test_doi_suffix_keeps_its_own_spelling_on_both_paths(self):
+        # The asymmetry the fold rests on: under ISO 26324 the registrant code is
+        # a decimal number, so respelling it names the same registrant, but the
+        # suffix is an opaque string where changing a character would invent a
+        # different identifier. A suffix digit therefore survives verbatim.
+        assert parse_item(_item(DOI="10.１２３４/abc１２"))["doi"] == "10.1234/abc１２"
+        assert (
+            parse_item(_item(extra="DOI: 10.１２３４/abc１２"))["doi"] == "10.1234/abc１２"
+        )
+
+    def test_doi_with_a_subdivided_registrant_code_is_folded_whole(self):
+        # The DOI Handbook (2.2.2) lets a registrant subdivide its code, and each
+        # part is still decimal. A prefix grammar of `10\.[0-9]+` alone would stop
+        # at the first dot, fail its own guard, and leave the value full-width.
         #
-        # This module still emits the full-width spelling, and that is not an
-        # oversight: neither `_DOI_CORE_RE` nor the raw `DOI` field is paired
-        # with a fold the way `_YEAR_RE`/`_PMID_RE` are (#410). The two DOI
-        # sources are independent, so a fold at `_DOI_CORE_RE` alone would have
-        # missed the raw-field path entirely — one more reason the fold belongs
-        # at the single join-key site.
-        out = parse_item(_item(DOI="10.１２３４/abc"))
-        assert out["doi"] == "10.１２３４/abc"
-        # Same on the `extra` fallback path, so the leak is not specific to one
-        # of the two DOI sources.
-        assert parse_item(_item(extra="DOI: 10.１２３４/abc"))["doi"] == "10.１２３４/abc"
-        # And the join key folds both spellings together regardless, which is
-        # what keeps the leak above from splitting a paper across two files.
+        # RAW FIELD PATH ONLY. The `extra` path cannot reach this case at all:
+        # `_DOI_CORE_RE` is `10\.\d+/`, which stops at the second dot and matches
+        # nothing, so a subdivided DOI in `extra` is dropped entirely — both
+        # spellings alike. That is a pre-existing limit of the extraction regex,
+        # not of the fold, and is out of #420's scope; it is pinned below so the
+        # asymmetry between the two paths is stated rather than implied.
+        assert parse_item(_item(DOI="10.１０００.１０/abc"))["doi"] == "10.1000.10/abc"
+
+    def test_the_extra_path_drops_a_subdivided_registrant_code_either_spelling(self):
+        # Characterization, not an endorsement: `_DOI_CORE_RE` never matches a
+        # subdivided code, so `extra` yields "" here. Pinned because the fold is
+        # what a reader would otherwise suspect, and because the two spellings
+        # agreeing (both "") is the property that keeps this out of #420.
+        assert parse_item(_item(extra="DOI: 10.1000.10/xyz"))["doi"] == ""
+        assert parse_item(_item(extra="DOI: 10.１０００.１０/xyz"))["doi"] == ""
+
+    def test_a_head_that_is_not_a_doi_prefix_is_not_rewritten(self):
+        # The guard, and an example that actually depends on it: folding this
+        # head *changes* it (`doi:10.１２３４` -> `doi:10.1234`), so without the
+        # fullmatch check the parser would emit a canonical-looking value it
+        # never understood. A label like this reaches the raw field from
+        # hand-edited libraries.
+        assert parse_item(_item(DOI="doi:10.１２３４/abc"))["doi"] == "doi:10.１２３４/abc"
+        # A URL wrapper, same reason: the head is `https:`, not a prefix.
+        assert (
+            parse_item(_item(DOI="https://doi.org/10.１２３４/abc"))["doi"]
+            == "https://doi.org/10.１２３４/abc"
+        )
+
+    def test_the_join_key_folds_independently_of_this_module(self):
+        # #405's fold is on the derived comparison value, so it also collides
+        # full-width DOIs *already sitting in* `sources/` — which no import-time
+        # fold can reach. The two are separate mechanisms and this pins that
+        # `normalize_cross_id` does not rely on the parser having folded first.
         assert normalize_cross_id("doi", "10.１２３４/abc") == normalize_cross_id(
             "doi", "10.1234/abc"
         )

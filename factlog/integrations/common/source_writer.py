@@ -41,6 +41,7 @@ from pathlib import Path
 from factlog.common import slugify, walk_source_dir
 from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
 from factlog.integrations.common._textio import atomic_write_text
+from factlog.integrations.common.doi import fold_doi_prefix
 from factlog.integrations.common.front_matter import read_first_author, read_scalars
 from factlog.integrations.common.matcher import (
     MatchInput,
@@ -231,44 +232,29 @@ def build_slug(author: str, year: str, title: str) -> str:
     return f"{byte_trunc(f'{author_slug}-{year_slug}-{title_slug}', STEM_MAX_BYTES)}.md"
 
 
-# A DOI prefix, ASCII-spelled: ``10.`` then the registrant code. The trailing
-# ``(?:\.[0-9]+)*`` is not decoration — the DOI Handbook (2.2.2) lets a registrant
-# subdivide its code (``10.1000.10``), and each part is still a decimal number, so
-# a grammar narrower than the spec would leave exactly the DOIs this fix is about
-# splitting into two files.
-_DOI_PREFIX_RE = re.compile(r"10\.[0-9]+(?:\.[0-9]+)*")
-
-
 def _normalize_doi(value: str) -> str:
     """Comparison form of a DOI: lowercased, prefix digits folded to ASCII.
 
-    The **prefix is normalized, the suffix is preserved** (#405), and the split is
-    the **first** ``/`` — a DOI suffix may itself contain slashes (``10.1002/x/y``),
-    and all of them belong to the opaque half. Under ISO 26324 the registrant code
-    in ``10.<registrant>`` is a decimal number, so ``10.１２３４`` is a *spelling* of
-    ``10.1234`` and the two name one registrant — the same argument that lets the
-    parser fold a PMID. The suffix is an opaque string, where respelling a
-    character would invent a different identifier, so it passes through byte for
-    byte even when it holds non-ASCII digits.
+    The **prefix is normalized, the suffix is preserved** (#405): under ISO 26324
+    the registrant code in ``10.<registrant>`` is a decimal number, so
+    ``10.１２３４`` is a *spelling* of ``10.1234`` and the two name one registrant —
+    the same argument that lets the parser fold a PMID. That asymmetry, the
+    prefix grammar and the first-``/`` split all live in
+    :func:`~factlog.integrations.common.doi.fold_doi_prefix`, which the Zotero
+    import boundary folds a *stored* DOI with too (#420); keeping one copy is why
+    the two cannot drift apart on, say, subdivided registrant codes.
 
-    Folded only when the folded head is exactly a DOI prefix; anything else (a
-    ``doi.org`` URL or a ``doi:`` label left in a hand-edited file, plain junk) is
-    returned merely lowercased, so this cannot quietly rewrite a value it does not
-    understand.
+    What is this function's own and not shared is the lowercasing: DOIs are
+    case-insensitive, so a comparison key must lowercase, while a stored value
+    keeps the case its source spelled. Lowercasing first is safe — no decimal
+    digit has a case, so fold and lowercase commute.
 
-    A value with **no** slash is likewise only lowercased, deliberately: with no
-    suffix to delimit it, there is nothing to distinguish a bare prefix from junk
-    that happens to start with digits, and a DOI missing its suffix is not a DOI
-    that could match anything anyway.
+    A value the fold does not recognise (a ``doi.org`` URL or a ``doi:`` label
+    left in a hand-edited file, plain junk, or a value with no slash at all) is
+    returned merely lowercased, so this cannot quietly rewrite a value it does
+    not understand.
     """
-    lowered = value.lower()
-    head, slash, suffix = lowered.partition("/")
-    if not slash:
-        return lowered
-    folded = fold_decimal_digits(head)
-    if not _DOI_PREFIX_RE.fullmatch(folded):
-        return lowered
-    return f"{folded}{slash}{suffix}"
+    return fold_doi_prefix(value.lower())
 
 
 # A PMID, ASCII-spelled: decimal digits and nothing else. ``\d`` would behave
@@ -305,9 +291,11 @@ def normalize_cross_id(kind: str, value: str) -> str:
     match OpenAlex's lowercased form; otherwise the same paper imports twice.
     They are also digit-spelling-insensitive in the prefix — see
     :func:`_normalize_doi`, which is the single place that decides what a DOI
-    join key looks like. The import paths keep writing the DOI they were given;
-    normalizing here, on the derived key, means an *already imported* full-width
-    DOI collides too, which a fix at ``_DOI_CORE_RE`` would not achieve.
+    join key looks like. Normalizing here, on the derived key, is what makes an
+    *already imported* full-width DOI collide too. The Zotero parser also folds
+    the prefix of the value it **stores** (#420), but that repairs new imports
+    only and could never have reached a file already on disk, so the two folds
+    are complements rather than one making the other redundant.
 
     A ``pmid`` is folded whole (:func:`_normalize_pmid`) for that same reason and
     with less hesitation, having no opaque half to preserve (#421). The Zotero

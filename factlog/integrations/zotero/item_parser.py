@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 
+from factlog.integrations.common.doi import fold_doi_prefix
 from factlog.text_norm import fold_decimal_digits
 
 # The digit-bearing patterns below stay ``\d`` — the whole Unicode ``Nd`` category —
@@ -48,32 +49,46 @@ from factlog.text_norm import fold_decimal_digits
 # (``literal_types``, #388). The fold mechanism itself is one Unicode fact shared
 # with the CSL export boundary, so it lives in ``text_norm`` (#410).
 #
-# The pairing is per-pattern, and only two of the three are paired — so the output
-# contract is per-FIELD, not module-wide. This module does NOT promise ASCII digits:
+# The output contract is per-FIELD, and for ``doi`` it is deliberately partial:
 #
 # - ``_YEAR_RE`` / ``_PMID_RE`` -> ``extract_year`` / ``extract_pmid`` fold their
-#   capture, so ``year`` and ``pmid`` leave here ASCII (#398).
-# - ``_DOI_CORE_RE`` has NO fold, and neither has the ``DOI`` field read straight
-#   off the item, so ``doi`` leaves here in whatever digits Zotero held:
-#   ``_doi_from_extra("DOI: 10.１２３４/abc")`` returns ``10.１２３４/abc`` verbatim
-#   (measured). Pairing it here would be a separate change, and only a partial one
-#   — under ISO 26324 only the ``10.<registrant>`` prefix is a decimal number, the
-#   suffix is opaque and must not be folded.
+#   whole capture, so ``year`` and ``pmid`` leave here ASCII (#398).
+# - ``doi``, **for a value the fold recognises as a DOI**, leaves here with an
+#   ASCII prefix and an untouched suffix (#420). Under ISO 26324 only the
+#   ``10.<registrant>`` prefix is a decimal number; the suffix is opaque, and
+#   respelling a character in it would name a different paper. So
+#   ``10.１２３４/abc１`` becomes ``10.1234/abc１`` and not more.
 #
-# The consequence a non-ASCII ``doi`` once had — a full-width and an ASCII spelling
-# of one paper taking different cross-source join keys, so it imported twice — was
-# #405, and it is fixed at the join-key site (``normalize_cross_id``), not here. A
-# join key is a derived comparison value rather than a stored one, so normalizing
-# there also collides DOIs already sitting in ``sources/`` instead of only
-# newly-imported ones — and it covers both DOI paths at once, which a fold at
-# ``_DOI_CORE_RE`` could not have done. So this module goes on emitting whatever
-# spelling Zotero held, by design.
+#   The condition is not a formality. ``fold_doi_prefix`` returns a head it does
+#   not recognise unchanged rather than rewriting it, so a wrapped value — and
+#   ``https://doi.org/10.１２３４/abc`` is common in a real library — is stored
+#   full-width, prefix included (measured). This module still does NOT promise
+#   ASCII digits in ``doi``.
 #
-# That verbatim spelling is NOT a residual defect — it is provenance. The join key
-# is the thing that had to be normalized; the stored value keeping the source's own
-# spelling is what lets a reader see what Zotero actually held. Whether to fold the
-# stored value anyway is a separate question with its own worth-it judgement, and it
-# is #420, not a gap this module is silently leaving open.
+# The fold is applied on **both** DOI paths, which are independent: the raw ``DOI``
+# item field never passes through ``_DOI_CORE_RE``, so pairing that pattern alone
+# would have left the commoner path leaking.
+#
+# What this fold is and is not for. The *join key* was the thing that had to be
+# normalized, and #405 did that at ``normalize_cross_id`` — a derived value, so it
+# collides DOIs already sitting in ``sources/`` too, which no import-boundary fold
+# can. This module's fold is about the **stored** value instead, and the consumer
+# that makes it worth doing is ``csl.py``: it puts the stored DOI straight into
+# exported CSL JSON, where a citation processor cannot resolve a full-width one.
+# That path is reached from the front matter dict alone, so it does not care which
+# integration wrote the file, and the join key never touches it.
+#
+# ``openalex/refresh.py``'s raw ``!=`` drift compare was originally cited here as a
+# second such consumer. It is not one, measured: a Zotero-written full-width DOI
+# does not reach it. When OpenAlex imports the same paper the result is a *merge*,
+# which records OpenAlex's own ASCII DOI in the provenance ledger and never opens
+# the ``.md``, so ``recorded_doi`` is ASCII on the ledger branch; and the front
+# matter branch is gated on an ``openalex_id`` the merge does not add. A source
+# carrying its own ``openalex_id`` was written by the OpenAlex integration, whose
+# DOI is ASCII upstream.
+#
+# It repairs new imports ONLY. Values already written stay as they are; fixing
+# those is #428's, at the consumers.
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
 # A DOI in `extra` is taken only from a line that carries a DOI label, and only
@@ -136,18 +151,10 @@ def extract_pmid(extra: object) -> str:
     of the same identifier and converting it yields the PubMed record actually
     meant.
 
-    **The DOI path is deliberately left alone, and is not broken by that.** An
-    earlier draft of this note claimed DOIs are opaque and therefore must not be
-    touched. That is only half true: under ISO 26324 a DOI prefix
-    ``10.<registrant>`` is a *decimal* number — ``_DOI_CORE_RE`` even spells it
-    ``10\\.\\d+/`` — and only the suffix is an opaque string, so the honest
-    asymmetry is "normalize the prefix, preserve the suffix". #405 applies that
-    asymmetry at the join-key site
-    (:func:`~factlog.integrations.common.source_writer.normalize_cross_id`), not
-    here, so a full-width DOI **already sitting in** ``sources/`` collides with
-    the ASCII one too; folding at ``_DOI_CORE_RE`` would have fixed only newly
-    imported records. This function keeps the DOI exactly as the library spelled
-    it, and the derived comparison key does the folding.
+    **The DOI path folds less than this one, and that asymmetry is the point.**
+    Under ISO 26324 a DOI prefix ``10.<registrant>`` is a *decimal* number and
+    only the suffix is opaque, so a DOI gets its prefix folded and its suffix
+    preserved (#420); a PMID, having no opaque half, folds whole.
     """
     if not isinstance(extra, str):
         return ""
@@ -160,6 +167,13 @@ def _doi_from_extra(extra: object) -> str:
 
     Scans line by line so a stray identifier elsewhere cannot leak in, and keeps
     only the ``10.x/y`` core so a ``doi.org`` URL wrapper is stripped.
+
+    The core's prefix is folded to ASCII digits and its suffix preserved (#420).
+    ``_DOI_CORE_RE`` matches ``\\d``, the whole ``Nd`` category, so the core it
+    hands back may be spelled ``10.１２３４/abc``; the fold is what makes this the
+    same value the ASCII spelling would have produced. This is one of the two
+    independent DOI paths — the raw ``DOI`` field is folded in :func:`parse_item`,
+    not here.
     """
     if not isinstance(extra, str):
         return ""
@@ -169,7 +183,7 @@ def _doi_from_extra(extra: object) -> str:
             continue
         core = _DOI_CORE_RE.search(label.group(1))
         if core:
-            return core.group(0).rstrip(".,;")
+            return fold_doi_prefix(core.group(0).rstrip(".,;"))
     return ""
 
 
@@ -246,7 +260,12 @@ def parse_item(item: dict) -> dict:
         "year": extract_year(date),
         "date": date,
         "journal": _str(data.get("publicationTitle")),
-        "doi": _str(data.get("DOI")) or _doi_from_extra(extra),
+        # Two independent DOI sources, each folded at its own site (#420): the
+        # raw field never reaches `_doi_from_extra`, so one fold cannot cover
+        # both. The raw field is also the untrusted one — a library may hold a
+        # `https://doi.org/...` URL there — and `fold_doi_prefix` returns a head
+        # it does not recognise unchanged rather than rewriting it.
+        "doi": fold_doi_prefix(_str(data.get("DOI"))) or _doi_from_extra(extra),
         "pmid": extract_pmid(extra),
         "abstract": _str(data.get("abstractNote")),
         "tags": tags,
