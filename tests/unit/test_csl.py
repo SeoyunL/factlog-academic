@@ -92,14 +92,16 @@ class TestYearDigitFolding:
         for value in ("2020", "２０２０", "２0２0", "٢٠٢٠", "출판 ２０２０년"):
             assert len(_fold_decimal_digits(value)) == len(value)
 
-    def test_year_pattern_is_ascii_only(self):
-        # Pins the intent the issue is about, and it is NOT observable through
-        # output: after folding, no `Nd` character survives, so `\d{4}` and
-        # `[0-9]{4}` accept identical inputs. Reverting the pattern alone breaks
-        # nothing today — it only re-hides what this module accepts, and re-arms
-        # the original bug the moment the fold is touched.
-        assert _YEAR_RE.pattern == r"[0-9]{4}"
-        assert "\\d" not in _YEAR_RE.pattern
+    def test_year_pattern_accepts_only_ascii_digits(self):
+        # Asserted on the pattern rather than on `to_csl` because it is NOT
+        # observable through output: the fold leaves no `Nd` character behind, so
+        # `\d{4}` and `[0-9]{4}` accept identical inputs downstream. This is the
+        # documentary half of the issue — the pattern should state the set it
+        # accepts. It is a set assertion, not a spelling one: any equivalent
+        # spelling (`\d{4}` with `re.ASCII`, `(?a:\d{4})`, `[0-9][0-9][0-9][0-9]`)
+        # passes. The fold itself is guarded by the behaviour tests above.
+        assert _YEAR_RE.search("2020")
+        assert not _YEAR_RE.search("２０２０")
 
     def test_superscript_and_circled_digits_are_not_years(self):
         # Category `No`, not `Nd`. `\d` never matched them, and the fold must not
