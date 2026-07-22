@@ -33,13 +33,15 @@ import pytest
 
 from factlog.bibtex import (
     _ENTRY_TYPES,
-    _FRONT_MATTER_CHUNK_CHARS,
-    _FRONT_MATTER_MAX_CHARS,
     parse_front_matter,
     read_front_matter,
     to_bibtex,
 )
 from factlog.csl import _CSL_TYPES, to_csl
+from factlog.front_matter_scan import (
+    FRONT_MATTER_CHUNK_CHARS as _FRONT_MATTER_CHUNK_CHARS,
+    FRONT_MATTER_MAX_CHARS as _FRONT_MATTER_MAX_CHARS,
+)
 from factlog.export_types import (
     resolve_source_type,
     should_promote_to_journal_type,
@@ -807,16 +809,64 @@ class TestExportPathOnDisk:
         assert read_front_matter(path) == {}
         assert read[0] < size / 10, f"read {read[0]} chars of a {size}-byte body"
 
-    def test_unclosed_front_matter_is_bounded(self, tmp_path, monkeypatch):
-        """An opening fence that is never closed stops at the cap, not at EOF."""
+    def test_unclosed_front_matter_is_bounded_and_carries_nothing(self, tmp_path,
+                                                                  monkeypatch):
+        """An opening fence that is never closed stops at the cap, and yields ``{}``.
+
+        Two separate claims, and the second used to be the opposite: the reader
+        returned everything it had read, so `title` came back. It now fails closed,
+        the same rule the de-duplication reader adopted in #409 and shares from
+        `front_matter_scan` since #419 — an unclosed block has no knowable extent,
+        so its `key:` lines cannot be told from body lines. See
+        `TestUnclosedBlockIsNotCited` for what that was costing here.
+
+        The bound is the older claim and is independent of it: a loop that failed
+        closed but read to EOF would satisfy the assertion above and not this one.
+        """
         path = tmp_path / "unclosed.md"
         path.write_text('---\ntitle: "T"\n' + "filler: line\n" * 400_000, encoding="utf-8")
         size = path.stat().st_size
         assert size > 2 * (1 << 20)
 
         read = self._chars_read(monkeypatch)
-        assert read_front_matter(path)["title"] == "T"
+        assert read_front_matter(path) == {}
         assert read[0] <= (1 << 20) + 8192, f"read {read[0]} chars of a {size}-byte file"
+
+    def test_a_closed_block_past_the_cap_is_dropped_not_truncated(self, tmp_path):
+        """The cap cuts the *search*, so a real fence beyond it is never seen.
+
+        Third and least likely of the three ways this reader changed in #419, and
+        the only one that is not also a change on the de-duplication side — there
+        this was already true, while the exporter used to cite the record from
+        whatever keys fitted under the cap. It now reports the file skipped.
+
+        `front_matter_scan` documents why a real fence and a missing one are
+        indistinguishable past the cap. What this pins is the consequence chosen
+        here: drop the record whole rather than emit a fraction of it.
+
+        The fixture pads a single `p:` key past the cap — it is not an author list,
+        and the `authors: ["A"]` line is one author, present only so the block has a
+        key the exporter would have cited. A real `authors:` line is what *reaches*
+        the cap in practice, but reproducing that here would only make the fixture
+        slower for the same assertion; the cap is a character limit and does not care
+        which key spent them. How many authors that is depends on their name length
+        (`read_front_matter` records the measured curve), and every point on it is
+        far past the few thousand the largest real collaborations run to.
+
+        Characters, not bytes: the pad is ASCII here, so the two coincide and this
+        fixture cannot tell them apart. A non-ASCII block three times the cap in
+        bytes is still cited — `front_matter_scan`'s cap comment carries that
+        measurement and why the distinction keeps getting lost.
+        """
+        path = tmp_path / "huge.md"
+        pad = "x" * (_FRONT_MATTER_MAX_CHARS + 5_000)
+        path.write_text(f'---\ntitle: "T"\nauthors: ["A"]\np: {pad}\n---\n\nbody\n',
+                        encoding="utf-8")
+        # Guards the guard: the fence must genuinely exist and sit past the cap, or
+        # this is just another unclosed-block test wearing a different name.
+        assert path.read_text(encoding="utf-8")[3:].find("\n---") > _FRONT_MATTER_MAX_CHARS
+
+        assert read_front_matter(path) == {}
 
     def test_large_author_list_still_emits_only_defined_fields(self, tmp_path):
         text = self._export(tmp_path, "bibtex", extra={
@@ -826,3 +876,106 @@ class TestExportPathOnDisk:
         for entry in entries:
             allowed = STANDARD_BIBTEX_FIELDS[_entry_of(entry)] | TOLERATED_EXTENSIONS
             assert set(_bibtex_fields(entry)) <= allowed, entry
+
+
+class TestUnclosedBlockIsNotCited:
+    """A block with no closing fence is not a citation (#419).
+
+    The counterpart to `test_front_matter_scan.TestUnclosedBlockCarriesNothing`,
+    which pins the same rule on the de-duplication side. Both readers now get their
+    answer from `front_matter_scan.front_matter_block`, so these are two call sites
+    of one decision rather than two implementations of it — which is the point: the
+    exporter reached the opposite conclusion for years while sharing the loop's
+    shape, and a belief written into its docstring ("`to_bibtex` reads only the
+    handful of keys it names, so the emitted entry is unaffected") turned out to be
+    false when someone finally ran it.
+    """
+
+    # Borrowed rather than subclassed: inheriting would re-run the whole export
+    # suite above under this name for nothing.
+    _kb = staticmethod(TestExportPathOnDisk._kb)
+    _export = TestExportPathOnDisk._export
+
+    # A user's own reading note: opening fence, no closing one, and a paper quoted
+    # in the body. Every field below is the *quoted paper's*, not the note's.
+    _NOTE = (
+        '---\ntitle: "My reading notes"\n\n'
+        "I am quoting a paper here:\n"
+        'title: "Attention Is All You Need"\n'
+        "year: 2017\n"
+        "doi: 10.5555/3295222\n"
+        'authors: ["Ashish Vaswani"]\n'
+        'journal: "NeurIPS"\n'
+    )
+
+    def test_a_quoted_paper_in_a_note_is_not_an_entry(self, tmp_path):
+        """The measured harm: this note used to export as a citation of that paper.
+
+        `@article{my-reading-note, author = {Ashish Vaswani}, title = {Attention Is
+        All You Need}, year = {2017}, journal = {NeurIPS}, doi = {10.5555/3295222}}`
+        — exit 0, no warning, a wrong bibliography entry pasted straight into a
+        LaTeX document. Asserted on real CLI output, and on the DOI in particular:
+        a citation carrying someone else's DOI resolves to their paper.
+        """
+        text = self._export(tmp_path, "bibtex", extra={"my-reading-note.md": self._NOTE})
+        assert "my-reading-note" not in text
+        assert "10.5555/3295222" not in text
+        assert "Attention Is All You Need" not in text
+        # The other four sources are untouched: refusing this file is not a
+        # blanket failure of the export.
+        assert len([e for e in text.splitlines() if e.startswith("@")]) == 4
+
+    def test_a_body_key_cannot_override_the_real_one(self, tmp_path):
+        """Why "only the keys it names" was not a defence: a body line *wins*.
+
+        The parse is last-wins, so the note's own `title` was replaced by the
+        quoted one — the exporter named `title`, and got the body's.
+        """
+        path = tmp_path / "note.md"
+        path.write_text(self._NOTE, encoding="utf-8")
+        assert read_front_matter(path) == {}
+
+    def test_closing_the_fence_restores_the_note_as_its_own_entry(self, tmp_path):
+        """The control: the refusal is about the missing fence, nothing else.
+
+        Same bytes with a closing fence after the note's own title, and the note
+        cites itself — with its own title, and none of the quoted paper's fields.
+        Without this the tests above would also pass if export had simply stopped
+        working.
+        """
+        closed = self._NOTE.replace('title: "My reading notes"\n\n',
+                                    'title: "My reading notes"\n---\n\n')
+        text = self._export(tmp_path, "bibtex", extra={"my-reading-note.md": closed})
+        entry = next(e for e in re.split(r"(?=^@)", text, flags=re.M)
+                     if e.startswith("@misc{my-reading-note,"))
+        assert "My reading notes" in entry
+        assert "10.5555/3295222" not in entry
+        assert "Ashish Vaswani" not in entry
+
+    def test_a_mojibake_source_does_not_abort_the_export(self, tmp_path):
+        """Undecodable bytes are "no front matter", not a crash (#419).
+
+        The exporter caught `OSError` alone, but reading to the closing fence puts
+        far more of a file through the codec than the old fixed window did, so a
+        source that is valid UTF-8 in its head and mojibake in its body raises
+        `UnicodeDecodeError` — a `ValueError`, which nothing on this path handles.
+        One such file aborted the entire run with a traceback, taking every other
+        source's citation with it. `front_matter_scan` catches both, so the file is
+        skipped and the rest of the KB still exports.
+        """
+        kb = self._kb(tmp_path)
+        (kb / "sources" / "mojibake.md").write_bytes(
+            b'---\ntitle: "T"\n' + b"filler line\n" * 1_000 + b"\xff\xfe\n")
+        out = tmp_path / "out.bib"
+
+        from factlog.cli import main
+        assert main(["export", "--bibtex", "--target", str(kb), "-o", str(out)]) == 0
+        text = out.read_text(encoding="utf-8")
+        assert "mojibake" not in text
+        assert len([e for e in text.splitlines() if e.startswith("@")]) == 4
+
+    def test_undecodable_bytes_read_as_no_front_matter(self, tmp_path):
+        """The unit beneath it: `{}`, not a raised `UnicodeDecodeError`."""
+        path = tmp_path / "mojibake.md"
+        path.write_bytes(b'---\ntitle: "T"\n' + b"filler line\n" * 1_000 + b"\xff\xfe\n")
+        assert read_front_matter(path) == {}

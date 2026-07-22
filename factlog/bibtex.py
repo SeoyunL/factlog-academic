@@ -23,6 +23,7 @@ from factlog.export_types import (
     should_promote_to_journal_type,
     venue_role,
 )
+from factlog.front_matter_scan import front_matter_block
 
 _LIST_ITEM_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _KV_RE = re.compile(r"^([A-Za-z0-9_]+):\s*(.*)$")
@@ -138,13 +139,8 @@ def _parse_value(raw: str):
     return raw
 
 
-def parse_front_matter(text: str) -> dict:
-    """Parse the leading ``---`` fenced YAML block into a dict ({} if none)."""
-    if not text.startswith("---"):
-        return {}
-    rest = text[3:]
-    end = rest.find("\n---")
-    block = rest if end == -1 else rest[:end]
+def _parse_block(block: str) -> dict:
+    """Parse the *inside* of a front-matter block — fences already stripped."""
     fm: dict = {}
     for line in block.splitlines():
         match = _KV_RE.match(line.strip())
@@ -153,73 +149,61 @@ def parse_front_matter(text: str) -> dict:
     return fm
 
 
-# How much to pull per read while looking for the closing fence, and the point at
-# which an *unclosed* front matter stops being read. The cap bounds only the
-# pathological file (an opening ``---`` whose fence is never closed); a well-formed
-# block stops at its own fence, however long it is.
-#
-# The chunk size is not a free performance knob — it is load-bearing twice over:
-#
-# * below 3 it breaks correctness outright. The opening-fence test runs on the
-#   first read alone, so a 1- or 2-char chunk makes ``startswith("---")`` false
-#   for a perfectly well-formed file and every source reads as empty.
-# * it quantises the cap. The loop checks the length *before* reading, so the
-#   effective ceiling is ``ceil(_FRONT_MATTER_MAX_CHARS / chunk) * chunk``, and
-#   changing the chunk moves where an unclosed block is actually cut. Powers of
-#   two that divide the cap keep that boundary put; other values shift it.
-_FRONT_MATTER_CHUNK_CHARS = 8192
-_FRONT_MATTER_MAX_CHARS = 1 << 20
+def parse_front_matter(text: str) -> dict:
+    """Parse the leading ``---`` fenced YAML block into a dict ({} if none).
+
+    Fails closed on a block whose closing fence is missing, the same rule
+    :func:`factlog.front_matter_scan.front_matter_block` applies to a file on disk
+    — an unclosed block has no knowable extent, so its ``key:`` lines cannot be
+    told from body lines. This once differed: the block ran to the end of whatever
+    it was given, which is how a reading note quoting a paper came to export as a
+    citation of that paper (#419). Keeping one rule is the point; a caller reaching
+    for ``parse_front_matter(path.read_text())`` must not get the lenient answer
+    that :func:`read_front_matter` no longer gives.
+    """
+    if not text.startswith("---"):
+        return {}
+    rest = text[3:]
+    end = rest.find("\n---")
+    return {} if end == -1 else _parse_block(rest[:end])
 
 
 def read_front_matter(path: Path | str) -> dict:
     """The source's YAML front matter as a dict, or ``{}``.
 
-    Reads to the block's **closing fence**, not to a fixed byte count. A fixed
-    4096-byte window truncated the block mid-way and silently dropped every key
-    past it: the arXiv writer emits one long ``authors:`` line ahead of ``year``/
-    ``journal``/``preprint``, so a large collaboration (200 authors, 7903-byte
-    block) kept only ``arxiv_id``/``arxiv_version``/``authors``/``title`` and
-    exported as a bare ``@misc`` with a title and nothing else — no author, year,
-    venue, DOI, nor the type key that makes it a preprint (#395).
+    Locating the block is :func:`factlog.front_matter_scan.front_matter_block`'s
+    job, shared with the de-duplication reader since #419; this adds only the
+    parse. That module's docstring carries the evidence for the read extent and for
+    failing closed on an unclosed block — including the export this one used to
+    emit from a reading note's body.
 
-    The window was never a read budget: the old code called ``read_text()`` on the
-    whole file and only *then* sliced, so it paid for every byte of the body and
-    still lost the tail of the front matter. Stopping at the fence — and returning
-    early when there is no opening fence — reads strictly less than that.
+    ``{}`` here means "no front matter", and ``cmd_export`` reports the file as
+    skipped rather than citing it. Every way the scan can come up empty — an
+    unreadable file, undecodable bytes, no opening fence, no closing fence — lands
+    on that same, visible outcome instead of aborting the run.
 
-    ``OSError`` yields ``{}`` so an unreadable file is reported as "no front
-    matter" (``cmd_export`` skips it) rather than aborting the export.
-
-    One cost went *up*. ``parse_front_matter`` treats a missing closing fence as
-    "the block runs to the end of what it was given", so a file with an opening
-    fence and no closing one absorbs body lines as keys — and widening the read
-    from 4096 chars to the cap multiplies how many (~200x: 525 keys -> 105,425 on
-    a 2MB fixture). It stays bounded, and ``to_bibtex`` reads only the handful of
-    keys it names, so the emitted entry is unaffected; the price is transient
-    memory on a malformed file, which is why the cap is not merely decorative.
+    **A genuinely closed block longer than the cap reads as ``{}`` too**, and that
+    is a change on this path: the exporter used to cite such a record from whatever
+    truncated keys it had managed to read, and now drops it and reports it skipped.
+    This is the cap behaving as ``front_matter_scan`` documents — past it a real
+    fence and a missing one are indistinguishable — but that was written there as a
+    standing property of the de-duplication reader, and it is new here. Reaching it
+    takes a block over ``FRONT_MATTER_MAX_CHARS`` — **characters, not bytes**: the
+    read is a text handle, so ``fh.read`` yields characters and ``len(head)`` counts
+    them, which is what the ``_CHARS`` in the name says. The equivalent author count
+    is therefore not a constant but ``cap / chars-per-author``, measured at 22,795
+    authors for 46-character names, 29,959 for 35-character, 65,535 for
+    16-character. Those three are ASCII, where characters and bytes coincide; a
+    35-character CJK name costs 81 bytes and still thresholds at 31,775 authors,
+    where a byte reading would predict 12,945. A block can exceed the cap threefold
+    in bytes and still be cited. ``front_matter_scan``'s cap comment illustrates the
+    same curve at ~40 characters per author; every point on it is far past the few
+    thousand the largest real collaborations run to. Dropping the record whole is
+    the better failure than citing a fraction of it silently; the cap is the lever
+    if a real corpus ever gets there.
     """
-    try:
-        with Path(path).open("r", encoding="utf-8") as fh:
-            head = fh.read(_FRONT_MATTER_CHUNK_CHARS)
-            if not head.startswith("---"):
-                # No opening fence: nothing to find, and no reason to read the body.
-                return {}
-            # Stop as soon as the accumulated text holds a fence. Scanning the
-            # accumulation rather than the latest chunk is a *read budget*, not a
-            # correctness property: ``parse_front_matter`` searches all of ``head``
-            # either way, so a straddling fence missed here would not be lost —
-            # the loop would just keep reading, to EOF or to the cap, whichever
-            # comes first. On a 3.6MB file whose fence straddles the first chunk
-            # boundary that is 16,384 chars read against 1,048,576, for the same
-            # 8188-char block and the same dict.
-            while "\n---" not in head[3:] and len(head) < _FRONT_MATTER_MAX_CHARS:
-                chunk = fh.read(_FRONT_MATTER_CHUNK_CHARS)
-                if not chunk:
-                    break
-                head += chunk
-    except OSError:
-        return {}
-    return parse_front_matter(head)
+    block = front_matter_block(path)
+    return {} if block is None else _parse_block(block)
 
 
 def is_annotation_source(fm: dict) -> bool:

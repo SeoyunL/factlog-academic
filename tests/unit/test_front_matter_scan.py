@@ -22,10 +22,12 @@ import pytest
 from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common.backfill import IMPORTED_AT_KEY
-from factlog.integrations.common.front_matter import (
+from factlog.front_matter_scan import (
     FRONT_MATTER_CHUNK_CHARS,
     FRONT_MATTER_MAX_CHARS,
     front_matter_block,
+)
+from factlog.integrations.common.front_matter import (
     read_first_author,
     read_scalar,
     read_scalars,

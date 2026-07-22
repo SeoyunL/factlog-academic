@@ -27,8 +27,9 @@ from factlog.integrations.arxiv.client import BatchResult
 from factlog.integrations.arxiv.id_normalizer import ArxivId
 from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
+from factlog.front_matter_scan import front_matter_block
 from factlog.integrations.common import acknowledge as ack
-from factlog.integrations.common.front_matter import front_matter_block, read_scalars
+from factlog.integrations.common.front_matter import read_scalars
 from factlog.integrations.common.provenance import (
     Provenance,
     SourceRecord,
