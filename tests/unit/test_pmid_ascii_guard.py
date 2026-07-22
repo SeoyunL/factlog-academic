@@ -31,11 +31,12 @@ from factlog.text_norm import fold_decimal_digits
 
 
 def recording_client():
-    """A client whose transport records calls and has nothing queued to return.
+    """A client whose transport records the call and then refuses to answer it.
 
-    Reaching the transport at all is the failure this file is about, so the queue
-    is deliberately empty: a request that gets through raises ``IndexError`` rather
-    than quietly succeeding on a canned body.
+    Reaching the transport at all is the failure this file is about, so there is
+    no canned body to succeed on: a request that gets through raises
+    ``AssertionError``, which ``pytest.raises(PubMedError)`` does not catch, so the
+    test dies at the moment of the send and says why.
     """
     calls = []
 
