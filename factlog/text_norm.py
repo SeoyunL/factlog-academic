@@ -22,6 +22,15 @@ Both functions key on ``str.isdecimal``, which is EXACTLY the Unicode ``Nd``
 category — the set Python's ``\\d`` matches. That equality is the whole reason
 this can be one module: the fold and the diagnostic must name the same set, or a
 warning would blame a character the parser never rejected.
+
+**The scope is narrower than the name: this is the ``Nd`` module, and the other
+normalizations stay where they are.** NFC canonicalisation (``common``, ``cli``)
+and the NFKD + combining-mark strip used for fuzzy matching
+(``integrations.common.matcher``) do NOT belong here. They answer different
+questions with different failure modes, and gathering them under one "text norm"
+roof would invite a caller to reach for the wrong one — the duplication this
+module exists to end, re-introduced one level up. Anything added here has to be a
+claim about decimal digits.
 """
 from __future__ import annotations
 
@@ -34,7 +43,14 @@ def fold_decimal_digits(value: str) -> str:
     """*value* with every Unicode decimal digit rewritten as its ASCII equivalent.
 
     Total and defensive: a non-digit character passes through untouched, so this
-    is safe to call on a whole string, a regex group, or a substring. It is also
+    is safe to call on a whole string, a regex group, or a substring. Passing one
+    through is the intended contract, not a missing check — the predecessor at the
+    Zotero boundary (#398) raised ``ValueError`` on a non-``Nd`` character, which
+    made this function a second, accidental guard on whether a capture was right.
+    That judgement belongs to the caller's regex: **what got captured is the call
+    site's responsibility, and folding it is this function's.** The cost is that a
+    mis-captured value now fails later, where it is parsed, rather than here.
+    It is also
     length- and position-preserving (one character in, one out), which is what
     makes "fold, then match ``[0-9]``" accept exactly the strings ``\\d`` accepted
     before, with the same numeric result — mixed scripts (``２0２0``) and non-Latin

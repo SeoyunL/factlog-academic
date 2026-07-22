@@ -42,12 +42,38 @@ from factlog.text_norm import fold_decimal_digits
 # The digit-bearing patterns below stay ``\d`` — the whole Unicode ``Nd`` category —
 # on purpose: a Zotero library holds whatever it holds, and narrowing to ``[0-9]``
 # would make ``２０２０-06-01`` match nothing and silently lose a year the source did
-# state. The wide match is paired with ``fold_decimal_digits`` at each extractor, so
-# what leaves this module is always ASCII (#398). The fold itself is one Unicode
-# fact shared with the CSL export boundary, so it lives in ``text_norm`` (#410);
-# what stays here is the *policy* — this is an import boundary, where the odd digit
-# is upstream data the user cannot edit from inside factlog, so it is normalized
-# rather than refused the way a hand-written literal is (``literal_types``, #388).
+# state. The policy for that wide match is this module's, and it is an import
+# boundary policy: the odd digit is upstream data the user cannot edit from inside
+# factlog, so it is normalized rather than refused the way a hand-written literal is
+# (``literal_types``, #388). The fold mechanism itself is one Unicode fact shared
+# with the CSL export boundary, so it lives in ``text_norm`` (#410).
+#
+# The pairing is per-pattern, and only two of the three are paired — so the output
+# contract is per-FIELD, not module-wide. This module does NOT promise ASCII digits:
+#
+# - ``_YEAR_RE`` / ``_PMID_RE`` -> ``extract_year`` / ``extract_pmid`` fold their
+#   capture, so ``year`` and ``pmid`` leave here ASCII (#398).
+# - ``_DOI_CORE_RE`` has NO fold, and neither has the ``DOI`` field read straight
+#   off the item, so ``doi`` leaves here in whatever digits Zotero held:
+#   ``_doi_from_extra("DOI: 10.１２３４/abc")`` returns ``10.１２３４/abc`` verbatim
+#   (measured). Pairing it here would be a separate change, and only a partial one
+#   — under ISO 26324 only the ``10.<registrant>`` prefix is a decimal number, the
+#   suffix is opaque and must not be folded.
+#
+# The consequence a non-ASCII ``doi`` once had — a full-width and an ASCII spelling
+# of one paper taking different cross-source join keys, so it imported twice — was
+# #405, and it is fixed at the join-key site (``normalize_cross_id``), not here. A
+# join key is a derived comparison value rather than a stored one, so normalizing
+# there also collides DOIs already sitting in ``sources/`` instead of only
+# newly-imported ones — and it covers both DOI paths at once, which a fold at
+# ``_DOI_CORE_RE`` could not have done. So this module goes on emitting whatever
+# spelling Zotero held, by design.
+#
+# That verbatim spelling is NOT a residual defect — it is provenance. The join key
+# is the thing that had to be normalized; the stored value keeping the source's own
+# spelling is what lets a reader see what Zotero actually held. Whether to fold the
+# stored value anyway is a separate question with its own worth-it judgement, and it
+# is #420, not a gap this module is silently leaving open.
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
 # A DOI in `extra` is taken only from a line that carries a DOI label, and only

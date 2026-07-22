@@ -115,23 +115,12 @@ from decimal import Decimal
 # which the fold sites need too, so it lives in ``text_norm`` (#410). It stays
 # importable as ``literal_types.non_ascii_digits`` because that is where its
 # callers (``common``, ``entity_audit``) report from — beside this module's
-# refusal, which is what they are explaining.
-from factlog.text_norm import non_ascii_digits
-
-__all__ = [
-    "TYPES",
-    "DEFAULT_AMOUNT_UNITS",
-    "NUMBER_SCALE",
-    "non_ascii_digits",
-    "parse_date",
-    "parse_number",
-    "parse_number_scaled",
-    "parse_ordinal",
-    "parse_amount",
-    "canonical_amount",
-    "normalize",
-    "humanize",
-]
+# refusal, which is what they are explaining. The redundant ``as`` alias is the
+# PEP 484 explicit-re-export spelling and is load-bearing, not a typo: without it
+# this is an unused import (ruff F401, measured). It is preferred over ``__all__``
+# because it re-exports this one name without also declaring a public surface for
+# the other eleven, which this module never had.
+from factlog.text_norm import non_ascii_digits as non_ascii_digits
 
 # The literal types this module can normalize. The declaration parser validates
 # a type tag against this set; the engine projection maps each to a column type.

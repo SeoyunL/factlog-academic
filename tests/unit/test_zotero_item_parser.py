@@ -165,10 +165,22 @@ class TestPmidAndDoi:
         # that division of labour: parser preserves, join key normalizes.
         #
         # Until #405 this was a "CHARACTERIZATION, NOT AN ENDORSEMENT" pin
-        # asserting the two spellings were *different* keys — the defect that
-        # imported one paper as two files. They now collide.
+        # asserting the two spellings were *different* join keys — the defect
+        # that imported one paper as two files. They now collide.
+        #
+        # This module still emits the full-width spelling, and that is not an
+        # oversight: neither `_DOI_CORE_RE` nor the raw `DOI` field is paired
+        # with a fold the way `_YEAR_RE`/`_PMID_RE` are (#410). The two DOI
+        # sources are independent, so a fold at `_DOI_CORE_RE` alone would have
+        # missed the raw-field path entirely — one more reason the fold belongs
+        # at the single join-key site.
         out = parse_item(_item(DOI="10.１２３４/abc"))
         assert out["doi"] == "10.１２３４/abc"
+        # Same on the `extra` fallback path, so the leak is not specific to one
+        # of the two DOI sources.
+        assert parse_item(_item(extra="DOI: 10.１２３４/abc"))["doi"] == "10.１２３４/abc"
+        # And the join key folds both spellings together regardless, which is
+        # what keeps the leak above from splitting a paper across two files.
         assert normalize_cross_id("doi", "10.１２３４/abc") == normalize_cross_id(
             "doi", "10.1234/abc"
         )
