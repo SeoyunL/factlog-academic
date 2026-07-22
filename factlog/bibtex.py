@@ -157,6 +157,16 @@ def parse_front_matter(text: str) -> dict:
 # which an *unclosed* front matter stops being read. The cap bounds only the
 # pathological file (an opening ``---`` whose fence is never closed); a well-formed
 # block stops at its own fence, however long it is.
+#
+# The chunk size is not a free performance knob — it is load-bearing twice over:
+#
+# * below 3 it breaks correctness outright. The opening-fence test runs on the
+#   first read alone, so a 1- or 2-char chunk makes ``startswith("---")`` false
+#   for a perfectly well-formed file and every source reads as empty.
+# * it quantises the cap. The loop checks the length *before* reading, so the
+#   effective ceiling is ``ceil(_FRONT_MATTER_MAX_CHARS / chunk) * chunk``, and
+#   changing the chunk moves where an unclosed block is actually cut. Powers of
+#   two that divide the cap keep that boundary put; other values shift it.
 _FRONT_MATTER_CHUNK_CHARS = 8192
 _FRONT_MATTER_MAX_CHARS = 1 << 20
 
@@ -179,6 +189,14 @@ def read_front_matter(path: Path | str) -> dict:
 
     ``OSError`` yields ``{}`` so an unreadable file is reported as "no front
     matter" (``cmd_export`` skips it) rather than aborting the export.
+
+    One cost went *up*. ``parse_front_matter`` treats a missing closing fence as
+    "the block runs to the end of what it was given", so a file with an opening
+    fence and no closing one absorbs body lines as keys — and widening the read
+    from 4096 chars to the cap multiplies how many (~200x: 525 keys -> 105,425 on
+    a 2MB fixture). It stays bounded, and ``to_bibtex`` reads only the handful of
+    keys it names, so the emitted entry is unaffected; the price is transient
+    memory on a malformed file, which is why the cap is not merely decorative.
     """
     try:
         with Path(path).open("r", encoding="utf-8") as fh:

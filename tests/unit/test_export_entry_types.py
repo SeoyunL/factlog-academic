@@ -31,7 +31,13 @@ from pathlib import Path
 
 import pytest
 
-from factlog.bibtex import _ENTRY_TYPES, parse_front_matter, read_front_matter, to_bibtex
+from factlog.bibtex import (
+    _ENTRY_TYPES,
+    _FRONT_MATTER_CHUNK_CHARS,
+    parse_front_matter,
+    read_front_matter,
+    to_bibtex,
+)
 from factlog.csl import _CSL_TYPES, to_csl
 from factlog.export_types import (
     resolve_source_type,
@@ -692,6 +698,46 @@ class TestExportPathOnDisk:
     def test_unreadable_path_is_reported_as_no_front_matter(self, tmp_path):
         """OSError degrades to `{}` (skipped), it does not abort the export."""
         assert read_front_matter(tmp_path / "does-not-exist.md") == {}
+
+    @staticmethod
+    def _fenced_at(offset: int) -> str:
+        """A source whose closing fence starts exactly at byte `offset`."""
+        head = '---\ntitle: "T"\n'
+        pad = "p: " + "x" * (offset - len(head) - 4) + "\n"
+        assert len(head + pad) == offset
+        return head + pad + '\n---\n\nLEAK: leaked\n'
+
+    @pytest.mark.parametrize("offset", range(-3, 4))
+    def test_fence_straddling_a_chunk_boundary_is_found(self, tmp_path, offset):
+        """The closing fence is found even when it spans two reads.
+
+        `read_front_matter` pulls `_FRONT_MATTER_CHUNK_CHARS` at a time, so a
+        `\\n---` sitting astride a boundary is split across them. The loop
+        re-scans the *accumulated* text rather than the latest chunk for exactly
+        this reason, and nothing else here pins that: the 200-author block
+        (7904B) fits in the first read, so its loop never iterates at all.
+
+        Without the accumulation the fence is missed, `title` vanishes with the
+        discarded chunk, and body keys past the fence leak into the front matter.
+
+        The offsets are computed *from the constant*, so retuning the chunk size
+        moves the fixture with it instead of silently aiming at nothing.
+        """
+        path = tmp_path / f"straddle{offset}.md"
+        path.write_text(self._fenced_at(_FRONT_MATTER_CHUNK_CHARS + offset), encoding="utf-8")
+
+        fm = read_front_matter(path)
+        assert fm["title"] == "T"
+        assert "LEAK" not in fm, "body key past the closing fence leaked in"
+
+    def test_chunk_size_must_cover_the_opening_fence(self, tmp_path):
+        """A chunk under 3 chars cannot see `---`, so every source reads as empty.
+
+        Pins the lower bound the constant's comment documents: the opening-fence
+        test runs on the *first* read alone, so a chunk of 1 or 2 makes
+        `startswith("---")` false for a perfectly well-formed file.
+        """
+        assert _FRONT_MATTER_CHUNK_CHARS >= 3
 
     @staticmethod
     def _chars_read(monkeypatch) -> list[int]:
