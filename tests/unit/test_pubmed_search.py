@@ -211,6 +211,30 @@ def _medline_record(pmid: str, *, medline_date: str) -> str:
   </PubmedArticle>"""
 
 
+def _no_year_record(pmid: str, *, pub_date: str = "<PubDate/>") -> str:
+    """A record whose `<PubDate>` yields no year at all — `_pub_date` returns `None`.
+
+    Three shapes reach this state and all three are real PubMed data: an empty
+    `<PubDate/>`, a `<PubDate>` holding only a `<Season>` (which `_pub_date` does not
+    read), and a `<MedlineDate>` whose free text carries no four-digit run ("Winter").
+    The last one still sets `pub_date_raw`, so the no-year warning can quote it.
+    """
+    return f"""
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>{pmid}</PMID>
+      <Article>
+        <Journal><Title>J Test</Title>
+          <JournalIssue>{pub_date}</JournalIssue></Journal>
+        <ArticleTitle>A dateless record.</ArticleTitle>
+      </Article>
+    </MedlineCitation>
+    <PubmedData><ArticleIdList>
+      <ArticleId IdType="pubmed">{pmid}</ArticleId>
+    </ArticleIdList></PubmedData>
+  </PubmedArticle>"""
+
+
 def _works(*records):
     """Parse fixture records through the real parser, so `.year` is the recorded year."""
     xml = "<PubmedArticleSet>" + "".join(records) + "</PubmedArticleSet>"
@@ -319,16 +343,16 @@ class TestYearRangeReport:
         assert year_range_report(works, year=None) == []
         assert year_range_report(works) == []
 
-    def test_a_record_without_a_year_is_not_reported(self):
-        # Absence is not a range mismatch; work_parser already accounts for a
-        # PubDate with no parseable year.
-        xml = ("<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>40000003</PMID>"
-               "<Article><Journal><Title>J Test</Title><JournalIssue><PubDate/>"
-               "</JournalIssue></Journal><ArticleTitle>No date.</ArticleTitle>"
-               "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>")
-        works = parse_efetch_response(xml, ("40000003",)).works
+    def test_a_record_without_a_year_never_joins_a_range_mismatch_block(self):
+        # Absence is not a range mismatch. The record IS reported (#389) but only in
+        # its own block: claiming a year "outside 2022-2025" for a record that has no
+        # year would be a fact the data does not carry.
+        works = _works(_no_year_record("40000003"))
         assert works[0].year is None
-        assert year_range_report(works, year="2022-2025") == []
+        lines = year_range_report(works, year="2022-2025")
+        assert len(lines) == 1
+        assert "outside --year" not in lines[0]
+        assert "no year at all" in lines[0]
 
     def test_an_unparseable_year_spec_yields_no_second_complaint(self):
         # The CLI rejects a bad --year before spending a request; this must not add
@@ -339,6 +363,110 @@ class TestYearRangeReport:
 
     def test_an_empty_result_set_is_silent(self):
         assert year_range_report((), year="2022-2025") == []
+
+
+class TestNoYearAtAllReport:
+    """#389: a --year search must not silently accept records with no year.
+
+    Distinct from the two blocks above in *claim*, not just wording: those say a year
+    was recorded outside the range, this says no year was recorded at all. Asking for
+    --year is asking to filter by year, so a year-less source landing without a word
+    makes the run indistinguishable from one that passed no --year.
+    """
+
+    def test_an_empty_pub_date_is_surfaced(self):
+        works = _works(_no_year_record("40000003"))
+        assert works[0].year is None
+        lines = year_range_report(works, year="2022-2025")
+        assert len(lines) == 1
+        assert "40000003" in lines[0]
+        assert "no year at all" in lines[0]
+        # The range is named, so the operator sees which request went unchecked.
+        assert "2022-2025" in lines[0]
+
+    def test_a_season_only_pub_date_is_surfaced(self):
+        # `_pub_date` reads <Year> and <MedlineDate>; a <Season> sibling is not a year
+        # and must not be mistaken for one.
+        works = _works(_no_year_record("40000004", pub_date="<PubDate><Season>Winter</Season></PubDate>"))
+        assert works[0].year is None
+        lines = year_range_report(works, year="2022-2025")
+        assert len(lines) == 1
+        assert "40000004" in lines[0]
+        assert "no year at all" in lines[0]
+
+    def test_a_medline_date_with_no_four_digit_year_is_surfaced_and_quoted(self):
+        # "Winter" sets pub_date_raw but yields no year. work_parser keeps that field
+        # to make a "derived-or-absent" year auditable; this is the absent half, so
+        # the text is quoted rather than dropped.
+        works = _works(_no_year_record(
+            "40000005", pub_date="<PubDate><MedlineDate>Winter</MedlineDate></PubDate>"))
+        assert works[0].year is None
+        assert works[0].pub_date_raw == "Winter"
+        line = year_range_report(works, year="2022-2025")[0]
+        assert "40000005" in line
+        assert "no year at all" in line
+        assert '"Winter"' in line
+
+    def test_a_record_with_a_year_in_range_stays_silent(self):
+        # The counterexample: a parseable, in-range year says nothing at all.
+        works = _works(_efetch_record("40000001", issue_year="2024", article_date="2023-11-02"))
+        assert year_range_report(works, year="2022-2025") == []
+
+    def test_only_the_year_less_records_are_named(self):
+        works = _works(
+            _efetch_record("40000001", issue_year="2024", article_date="2023-11-02"),
+            _no_year_record("40000003"),
+        )
+        lines = year_range_report(works, year="2022-2025")
+        assert len(lines) == 1
+        assert "40000003" in lines[0]
+        assert "40000001" not in lines[0]
+
+    def test_no_year_filter_means_nothing_to_check(self):
+        # Without --year there is no range, so nothing about a record's year — present
+        # or missing — was requested. Silence is correct here, not a miss.
+        works = _works(_no_year_record("40000003"))
+        assert year_range_report(works, year=None) == []
+        assert year_range_report(works) == []
+
+    def test_the_explanation_is_printed_once_per_block(self):
+        works = _works(*[_no_year_record(f"4000000{n}") for n in range(1, 4)])
+        lines = year_range_report(works, year="2022-2025")
+        assert len(lines) == 1
+        assert lines[0].startswith("⚠ 3 results")
+        assert lines[0].count("is recorded with") == 1
+
+    def test_a_single_record_is_counted_in_the_singular(self):
+        works = _works(_no_year_record("40000003"))
+        line = year_range_report(works, year="2022-2025")[0]
+        assert line.startswith("⚠ 1 result will be recorded with no year at all")
+        assert "against it)" in line
+
+    def test_all_three_causes_get_their_own_block(self):
+        # All three causes in one result set. The blocks must split three ways and no
+        # explanation may attach to another cause's PMID: the electronic-date story is
+        # false for a record with no ArticleDate, and the MedlineDate-span story is
+        # false for a record whose PubDate is empty.
+        works = _works(
+            _efetch_record("41620285", issue_year="2026", article_date="2025-04-16"),
+            _medline_record("1", medline_date="1998 Dec-1999 Jan"),
+            _no_year_record("40000003"),
+        )
+        lines = year_range_report(works, year="2000-2025")
+        assert len(lines) == 3
+        electronic = next(line for line in lines if "41620285" in line)
+        medline = next(line for line in lines if "PMID 1 " in line)
+        unknown = next(line for line in lines if "40000003" in line)
+        assert "electronic" in electronic and "MedlineDate" not in electronic
+        assert "MedlineDate" in medline and "electronic" not in medline
+        assert "no year at all" in unknown
+        assert "electronic" not in unknown and "MedlineDate" not in unknown
+        # The two range-mismatch blocks keep their claim; the third does not borrow it.
+        assert "outside --year" in electronic and "outside --year" in medline
+        assert "outside --year" not in unknown
+        # No PMID appears in a block that is not about it.
+        assert "40000003" not in electronic and "40000003" not in medline
+        assert "41620285" not in unknown and "PMID 1 " not in unknown
 
 
 # -- reading esearch back ---------------------------------------------------

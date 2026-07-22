@@ -4874,7 +4874,9 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     result whose *recorded* year falls outside ``--year``: PubMed's date filter also
     matches an electronic publication date, so a Print-Electronic paper is a genuine
     hit that lands with a later issue year, and ``year_range_report`` names it rather
-    than letting it appear in the KB unannounced (#387). ``--show-query`` prints the composed
+    than letting it appear in the KB unannounced (#387) — as it does a result that
+    will be recorded with no year at all, which ``--year`` can check against even
+    less (#389). ``--show-query`` prints the composed
     ``term`` and sends nothing; ``--dry-run`` sends the search and declines to write
     (they are different, per the issue).
     """
@@ -5006,7 +5008,9 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     # [Date - Publication] filter also matches a record's electronic publication
     # date, while front matter carries the journal issue's year, so a
     # Print-Electronic paper legitimately matches --year 2022-2025 and lands as
-    # `year: 2026`. Surfaced, never blocked: the record is a real match and the
+    # `year: 2026` — or, when its PubDate carries no parseable year, with no `year`
+    # at all (#389), which a --year search is no less entitled to hear about.
+    # Surfaced, never blocked: the record is a real match and the
     # operator decides. On stderr in both modes — like the silent-zero guard — so
     # --porcelain stdout stays parseable, and before selection so the fact is
     # known while there is still a choice to make.

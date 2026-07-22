@@ -212,6 +212,33 @@ PMID 41620285 (2026), PMID 40000002 (2021).
 파싱 가능합니다), 선택 전에 나오므로 아직 선택을 바꿀 수 있습니다. 수집을 막지 않고,
 **종료코드는 0 그대로입니다** — 이 경고 때문에 실패하는 CI는 없습니다.
 
+#### `--year` 를 걸어도 연도가 아예 없는 레코드는 들어옵니다
+
+셋째 블록입니다. `PubDate` 에 네 자리 연도가 **아무 데도 없는** 레코드 — 요소가 비었거나,
+`<Season>Winter</Season>` 만 있거나, `<MedlineDate>Winter</MedlineDate>` 처럼 자유텍스트에
+연도가 없는 경우 — 는 front matter에 `year` 가 아예 없이 기록됩니다. `--year` 를 걸었어도
+막히지 않습니다.
+
+이건 위의 두 원인과 **주장 자체가 다릅니다**. 위 둘은 "기록될 연도가 범위 밖"이라고 말하고,
+이건 "기록될 연도가 없다"고 말합니다. 없는 연도를 두고 "2022-2025 밖"이라고 하면 데이터에
+없는 사실을 지어내는 것이므로 같은 블록에 섞지 않습니다 — 원인별로 가르는 이유와 같습니다.
+그렇다고 침묵하지도 않습니다. `--year` 를 준다는 건 연도로 거르겠다는 뜻인데 연도 없는
+소스가 조용히 앉으면 `--year` 를 주지 않은 런과 구분이 안 됩니다.
+
+```
+factlog pubmed-search: ⚠ 2 results will be recorded with no year at all (--year 2022-2025
+cannot be checked against them): PMID 40000003, PMID 40000009 (MedlineDate "Winter").
+  A record carrying no four-digit year anywhere in its <PubDate> ... the exit code stays 0 ...
+```
+
+`MedlineDate` 자유텍스트가 있었으면 그 원문을 함께 인용합니다. `pub_date_raw` 는 연도가
+**파생됐거나 없을 때** 감사 가능하게 두려고 있는 필드이고, 연도 없는 계절 표기가 바로 그
+"없는" 쪽입니다.
+
+앞의 두 블록과 같습니다 — 수집을 막지 않고, stderr로 나가고, **종료코드는 0 그대로**입니다.
+`--year` 를 주지 않은 검색에서는 이 블록도 나오지 않습니다. 범위가 없으면 무엇과도 대조할
+일이 없기 때문입니다.
+
 ### `pubmed-refresh`
 
 KB의 provenance 원장(`<kb>/source-provenance/**/*.json`)에 있는 PubMed 레코드와 front

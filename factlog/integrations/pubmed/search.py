@@ -525,14 +525,15 @@ def silent_zero_report(
     return lines
 
 
-# Why a record's recorded year can sit outside --year, one paragraph per *cause*.
-# Never one paragraph for both: the electronic-date story is plainly false for a
-# record that has no ArticleDate at all, and a warning whose explanation is wrong
-# sends the operator hunting for a field that is not there — worse than no
+# Why a --year search can record a year the operator did not ask for, one paragraph
+# per *cause*. Never one paragraph for several: the electronic-date story is plainly
+# false for a record that has no ArticleDate at all, and a warning whose explanation
+# is wrong sends the operator hunting for a field that is not there — worse than no
 # explanation, because it is confidently wrong. `pub_date_raw` is what tells the
-# two apart, and `work_parser` states that is the field's purpose: it "makes a
+# causes apart, and `work_parser` states that is the field's purpose: it "makes a
 # derived-or-absent year auditable instead of silent". Reporting a derived year
-# without it would discard the audit trail kept for exactly this moment.
+# without it would discard the audit trail kept for exactly this moment — and the
+# *absent* half of that sentence is why the no-year cause quotes it too (#389).
 _YEAR_CAUSE_ELECTRONIC = (
     "PubMed's date filter also matches a record's electronic publication date, while "
     "factlog records the journal issue's year — the two differ when a paper appears "
@@ -547,10 +548,22 @@ _YEAR_CAUSE_MEDLINE = (
     "a genuine match, not a bug: it is imported as usual and the exit code stays 0 — "
     "decide whether you want it in the KB."
 )
+# Not a range mismatch at all, and never merged into the two above: these records
+# have no year to compare. Reported anyway (#389) because asking for --year is
+# asking to filter by year, and a source that lands with the year field missing is
+# exactly what the operator did not ask for — silence here is indistinguishable
+# from a search with no --year at all.
+_YEAR_CAUSE_UNKNOWN = (
+    "A record carrying no four-digit year anywhere in its <PubDate> — the element is "
+    "empty, or holds free text such as a season with no year in it — is recorded with "
+    "no year field at all, so the requested range can neither include nor exclude it. "
+    "Such a record is a genuine match, not a bug: it is imported as usual and the exit "
+    "code stays 0 — decide whether you want a source with no year in the KB."
+)
 
 
 def year_range_report(works, *, year: str | None = None) -> list[str]:
-    """Name every result whose recorded year falls outside the requested ``--year``.
+    """Name every result a requested ``--year`` will not hold for once recorded.
 
     **The mismatch this surfaces (#387).** ``--year`` composes a
     ``[Date - Publication]`` clause, and PubMed matches that range against dates the
@@ -584,11 +597,20 @@ def year_range_report(works, *, year: str | None = None) -> list[str]:
     the MeSH guard and arXiv's ``--category`` pre-flight take. Nothing here filters or
     blocks, and the exit code is unaffected.
 
+    **A third block: no year at all (#389).** A record whose ``PubDate`` carries no
+    parseable year is recorded with no ``year`` field, and absence is *not* evidence
+    of a range mismatch — so it never joins either block above, whose whole claim is
+    that a year was recorded outside the range. It is still reported, in its own
+    block with its own wording, because a search that was given ``--year`` and
+    silently accepts year-less records is indistinguishable from one given no
+    ``--year`` at all. The ``MedlineDate`` text, when there was one, is quoted here
+    too: ``pub_date_raw`` exists to keep a "derived-**or-absent**" year auditable,
+    and a season with no year in it is the absent half.
+
     Pure, duck-typed over ``.pmid``/``.year``/``.pub_date_raw`` (no import of
-    ``work_parser``), and silent — ``[]`` — when no ``--year`` was given or every
-    result lands inside the range. A result with **no** year at all is skipped rather
-    than reported: absence is not evidence of a range mismatch, and ``work_parser``
-    already accounts for a record whose ``PubDate`` carries no parseable year.
+    ``work_parser``), and silent — ``[]`` — when no ``--year`` was given (there is no
+    range to check anything against, missing year included) or every result lands
+    inside the range with a year of its own.
     """
     if not year:
         return []
@@ -602,26 +624,41 @@ def year_range_report(works, *, year: str | None = None) -> list[str]:
 
     electronic: list[str] = []
     medline: list[str] = []
+    unknown: list[str] = []
     for work in works:
         work_year = getattr(work, "year", None)
-        if work_year is None or start_year <= work_year <= end_year:
-            continue
         pmid = getattr(work, "pmid", "?")
-        # Non-None exactly when `_pub_date` fell back to MedlineDate free text.
+        # Non-None exactly when `_pub_date` read MedlineDate free text — whether or
+        # not a year could be derived from it.
         raw = getattr(work, "pub_date_raw", None)
+        if work_year is None:
+            unknown.append(f'PMID {pmid} (MedlineDate "{raw}")' if raw else f"PMID {pmid}")
+            continue
+        if start_year <= work_year <= end_year:
+            continue
         if raw:
             medline.append(f'PMID {pmid} ({work_year}, from MedlineDate "{raw}")')
         else:
             electronic.append(f"PMID {pmid} ({work_year})")
 
+    # One claim per block, in the count-agnostic shape the header needs. `{pronoun}`
+    # stays a literal placeholder (not an f-string field) until the block's size is
+    # known, so "1 result ... against it" reads as English rather than as a template.
+    outside = f"will be recorded with a year outside --year {year}"
+    absent = (
+        f"will be recorded with no year at all (--year {year} cannot be checked "
+        "against {pronoun})"
+    )
     lines: list[str] = []
-    for named, reason in ((electronic, _YEAR_CAUSE_ELECTRONIC),
-                          (medline, _YEAR_CAUSE_MEDLINE)):
+    for named, claim, reason in ((electronic, outside, _YEAR_CAUSE_ELECTRONIC),
+                                 (medline, outside, _YEAR_CAUSE_MEDLINE),
+                                 (unknown, absent, _YEAR_CAUSE_UNKNOWN)):
         if not named:
             continue
-        noun = "result" if len(named) == 1 else "results"
+        single = len(named) == 1
+        noun = "result" if single else "results"
+        claim = claim.replace("{pronoun}", "it" if single else "them")
         lines.append(
-            f"⚠ {len(named)} {noun} will be recorded with a year outside --year "
-            f"{year}: " + ", ".join(named) + f".\n  {reason}"
+            f"⚠ {len(named)} {noun} {claim}: " + ", ".join(named) + f".\n  {reason}"
         )
     return lines
