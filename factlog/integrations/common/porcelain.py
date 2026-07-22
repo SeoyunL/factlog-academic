@@ -33,18 +33,19 @@ those three:
   exactly the drift one shared definition exists to prevent.
 * ``cli.py`` lines 3292, 3474, 3808, 3998 and 4206, ``print(f"target\\t{...}")`` — print a
   path derived from the user's ``--target`` argument, and a POSIX filename may contain a
-  tab outright. Their three siblings at 5718, 5858 and 6392 emit the same row through
-  ``_f(...)`` and are gated: the same four-times-one-checked drift as the bullet above.
-  Recorded from a grep, unlike the two above — no tab-carrying path was run end to end
-  through these five, so "reaches this row unneutralized" is inference, not measurement.
+  tab outright. Their siblings at 5718, 5858 and 6392 emit the same row through ``_f(...)``
+  and are gated: the same split as the bullet above, here eight emissions of one row shape
+  with three of them checked. Recorded from a grep, unlike the two above — no tab-carrying
+  path was run end to end through these five, so "reaches this row unneutralized" is
+  inference, not measurement.
 
 Those line numbers are a starting point, not an inventory; grep the bare ``print(f"``
 porcelain rows before trusting any count here, including this one. That warning earned
 itself immediately: the ``target`` bullet is a sixth group found *after* this paragraph
-first claimed five, which is why the count above is a floor and reads "at least". The point of keeping
-the note in the present tense is that a reader must not mistake an ungated path for a
-checked one — which is what an earlier revision of this paragraph, rewritten entirely
-into the past tense once #406 landed, quietly did.
+first claimed five, which is why the count above is a floor and reads "at least". The
+point of keeping the note in the present tense is that a reader must not mistake an
+ungated path for a checked one — which is what an earlier revision of this paragraph,
+rewritten entirely into the past tense once #406 landed, quietly did.
 
 Note what kind of gap that is, because this module has seen both kinds. The ones above
 are **ungated** — no neutralization at all. The three ``*-backfill-provenance`` commands
