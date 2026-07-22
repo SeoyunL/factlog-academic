@@ -129,14 +129,20 @@ def test_only_the_digit_axis_is_shared(raw, openalex_takes_it):
             openalex_pmid(raw)
 
 
-class TestWhyRejectAndNotFold:
-    """The two facts that decided the policy, kept as executable claims."""
+class TestWhatTheGuardRestsOn:
+    """Two properties of the defect itself, kept as executable claims.
+
+    Neither decided the fold-vs-reject policy — that argument is recorded on #427.
+    They pin why ``isdigit()`` was the wrong predicate and why the leading-zero
+    rule beside it did not compensate.
+    """
 
     @pytest.mark.parametrize("raw", ["²²", "①"])
-    def test_folding_would_not_have_closed_the_hole(self, raw):
+    def test_category_No_survives_a_fold_and_still_satisfies_isdigit(self, raw):
         # ``fold_decimal_digits`` is exactly as wide as ``Nd`` by design, so these
-        # survive it unchanged and still satisfy ``isdigit()``. A fold-then-digit
-        # check would keep admitting them; only the ASCII guard rejects them.
+        # survive it unchanged. A fold-then-``isdigit`` check would keep admitting
+        # them. (An ``isdecimal`` guard would reject them — but not ``１２３``, whose
+        # ``isdecimal()`` is true, so it is no substitute either.)
         assert fold_decimal_digits(raw) == raw
         assert raw.isdigit() and not raw.isdecimal()
 

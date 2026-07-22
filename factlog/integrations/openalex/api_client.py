@@ -188,10 +188,12 @@ def normalize_pmid(value: str) -> str:
 
     The **digit** policy is identical to ``pubmed.client.normalize_pmid``'s on
     purpose, so one id cannot mean different things in different commands. Only
-    that axis is shared: the two accept different surface forms by design (this one
-    a ``pubmed.ncbi.nlm.nih.gov`` URL, that one a ``pmid:`` prefix and an ``int``),
-    each taking the spelling its own source produces. Rejecting was chosen over
-    folding the digits; the argument is in #427 and is not restated here.
+    that axis is shared: the two accept different surface forms by design, each
+    taking what its own callers hand it — this one the ``pubmed.ncbi.nlm.nih.gov``
+    URL the API returns in ``ids.pmid``, that one a ``pmid:`` label or a bare
+    ``int``, which are conveniences for the user and the Python caller rather than
+    anything NCBI emits. Rejecting was chosen over folding the digits; the argument
+    is recorded on #427 and is not restated here.
 
     **What rejecting costs.** The sole caller is ``openalex.work_parser`` on
     ``ids.pmid`` — a write path — where ``_optional`` turns a rejected id into

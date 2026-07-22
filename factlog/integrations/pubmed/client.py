@@ -157,8 +157,10 @@ def normalize_pmid(value: object) -> str:
     ``0``/leading-zero rejections exist to prevent. (That it reached the transport
     is measured; what NCBI answers to one is not, no live call having been made.)
 
-    The response side is unguarded: ``pubmed.work_parser`` never imports this
-    function, so tightening it does not change what a record stores.
+    The response side is unguarded **for the PMID specifically**:
+    ``pubmed.work_parser`` never imports this function, so tightening it does not
+    change what a record stores. It does validate the response DOI, through the
+    shared ``normalize_doi``.
     """
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise PubMedError(f"PMID must be a string or int, got {type(value).__name__}")
