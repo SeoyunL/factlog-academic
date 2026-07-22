@@ -152,6 +152,63 @@ printf '%s' "$out" | grep -qF "'published_year' is declared by" && ok "contested
 # Both expanded forms are contested here, so the count is exact — an assertion of
 # "some number" would hold at zero.
 printf '%s' "$out" | grep -qE "2 conflicting typed declaration\(s\)" && ok "summary counts conflicting typed declarations" || bad "summary omits conflicting declaration count"
+# Report ORDER is part of the contract (a diffable, re-runnable report). Both
+# contested forms are listed, canonical first — reversing the sort must fail here.
+# `|| true`: under `set -e` a non-matching grep inside a command substitution aborts
+# the whole script, which turns "this assertion failed" into "the gate stopped early
+# and reported nothing". Fail as a FAIL line, not as a silent exit.
+order="$(printf '%s' "$out" | { grep -oE "'(published_year|게재연도)' is declared by" || true; } | tr '\n' '|')"
+[ "$order" = "'published_year' is declared by|'게재연도' is declared by|" ] \
+  && ok "conflicting forms reported in a fixed order" || bad "conflict report order not fixed (got: $order)"
+
+# --- agreeing canonical/alias declarations are NOT a conflict (#393) ----------
+# The same unit table on both lines, differing only in the engine-side alias — which
+# every real pair must, since common.py rejects a duplicate alias. Comparing whole
+# specs made this pair "self-contradictory" and dropped its table: a NEW false
+# positive, and a coverage regression against main's last-writer-wins (which at
+# least landed on an identical table). Pinned through REAL policy files, because
+# the property only holds for spec objects the parser actually builds.
+KB5="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB5" >/dev/null 2>&1
+printf 'x\n' > "$KB5/sources/a.md"
+printf -- '- `published_year`\n- `게재연도`\n' > "$KB5/policy/attribute-relations.md"
+printf -- '- `게재연도` -> `published_year`\n' > "$KB5/policy/relation-aliases.md"
+printf -- '`published_year` : amount as a1 (파운드=1700)\n`게재연도` : amount as a2 (파운드=1700)\n' \
+  > "$KB5/policy/typed-relations.md"
+printf '%s\n%s\n%s\n%s\n' "$H" \
+  'P1,published_year,"amount(9,""파운드"")",sources/a.md,accepted,0.9,' \
+  'P2,게재연도,"amount(5,""파운드"")",sources/a.md,accepted,0.9,' \
+  'P3,published_year,"amount(5,""달러"")",sources/a.md,accepted,0.9,' > "$KB5/facts/candidates.csv"
+set +e; out="$("$PYTHON" "$AUDIT" --wiki "$KB5" 2>&1)"; rc=$?; set -e
+
+[ "$rc" -eq 0 ] && ok "agreeing-declaration KB exits 0" || bad "agreeing-declaration KB exit $rc"
+printf '%s' "$out" | grep -qE "0 conflicting typed declaration\(s\)" && ok "agreeing declarations are not a conflict" || bad "agreeing declarations wrongly reported as conflicting"
+printf '%s' "$out" | grep -qF "conflicting typed declaration (one relation form, two declarations):" && bad "conflict section printed for agreeing declarations" || ok "no conflict section for agreeing declarations"
+printf '%s' "$out" | grep -qF '• '"'"'amount(9,"파운드")'"'" && bad "agreed unit table not applied (value falsely accused)" || ok "the agreed unit table still applies"
+# ...and the table being kept must still COST something: an out-of-table unit is
+# reported, so "no conflict" cannot be faked by dropping judgement altogether.
+printf '%s' "$out" | grep -qF '• '"'"'amount(5,"달러")'"'" && ok "out-of-table unit still reported under agreeing declarations" || bad "kept table stopped judging unknown units"
+
+# --- a contested form names EVERY claimant (#393) ------------------------------
+# Three lines on one canonical where the first two AGREE and the third differs.
+# Reporting only the disagreeing pair drops an agreeing line and sends the author
+# to edit the wrong ones, so all three names must appear on the conflict line.
+KB6="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB6" >/dev/null 2>&1
+printf 'x\n' > "$KB6/sources/a.md"
+printf -- '- `published_year`\n- `게재연도`\n- `출판연도`\n' > "$KB6/policy/attribute-relations.md"
+printf -- '- `게재연도` -> `published_year`\n- `출판연도` -> `published_year`\n' > "$KB6/policy/relation-aliases.md"
+printf -- '`published_year` : amount as a1 (파운드=1700)\n`게재연도` : amount as a2 (파운드=1700)\n`출판연도` : amount as a3 (달러=1300)\n' \
+  > "$KB6/policy/typed-relations.md"
+printf '%s\n%s\n' "$H" \
+  'P1,published_year,"amount(9,""파운드"")",sources/a.md,accepted,0.9,' > "$KB6/facts/candidates.csv"
+set +e; out="$("$PYTHON" "$AUDIT" --wiki "$KB6" 2>&1)"; rc=$?; set -e
+
+[ "$rc" -eq 0 ] && ok "three-claimant KB exits 0" || bad "three-claimant KB exit $rc"
+line="$(printf '%s' "$out" | { grep -F "'published_year' is declared by" || true; })"
+for n in published_year 게재연도 출판연도; do
+  printf '%s' "$line" | grep -qF "'$n'" && ok "conflict names claimant '$n'" || bad "conflict omits claimant '$n'"
+done
 
 echo ""
 echo "========================================"

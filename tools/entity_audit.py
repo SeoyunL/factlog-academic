@@ -176,6 +176,20 @@ def _is_malformed_compound_term(value: str, spec: object | None = None) -> bool:
     return literal_types.normalize(type_tag, value) is None
 
 
+def _judged_fields(spec: object | None) -> tuple[object, object]:
+    """The only parts of a TypedRelSpec that change a malformed verdict.
+
+    Kept beside `_is_malformed_compound_term` because it must mirror it exactly:
+    that function reads `type` and `units` and nothing else. `alias` names the
+    engine side-relation and never reaches a verdict, so two declarations differing
+    only there agree as far as this audit is concerned — and since common.py forbids
+    a duplicate alias, comparing it would make EVERY pair of lines differ (#393).
+
+    `units` is a dict, so this tuple is compared with `==`, never hashed.
+    """
+    return getattr(spec, "type", None), getattr(spec, "units", None)
+
+
 def _typed_spec_by_form() -> tuple[dict[str, object], dict[str, list[str]]]:
     """Every SURFACE form naming a typed relation → its TypedRelSpec, plus the forms
     two or more declarations disagree about.
@@ -198,36 +212,56 @@ def _typed_spec_by_form() -> tuple[dict[str, object], dict[str, list[str]]]:
     contradicts itself. Dropping alone would fix the false accusation while leaving
     the author with no way to learn why their table stopped applying.
 
-    Two lines mapping a form to an EQUAL spec are not a conflict: nothing is
-    contested, so the form keeps its table.
+    "Disagree" is decided on the fields this audit actually CONSUMES — `type` and
+    `units`, the only two `_is_malformed_compound_term` ever reads. Comparing whole
+    TypedRelSpecs made the carve-out below unreachable: `alias` is a field, and
+    common.py rejects a duplicate alias outright (`duplicate alias ...`), so two
+    distinct lines can never be `==`. Every canonical/alias pair would then be
+    reported as a self-contradiction and lose its table — including pairs declaring
+    the SAME unit table, which main judged correctly. That is a new false positive
+    in a fix whose whole point is removing one, so the comparison must ignore the
+    fields nothing downstream reads.
+
+    Two lines agreeing on `type` and `units` are therefore not a conflict: nothing
+    the audit consumes is contested, so the form keeps its table.
+
+    A contested form reports EVERY line that claims it, not just the two that first
+    disagreed. Recording only the disagreeing pair dropped a claimant whenever two
+    lines agreed before a third differed (the agreeing ones overwrite each other as
+    "the" declarer), so the report named 2 of 3 lines and sent the author to fix the
+    wrong ones. Claimants keep DECLARATION order — the order the author reads them
+    in typed-relations.md — which is deterministic (`typed_relations` preserves file
+    order) and more useful than an alphabetical one.
     """
     specs = typed_relations()
     if not specs:
         return {}, {}
     aliases = relation_aliases()
     by_form: dict[str, object] = {}
-    declarer: dict[str, str] = {}            # form -> the relation name that mapped it
-    conflicts: dict[str, set[str]] = {}      # contested form -> every name claiming it
+    # Every name claiming a form, in declaration order — the claimant list is built
+    # for all forms, not only contested ones, because a form becomes contested after
+    # some of its claimants have already been seen.
+    claimants: dict[str, list[str]] = defaultdict(list)
+    contested: set[str] = set()
     for name, spec in specs.items():
         nfc_name = unicodedata.normalize("NFC", name)
         canon = aliases.get(nfc_name, nfc_name)
-        # sorted(): the expansion is a set, so a stable order keeps the reported
-        # conflict identical run to run.
+        # The expansion is a set; sort it so the ITERATION is reproducible. Report
+        # order does not depend on this (the return statement orders both levels),
+        # and the forms of one spec are distinct, so this is defensive only.
         for form in sorted({nfc_name, canon} | surface_variants(canon, aliases)):
-            if form in conflicts:
-                # Already contested; a third claimant joins the report, and the form
-                # stays out of by_form no matter what it declares.
-                conflicts[form].add(nfc_name)
+            if nfc_name not in claimants[form]:
+                claimants[form].append(nfc_name)
+            if form in contested:
+                # Stays out of by_form no matter what a later line declares.
                 continue
             previous = by_form.get(form)
-            if previous is not None and previous != spec:
-                conflicts[form] = {declarer[form], nfc_name}
+            if previous is not None and _judged_fields(previous) != _judged_fields(spec):
+                contested.add(form)
                 del by_form[form]
-                del declarer[form]
                 continue
             by_form[form] = spec
-            declarer[form] = nfc_name
-    return by_form, {form: sorted(names) for form, names in sorted(conflicts.items())}
+    return by_form, {form: claimants[form] for form in sorted(contested)}
 
 
 def _looks_literal(value: str) -> bool:

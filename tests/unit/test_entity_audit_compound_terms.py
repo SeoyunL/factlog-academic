@@ -331,17 +331,117 @@ class TestConflictingTypedDeclarations:
         assert found["malformed_literals"] == ['amount(abc,"파운드")']
 
     def test_agreeing_declarations_are_not_a_conflict(self, monkeypatch):
-        # Same spec on both lines: nothing is contested, so the table still applies
-        # and an out-of-table unit is still reported.
+        # Two DISTINCT objects carrying an equal table. Passing one object twice
+        # would only prove `previous is spec` and would pass even if the comparison
+        # were identity-based, so the carve-out has to be shown on separate objects.
         from common import TypedRelSpec
 
-        spec = TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700})
         monkeypatch.setattr(
             entity_audit,
             "typed_relations",
-            lambda: {"published_year": spec, "게재연도": spec},
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+            },
         )
         monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "published_year", 'amount(5,"달러")'),
+        ])
+
+        assert found["typed_form_conflicts"] == {}
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+
+    def test_declarations_differing_only_in_alias_are_not_a_conflict(self, monkeypatch):
+        """The carve-out must survive the one difference real KBs ALWAYS have.
+
+        common.py raises on a duplicate alias, so two lines can never share one —
+        which means whole-spec equality made the carve-out unreachable and reported
+        a self-contradiction for agreeing declarations (a NEW false positive, worse
+        than main's last-writer-wins, which at least picked an identical table).
+        `alias` names the engine side-relation and never reaches a verdict.
+        """
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units={"파운드": 1700}),
+            },
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "게재연도", 'amount(5,"파운드")'),
+            _row("P3", "published_year", 'amount(5,"달러")'),
+        ])
+
+        # No conflict, the shared table still applies, and coverage does not regress:
+        # the genuinely unresolvable unit is still reported.
+        assert found["typed_form_conflicts"] == {}
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+
+    @staticmethod
+    def _three_lines(monkeypatch, third_units):
+        """Three lines on one canonical, DECLARED in an order that is not
+        alphabetical — so declaration order and sorted order are distinguishable."""
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "출판연도": TypedRelSpec(type="amount", alias="a3", units={"파운드": 1700}),
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units=third_units),
+            },
+        )
+        monkeypatch.setattr(
+            entity_audit,
+            "relation_aliases",
+            lambda: {"게재연도": "published_year", "출판연도": "published_year"},
+        )
+
+    def test_every_claimant_is_named_even_when_some_agree(self, monkeypatch):
+        """The first two lines AGREE; only the third differs.
+
+        Recording just the disagreeing pair dropped whichever agreeing line was
+        overwritten as "the" declarer, so the report named 2 of 3 lines — and sent
+        the author to edit the wrong ones. All three claim the form; all three are
+        named.
+        """
+        self._three_lines(monkeypatch, {"달러": 1300})
+        found = entity_audit.audit([_row("P1", "published_year", 'amount(9,"파운드")')])
+
+        assert found["typed_form_conflicts"]["published_year"] == [
+            "출판연도", "published_year", "게재연도",
+        ]
+
+    def test_report_order_is_fixed_not_incidental(self, monkeypatch):
+        """Ordering must be asserted as a LIST — dict `==` ignores key order.
+
+        Three contested forms and three claimants, so both the outer (form) and
+        inner (claimant) orderings have something to get wrong. Without this,
+        reversing either ordering in `_typed_spec_by_form` left every test passing.
+        Forms come out sorted; claimants keep declaration order, which is why the
+        fixture declares them non-alphabetically.
+        """
+        self._three_lines(monkeypatch, {"달러": 1300})
+        found = entity_audit.audit([_row("P1", "published_year", 'amount(9,"파운드")')])
+        claimants = ["출판연도", "published_year", "게재연도"]
+
+        assert list(found["typed_form_conflicts"].items()) == [
+            ("published_year", claimants),
+            ("게재연도", claimants),
+            ("출판연도", claimants),
+        ]
+
+    def test_three_agreeing_lines_are_still_not_a_conflict(self, monkeypatch):
+        # The completeness fix must not turn "seen more than once" into "contested".
+        self._three_lines(monkeypatch, {"파운드": 1700})
         found = entity_audit.audit([
             _row("P1", "published_year", 'amount(9,"파운드")'),
             _row("P2", "published_year", 'amount(5,"달러")'),
