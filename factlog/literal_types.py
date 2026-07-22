@@ -79,7 +79,13 @@ declaration — which is exactly the full-width case. Nothing in this module cha
 for that to happen; the coupling is one-way, and ``entity_audit`` pins it.
 
 Because a full-width digit is hard to see in a warning, the report sites append
-``non_ascii_digits`` to name the actual offending characters.
+``non_ascii_digits`` to name the actual offending characters. That helper now
+lives in :mod:`factlog.text_norm` and is re-exported here for its callers:
+**the vocabulary is there, the policy is here** (#410). What ``Nd`` *is*, and how
+to fold it, is one Unicode fact with no room to diverge; whether a value carrying
+one is refused (this module) or folded (the Zotero import boundary, the CSL export
+boundary) is the decision that legitimately differs per call site, and it stays at
+the call site.
 
 **One known producer stopped feeding this, for new imports only.** ``zotero``'s
 ``extract_year`` passed a full-width year through verbatim, so an ordinary Zotero
@@ -104,6 +110,17 @@ import datetime
 import decimal
 import re
 from decimal import Decimal
+
+# Re-exported, not redefined: ``non_ascii_digits`` describes the ``Nd`` vocabulary,
+# which the fold sites need too, so it lives in ``text_norm`` (#410). It stays
+# importable as ``literal_types.non_ascii_digits`` because that is where its
+# callers (``common``, ``entity_audit``) report from — beside this module's
+# refusal, which is what they are explaining. The redundant ``as`` alias is the
+# PEP 484 explicit-re-export spelling and is load-bearing, not a typo: without it
+# this is an unused import (ruff F401, measured). It is preferred over ``__all__``
+# because it re-exports this one name without also declaring a public surface for
+# the other eleven, which this module never had.
+from factlog.text_norm import non_ascii_digits as non_ascii_digits
 
 # The literal types this module can normalize. The declaration parser validates
 # a type tag against this set; the engine projection maps each to a column type.
@@ -160,31 +177,6 @@ _AMOUNT_COMPOUND_RE = re.compile(
     r'(?:"(?P<qunit>[^"]*)"|(?P<unit>[^,)"]+))\s*\)$',
     re.IGNORECASE,
 )
-
-
-_ASCII_DIGITS = frozenset("0123456789")
-
-
-def non_ascii_digits(value: str) -> str:
-    """The distinct non-ASCII Unicode decimal digits in *value*, first-appearance
-    order, as one string (``""`` when there are none). Pure; never raises.
-
-    EXACTLY the set the parsers used to accept and no longer do: ``str.isdecimal``
-    is the ``Nd`` category, which is what ``\\d`` matched, minus ``0-9``. It is NOT
-    ``str.isdigit`` — that also admits superscripts (``²``, category ``No``), which
-    ``\\d`` never matched, so reporting one would name a character that was never
-    the cause.
-
-    This exists for the WARNING TEXT, not for parsing. ``date(２０２０,１)`` and
-    ``date(2020,1)`` render nearly identically in a terminal, so "does not parse as
-    date" alone sends a human hunting for a typo that is invisible. Callers append
-    the offending characters; nothing here decides whether a value parses.
-    """
-    seen: list[str] = []
-    for ch in value:
-        if ch.isdecimal() and ch not in _ASCII_DIGITS and ch not in seen:
-            seen.append(ch)
-    return "".join(seen)
 
 
 def _amount_unit(match: re.Match[str]) -> str:

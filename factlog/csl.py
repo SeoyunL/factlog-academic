@@ -11,7 +11,6 @@ shares with the BibTeX exporter live in :mod:`factlog.export_types`.
 from __future__ import annotations
 
 import re
-import unicodedata
 
 from factlog.export_types import (
     COLLECTION,
@@ -25,6 +24,7 @@ from factlog.export_types import (
     should_promote_to_journal_type,
     venue_role,
 )
+from factlog.text_norm import fold_decimal_digits
 
 # Venue role -> CSL variable, resolved from the same `venue_role` judgement the
 # BibTeX exporter uses. CSL constrains nothing structurally (any variable may
@@ -106,37 +106,18 @@ _CSL_TYPES = {
 # category, so a full-width `２０２０` matched — and then came out correct anyway,
 # because `int()` accepts any `Nd` digit. The value was right by accident: the
 # regex admitted a character it never meant to and the parse step happened to
-# rescue it. `_fold_decimal_digits` now performs that conversion where it can be
+# rescue it. `fold_decimal_digits` now performs that conversion where it can be
 # read, and this pattern states what it actually accepts (#399).
+#
+# Folding rather than rejecting because this is an **export** path: the value is
+# already in the KB by the time we see it, and a reader of the exported CSL can do
+# nothing about a bad one, so refusing would only drop a year we can read perfectly
+# well. `literal_types` refuses these same characters and the two are not in
+# conflict — that module guards values *entering* the store as typed literals,
+# where the front matter is still editable and a warning is actionable. The fold
+# mechanism itself is one Unicode fact shared with the import boundary, so it lives
+# in `text_norm` (#410); this comment is the part that is a policy and stays here.
 _YEAR_RE = re.compile(r"[0-9]{4}")
-
-
-def _fold_decimal_digits(value: str) -> str:
-    """*value* with every Unicode decimal digit rewritten as its ASCII equivalent.
-
-    Length- and position-preserving (one character in, one out), so folding and
-    then searching `[0-9]{4}` accepts exactly the strings `\\d{4}` accepted before,
-    with the same numeric result — mixed scripts (`２0２0`) and non-Latin ones
-    (`٢٠٢٠`) included. This restates the old behaviour; it does not change it.
-
-    `str.isdecimal` is EXACTLY `Nd`, which is what `\\d` matched — the same set
-    `literal_types.non_ascii_digits` names for warning text. Deliberately NOT
-    `unicodedata.normalize("NFKC", …)`, which is wrong in both directions
-    (measured): it folds `²` and `①` (category `No`) to digits, which `\\d` never
-    matched, and it leaves Arabic-Indic `٢٠٢٠` untouched (already NFKC-stable),
-    which `\\d` did match. NFKC would both widen and narrow the old behaviour;
-    this fold restates it.
-
-    Folding rather than rejecting because this is an **export** path. The value is
-    already in the KB by the time we see it, and a reader of the exported CSL can
-    do nothing about a bad one; refusing here would only drop a year we can read
-    perfectly well. `literal_types` refuses these same characters, and the two are
-    not in conflict: that module guards values *entering* the store as typed
-    literals, where the front matter is still editable and a warning is actionable.
-    """
-    return "".join(
-        str(unicodedata.decimal(ch)) if ch.isdecimal() else ch for ch in value
-    )
 
 
 def _csl_type(fm: dict) -> str:
@@ -180,7 +161,7 @@ def to_csl(fm: dict, item_id: str) -> dict:
 
     year = fm.get("year")
     if year:
-        match = _YEAR_RE.search(_fold_decimal_digits(str(year)))
+        match = _YEAR_RE.search(fold_decimal_digits(str(year)))
         if match:
             item["issued"] = {"date-parts": [[int(match.group(0))]]}
 

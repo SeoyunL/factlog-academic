@@ -2,7 +2,8 @@
 """Unit tests for CSL-JSON export core."""
 from __future__ import annotations
 
-from factlog.csl import _YEAR_RE, _fold_decimal_digits, to_csl
+from factlog.csl import _YEAR_RE, to_csl
+from factlog.text_norm import fold_decimal_digits
 
 FM = {
     "item_type": "journalArticle",
@@ -83,14 +84,14 @@ class TestYearDigitFolding:
         assert item["issued"] == {"date-parts": [[2020]]}
 
     def test_folding_does_not_disturb_surrounding_characters(self):
-        assert _fold_decimal_digits("출판 ２０２０년") == "출판 2020년"
-        assert _fold_decimal_digits("n.d.") == "n.d."
+        assert fold_decimal_digits("출판 ２０２０년") == "출판 2020년"
+        assert fold_decimal_digits("n.d.") == "n.d."
 
     def test_folding_preserves_length(self):
         # Position-preserving is what makes folding equivalent to the old `\d{4}`:
         # a fold that changed length could create or destroy a 4-digit run.
         for value in ("2020", "２０２０", "２0２0", "٢٠٢٠", "출판 ２０２０년"):
-            assert len(_fold_decimal_digits(value)) == len(value)
+            assert len(fold_decimal_digits(value)) == len(value)
 
     def test_year_pattern_accepts_only_ascii_digits(self):
         # Asserted on the pattern rather than on `to_csl` because it is NOT
@@ -108,7 +109,7 @@ class TestYearDigitFolding:
         # start matching them — NFKC would have, which is why it is not used.
         assert "issued" not in to_csl({"year": "20²0"}, "k")
         assert "issued" not in to_csl({"year": "①②③④"}, "k")
-        assert _fold_decimal_digits("20²0") == "20²0"
+        assert fold_decimal_digits("20²0") == "20²0"
 
     def test_too_few_digits_still_omits_issued(self):
         assert "issued" not in to_csl({"year": "１２３"}, "k")

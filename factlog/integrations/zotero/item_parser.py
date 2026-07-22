@@ -36,8 +36,47 @@ them — never sorted — because a reordering would change the derived source f
 from __future__ import annotations
 
 import re
-import unicodedata
 
+from factlog.text_norm import fold_decimal_digits
+
+# The digit-bearing patterns below stay ``\d`` — the whole Unicode ``Nd`` category —
+# on purpose: a Zotero library holds whatever it holds, and narrowing to ``[0-9]``
+# would make ``２０２０-06-01`` match nothing and silently lose a year the source did
+# state. The policy for that wide match is this module's, and it is an import
+# boundary policy: the odd digit is upstream data the user cannot edit from inside
+# factlog, so it is normalized rather than refused the way a hand-written literal is
+# (``literal_types``, #388). The fold mechanism itself is one Unicode fact shared
+# with the CSL export boundary, so it lives in ``text_norm`` (#410).
+#
+# The pairing is per-pattern, and only two of the three are paired — so the output
+# contract is per-FIELD, not module-wide. This module does NOT promise ASCII digits:
+#
+# - ``_YEAR_RE`` / ``_PMID_RE`` -> ``extract_year`` / ``extract_pmid`` fold their
+#   capture, so ``year`` and ``pmid`` leave here ASCII (#398).
+# - ``_DOI_CORE_RE`` has NO fold, and neither has the ``DOI`` field read straight
+#   off the item, so ``doi`` leaves here in whatever digits Zotero held:
+#   ``_doi_from_extra("DOI: 10.１２３４/abc")`` returns ``10.１２３４/abc`` verbatim
+#   (measured). Pairing it here would be a separate change, and only a partial one
+#   — under ISO 26324 only the ``10.<registrant>`` prefix is a decimal number, the
+#   suffix is opaque and must not be folded.
+#
+# The consequence a non-ASCII ``doi`` has — a full-width and an ASCII spelling of
+# one paper taking different cross-source join keys, so it imports twice — is
+# tracked as #405. That issue lists TWO candidate sites and leaves the choice open:
+# folding the prefix here at ``_DOI_CORE_RE``, or folding at the join-key site
+# (``normalize_cross_id``). Its stated preference is the join-key site, because a
+# join key is a derived comparison value rather than a stored one, so normalizing
+# there also collides already-imported DOIs instead of only newly-imported ones. If
+# it lands that way this module keeps emitting the full-width spelling; if it lands
+# on the import site instead, the fold belongs right here. Until then the split is
+# live and pinned in ``tests/unit/test_zotero_item_parser.py``.
+#
+# On the join-key outcome, the verbatim spelling that stays in ``doi`` is NOT a
+# residual defect — it is provenance. The join key is the thing that had to be
+# normalized; the stored value keeping the source's own spelling is what lets a
+# reader see what Zotero actually held. Whether to fold the stored value anyway is
+# a separate question with its own worth-it judgement, and it is #420, not a gap
+# this module is silently leaving open.
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
 # A DOI in `extra` is taken only from a line that carries a DOI label, and only
@@ -64,37 +103,6 @@ def _str(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _ascii_digits(run: str) -> str:
-    """Rewrite a run of Unicode decimal digits to its ASCII spelling.
-
-    Only ever called on text captured by a ``\\d`` group, and Python's ``\\d`` is
-    exactly the Unicode ``Nd`` (decimal number) category — every member of which
-    has a defined decimal value by definition — so ``unicodedata.digit`` is total
-    here and the function cannot raise. That argument is what carries the totality;
-    it does not depend on the size of ``Nd``, which grows with each Unicode
-    revision. (Spot-checked exhaustively over ``Nd`` under Unicode 15.0.0.)
-
-    The precondition is real, though: this is a helper for ``\\d`` captures, not a
-    general-purpose sanitizer. Handed a non-``Nd`` character it raises
-    ``ValueError`` rather than passing it through.
-
-    Deliberately NOT ``NFKC``, for two measured reasons:
-
-    - NFKC is incomplete. It folds full-width ``２０２０`` but leaves Arabic-Indic
-      ``٢٠٢٠``, Devanagari ``२०२०`` and Extended-Arabic ``۲۰۲۰`` untouched, and
-      ``\\d`` matches all of those. They would still reach the front matter
-      non-ASCII and still be refused downstream (#388).
-    - NFKC is too broad. It also manufactures digits out of characters that are
-      not digits at all (``①`` -> ``1``, ``²`` -> ``2``), so running it over the
-      raw date could invent a year the source never stated. The codebase
-      normalizes to NFC precisely to avoid that class of folding.
-
-    Mapping the matched run digit-by-digit is exactly as wide as the match and
-    no wider.
-    """
-    return "".join(str(unicodedata.digit(char)) for char in run)
-
-
 def extract_year(date: object) -> str:
     """First 4-digit run in a Zotero date ("2005", "June 2005", "2005-06-01").
 
@@ -118,7 +126,7 @@ def extract_year(date: object) -> str:
     a re-import writes a second file under the new name and the old one remains.
     """
     match = _YEAR_RE.search(date) if isinstance(date, str) else None
-    return _ascii_digits(match.group(0)) if match else ""
+    return fold_decimal_digits(match.group(0)) if match else ""
 
 
 def extract_pmid(extra: object) -> str:
@@ -150,7 +158,7 @@ def extract_pmid(extra: object) -> str:
     if not isinstance(extra, str):
         return ""
     match = _PMID_RE.search(extra)
-    return _ascii_digits(match.group(1)) if match else ""
+    return fold_decimal_digits(match.group(1)) if match else ""
 
 
 def _doi_from_extra(extra: object) -> str:
