@@ -96,10 +96,16 @@ class ParsedPubMedWork:
     ``pmid`` is the PMID *as returned* (the key identifier). For a merged record
     that differs from the requested id — :class:`MergedRecord` keeps both.
 
-    ``pub_date_raw`` is the ``MedlineDate`` free text when the year came from
-    there (else ``None``); it makes a derived-or-absent year auditable instead of
-    silent. ``year`` is the resolved integer year, or ``None`` when the record
-    carries neither a ``<Year>`` nor a parseable ``<MedlineDate>``.
+    ``pub_date_raw`` is the ``MedlineDate`` free text whenever the record carried
+    one — **whether or not a year could be read out of it** (else ``None``); it
+    makes a derived-or-absent year auditable instead of silent. Those two halves
+    are one contract, not a rule plus an exception: ``"Winter"`` sets
+    ``pub_date_raw`` and leaves ``year`` ``None``, and callers rely on it
+    (``search.year_range_report``'s no-year block quotes exactly that text, #389).
+    Narrowing this to "when the year came from there" would make that quote
+    disappear while every year-bearing test still passed. ``year`` is the resolved
+    integer year, or ``None`` when the record carries neither a ``<Year>`` nor a
+    ``<MedlineDate>`` with a four-digit run in it.
     """
 
     pmid: str
@@ -257,9 +263,18 @@ def _journal(article: ET.Element) -> str | None:
 def _pub_date(article: ET.Element) -> tuple[int | None, str | None]:
     """Resolve (year, medline_date_raw) from ``Journal/JournalIssue/PubDate``.
 
-    ``<Year>`` wins. Otherwise ``<MedlineDate>``'s first four-digit run is the
-    year and its verbatim text is returned so a derived year is auditable. Neither
-    present → ``(None, None)``. See module docstring for why the year matters.
+    ``<Year>`` wins **when it is all digits** → ``(year, None)``: nothing was derived,
+    so there is nothing to audit. A non-numeric ``<Year>`` does not win — it falls
+    through to ``<MedlineDate>`` below exactly as an absent one would, so the element
+    being *present* is not what decides. Otherwise a ``<MedlineDate>``'s verbatim text
+    is returned whether or not a year comes out of it — ``(year, text)`` when its first
+    four-digit run supplies one,
+    ``(None, text)`` when the free text carries no four-digit run at all ("Winter",
+    "Spring"). That third shape is deliberate, not a fallthrough: ``pub_date_raw`` is
+    what lets a caller tell "no year, and here is the text that failed to yield one"
+    apart from "no date element at all", and the no-year warning in
+    ``search.year_range_report`` quotes it (#389). Neither element present →
+    ``(None, None)``. See module docstring for why the year matters.
     """
     journal = article.find("Journal")
     if journal is None:

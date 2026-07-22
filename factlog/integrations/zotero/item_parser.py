@@ -36,6 +36,7 @@ them — never sorted — because a reordering would change the derived source f
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
@@ -63,21 +64,93 @@ def _str(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _ascii_digits(run: str) -> str:
+    """Rewrite a run of Unicode decimal digits to its ASCII spelling.
+
+    Only ever called on text captured by a ``\\d`` group, and Python's ``\\d`` is
+    exactly the Unicode ``Nd`` (decimal number) category — every member of which
+    has a defined decimal value by definition — so ``unicodedata.digit`` is total
+    here and the function cannot raise. That argument is what carries the totality;
+    it does not depend on the size of ``Nd``, which grows with each Unicode
+    revision. (Spot-checked exhaustively over ``Nd`` under Unicode 15.0.0.)
+
+    The precondition is real, though: this is a helper for ``\\d`` captures, not a
+    general-purpose sanitizer. Handed a non-``Nd`` character it raises
+    ``ValueError`` rather than passing it through.
+
+    Deliberately NOT ``NFKC``, for two measured reasons:
+
+    - NFKC is incomplete. It folds full-width ``２０２０`` but leaves Arabic-Indic
+      ``٢٠٢٠``, Devanagari ``२०२०`` and Extended-Arabic ``۲۰۲۰`` untouched, and
+      ``\\d`` matches all of those. They would still reach the front matter
+      non-ASCII and still be refused downstream (#388).
+    - NFKC is too broad. It also manufactures digits out of characters that are
+      not digits at all (``①`` -> ``1``, ``²`` -> ``2``), so running it over the
+      raw date could invent a year the source never stated. The codebase
+      normalizes to NFC precisely to avoid that class of folding.
+
+    Mapping the matched run digit-by-digit is exactly as wide as the match and
+    no wider.
+    """
+    return "".join(str(unicodedata.digit(char)) for char in run)
+
+
 def extract_year(date: object) -> str:
-    """First 4-digit run in a Zotero date ("2005", "June 2005", "2005-06-01")."""
+    """First 4-digit run in a Zotero date ("2005", "June 2005", "2005-06-01").
+
+    The returned year is always ASCII. Zotero is an external source whose ``date``
+    field is whatever the library holds, so a non-ASCII digit here is upstream
+    data, not something the user typed or can fix from inside factlog — normalizing
+    is right where refusing (#388, for hand-written literals) is right.
+
+    Normalizing rather than narrowing ``_YEAR_RE`` to ``[0-9]{4}``: narrowing makes
+    ``２０２０-06-01`` match nothing at all (no 4-run of ASCII digits survives), so
+    ``year`` would silently go empty and lose a fact the source did state. Keeping
+    the wide match and converting preserves the year.
+
+    **Side effect on slugs, in both directions.** ``year`` feeds the source slug,
+    and ``slugify("２０２０")`` is ``"item"`` — so a legacy full-width import landed
+    at ``kim-item-paper-one.md``. After this change the same record slugs as
+    ``kim-2020-paper-one.md``: the broken name is repaired for new imports, which is
+    a real (and unplanned) gain beyond silencing the warning. The cost is that the
+    slug *moves*. On the default path ``skip_duplicates=True`` catches the record by
+    ``zotero_key`` first, so nothing extra is written; with ``skip_duplicates=False``
+    a re-import writes a second file under the new name and the old one remains.
+    """
     match = _YEAR_RE.search(date) if isinstance(date, str) else None
-    return match.group(0) if match else ""
+    return _ascii_digits(match.group(0)) if match else ""
 
 
 def extract_pmid(extra: object) -> str:
     """PMID from the free-form ``extra`` field (multi-line, any case).
 
     The first ``PMID`` match wins if several appear.
+
+    ASCII-normalized for the same reason as :func:`extract_year`, and safely so: a
+    PMID is by definition a decimal integer, so a non-ASCII spelling is a rendering
+    of the same identifier and converting it yields the PubMed record actually
+    meant.
+
+    **The DOI path is left alone for scope, not because it is correct.** An earlier
+    draft of this note claimed DOIs are opaque and therefore must not be touched.
+    That is only half true and the half it gets wrong matters: under ISO 26324 a DOI
+    prefix ``10.<registrant>`` is a *decimal* number — ``_DOI_CORE_RE`` even spells
+    it ``10\\.\\d+/`` — and only the suffix is an opaque string. So the honest
+    asymmetry is "normalize the prefix, preserve the suffix", not "leave DOIs
+    alone", and a full-width DOI really is broken today: ``normalize_cross_id``
+    only strips and lowercases, so ``10.１２３４/abc`` and ``10.1234/abc`` are
+    different join keys and the same paper imports as two files. DOI is the primary
+    cross-source join key, so this silently defeats later OpenAlex/PubMed matching.
+    That is a pre-existing bug, out of scope here, and tracked as #405 — see
+    ``tests/unit/test_zotero_item_parser.py`` for the pinned current behaviour.
+    The likely fix belongs at the join-key site (``normalize_cross_id``) rather
+    than here at ``_DOI_CORE_RE``, so that already-imported full-width DOIs
+    collide correctly too instead of only newly-imported ones.
     """
     if not isinstance(extra, str):
         return ""
     match = _PMID_RE.search(extra)
-    return match.group(1) if match else ""
+    return _ascii_digits(match.group(1)) if match else ""
 
 
 def _doi_from_extra(extra: object) -> str:

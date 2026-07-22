@@ -8,7 +8,10 @@ retracted tags, creator/tag order preservation).
 """
 from __future__ import annotations
 
+from factlog import literal_types
+from factlog.integrations.common.source_writer import normalize_cross_id
 from factlog.integrations.zotero.item_parser import (
+    _YEAR_RE,
     ItemParser,
     extract_pmid,
     extract_tags,
@@ -108,12 +111,76 @@ class TestYear:
         assert extract_year(None) == ""
         assert extract_year("no digits here") == ""
 
+    def test_year_is_normalized_to_ascii_digits(self):
+        # Zotero holds whatever the library holds; a non-ASCII digit run is
+        # upstream data the user cannot fix from inside factlog (#398).
+        assert extract_year("２０２０-06-01") == "2020"  # full-width
+        assert extract_year("2020-06-01") == "2020"  # half-width, unchanged
+        assert extract_year("２0２0-06-01") == "2020"  # mixed
+        assert extract_year("２０２０") == "2020"
+
+    def test_year_normalizes_non_fullwidth_digit_scripts(self):
+        # The counter-case for NFKC: `\d` matches these, but NFKC does NOT fold
+        # them, so an NFKC-based fix would leave them non-ASCII.
+        assert extract_year("٢٠٢٠-06-01") == "2020"  # Arabic-Indic
+        assert extract_year("२०२०-06-01") == "2020"  # Devanagari
+        assert extract_year("۲۰۲۰-06-01") == "2020"  # Extended Arabic-Indic
+        assert extract_year("２0٢0") == "2020"  # scripts mixed within one run
+
+    def test_year_does_not_invent_digits_from_non_digits(self):
+        # The other half of rejecting NFKC: `①` and `²` are not `Nd`, so they are
+        # not matched and cannot be folded into a year that was never stated.
+        assert extract_year("①②③④") == ""
+        assert extract_year("²²²²") == ""
+
+    def test_normalized_year_is_accepted_by_literal_types(self):
+        # The point of #398: the value this writes must survive the ASCII-only
+        # parsers #388 installed, so an ordinary import stops producing
+        # "does not parse" warnings. `year` reaches them as a bare number.
+        raw = "２０２０-06-01"
+        assert literal_types.parse_number(_YEAR_RE.search(raw).group(0)) is None
+        assert literal_types.parse_number(extract_year(raw)) == 2020
+        assert literal_types.non_ascii_digits(extract_year(raw)) == ""
+
 
 class TestPmidAndDoi:
     def test_pmid_multiline_any_case(self):
         assert extract_pmid("Some note\npmid: 999\n") == "999"
         assert extract_pmid("PMID:12345") == "12345"
         assert extract_pmid("no id") == ""
+
+    def test_pmid_is_normalized_to_ascii_digits(self):
+        # A PMID is by definition a decimal integer, so respelling it in ASCII
+        # names the same PubMed record.
+        assert extract_pmid("PMID: １２３４５６７") == "1234567"
+        assert extract_pmid("PMID: 1234567") == "1234567"
+        assert extract_pmid("PMID: １23４567") == "1234567"
+        assert literal_types.parse_number(extract_pmid("PMID: １２３４５６７")) == 1234567
+
+    def test_doi_digits_are_not_normalized_known_limitation(self):
+        # CHARACTERIZATION, NOT AN ENDORSEMENT. This pins what the code does
+        # today so a future fix is a visible, intentional change — it does not
+        # assert that today's behaviour is right. It is not.
+        #
+        # Under ISO 26324 a DOI prefix `10.<registrant>` is a decimal number
+        # (`_DOI_CORE_RE` spells it `10\.\d+/`); only the suffix is opaque. So
+        # the same "it is a number, respell it" argument that justifies
+        # normalizing PMID applies to the DOI *prefix*, and leaving it produces
+        # a real defect: `normalize_cross_id` only strips/lowercases, so the
+        # two spellings below are different join keys and one paper imports as
+        # two files. DOI is the primary cross-source join key, so later
+        # OpenAlex/PubMed imports (always ASCII) then fail to match in silence.
+        #
+        # Pre-existing, out of scope for #398 (which fixes the producer of the
+        # #388 warnings), tracked as #405. When #405 lands, this test is the
+        # one to invert — the assertions below are exactly what it must change.
+        out = parse_item(_item(DOI="10.１２３４/abc"))
+        assert out["doi"] == "10.１２３４/abc"
+        # The defect this leaves behind, pinned explicitly so it cannot be
+        # mistaken for intended behaviour:
+        assert normalize_cross_id("doi", "10.１２３４/abc") != normalize_cross_id(
+            "doi", "10.1234/abc"
+        )
 
     def test_doi_prefers_data_field(self):
         out = parse_item(_item(DOI="10.1/x", extra="DOI: 10.2/y"))

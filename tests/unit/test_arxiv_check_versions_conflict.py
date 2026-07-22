@@ -452,6 +452,37 @@ class TestThePorcelainContract:
         # The tabbed path survives as text in the reason, with its tab flattened to a space.
         assert "sources/a TABBED.md=v3" in fields[7]
         assert "\t" not in fields[7]
+
+    @pytest.mark.parametrize("char, name", [
+        (" ", "LINE SEPARATOR"),
+        ("\x85", "NEL"),
+    ])
+    def test_a_non_c0_line_break_in_a_source_path_cannot_add_a_row(
+        self, tmp_path, fake, capsys, char, name
+    ):
+        # The sibling of the tab case, for the *row* axis rather than the column axis.
+        # U+0085/U+2028/U+2029 are legal POSIX filename bytes and legal in the JSON an
+        # OpenAlex reason is read from, and `str.splitlines()` breaks on all three — so
+        # before #396 widened the shared gate, such a path split this row in two and every
+        # positional consumer reading line-by-line saw a phantom record. Tab-only coverage
+        # could not see it: the field count stays right while the row count does not.
+        (tmp_path / "sources").mkdir()
+        (tmp_path / "sources" / f"a{char}BROKEN.md").write_text(
+            f"---\narxiv_id: {ID}\narxiv_version: 3\n---\n# a\n", encoding="utf-8"
+        )
+        _seed_front_matter(tmp_path, 7, name="b")
+        fake(FakeClient([_work(version=7)]))
+
+        run([*_plain(tmp_path), "--porcelain"])
+        out = capsys.readouterr().out
+
+        # splitlines(), not split("\n"): split("\n") is blind to exactly these characters,
+        # which is how the same class of bug survived a review in #396.
+        check_rows = [line for line in out.splitlines() if line.startswith("check\t")]
+        assert len(check_rows) == 1
+        assert len(check_rows[0].split("\t")) == 9
+        assert "sources/a BROKEN.md=v3" in check_rows[0].split("\t")[7]
+
     def test_the_human_summary_has_no_version_conflict_line(self, tmp_path, fake, capsys):
         _seed_sidecar(tmp_path, 5, name="a")
         fake(FakeClient([_work(version=7)]))
