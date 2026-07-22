@@ -2,10 +2,14 @@
 """The three search commands' `--porcelain` result rows keep their shape (#406).
 
 `porcelain.py` names the positional contract — a fixed field count read by column
-offset — and every other porcelain emitter routes caller-influenced values through
-`porcelain_field`. The three `_*_show_results` printers did not, so a tab in an
+offset — and the three `_*_show_results` printers did not honour it, so a tab in an
 upstream `title` added a column and a line break split the row, silently, in exactly
 the commands used most.
+
+Scope, stated exactly, because an earlier draft of this docstring overreached: what is
+covered below is the three `result` rows and nothing else. It is *not* a claim that
+every porcelain emitter is gated — measured, several are not (`porcelain.py` lists
+them). Read this file as "these three rows hold their shape", never as a survey.
 
 The three are tested together because the bug was one bug in three copies: the rows
 share a shape (`result\\t<index>\\t<id>\\t<flag>\\t<title>`), so they share the
@@ -21,10 +25,13 @@ from factlog import cli
 from factlog.integrations.common.porcelain import _LINE_BREAKS
 
 
-# Every character the gate covers, plus the three the issue names outright. U+2028 is
-# the pointed one: legal XML, legal JSON, not a control character by any C0 reading,
-# and `str.splitlines()` breaks on it — so a "strip control characters" gate would
-# have let it through.
+# Exactly the set the gate covers — tab plus every `_LINE_BREAKS` character — and one
+# space, which the gate deliberately leaves alone and which therefore rides along as a
+# negative control (it must stay green under a disabled gate; measured). The issue names
+# tab, newline and U+2028: all three are already in that set, so none is added here.
+# U+2028 is the pointed member — legal XML, legal JSON, not a control character by any
+# C0 reading, and `str.splitlines()` breaks on it, so a "strip control characters" gate
+# would have let it through.
 HOSTILE = sorted({"\t", " ", *_LINE_BREAKS})
 
 
@@ -50,19 +57,32 @@ COMMANDS = [
 IDS = [name for name, _, _ in COMMANDS]
 
 
-def _result_rows(capsys, expected):
-    """The `result` lines, asserting the block is exactly ``expected`` rows + `found`.
+def _result_rows(capsys, expected, columns=5):
+    """The `result` lines: exactly ``expected`` rows + `found`, each of ``columns`` fields.
 
-    Deliberately *not* a filter on the ``result\\t`` prefix: a title carrying a line
-    break splits its row into a `result`-prefixed head and an orphan tail, and a filter
-    would count the head, see one well-formed row, and pass. The orphan line is the
-    whole bug, so the count is taken over every line printed (measured — a prefix
-    filter here was green against an ungated printer).
+    Both halves of the contract are checked here because they fail independently and
+    neither implies the other:
+
+    * **Line count** is deliberately *not* a filter on the ``result\\t`` prefix. A title
+      carrying a line break splits its row into a `result`-prefixed head and an orphan
+      tail, and a filter would count the head, see one well-formed row, and pass. The
+      orphan line is the whole bug, so the count is taken over every line printed
+      (measured — a prefix filter here was green against an ungated printer).
+    * **Column count** catches what the line count cannot: a tab adds a field without
+      splitting the row, so the line count stays right while a positional consumer reads
+      the wrong field. That dimension lived in each caller until it was folded in here.
+
+    ``columns`` is a parameter rather than a literal 5 because ``openalex-cite`` emits the
+    same row with a leading ``scope`` field, six wide.
     """
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == expected + 1, f"expected {expected} rows + found, got {lines!r}"
     assert lines[-1].startswith("found\t")
-    return lines[:-1]
+    rows = lines[:-1]
+    for row in rows:
+        assert row.startswith("result\t"), f"not a result row: {row!r}"
+        assert len(row.split("\t")) == columns, f"field count drifted: {row!r}"
+    return rows
 
 
 @pytest.mark.parametrize("name, build, show", COMMANDS, ids=IDS)
@@ -71,9 +91,7 @@ class TestAHostileTitle:
     def test_the_row_stays_one_line_of_five_columns(self, name, build, show, char,
                                                     capsys):
         show([build(f"before{char}after")], 1, porcelain=True)
-        row, = _result_rows(capsys, 1)
-        assert row.startswith("result\t"), f"{name}: the title split the row"
-        assert len(row.split("\t")) == 5, f"{name}: the title added a column"
+        _result_rows(capsys, 1)
 
     def test_one_output_line_per_result_plus_the_found_row(self, name, build, show,
                                                            char, capsys):
@@ -81,8 +99,7 @@ class TestAHostileTitle:
         # must be two lines, never three because one title carried a break.
         works = [build(f"a{char}b", "X1"), build(f"c{char}d", "X2")]
         show(works, 2, porcelain=True)
-        rows = _result_rows(capsys, 2)
-        assert all(len(row.split("\t")) == 5 for row in rows), name
+        _result_rows(capsys, 2)
 
 
 @pytest.mark.parametrize("name, build, show", COMMANDS, ids=IDS)
@@ -92,8 +109,7 @@ class TestAHostileIdentifier:
         # arrive from a response this code did not write — so it is gated on the same
         # terms as the title, not trusted for being "an identifier".
         show([build("A paper", "W1\nresult\t9\tforged")], 1, porcelain=True)
-        row, = _result_rows(capsys, 1)
-        assert len(row.split("\t")) == 5, f"{name}: the id added a column"
+        _result_rows(capsys, 1)
 
 
 @pytest.mark.parametrize("name, build, show", COMMANDS, ids=IDS)
