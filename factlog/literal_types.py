@@ -81,12 +81,15 @@ for that to happen; the coupling is one-way, and ``entity_audit`` pins it.
 Because a full-width digit is hard to see in a warning, the report sites append
 ``non_ascii_digits`` to name the actual offending characters.
 
-**Expect a rise in these warnings after this lands, from one known producer.**
-``zotero``'s ``extract_year`` passes a full-width year through verbatim (#398), so
-an ordinary Zotero import can write a value this module now refuses; ``csl``'s
-``_YEAR_RE`` folds one silently via ``int()`` and is the milder sibling (#399).
-Neither is fixed here. If ``does not parse`` warnings appear on records nobody
-hand-edited, #398 is the first place to look.
+**One known producer fed this, and no longer does.** ``zotero``'s ``extract_year``
+passed a full-width year through verbatim, so an ordinary Zotero import could write
+a value this module refuses; #398 normalizes it (and ``extract_pmid``) to ASCII at
+the import boundary instead. The split is intentional: a hand-written literal is
+refused so the author sees it, while an imported one is normalized, because there
+the odd digit comes from an external library the user cannot edit from inside
+factlog. ``csl``'s ``_YEAR_RE`` folds one silently via ``int()`` and is the milder
+sibling (#399). If ``does not parse`` warnings still appear on records nobody
+hand-edited, look for a writer that skipped that boundary.
 """
 from __future__ import annotations
 

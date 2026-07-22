@@ -36,6 +36,7 @@ them — never sorted — because a reordering would change the derived source f
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
@@ -63,21 +64,64 @@ def _str(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _ascii_digits(run: str) -> str:
+    """Rewrite a run of Unicode decimal digits to its ASCII spelling.
+
+    Only ever called on text captured by a ``\\d`` group, and Python's ``\\d`` is
+    exactly the Unicode ``Nd`` (decimal number) category — every member of which
+    has a defined decimal value — so ``unicodedata.digit`` is total here and the
+    function cannot raise. Verified against all 680 code points ``\\d`` matches.
+
+    Deliberately NOT ``NFKC``, for two measured reasons:
+
+    - NFKC is incomplete. It folds full-width ``２０２０`` but leaves Arabic-Indic
+      ``٢٠٢٠``, Devanagari ``२०२०`` and Extended-Arabic ``۲۰۲۰`` untouched, and
+      ``\\d`` matches all of those. They would still reach the front matter
+      non-ASCII and still be refused downstream (#388).
+    - NFKC is too broad. It also manufactures digits out of characters that are
+      not digits at all (``①`` -> ``1``, ``²`` -> ``2``), so running it over the
+      raw date could invent a year the source never stated. The codebase
+      normalizes to NFC precisely to avoid that class of folding.
+
+    Mapping the matched run digit-by-digit is exactly as wide as the match and
+    no wider.
+    """
+    return "".join(str(unicodedata.digit(char)) for char in run)
+
+
 def extract_year(date: object) -> str:
-    """First 4-digit run in a Zotero date ("2005", "June 2005", "2005-06-01")."""
+    """First 4-digit run in a Zotero date ("2005", "June 2005", "2005-06-01").
+
+    The returned year is always ASCII. Zotero is an external source whose ``date``
+    field is whatever the library holds, so a non-ASCII digit here is upstream
+    data, not something the user typed or can fix from inside factlog — normalizing
+    is right where refusing (#388, for hand-written literals) is right.
+
+    Normalizing rather than narrowing ``_YEAR_RE`` to ``[0-9]{4}``: narrowing makes
+    ``２０２０-06-01`` match nothing at all (no 4-run of ASCII digits survives), so
+    ``year`` would silently go empty and lose a fact the source did state. Keeping
+    the wide match and converting preserves the year.
+    """
     match = _YEAR_RE.search(date) if isinstance(date, str) else None
-    return match.group(0) if match else ""
+    return _ascii_digits(match.group(0)) if match else ""
 
 
 def extract_pmid(extra: object) -> str:
     """PMID from the free-form ``extra`` field (multi-line, any case).
 
     The first ``PMID`` match wins if several appear.
+
+    ASCII-normalized for the same reason as :func:`extract_year`, and safely so: a
+    PMID is by definition a decimal integer, so a non-ASCII spelling is a rendering
+    of the same identifier and converting it yields the PubMed record actually
+    meant. The DOI path is deliberately left alone — a DOI suffix is an opaque
+    string, not a number, so rewriting its characters would fabricate a *different*
+    identifier rather than respell the same one.
     """
     if not isinstance(extra, str):
         return ""
     match = _PMID_RE.search(extra)
-    return match.group(1) if match else ""
+    return _ascii_digits(match.group(1)) if match else ""
 
 
 def _doi_from_extra(extra: object) -> str:
