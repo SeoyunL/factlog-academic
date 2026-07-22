@@ -24,9 +24,42 @@ from factlog import cli
 from factlog.integrations.openalex.api_client import OpenAlexError
 from factlog.integrations.openalex.api_client import normalize_pmid as openalex_pmid
 from factlog.integrations.openalex.work_parser import parse_work
-from factlog.integrations.pubmed.client import PubMedError
+from factlog.integrations.pubmed.client import PubMedClient, PubMedError
 from factlog.integrations.pubmed.client import normalize_pmid as pubmed_pmid
+from factlog.integrations.pubmed.config import PubMedConfig
 from factlog.text_norm import fold_decimal_digits
+
+
+def recording_client():
+    """A client whose transport records calls and has nothing queued to return.
+
+    Reaching the transport at all is the failure this file is about, so the queue
+    is deliberately empty: a request that gets through raises ``IndexError`` rather
+    than quietly succeeding on a canned body.
+    """
+    calls = []
+
+    def transport(endpoint, params):
+        calls.append((endpoint, params))
+        raise AssertionError("a request was sent for a full-width PMID")
+
+    api = PubMedClient(
+        config=PubMedConfig(email="dev@example.edu"),
+        transport=transport,
+        sleep=lambda _s: None,
+        warn=lambda _m: None,
+    )
+    return api, calls
+
+
+def kb(tmp_path):
+    """A temp KB with the contact email ``_pubmed_prepare`` requires."""
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "policy").mkdir()
+    (tmp_path / "policy" / "pubmed-config.toml").write_text(
+        '[client]\nemail = "test@example.com"\n', encoding="utf-8"
+    )
+    return tmp_path
 
 # Every one of these satisfies ``str.isdigit()`` and so passed both gates before
 # the ASCII guard. The last two are category ``No``: ``isdigit()`` is true but
@@ -55,9 +88,9 @@ def test_non_ascii_digits_are_rejected(normalize, error, raw):
         normalize(raw)
 
 
-@pytest.mark.parametrize("normalize,error", NORMALIZERS)
+@pytest.mark.parametrize("normalize", [openalex_pmid, pubmed_pmid], ids=["openalex", "pubmed"])
 @pytest.mark.parametrize("raw", ["32738937", "1", "16354850"])
-def test_ascii_pmids_still_pass(normalize, error, raw):
+def test_ascii_pmids_still_pass(normalize, raw):
     assert normalize(raw) == raw
 
 
@@ -91,17 +124,13 @@ class TestPubMedGuardsTheRequest:
     """All three callers are request-side; nothing may reach the transport."""
 
     def test_a_full_width_id_never_reaches_the_transport(self):
-        from tests.unit.test_pubmed_client import client as pubmed_client
-
-        api, calls, _ = pubmed_client([])
+        api, calls = recording_client()
         with pytest.raises(PubMedError, match="invalid PMID"):
             api.efetch(["１２３４５６７８"])
         assert calls == []
 
     def test_pubmed_import_rejects_before_spending_a_request(self, tmp_path, monkeypatch):
-        from tests.unit.test_pubmed_cli import _kb
-
-        kb = _kb(tmp_path)
+        target = kb(tmp_path)
 
         # If the id is rejected at validation time the command never builds a
         # client at all, so no network is reachable even in principle. Assert that
@@ -111,17 +140,15 @@ class TestPubMedGuardsTheRequest:
 
         monkeypatch.setattr(cli, "_make_pubmed_client", refuse)
         args = cli.build_parser().parse_args(
-            ["pubmed-import", "--pmid", "１２３４５６７８", "--target", str(kb)]
+            ["pubmed-import", "--pmid", "１２３４５６７８", "--target", str(target)]
         )
         assert args.func(args) == 1
-        assert list((kb / "sources").glob("*.md")) == []
+        assert list((target / "sources").glob("*.md")) == []
 
     def test_acknowledge_retraction_rejects_the_id(self, tmp_path, capsys):
-        from tests.unit.test_pubmed_cli import _kb
-
-        kb = _kb(tmp_path)
+        target = kb(tmp_path)
         args = cli.build_parser().parse_args(
-            ["pubmed-acknowledge-retraction", "--id", "１２３４５６７８", "--target", str(kb)]
+            ["pubmed-acknowledge-retraction", "--id", "１２３４５６７８", "--target", str(target)]
         )
         assert args.func(args) == 1
         assert "invalid PMID" in capsys.readouterr().err
