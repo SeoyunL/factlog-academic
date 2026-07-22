@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from factlog.integrations.zotero.annotation_writer import (
+    _HEAD_SCAN_BYTES,
     AnnotationResult,
     html_to_text,
     render_annotations,
@@ -24,6 +25,30 @@ def _note(html="<p>Comment: under review</p>"):
 
 def _sources(tmp_path):
     return tmp_path / "sources"
+
+
+def _squatter(tmp_path, text):
+    """A user's own file sitting on the target path."""
+    sources = _sources(tmp_path)
+    sources.mkdir(exist_ok=True)
+    path = sources / "s-notes.md"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _assert_write_refused(tmp_path, text):
+    """Writing over a user's file is refused *and* the file survives untouched.
+
+    Snapshots the bytes and mtime before the write, so the check cannot pass by
+    comparing the file to its own post-write state.
+    """
+    path = _squatter(tmp_path, text)
+    before, before_mtime = path.read_bytes(), path.stat().st_mtime_ns
+    res = write_annotations(BIB, [_hl()], [], "s", tmp_path)
+    assert res.status == "skipped" and "not a zotero notes file" in res.reason
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+    return path
 
 
 class TestHtmlToText:
@@ -107,12 +132,7 @@ class TestWrite:
         assert "second" in res.path.read_text(encoding="utf-8")
 
     def test_never_overwrites_non_ours_file(self, tmp_path):
-        sources = _sources(tmp_path)
-        sources.mkdir()
-        squatter = sources / "s-notes.md"
-        squatter.write_text("# a user's own notes\n", encoding="utf-8")
-        res = write_annotations(BIB, [_hl()], [], "s", tmp_path)
-        assert res.status == "skipped" and "not a zotero notes file" in res.reason
+        squatter = _assert_write_refused(tmp_path, "# a user's own notes\n")
         assert squatter.read_text(encoding="utf-8").startswith("# a user's own notes")
 
     def test_returns_result_type(self, tmp_path):
@@ -120,17 +140,29 @@ class TestWrite:
 
     def test_marker_in_user_body_is_not_ours(self, tmp_path):
         # A user's own front-matter file whose BODY mentions the marker must not
-        # be mistaken for ours (P4).
-        sources = _sources(tmp_path)
-        sources.mkdir()
-        squatter = sources / "s-notes.md"
-        squatter.write_text(
+        # be mistaken for ours (P4). The block closes inside the head here, so this
+        # is the control for the two unclosed-block cases below.
+        squatter = _assert_write_refused(
+            tmp_path,
             "---\ntitle: My note\n---\n\nI use source_kind: annotations in factlog.\n",
-            encoding="utf-8",
         )
-        res = write_annotations(BIB, [_hl()], [], "s", tmp_path)
-        assert res.status == "skipped" and "not a zotero notes file" in res.reason
         assert "My note" in squatter.read_text(encoding="utf-8")
+
+    def test_unclosed_front_matter_with_marker_is_not_ours(self, tmp_path):
+        # The block never closes, so the marker line cannot be told apart from the
+        # user's body. Ownership must not be claimed (#418).
+        _assert_write_refused(
+            tmp_path,
+            "---\ntitle: My note\nsource_kind: annotations\n\nmy own notes, no fence\n",
+        )
+
+    def test_closing_fence_past_scan_window_is_not_ours(self, tmp_path):
+        # The block does close, but past the scanned head, so the marker's position
+        # is again unknowable from the head alone (#418).
+        filler = "".join(f"x: {'y' * 76}\n" for _ in range(60))
+        text = f"---\ntitle: My note\nsource_kind: annotations\n{filler}---\n\nbody\n"
+        assert text.index("\n---\n\nbody") > _HEAD_SCAN_BYTES
+        _assert_write_refused(tmp_path, text)
 
     def test_long_title_still_detected_as_ours(self, tmp_path):
         bib = {"zotero_key": "K", "title": "T" * 600}
@@ -138,6 +170,16 @@ class TestWrite:
         assert first.status == "written"
         res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", tmp_path)
         assert res.status == "updated"  # our own file recognized despite long title
+
+    def test_large_body_still_detected_as_ours(self, tmp_path):
+        # Our own fence sits at the top, so a body far past the scanned head must
+        # not turn the fail-closed rule into a refusal to update our own file.
+        many = [_hl("z" * 200, page=str(i)) for i in range(40)]
+        first = write_annotations(BIB, many, [], "s", tmp_path)
+        assert first.status == "written"
+        assert len(first.path.read_bytes()) > _HEAD_SCAN_BYTES
+        res = write_annotations(BIB, many + [_hl("newest")], [], "s", tmp_path)
+        assert res.status == "updated"
 
     def test_updated_then_idempotent(self, tmp_path):
         write_annotations(BIB, [_hl("a")], [], "s", tmp_path)
