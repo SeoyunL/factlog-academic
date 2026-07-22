@@ -15,6 +15,7 @@ one consumer whole says nothing about the next.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -126,6 +127,29 @@ WRITERS = {
     "zotero": _zotero_md,
 }
 
+# The same writers as objects, so a test can ask one which keys it scans for
+# instead of restating them.
+WRITER_INSTANCES = {
+    "arxiv": ArxivSourceWriter(),
+    "openalex": OpenAlexSourceWriter(),
+    "pubmed": PubMedSourceWriter(),
+    "zotero": ZoteroSourceWriter(),
+}
+
+
+def _scalar_keys_of(kind: str) -> set[str]:
+    """The top-level keys the writer emits with a *scalar* value.
+
+    A ``[...]`` flow list (``authors``, ``tags``) is what ``read_scalars`` is
+    documented not to read, so asking for one would pin the wrong contract.
+    """
+    return {
+        line.split(":", 1)[0]
+        for line in WRITERS[kind]().split("---")[1].splitlines()
+        if line[:1].isalpha() and ":" in line
+        and not line.split(":", 1)[1].strip().startswith("[")
+    }
+
 
 @pytest.fixture
 def source(tmp_path):
@@ -155,15 +179,7 @@ class TestReadsToTheClosingFence:
         path = source(kind)
         block = front_matter_block(path)
         assert block is not None
-        # Top-level keys with a scalar value. A `[...]` flow list (`authors`,
-        # `tags`) is what `read_scalars` is documented not to read, so asking for
-        # one would pin the wrong contract.
-        emitted = [
-            line.split(":", 1)[0]
-            for line in WRITERS[kind]().split("---")[1].splitlines()
-            if line[:1].isalpha() and ":" in line
-            and not line.split(":", 1)[1].strip().startswith("[")
-        ]
+        emitted = sorted(_scalar_keys_of(kind))
         assert emitted, "fixture emitted no scalar keys"
         found = read_scalars(path, emitted)
         missing = [key for key in emitted if key not in found]
@@ -210,8 +226,6 @@ class TestReadsToTheClosingFence:
 
 def _chars_read(monkeypatch) -> list[int]:
     """Instrument ``Path.open`` so a test can assert how much a read cost."""
-    from pathlib import Path
-
     total = [0]
     real_open = Path.open
 
@@ -232,36 +246,53 @@ def _chars_read(monkeypatch) -> list[int]:
 
 
 class TestChunking:
-    @staticmethod
-    def _fenced_at(offset: int) -> str:
+    # A body far larger than the cap, so "kept reading" and "stopped at the fence"
+    # differ by two orders of magnitude rather than by a rounding error.
+    _BIG_BODY = "leak: leaked\n" * 300_000
+
+    @classmethod
+    def _fenced_at(cls, offset: int) -> str:
         """A source whose closing fence starts exactly at character ``offset``."""
         head = '---\ntitle: "T"\n'
         pad = "p: " + "x" * (offset - len(head) - 4) + "\n"
         assert len(head + pad) == offset
-        return head + pad + '\n---\n\nleak: leaked\n'
+        return head + pad + '\n---\n\n' + cls._BIG_BODY
 
     @pytest.mark.parametrize("offset", range(-3, 4))
-    def test_fence_straddling_a_chunk_boundary_is_found(self, tmp_path, offset):
-        """The closing fence is found even when it spans two reads.
+    def test_fence_straddling_a_chunk_boundary_stops_the_read(self, tmp_path, offset,
+                                                              monkeypatch):
+        """A fence astride a chunk boundary still ends the read at that boundary.
 
         The reader pulls ``FRONT_MATTER_CHUNK_CHARS`` at a time, so a ``\\n---``
-        astride a boundary is split across them. The loop re-scans the
-        *accumulated* text rather than the latest chunk for exactly this reason,
-        and nothing else here pins that: the 200-author blocks all fit the first
-        read, so their loop never iterates at all.
+        sitting across a boundary is split between two of them. The loop tests the
+        *accumulated* text for exactly this case.
 
-        Without the accumulation the fence is missed, ``title`` vanishes with the
-        discarded chunk, and body keys past the fence read as front matter.
+        What that buys is a **read budget, not the fence**. The extraction after
+        the loop searches all of ``head`` regardless, so a loop that only looked at
+        the latest chunk would still find this fence and return the same block —
+        it would just keep reading to the cap first. Asserting on the block alone
+        therefore pins nothing: only the read volume separates the two.
 
         The offsets are computed *from the constant*, so retuning the chunk size
-        moves the fixture with it instead of silently aiming at nothing.
+        moves the fixture with it instead of silently aiming at nothing. They span
+        the fence split across the boundary (-3..-1) and the fence landing at the
+        head of the second chunk, where the ``[3:]`` slice would swallow it (0..2).
+        ``+3`` is the control: there the fence sits wholly inside the second chunk
+        with nothing sliced away, so it is the one offset a latest-chunk-only loop
+        also gets right.
         """
         path = tmp_path / f"straddle{offset}.md"
         path.write_text(self._fenced_at(FRONT_MATTER_CHUNK_CHARS + offset), encoding="utf-8")
+        assert path.stat().st_size > FRONT_MATTER_MAX_CHARS
 
+        read = _chars_read(monkeypatch)
         found = read_scalars(path, ("title", "leak"))
         assert found.get("title") == "T"
         assert "leak" not in found, "body key past the closing fence leaked in"
+        # The fence is at most one character past the first boundary, so two chunks
+        # always suffice. Reading a third means the loop stopped noticing it.
+        assert read[0] <= 2 * FRONT_MATTER_CHUNK_CHARS, (
+            f"read {read[0]} chars for a fence at {FRONT_MATTER_CHUNK_CHARS + offset}")
 
     def test_chunk_size_must_cover_the_opening_fence(self):
         """A chunk under 3 chars cannot see ``---``, so every source reads as empty.
@@ -272,24 +303,103 @@ class TestChunking:
         """
         assert FRONT_MATTER_CHUNK_CHARS >= 3
 
-    def test_an_unclosed_block_stops_at_the_cap(self, tmp_path, monkeypatch):
-        """A file whose fence is never closed is read to the cap and no further.
+    def test_the_search_for_a_fence_stops_at_the_cap(self, tmp_path, monkeypatch):
+        """A file with no closing fence is read to the cap and no further.
 
-        The cap is what keeps the widened read bounded; the loop checks the length
-        *before* reading, so the ceiling is the cap rounded up to a whole chunk.
+        The cap bounds the *search*; the loop checks the length before reading, so
+        the ceiling is the cap rounded up to a whole chunk.
         """
         path = tmp_path / "unclosed.md"
         path.write_text('---\ntitle: "T"\n' + "filler line\n" * 400_000, encoding="utf-8")
         assert path.stat().st_size > 3 * FRONT_MATTER_MAX_CHARS
 
         read = _chars_read(monkeypatch)
-        block = front_matter_block(path)
+        assert front_matter_block(path) is None
         ceiling = -(-FRONT_MATTER_MAX_CHARS // FRONT_MATTER_CHUNK_CHARS) * FRONT_MATTER_CHUNK_CHARS
         assert read[0] <= ceiling
-        # The keys above the (absent) fence are still read; the body it absorbed
-        # is bounded, not unbounded.
-        assert block is not None and len(block) <= ceiling
-        assert read_scalar(path, "title") == "T"
+
+
+class TestUnclosedBlockCarriesNothing:
+    """A block with no closing fence yields nothing, in both directions.
+
+    Its extent is unknowable, so a key read out of it may be a body line. Handing
+    those to the writers' caches registers a stranger's note under a paper's
+    identity; the recoverable cost of refusing is a duplicate ``.md``.
+    """
+
+    @staticmethod
+    def _unclosed(tmp_path, body: str) -> Path:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        path = tmp_path / "note.md"
+        path.write_text(f'---\ntitle: "A user note"\n\n{body}\n', encoding="utf-8")
+        return path
+
+    @pytest.mark.parametrize("key,value", [
+        ("arxiv_id", "2012.05876"),
+        ("doi", "10.1038/s41586-020-2649-2"),
+        ("openalex_id", "W2741809807"),
+        ("zotero_key", "ABCD1234"),
+        ("pmid", "16354850"),
+    ])
+    def test_a_body_identity_key_is_not_an_identity(self, tmp_path, key, value):
+        """The registration path: `by_identity`/`by_cross_id` must not see these.
+
+        `common/source_writer.py:442` registers whatever identity `read_scalars`
+        reports. A user's own note that opens with `---` and never closes it would
+        otherwise bind a real paper's id to that note, and the next import of the
+        real paper is skipped or paired against it.
+        """
+        path = self._unclosed(tmp_path, f"Quoting a paper:\n{key}: {value}")
+        assert read_scalars(path, (key,)) == {}
+        assert read_scalar(path, key) == ""
+
+    def test_the_matcher_gets_no_row_either(self, tmp_path):
+        """The fallback path: no title/year/author, so `_match_row` fails closed."""
+        path = self._unclosed(
+            tmp_path, 'year: 2020\nimported_from: arxiv\nauthors: ["Ada Lovelace"]')
+        assert read_scalars(path, ("year", IMPORTED_FROM_KEY, "title")) == {}
+        assert read_first_author(path) == ""
+
+    def test_an_ignore_marker_in_the_body_cannot_be_reached(self, tmp_path):
+        """`ignore_re` no longer depends on where in the body a marker line sits.
+
+        Widening the read made a body `source_kind: annotations` visible to
+        Zotero's `ANNOTATION_MARKER_RE`, which reads the whole file as carrying
+        nothing — while the same file with that line inside the old 2048-byte
+        window read as nothing before the change too. The answer was decided by an
+        offset. It is now decided by the missing fence: nothing, either way.
+        """
+        near = self._unclosed(tmp_path / "near", "source_kind: annotations")
+        far = self._unclosed(tmp_path / "far", "x\n" * 5_000 + "source_kind: annotations")
+        for path in (near, far):
+            assert read_scalar(path, "zotero_key", ANNOTATION_MARKER_RE) == ""
+
+    def test_a_closed_block_is_unaffected_by_its_body(self, tmp_path):
+        """The counterpart: closing the fence restores every one of those reads.
+
+        Without this the tests above would also pass if the reader had simply
+        stopped working.
+        """
+        path = tmp_path / "closed.md"
+        path.write_text(
+            '---\ntitle: "A user note"\nzotero_key: "ABCD1234"\n---\n\n'
+            "arxiv_id: 2012.05876\nsource_kind: annotations\n", encoding="utf-8")
+        assert read_scalar(path, "zotero_key", ANNOTATION_MARKER_RE) == "ABCD1234"
+        assert read_scalar(path, "arxiv_id") == ""
+
+    def test_undecodable_bytes_are_no_front_matter(self, tmp_path):
+        """Mojibake past the first chunk must not raise at the caller.
+
+        Reading further than the old window puts more of a file through the codec,
+        so a source whose head is valid UTF-8 and whose body is not used to decode
+        (the bad bytes sat past 2048) and would now raise `UnicodeDecodeError` —
+        which is a `ValueError`, not the `OSError` the callers are shielded from.
+        """
+        path = tmp_path / "mojibake.md"
+        path.write_bytes(b'---\ntitle: "T"\n' + b"filler line\n" * 1_000 + b"\xff\xfe\n")
+        assert front_matter_block(path) is None
+        assert read_scalars(path, ("title",)) == {}
+        assert read_first_author(path) == ""
 
 
 class TestEveryConsumer:
@@ -353,12 +463,32 @@ class TestEveryConsumer:
 
     @pytest.mark.parametrize("kind", sorted(WRITERS))
     def test_source_writer_cache_reads_the_matcher_keys(self, kind, source):
-        # factlog/integrations/common/source_writer.py:442 — the surfacing writer's
-        # scan keys. `imported_from` and `year` are what the title+author+year
-        # fallback needs, and both used to fall past the window.
-        keys = (IMPORTED_FROM_KEY, "title", "year")
-        found = read_scalars(source(kind), keys)
-        assert set(found) == set(keys), f"{kind}: missing {set(keys) - set(found)}"
+        """factlog/integrations/common/source_writer.py:442, with its own key set.
+
+        The keys come from the writer's ``_scan_keys()`` rather than a copy of
+        today's list, so extending the scan extends this test. Only the ones the
+        writer actually emits can be asserted — a Zotero record carries no
+        ``arxiv_id`` — so the expectation is the intersection, checked non-empty.
+        """
+        path = source(kind)
+        keys = WRITER_INSTANCES[kind]._scan_keys()
+        emitted = _scalar_keys_of(kind)
+        expected = {key for key in keys if key in emitted}
+        assert expected, f"{kind}: scan keys and emitted keys do not overlap"
+        found = read_scalars(path, keys)
+        assert expected <= set(found), f"{kind}: missing {expected - set(found)}"
+
+    @pytest.mark.parametrize("kind", sorted(WRITERS))
+    def test_the_fallback_keys_survive(self, kind, source):
+        """`imported_from` and `year` specifically — the title+author+year fallback.
+
+        These are the keys the issue measured as lost (`imported_from` at 50
+        authors, `year` at 60), and the only reason the defect was not visible
+        from the ID-keyed paths. `_scan_keys()` above would still pass if the
+        matcher stopped asking for them.
+        """
+        found = read_scalars(source(kind), (IMPORTED_FROM_KEY, "title", "year"))
+        assert set(found) == {IMPORTED_FROM_KEY, "title", "year"}
 
     @pytest.mark.parametrize("kind", sorted(WRITERS))
     def test_source_writer_cache_reads_the_first_author(self, kind, source):

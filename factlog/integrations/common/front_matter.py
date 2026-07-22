@@ -6,6 +6,10 @@ Only the leading front-matter block (between the opening ``---`` and its closing
 source, or the literal text ``zotero_key:`` inside a body, is never mistaken for
 a prior import.
 
+A block whose closing fence is never found carries *nothing*. Its extent is
+unknowable, so any key read out of it might be a body line; see
+:func:`front_matter_block`.
+
 This is a *reader*, not a YAML parser: it recognises the ``key: value`` and
 ``key: "value"`` forms the source writers emit, which is all the de-duplication
 index needs.
@@ -16,9 +20,17 @@ import re
 from pathlib import Path
 
 # How much to pull per read while looking for the closing fence, and the point at
-# which an *unclosed* front matter stops being read. The cap bounds only the
-# pathological file (an opening ``---`` whose fence is never closed); a well-formed
-# block stops at its own fence, however long it is.
+# which the search for one gives up. A well-formed block stops at its own fence,
+# however long it is; the cap bounds the search on a file that has no closing fence
+# to find.
+#
+# The cap is a *limit on the search*, not only on the pathological file: a block
+# that is genuinely closed but longer than the cap is cut off before its fence is
+# reached, and is then indistinguishable from an unclosed one — so it reads as no
+# front matter at all. At ~40 bytes per author that needs roughly 26,000 authors in
+# one ``authors:`` line, which no record approaches (the largest real
+# collaborations run to a few thousand), so the cap buys bounded reads at a price
+# nothing pays. Raising it costs only memory on malformed files.
 #
 # The chunk size is not a free performance knob — it is load-bearing twice over:
 #
@@ -27,8 +39,8 @@ from pathlib import Path
 #   for a perfectly well-formed file and every source reads as empty.
 # * it quantises the cap. The loop checks the length *before* reading, so the
 #   effective ceiling is ``ceil(FRONT_MATTER_MAX_CHARS / chunk) * chunk``, and
-#   changing the chunk moves where an unclosed block is actually cut. Powers of
-#   two that divide the cap keep that boundary put; other values shift it.
+#   changing the chunk moves where the search is actually cut. Powers of two that
+#   divide the cap keep that boundary put; other values shift it.
 FRONT_MATTER_CHUNK_CHARS = 8192
 FRONT_MATTER_MAX_CHARS = 1 << 20
 
@@ -54,17 +66,24 @@ def front_matter_block(path: Path) -> str | None:
     weighs. Returning early when there is no opening fence keeps that true for the
     ingest conversions that carry an HTML provenance comment instead of YAML.
 
-    Returns None for an unreadable file or one with no opening fence.
+    Returns None for an unreadable file, one with no opening fence, **and one whose
+    closing fence is never found**. That last case used to return everything read so
+    far, which meant the body: a user's own note that opens with ``---`` and never
+    closes it would hand its ``arxiv_id:``/``doi:``/``title:`` body lines to the caller as
+    front matter, and the writers' caches would register them as that file's
+    identity (``by_identity``/``by_cross_id``/``match_rows`` in
+    ``common/source_writer``). An unrelated note then matches a real paper and the
+    import is skipped or paired wrongly. Reading to the cap rather than to 2048
+    bytes widened how much body could be absorbed, but the defect predates that —
+    the fixed window only made it smaller, and where the offending line sat in the
+    body decided whether it appeared at all.
 
-    One cost went *up*. A block with no closing fence is taken to run to the end of
-    what was read, so such a file absorbs its body into the block — and widening the
-    read from 2048 chars to ``FRONT_MATTER_MAX_CHARS`` multiplies how much by up to
-    512x. It stays bounded by the cap, and the readers above name the keys they want,
-    so a *value* only changes where the body happens to carry a matching ``key:``
-    line (or, for ``ignore_re``, a body line the caller's marker pattern matches —
-    which reads that unclosed file as carrying nothing). Both need a missing closing
-    fence to begin with; the routine price is transient memory, which is why the cap
-    is not merely decorative.
+    So an unclosed block yields nothing: its extent is unknowable, and a key read
+    out of it cannot be told from a body line. The cost is the other direction —
+    a genuinely tool-written source whose fence a human deleted now reads as "not
+    imported", so re-importing writes a second ``.md`` instead of updating the
+    first. That is a visible, recoverable duplicate; silently binding a stranger's
+    note to a paper's identity is neither.
     """
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -72,18 +91,26 @@ def front_matter_block(path: Path) -> str | None:
             if not head.startswith("---"):
                 # No opening fence: nothing to find, and no reason to read the body.
                 return None
-            # Re-scan the accumulated text each pass, so a fence straddling a chunk
-            # boundary is still found.
+            # Stop as soon as the accumulated text holds a fence. Scanning the
+            # accumulation rather than the latest chunk is a *read budget*, not a
+            # correctness property: the extraction below searches all of ``head``
+            # either way, so missing a straddling fence here would not lose it —
+            # it would just keep reading to the cap. On a file with a large body
+            # that is the difference between two chunks and a megabyte.
             while "\n---" not in head[3:] and len(head) < FRONT_MATTER_MAX_CHARS:
                 chunk = fh.read(FRONT_MATTER_CHUNK_CHARS)
                 if not chunk:
                     break
                 head += chunk
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # Undecodable bytes are "no front matter", like an unreadable file. Reading
+        # further than the old window put more of a file's bytes through the codec,
+        # so a source that is valid UTF-8 in its head and mojibake in its body used
+        # to decode and now raises — at the caller, which does not expect it.
         return None
     rest = head[3:]
     end = rest.find("\n---")
-    return rest if end == -1 else rest[:end]
+    return None if end == -1 else rest[:end]
 
 
 def read_scalars(path: Path, keys, ignore_re: re.Pattern[str] | None = None) -> dict[str, str]:
