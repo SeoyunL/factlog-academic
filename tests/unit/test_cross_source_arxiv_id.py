@@ -121,7 +121,12 @@ class TestDoiDigitSpelling:
     matches the ASCII one from OpenAlex and one paper imports as two files. The
     suffix is an opaque string, where respelling a character would name a
     *different* identifier, so it is left exactly as written. The boundary is the
-    first ``/``.
+    first ``/`` — later slashes are part of the suffix.
+
+    Two properties of the implementation are pinned here as well as the outcome,
+    because a mutant that drops either survives the rest of the suite: the guard
+    that refuses to fold a head which is not a DOI prefix, and the choice of the
+    *first* slash as the split.
     """
 
     def test_full_width_prefix_collides_with_ascii(self):
@@ -138,9 +143,24 @@ class TestDoiDigitSpelling:
         # `10` is as much a decimal number as the registrant code.
         assert normalize_cross_id("doi", "１０.1234/abc") == "10.1234/abc"
 
+    def test_subdivided_registrant_code_folds(self):
+        # DOI Handbook 2.2.2: a registrant may subdivide its code (the handbook's
+        # own example is `10.1000.10`). Each part is still a decimal number, so a
+        # grammar that accepted only one part would leave these DOIs splitting
+        # into two files — the exact defect this fix exists to close.
+        assert normalize_cross_id("doi", "10.１０００.１０/xyz") == "10.1000.10/xyz"
+        assert normalize_cross_id("doi", "10.1000.10.5/xyz") == "10.1000.10.5/xyz"
+
     def test_suffix_is_preserved_not_folded(self):
         # The opaque half. Folding here would invent a different identifier.
         assert normalize_cross_id("doi", "10.1234/ａ１b") == "10.1234/ａ１b"
+
+    def test_the_split_is_the_first_slash_not_the_last(self):
+        # A DOI suffix may contain slashes (`10.1002/x/y` is ordinary), and every
+        # one of them is inside the opaque half. Splitting on the last slash would
+        # drag part of the suffix into the folded head.
+        assert normalize_cross_id("doi", "10.１２３４/x/y") == "10.1234/x/y"
+        assert normalize_cross_id("doi", "10.１２３４/x/１") == "10.1234/x/１"
 
     def test_suffixes_that_differ_only_in_digit_spelling_stay_distinct_keys(self):
         # The consequence of preserving the suffix, asserted rather than implied:
@@ -167,6 +187,17 @@ class TestDoiDigitSpelling:
             "https://doi.org/10.１２３４/abc"
         assert normalize_cross_id("doi", "not-a-doi") == "not-a-doi"
         assert normalize_cross_id("doi", "10.1234") == "10.1234"
+
+    def test_the_prefix_guard_blocks_a_head_that_is_not_a_doi_prefix(self):
+        # These pin the *guard*, which the cases above do not: each head here
+        # carries a non-ASCII digit, so dropping the "is it really a DOI prefix?"
+        # check would fold it. Only a value whose head is a DOI prefix may be
+        # rewritten; a labelled or scheme-prefixed value is something this
+        # function does not claim to understand, and it says so by not touching
+        # it rather than by guessing.
+        assert normalize_cross_id("doi", "urn:１２３/abc") == "urn:１２３/abc"
+        assert normalize_cross_id("doi", "doi:10.１２３４/abc") == "doi:10.１２３４/abc"
+        assert normalize_cross_id("doi", "11.１２３４/abc") == "11.１２３４/abc"
 
     def test_full_width_and_ascii_doi_import_as_one_file(self, tmp_path):
         # End-to-end repro from #405: before the fix these wrote
