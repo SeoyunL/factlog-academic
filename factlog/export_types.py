@@ -78,3 +78,72 @@ def should_promote_to_journal_type(fm: dict, resolved_type: str | None) -> bool:
     deposits #60 says must stay preprints.
     """
     return resolved_type is None and bool(fm.get("journal"))
+
+
+# What the `journal` front-matter field *is* for a given work type. Both
+# exporters read this one table, then translate the role into their own field
+# name — the role is the shared judgement, the field name is not.
+#
+# Selecting the venue field per entry type (rather than special-casing one type)
+# is what keeps the emitted field valid: in standard BibTeX `journal` belongs to
+# `@article` alone, so putting it on `@book`/`@incollection`/`@inproceedings`/
+# `@techreport`/`@phdthesis` is exactly as wrong as putting it on `@misc` (#384).
+PERIODICAL = "periodical"     # a serial: journal, magazine, newspaper
+COLLECTION = "collection"     # a larger work containing this one: book, proceedings
+ISSUER = "issuer"             # the institution that issued a report
+SCHOOL = "school"             # the degree-granting institution of a thesis
+INFORMAL = "informal"         # self-deposited or unclassified: no formal container
+NO_VENUE = "no-venue"         # the work IS the container (a whole book)
+
+_VENUE_ROLES = {
+    # Zotero itemType
+    "journalArticle": PERIODICAL,
+    "magazineArticle": PERIODICAL,
+    "newspaperArticle": PERIODICAL,
+    "conferencePaper": COLLECTION,
+    "bookSection": COLLECTION,
+    "encyclopediaArticle": COLLECTION,
+    "dictionaryEntry": COLLECTION,
+    "book": NO_VENUE,
+    "report": ISSUER,
+    "thesis": SCHOOL,
+    "preprint": INFORMAL,
+    # OpenAlex work type
+    "article": PERIODICAL,
+    "review": PERIODICAL,
+    "book-review": PERIODICAL,
+    "letter": PERIODICAL,
+    "editorial": PERIODICAL,
+    "erratum": PERIODICAL,
+    "retraction": PERIODICAL,
+    "data-paper": PERIODICAL,
+    "conference-paper": COLLECTION,
+    "book-chapter": COLLECTION,
+    "book-section": COLLECTION,
+    "reference-entry": COLLECTION,
+    "report-component": ISSUER,
+    "dissertation": SCHOOL,
+    "dataset": INFORMAL,
+    "software": INFORMAL,
+}
+
+
+def venue_role(fm: dict) -> str:
+    """What kind of venue this record's ``journal`` field names.
+
+    Shared for the same reason as :func:`should_promote_to_journal_type`: when
+    each exporter picked the venue field on its own condition, the same record
+    was published in a ``howpublished`` in BibTeX and a ``container-title`` in
+    CSL, and a BibTeX->CSL round trip (pandoc reads ``howpublished`` as
+    ``publisher``) made the two outputs contradict each other outright.
+
+    An unknown type gets :data:`INFORMAL`, whose field is valid on every entry
+    type, so a type this table has never heard of cannot produce an invalid
+    pairing.
+    """
+    source_type = resolve_source_type(fm)
+    if should_promote_to_journal_type(fm, source_type):
+        return PERIODICAL
+    if source_type is None:
+        return INFORMAL
+    return _VENUE_ROLES.get(source_type, INFORMAL)

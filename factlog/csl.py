@@ -12,7 +12,49 @@ from __future__ import annotations
 
 import re
 
-from factlog.export_types import resolve_source_type, should_promote_to_journal_type
+from factlog.export_types import (
+    COLLECTION,
+    INFORMAL,
+    ISSUER,
+    NO_VENUE,
+    PERIODICAL,
+    SCHOOL,
+    resolve_source_type,
+    should_promote_to_journal_type,
+    venue_role,
+)
+
+# Venue role -> CSL variable, resolved from the same `venue_role` judgement the
+# BibTeX exporter uses. CSL constrains nothing structurally (any variable may sit
+# on any type), so the choice is settled by what styles actually render (#384).
+#
+# INFORMAL is the one that looks wrong on paper: the venue is a periodical name,
+# and `container-title` is where a periodical name belongs. But an INFORMAL
+# record is typed `article` (a preprint — #60 forbids retyping a deposit that
+# names where it later appeared), and for a standalone `article` the styles
+# disagree about `container-title` while agreeing about `publisher`. Rendered
+# with pandoc --citeproc, one preprint carrying `Nature 585, 357 (2020)`:
+#
+#   style     container-title                     publisher
+#   ieee      (venue dropped entirely)            "2020, Nature 585, 357 (2020)"
+#   apa       "In Nature 585, 357 (2020)."        "Nature 585, 357 (2020)."
+#   chicago   "In Nature 585...  Preprint."       "Preprint, Nature 585, 357..."
+#   ama/nature  renders                           renders
+#
+# So `container-title` reintroduces the very defect #384 fixes (IEEE silently
+# loses the venue) and reads as a containment claim the record does not make;
+# `publisher` renders everywhere, and the styles phrase it as "Preprint at" /
+# "Preprint posted online", which is what the record means. It also agrees with
+# the BibTeX side after a round trip, since pandoc reads `howpublished` back as
+# `publisher` — a corroboration, not the reason.
+_VENUE_FIELDS = {
+    PERIODICAL: "container-title",
+    COLLECTION: "container-title",
+    ISSUER: "publisher",
+    SCHOOL: "publisher",
+    INFORMAL: "publisher",
+    NO_VENUE: "",
+}
 
 # Work type -> CSL type; anything else falls back to "document". Keyed by the
 # same vocabularies as `bibtex._ENTRY_TYPES` (Zotero itemType and OpenAlex work
@@ -101,8 +143,9 @@ def to_csl(fm: dict, item_id: str) -> dict:
             item["issued"] = {"date-parts": [[int(match.group(0))]]}
 
     journal = fm.get("journal")
-    if journal:
-        item["container-title"] = str(journal)
+    venue_key = _VENUE_FIELDS[venue_role(fm)]
+    if journal and venue_key:
+        item[venue_key] = str(journal)
 
     if fm.get("doi"):
         item["DOI"] = str(fm["doi"])

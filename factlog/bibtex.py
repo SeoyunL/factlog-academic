@@ -12,7 +12,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from factlog.export_types import resolve_source_type, should_promote_to_journal_type
+from factlog.export_types import (
+    COLLECTION,
+    INFORMAL,
+    ISSUER,
+    NO_VENUE,
+    PERIODICAL,
+    SCHOOL,
+    resolve_source_type,
+    should_promote_to_journal_type,
+    venue_role,
+)
 
 _LIST_ITEM_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _KV_RE = re.compile(r"^([A-Za-z0-9_]+):\s*(.*)$")
@@ -54,6 +64,23 @@ _ENTRY_TYPES = {
     # stay @misc — but CSL does have them, hence no matching _CSL_TYPES value.
     "dataset": "misc",
     "software": "misc",
+}
+
+# Venue role -> the standard-BibTeX field that holds it. Standard BibTeX scopes
+# venue fields tightly: `journal` is defined for @article ALONE, `booktitle` for
+# @inproceedings/@incollection, `institution` for @techreport, `school` for
+# @phdthesis, `howpublished` for @misc. Emitting `journal` on any other entry
+# type is the same defect as the @misc+journal pairing this fixes — the field is
+# dropped, and @inproceedings/@incollection additionally warn on the now-empty
+# `booktitle` they require. `NO_VENUE` maps to "" (the field is omitted): a whole
+# book is not contained in anything.
+_VENUE_FIELDS = {
+    PERIODICAL: "journal",
+    COLLECTION: "booktitle",
+    ISSUER: "institution",
+    SCHOOL: "school",
+    INFORMAL: "howpublished",
+    NO_VENUE: "",
 }
 
 # Char-by-char LaTeX escaping (one pass, so inserted braces are not re-escaped).
@@ -163,16 +190,11 @@ def to_bibtex(fm: dict, cite_key: str) -> str:
     if isinstance(authors, list) and authors:
         fields.append(("author", " and ".join(str(a) for a in authors)))
     entry_type = _entry_type(fm)
-    # Standard BibTeX's @misc has no `journal` field: biber/BibTeX drops it with
-    # a warning, which is how a published preprint lost its venue entirely (#384).
-    # The venue is still worth recording, so it goes to `howpublished`, the field
-    # @misc does define. Retyping the entry instead would contradict #60 — an
-    # arXiv deposit stays a preprint even once `journal` names where it landed.
-    venue_key = "journal" if entry_type != "misc" else "howpublished"
+    venue_key = _VENUE_FIELDS[venue_role(fm)]
     for fm_key, bib_key in (("title", "title"), ("year", "year"),
                             ("journal", venue_key), ("doi", "doi")):
         value = fm.get(fm_key)
-        if value:
+        if value and bib_key:
             fields.append((bib_key, str(value)))
     if fm.get("pmid"):
         fields.append(("note", f"PMID: {fm['pmid']}"))
