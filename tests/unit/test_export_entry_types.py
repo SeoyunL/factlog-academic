@@ -18,14 +18,16 @@ Four things are pinned here, because each failed differently:
   `journal` to `@article` alone, so the pairing is checked against each entry
   type's own field list rather than against `@misc` as a special case;
 * the *export path* (`TestExportPathOnDisk`) — through files on disk and
-  ``cli.main``, because the in-memory helpers skip the front-matter read that
-  truncates at 4096 bytes (#395).
+  ``cli.main``, because the in-memory helpers skip the front-matter read
+  entirely, which is where a large author list used to cost a record its
+  metadata (#395, fixed).
 """
 from __future__ import annotations
 
 import json
 import re
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -572,8 +574,8 @@ class TestExportersAgree:
 class TestExportPathOnDisk:
     """The real path: files on disk, read through `read_front_matter`, via the CLI.
 
-    The in-memory helpers above never exercise the 4096-byte front-matter read,
-    which is where a large author list silently costs a record its metadata.
+    The in-memory helpers above never exercise the front-matter read, which is
+    where a large author list used to silently cost a record its metadata (#395).
     """
 
     @staticmethod
@@ -630,27 +632,116 @@ class TestExportPathOnDisk:
             allowed = STANDARD_BIBTEX_FIELDS[name] | TOLERATED_EXTENSIONS
             assert set(_bibtex_fields(entry)) <= allowed, entry
 
-    def test_large_author_list_truncates_front_matter(self, tmp_path):
-        """Known pre-existing defect, pinned here rather than fixed — see #395.
+    def test_large_author_list_keeps_the_whole_front_matter(self, tmp_path):
+        """#395, fixed: the front-matter read now stops at the closing fence.
 
-        `read_front_matter` reads only the first 4096 bytes, and the arXiv writer
-        emits a single long `authors:` line before `year`/`journal`/`doi`/
-        `preprint`, so a large collaboration pushes all of them out of the
-        window. The record keeps only `title` (plus the `arxiv_id`/
-        `arxiv_version` that precede `authors`) and loses author, year, venue,
-        DOI and its type key. Verified byte-identical on main, so this branch
-        neither causes nor worsens it; fixing it means changing the scan window
-        or the writer's key order, both outside this change. When #395 lands,
-        these assertions flip and should be updated.
+        This assertion was inverted — #384 pinned the defect here rather than
+        fixing it. `read_front_matter` used to read only the first 4096 bytes,
+        and the arXiv writer emits a single long `authors:` line before
+        `year`/`journal`/`preprint`, so a large collaboration pushed all of them
+        out of the window: the record kept `arxiv_id`/`arxiv_version`/`authors`/
+        `title` alone and lost author, year, venue and its type key.
+
+        The fixture's block is deliberately larger than the old window, so this
+        test is only meaningful while that stays true — hence the size assertion.
         """
         path = tmp_path / "big.md"
         text = _arxiv_md(journal_ref="Nature 585, 357 (2020)", n_authors=200)
         path.write_text(text, encoding="utf-8")
+        # Guards the guard: a block under 4096 bytes would pass even unfixed.
         assert len(text.split("---")[1].encode()) > 4096
 
         fm = read_front_matter(path)
-        assert sorted(fm) == ["arxiv_id", "arxiv_version", "authors", "title"]
-        assert set(_bibtex_fields(to_bibtex(fm, "big"))) == {"title"}
+        # Every key the writer emitted survives, in particular the ones that used
+        # to fall past the window.
+        for key in ("year", "journal", "preprint", "primary_category", "imported_from"):
+            assert key in fm, f"{key} lost to truncation"
+        assert isinstance(fm["authors"], list) and len(fm["authors"]) == 200
+
+        entry = to_bibtex(fm, "big")
+        # The type key survived, so the record is still resolved as a preprint
+        # rather than falling back to a bare default.
+        assert entry.startswith("@misc{big,")
+        assert set(_bibtex_fields(entry)) == {"author", "title", "year", "howpublished"}
+
+    def test_front_matter_read_stops_at_the_closing_fence(self, tmp_path):
+        """A `---` in the *body* is not a fence, and the body is not parsed.
+
+        Pins the two halves of the fence-terminated read: keys below the closing
+        fence never enter the dict, and a body large enough to dwarf any fixed
+        window costs nothing because the read stops early.
+        """
+        path = tmp_path / "fenced.md"
+        body = "\n".join(f"body_key_{i}: not front matter" for i in range(20_000))
+        path.write_text(
+            f'---\ntitle: "T"\nyear: "2020"\n---\n\n{body}\n', encoding="utf-8",
+        )
+        assert path.stat().st_size > 4096
+
+        assert read_front_matter(path) == {"title": "T", "year": "2020"}
+
+    def test_file_without_opening_fence_has_no_front_matter(self, tmp_path):
+        """An ingest conversion carries an HTML provenance comment, not YAML.
+
+        `cmd_export` relies on `{}` here to report the file as skipped.
+        """
+        path = tmp_path / "converted.md"
+        path.write_text("<!-- provenance -->\n\ntitle: not front matter\n", encoding="utf-8")
+        assert read_front_matter(path) == {}
+
+    def test_unreadable_path_is_reported_as_no_front_matter(self, tmp_path):
+        """OSError degrades to `{}` (skipped), it does not abort the export."""
+        assert read_front_matter(tmp_path / "does-not-exist.md") == {}
+
+    @staticmethod
+    def _chars_read(monkeypatch) -> list[int]:
+        """Instrument `Path.open` so a test can assert how much a read cost."""
+        total = [0]
+        real_open = Path.open
+
+        def counting_open(self, *args, **kwargs):
+            handle = real_open(self, *args, **kwargs)
+            real_read = handle.read
+
+            def read(size=-1):
+                data = real_read(size)
+                total[0] += len(data)
+                return data
+
+            handle.read = read
+            return handle
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        return total
+
+    def test_missing_opening_fence_does_not_read_the_body(self, tmp_path, monkeypatch):
+        """The opening-fence check is a read budget, not just a shortcut.
+
+        `cmd_export` walks every `.md` under both source roots, including ingest
+        conversions that carry an HTML provenance comment instead of YAML. With
+        no opening fence there is no closing fence to find either, so without
+        this check the search would run to EOF on every such file — reading a
+        whole body to conclude it has nothing.
+        """
+        path = tmp_path / "converted.md"
+        path.write_text("<!-- provenance -->\n" + "filler line\n" * 200_000, encoding="utf-8")
+        size = path.stat().st_size
+        assert size > 1_000_000
+
+        read = self._chars_read(monkeypatch)
+        assert read_front_matter(path) == {}
+        assert read[0] < size / 10, f"read {read[0]} chars of a {size}-byte body"
+
+    def test_unclosed_front_matter_is_bounded(self, tmp_path, monkeypatch):
+        """An opening fence that is never closed stops at the cap, not at EOF."""
+        path = tmp_path / "unclosed.md"
+        path.write_text('---\ntitle: "T"\n' + "filler: line\n" * 400_000, encoding="utf-8")
+        size = path.stat().st_size
+        assert size > 2 * (1 << 20)
+
+        read = self._chars_read(monkeypatch)
+        assert read_front_matter(path)["title"] == "T"
+        assert read[0] <= (1 << 20) + 8192, f"read {read[0]} chars of a {size}-byte file"
 
     def test_large_author_list_still_emits_only_defined_fields(self, tmp_path):
         text = self._export(tmp_path, "bibtex", extra={

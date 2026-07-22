@@ -153,9 +153,46 @@ def parse_front_matter(text: str) -> dict:
     return fm
 
 
+# How much to pull per read while looking for the closing fence, and the point at
+# which an *unclosed* front matter stops being read. The cap bounds only the
+# pathological file (an opening ``---`` whose fence is never closed); a well-formed
+# block stops at its own fence, however long it is.
+_FRONT_MATTER_CHUNK_CHARS = 8192
+_FRONT_MATTER_MAX_CHARS = 1 << 20
+
+
 def read_front_matter(path: Path | str) -> dict:
+    """The source's YAML front matter as a dict, or ``{}``.
+
+    Reads to the block's **closing fence**, not to a fixed byte count. A fixed
+    4096-byte window truncated the block mid-way and silently dropped every key
+    past it: the arXiv writer emits one long ``authors:`` line ahead of ``year``/
+    ``journal``/``preprint``, so a large collaboration (200 authors, 7903-byte
+    block) kept only ``arxiv_id``/``arxiv_version``/``authors``/``title`` and
+    exported as a bare ``@misc`` with a title and nothing else — no author, year,
+    venue, DOI, nor the type key that makes it a preprint (#395).
+
+    The window was never a read budget: the old code called ``read_text()`` on the
+    whole file and only *then* sliced, so it paid for every byte of the body and
+    still lost the tail of the front matter. Stopping at the fence — and returning
+    early when there is no opening fence — reads strictly less than that.
+
+    ``OSError`` yields ``{}`` so an unreadable file is reported as "no front
+    matter" (``cmd_export`` skips it) rather than aborting the export.
+    """
     try:
-        head = Path(path).read_text(encoding="utf-8")[:4096]
+        with Path(path).open("r", encoding="utf-8") as fh:
+            head = fh.read(_FRONT_MATTER_CHUNK_CHARS)
+            if not head.startswith("---"):
+                # No opening fence: nothing to find, and no reason to read the body.
+                return {}
+            # Re-scan the accumulated text each pass, so a fence straddling a chunk
+            # boundary is still found.
+            while "\n---" not in head[3:] and len(head) < _FRONT_MATTER_MAX_CHARS:
+                chunk = fh.read(_FRONT_MATTER_CHUNK_CHARS)
+                if not chunk:
+                    break
+                head += chunk
     except OSError:
         return {}
     return parse_front_matter(head)
