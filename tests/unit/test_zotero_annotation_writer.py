@@ -2,8 +2,9 @@
 """Unit tests for the Zotero annotation source writer (phase 3, #28)."""
 from __future__ import annotations
 
+from factlog.integrations.zotero._textio import yaml_scalar
 from factlog.integrations.zotero.annotation_writer import (
-    _HEAD_SCAN_BYTES,
+    _HEAD_SCAN_CHARS,
     AnnotationResult,
     html_to_text,
     render_annotations,
@@ -36,16 +37,17 @@ def _squatter(tmp_path, text):
     return path
 
 
-def _assert_write_refused(tmp_path, text):
+def _assert_write_refused(tmp_path, text, reason="not a zotero notes file"):
     """Writing over a user's file is refused *and* the file survives untouched.
 
     Snapshots the bytes and mtime before the write, so the check cannot pass by
-    comparing the file to its own post-write state.
+    comparing the file to its own post-write state. ``reason`` is asserted too:
+    the two refusals say different things and must not be reported alike (#430).
     """
     path = _squatter(tmp_path, text)
     before, before_mtime = path.read_bytes(), path.stat().st_mtime_ns
     res = write_annotations(BIB, [_hl()], [], "s", tmp_path)
-    assert res.status == "skipped" and "not a zotero notes file" in res.reason
+    assert res.status == "skipped" and reason in res.reason
     assert path.read_bytes() == before
     assert path.stat().st_mtime_ns == before_mtime
     return path
@@ -158,10 +160,12 @@ class TestWrite:
 
     def test_unclosed_front_matter_with_marker_is_not_ours(self, tmp_path):
         # The block never closes, so the marker line cannot be told apart from the
-        # user's body. Ownership must not be claimed (#418).
+        # user's body. Ownership must not be claimed (#418), and the refusal says
+        # we could not classify the file rather than claiming it is not ours (#430).
         _assert_write_refused(
             tmp_path,
             "---\ntitle: My note\nsource_kind: annotations\n\nmy own notes, no fence\n",
+            reason="does not close inside the scanned head",
         )
 
     def test_closing_fence_past_scan_window_is_not_ours(self, tmp_path):
@@ -169,8 +173,21 @@ class TestWrite:
         # is again unknowable from the head alone (#418).
         filler = "".join(f"x: {'y' * 76}\n" for _ in range(60))
         text = f"---\ntitle: My note\nsource_kind: annotations\n{filler}---\n\nbody\n"
-        assert text.index("\n---\n\nbody") > _HEAD_SCAN_BYTES
-        _assert_write_refused(tmp_path, text)
+        assert text.index("\n---\n\nbody") > _HEAD_SCAN_CHARS
+        _assert_write_refused(tmp_path, text, reason="does not close inside the scanned head")
+
+    def test_unterminated_and_foreign_reasons_differ(self, tmp_path):
+        # Both refusals skip, but a reader has to be able to tell "someone else's
+        # file" from "a file we cannot classify" — reporting the first for the
+        # second was the false report in #430.
+        foreign = write_annotations(BIB, [_hl()], [], "s", tmp_path)
+        assert foreign.status == "written"  # sanity: the helper below overwrites it
+        _squatter(tmp_path, "---\ntitle: mine\n---\n\nbody\n")
+        a = write_annotations(BIB, [_hl()], [], "s", tmp_path)
+        _squatter(tmp_path, "---\ntitle: mine\nsource_kind: annotations\nno fence\n")
+        b = write_annotations(BIB, [_hl()], [], "s", tmp_path)
+        assert a.status == b.status == "skipped"
+        assert a.reason != b.reason
 
     def test_long_title_still_detected_as_ours(self, tmp_path):
         bib = {"zotero_key": "K", "title": "T" * 600}
@@ -179,30 +196,93 @@ class TestWrite:
         res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", tmp_path)
         assert res.status == "updated"  # our own file recognized despite long title
 
-    def test_over_long_front_matter_stops_updating_our_own_file(self, tmp_path):
-        # CHARACTERIZATION, NOT AN ENDORSEMENT. Front matter that does not close
-        # inside the head makes us disown a file we wrote ourselves: it is written
-        # once, never updated again, and the skip reason ("not a zotero notes file")
-        # is false. Left as-is because reaching it needs a ~4000-character title and
-        # the alternative — a wider head — puts real user files back at risk of
-        # being overwritten (see _HEAD_SCAN_BYTES). Follow-up: #430, which proposes
-        # capping the emitted title so the trade-off disappears. This test pins the
-        # current behaviour, so fixing #430 must flip it rather than delete it: the
-        # over-long case should then assert "updated", not "skipped".
+    def test_title_is_capped_so_the_fence_stays_inside_the_head(self, tmp_path):
+        # #418 pinned the cliff here as a characterization: past a ~4000-character
+        # title the closing fence left the head and we disowned our own file for
+        # good. #430 removed the cliff by capping the emitted title, so this test
+        # now pins the invariant that replaced it — the fence lands inside the head
+        # whatever the title is — while keeping the property that made the old test
+        # useful: the boundary is DERIVED from the front-matter layout and then
+        # contrasted with the measured number, so it breaks loudly instead of going
+        # vacuous. Measured, rather than assumed: a layout change trips the two
+        # derived-vs-measured contrasts (this one and the zotero_key one below) and
+        # nothing else; an off-by-one in the cap trips three invariant assertions.
         probe_len = 100
         probe = render_annotations({"zotero_key": "K", "title": "T" * probe_len}, [_hl()], [])
-        # Accepted while the whole "\n---" fence fits in the head, so the last title
-        # length still recognized puts the fence at exactly _HEAD_SCAN_BYTES - 4.
-        last_ok = probe_len + (_HEAD_SCAN_BYTES - 3 - probe.index("\n---", 3)) - 1
-        assert last_ok == 4016  # measured cliff for the current front-matter layout
+        # The longest title still emitted verbatim is the one putting the whole
+        # "\n---" fence at exactly _HEAD_SCAN_CHARS - 4; beyond it the cap bites.
+        last_verbatim = probe_len + (_HEAD_SCAN_CHARS - 3 - probe.index("\n---", 3)) - 1
+        assert last_verbatim == 4016  # measured for the current front-matter layout
 
-        for title_len, expected in ((last_ok, "updated"), (last_ok + 1, "skipped")):
-            bib = {"zotero_key": "K", "title": "T" * title_len}
+        for title_len in (last_verbatim, last_verbatim + 1, 20000):
+            title = "T" * title_len
+            bib = {"zotero_key": "K", "title": title}
+            text = render_annotations(bib, [_hl()], [])
+            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_CHARS
+            emitted = text.split("title: ", 1)[1].split("\n", 1)[0]
+            assert (emitted == f'"{title}"') is (title_len == last_verbatim)
+
             target = tmp_path / str(title_len)
             assert write_annotations(bib, [_hl("first")], [], "s", target).status == "written"
             res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", target)
-            assert res.status == expected
-        assert "not a zotero notes file" in res.reason  # the false reason, pinned
+            assert res.status == "updated"  # no length disowns our own file any more
+
+    def test_capped_title_is_marked_as_cut(self, tmp_path):
+        # A cut title must not read as if it were the real one, and the heading must
+        # show the same title the front matter does. Compared through yaml_scalar
+        # rather than by slicing the quotes off: the front matter carries the
+        # ESCAPED title and the heading the raw one, so a backslash-heavy title
+        # would fail a naive comparison while the code is right.
+        for title in ("T" * 20000, "\\" * 20000, 'a"b' * 8000):
+            text = render_annotations({"zotero_key": "K", "title": title}, [_hl()], [])
+            emitted = text.split("title: ", 1)[1].split("\n", 1)[0]
+            assert emitted.endswith('…"')
+            heading = next(ln for ln in text.splitlines() if ln.startswith("# Annotations — "))
+            assert yaml_scalar(heading[len("# Annotations — ") :]) == emitted
+
+    def test_escape_heavy_title_is_capped_on_emitted_width(self, tmp_path):
+        # yaml_scalar doubles a backslash, so counting input characters would let
+        # the front matter grow to twice the budget and push the fence back out.
+        for ch in ("\\", '"', "\t"):
+            bib = {"zotero_key": "K", "title": ch * 20000}
+            text = render_annotations(bib, [_hl()], [])
+            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_CHARS
+            target = tmp_path / str(ord(ch))
+            assert write_annotations(bib, [_hl("first")], [], "s", target).status == "written"
+            res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", target)
+            assert res.status == "updated"
+
+    def test_long_zotero_key_shrinks_the_title_not_the_fence(self, tmp_path):
+        # The budget is shared: a longer key leaves less room for the title. Probed
+        # AT and PAST the point where the key alone would exhaust it, because that
+        # is where sharing stops being enough and the key has to be capped too —
+        # capping only the title moved the #430 cliff onto the key rather than
+        # removing it (measured: it reappeared at key_len=4018). Derived from the
+        # layout and then contrasted, like the title boundary above.
+        probe_key, probe_title = "K", "T" * 100
+        probe = render_annotations({"zotero_key": probe_key, "title": probe_title}, [_hl()], [])
+        slack = _HEAD_SCAN_CHARS - (probe.index("\n---", 3) + len("\n---"))
+        exhausts_budget = len(probe_key) + len(probe_title) + slack
+        assert exhausts_budget == 4017  # longest key still emitted verbatim, measured
+
+        for key_len in (3000, exhausts_budget, exhausts_budget + 1, 20000):
+            bib = {"zotero_key": "K" * key_len, "title": "T" * 20000}
+            text = render_annotations(bib, [_hl()], [])
+            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_CHARS
+            emitted_key = text.split("zotero_key: ", 1)[1].split("\n", 1)[0]
+            assert (emitted_key == '"' + "K" * key_len + '"') is (key_len <= exhausts_budget)
+
+            target = tmp_path / str(key_len)
+            assert write_annotations(bib, [_hl("first")], [], "s", target).status == "written"
+            res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", target)
+            assert res.status == "updated"
+
+    def test_key_is_served_before_the_title(self, tmp_path):
+        # When the two cannot both fit, the key wins the budget: it identifies the
+        # item, the title only describes it.
+        text = render_annotations({"zotero_key": "K" * 2000, "title": "T" * 20000}, [_hl()], [])
+        assert '"' + "K" * 2000 + '"' in text  # key verbatim
+        assert text.split("title: ", 1)[1].split("\n", 1)[0].endswith('…"')  # title cut
 
     def test_large_body_still_detected_as_ours(self, tmp_path):
         # Our own fence sits at the top, so a body far past the scanned head must
@@ -210,7 +290,7 @@ class TestWrite:
         many = [_hl("z" * 200, page=str(i)) for i in range(40)]
         first = write_annotations(BIB, many, [], "s", tmp_path)
         assert first.status == "written"
-        assert len(first.path.read_bytes()) > _HEAD_SCAN_BYTES
+        assert len(first.path.read_bytes()) > _HEAD_SCAN_CHARS
         res = write_annotations(BIB, many + [_hl("newest")], [], "s", tmp_path)
         assert res.status == "updated"
 

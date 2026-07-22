@@ -19,10 +19,11 @@ both idempotent and fresh:
 
 "ours" is detected by a ``source_kind: annotations`` line inside the front-matter
 block (not anywhere in the body). Deciding that needs two things inside the
-scanned head, and only the first is under our control: we write the *marker* on
-the line right after the opening fence, but the *closing fence* sits wherever the
-front matter ends. A file whose block does not close inside the head is therefore
-never ours, however early its marker appears. Writes are atomic (temp+os.replace).
+scanned head: we write the *marker* on the line right after the opening fence,
+and we cap the emitted title so the *closing fence* cannot be pushed out of the
+head by a long title. A file whose block does not close inside the head is never
+ours, however early its marker appears — that still holds for hand-edited front
+matter. Writes are atomic (temp+os.replace).
 """
 from __future__ import annotations
 
@@ -46,8 +47,16 @@ from factlog.integrations.zotero._textio import (
 # user file whose *own front matter* carries the marker line close inside the head
 # and so be claimed as ours and overwritten — measured at 65536, a file with the
 # fence at 4844 goes from "skipped" back to "updated". The narrow window costs an
-# over-rejection for absurdly long front matter instead (see _is_ours).
-_HEAD_SCAN_BYTES = 4096
+# over-rejection for absurdly long front matter instead (see _not_ours_reason).
+# Characters, not bytes: the head is read in text mode, so a multi-byte title is
+# measured the same way render_annotations budgets for it.
+_HEAD_SCAN_CHARS = 4096
+
+# Appended to a title we had to cut so the cut is visible in the file itself.
+_TRUNCATED_SUFFIX = "…"
+
+_NOT_OURS = "target exists and is not a zotero notes file"
+_UNTERMINATED = "target exists and its front matter does not close inside the scanned head"
 
 # Strip script/style/comment *contents* (not just the tags) before removing tags.
 _DROP_CONTENT_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>|<!--.*?-->")
@@ -110,6 +119,29 @@ def _format_highlight(data: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _fit_scalar(value: str, budget: int) -> str:
+    """Longest prefix of ``value`` whose *emitted* scalar stays within ``budget``.
+
+    Counted on the emitted width, not the input length: yaml_scalar turns one
+    backslash/quote/tab into two characters, so a cap on input characters would
+    still let the front matter grow past the budget.
+    """
+    if len(yaml_scalar(value)) - 2 <= budget:
+        return value
+    budget -= len(yaml_scalar(_TRUNCATED_SUFFIX)) - 2  # the marker itself has to fit
+    if budget < 0:
+        return ""
+    used = 0
+    kept = 0
+    for ch in value:
+        width = len(yaml_scalar(ch)) - 2
+        if used + width > budget:
+            break
+        used += width
+        kept += 1
+    return value[:kept] + _TRUNCATED_SUFFIX
+
+
 def render_annotations(parsed_bib: dict, annotations: list[dict], notes: list[dict]) -> str:
     """The full markdown (front matter + body), or "" if there is nothing to write."""
     highlight_blocks = [b for b in (_format_highlight(_ad(a)) for a in annotations) if b]
@@ -117,13 +149,26 @@ def render_annotations(parsed_bib: dict, annotations: list[dict], notes: list[di
     if not highlight_blocks and not note_texts:
         return ""
 
+    key = _clean(parsed_bib.get("zotero_key"))
     title = _clean(parsed_bib.get("title")) or "Untitled"
-    # Marker first so it is always near the top of the scanned head.
-    lines = ["---", _MARKER]
-    lines.append(f"zotero_key: {yaml_scalar(_clean(parsed_bib.get('zotero_key')))}")
+    # Marker first so it is always near the top of the scanned head. EVERY variable
+    # length field is capped, not just the title: whatever is left uncapped becomes
+    # the next thing that pushes the closing fence out of the head and makes us
+    # disown our own file for good (#430). The budget is derived from the block we
+    # are about to emit rather than hardcoded, so adding a field narrows what the
+    # values may spend instead of silently reopening that cliff.
+    skeleton = ["---", _MARKER, 'zotero_key: ""', 'title: ""', "imported_from: zotero"]
+    budget = _HEAD_SCAN_CHARS - len("\n---") - len("\n".join(skeleton))
+    # The key identifies the item, so it is served first and the title lives on
+    # what remains. Both are for a human reading the file — nothing reads either
+    # back (front_matter.read_scalars skips annotation sources by their marker).
+    key = _fit_scalar(key, budget)
+    title = _fit_scalar(title, budget - (len(yaml_scalar(key)) - 2))
+    lines = ["---", _MARKER, f"zotero_key: {yaml_scalar(key)}"]
     lines.append(f"title: {yaml_scalar(title)}")
     lines.append("imported_from: zotero")
-    lines.append("---\n")
+    lines.append("---")
+    lines.append("")
     lines.append(f"# Annotations — {title}\n")
 
     if highlight_blocks:
@@ -137,28 +182,36 @@ def render_annotations(parsed_bib: dict, annotations: list[dict], notes: list[di
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _is_ours(path: Path) -> bool:
-    """True only if the file's front-matter block carries the annotations marker."""
+def _not_ours_reason(path: Path) -> str:
+    """Empty if the file's front-matter block carries our marker, else why it does not.
+
+    The two refusals are reported apart because they mean different things to
+    whoever reads the skip. One is a file we can read and can tell is not ours.
+    The other is a file whose ownership is undecidable: it may be ours with front
+    matter hand-grown past the head, someone else's unterminated block, or a plain
+    document that merely opens with ``---``. Reporting the second as "not a zotero
+    notes file" asserted more than we know, and was false for our own files (#430).
+    """
     try:
         with path.open("r", encoding="utf-8") as fh:
-            head = fh.read(_HEAD_SCAN_BYTES)
+            head = fh.read(_HEAD_SCAN_CHARS)
     except OSError:
-        return False
+        return _NOT_OURS
     if not head.startswith("---"):
-        return False
+        return _NOT_OURS
     rest = head[3:]
     end = rest.find("\n---")
     if end == -1:
         # The closing fence is missing or past the scanned head, so we cannot tell
         # front matter from body. Claiming ownership here would let a marker line
         # in a user's *body* pass the overwrite gate and destroy their file. The
-        # opposite error costs a silent skip: one of our own files stops being
-        # updated, and reports "not a zotero notes file" while it does so. That is
-        # bad but recoverable, and it needs front matter over _HEAD_SCAN_BYTES to
-        # happen at all. Not knowing where the block ends means not ours.
-        return False
+        # opposite error costs a silent skip, which is bad but recoverable. Not
+        # knowing where the block ends means not ours. Our own writes stay clear of
+        # this by capping every variable field (see render_annotations), so reaching
+        # it now takes front matter someone lengthened by hand.
+        return _UNTERMINATED
     block = rest[:end]
-    return _MARKER_LINE_RE.search(block) is not None
+    return "" if _MARKER_LINE_RE.search(block) else _NOT_OURS
 
 
 def write_annotations(
@@ -187,8 +240,9 @@ def write_annotations(
     path = sources_dir / f"{base_stem}-notes.md"
 
     if path.exists():
-        if not _is_ours(path):
-            return AnnotationResult(path, "skipped", "target exists and is not a zotero notes file")
+        refusal = _not_ours_reason(path)
+        if refusal:
+            return AnnotationResult(path, "skipped", refusal)
         try:
             if path.read_text(encoding="utf-8") == content:
                 return AnnotationResult(path, "skipped", "unchanged")
