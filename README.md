@@ -2,17 +2,23 @@
 
 > 🌐 [English](README.en.md) | **한국어**
 
-> facts + logic — 문서에 적힌 주장을 **출처가 붙은 사실**로 정리하고, 그 사실들끼리
-> 어긋나는 곳을 기계적으로 찾아 주는 도구입니다.
->
-> 보고서·논문·발표자료가 쌓이면 "이 숫자 어디서 나왔더라", "지난달 문서와 올해
-> 문서가 서로 다른 말을 하는데" 같은 문제가 생깁니다. factlog는 문서에서 주장을
-> 뽑아내 **어느 파일 어느 절에서 왔는지 출처를 붙이고**, 승인된 것만 모아 모순을
-> 검사합니다.
->
-> factlog는 AI가 뽑아낸 주장을 그대로 믿지 않습니다. 판단이 필요한 사실은 검토
-> 큐에 쌓이고, 사람이 `factlog accept` 로 승인해야 검증 엔진의 입력이 됩니다.
-> 자세한 구분은 [candidate vs accepted 신뢰 경계](docs/guide/concepts.md)를 보세요.
+**facts + logic** — 문서에서 사실 주장을 뽑아내 **어느 파일 어느 절에서 왔는지
+출처를 붙이고**, 그 사실들이 서로 모순되지 않는지 자동으로 검증해 주는 도구입니다.
+주장 추출은 LLM이 맡고, 검증은 **매번 같은 결과를 내는(결정론적) 엔진**이 맡습니다
+— 검증 단계에 LLM의 추측이 끼어들지 않으므로, 같은 사실과 같은 질문에는 언제나
+같은 판정이 나옵니다. (검증 엔진은 Datalog/wirelog 기반으로 구현되어 있습니다.)
+
+지원 형식은 마크다운·일반 텍스트는 물론 Word·PDF·HWP·PowerPoint 등으로, 텍스트가
+아닌 문서는 factlog가 자동으로 텍스트로 변환한 뒤 처리합니다.
+
+뽑아낸 주장이 곧바로 사실이 되지는 않습니다. 판단이 필요한 것은 검토 큐에 쌓이고,
+사람이 `factlog accept` 로 승인해야 검증 엔진의 입력이 됩니다 —
+[candidate vs accepted 신뢰 경계](docs/guide/concepts.md).
+
+factlog는 [Claude Code](https://code.claude.com) 플러그인입니다. 세션 안에서는
+`/factlog ...` slash command로 쓰고, 사람이 직접 검토하고 승인하는 단계는 터미널에서
+Python CLI(`python3 -m factlog ...`)로 실행합니다. 두 입구 모두 같은 검증 엔진을
+호출합니다 — slash command · Python CLI · 검증 엔진, 이 셋이 한 도구입니다.
 
 ![factlog 동작 방식: Claude가 제안하고, 엔진이 검증하며, 사람이 확인합니다](docs/how-it-works.svg)
 
@@ -97,17 +103,11 @@ factlog는 [Claude Code](https://code.claude.com) **플러그인**입니다. 시
 로컬 설치(개발용), `/factlog setup` 이 하는 일, PEP 668 venv 안내, Windows Python
 실행 파일 문제는 [설치 가이드](docs/guide/install.md)를 보세요.
 
-## 두 개의 입구 — slash command 와 CLI
+## 무엇이 결정론적이고 무엇이 아닌가
 
-factlog는 세션 안에서는 `/factlog ...` slash command로 쓰고, 검토·승인 같은 사람의
-게이트는 터미널에서 Python CLI(`python3 -m factlog ...`)로 직접 실행합니다. 두 입구
-모두 같은 결정론 엔진을 호출합니다 — slash command · Python CLI · 검증 엔진, 이
-셋이 한 도구입니다.
-
-추출과 질의 초안은 LLM(세션 안의 Claude)이 맡고, 검증은 Datalog/wirelog 기반의
-**결정론적 엔진**이 맡습니다. 같은 accepted 사실 집합과 같은 쿼리에는 언제나 같은
-검증 결과가 나옵니다. 반면 문서에서 사실을 뽑아내는 추출 단계는 비결정적이라, 다시
-돌리면 결과가 달라질 수 있습니다. 무엇이 보장되고 무엇이 보장되지 않는지는
+검증은 결정론적이지만 **추출은 그렇지 않습니다.** 문서에서 사실을 뽑아내는 단계는
+LLM이 맡으므로 다시 돌리면 결과가 달라질 수 있습니다. 반대로 승인된 사실과 질의가
+같으면 검증 판정은 언제나 같습니다. 무엇이 보장되고 무엇이 보장되지 않는지는
 [결정론과 한계](docs/guide/determinism.md)에 정리되어 있습니다.
 
 ## 빠른 시작

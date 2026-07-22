@@ -2,21 +2,28 @@
 
 > 🌐 **English** | [한국어](README.md)
 
-> facts + logic — a tool that turns the claims written in your documents into
-> **facts with sources attached**, then mechanically finds the places where those
-> facts contradict each other.
->
-> Once reports, papers, and slide decks pile up, you hit questions like "where did
-> this number come from?" and "last month's document says something different from
-> this year's." factlog pulls the claims out of your documents, **attaches the file
-> and section each one came from**, and checks the approved ones for
-> contradictions.
->
-> factlog does not take the AI's word for it. Facts that need a judgement call go
-> into a review queue, and a human has to approve them with `factlog accept` before
-> they become input to the verification engine. See
-> [candidate vs accepted — the trust boundary](docs/guide/concepts.en.md) for the
-> full distinction.
+**facts + logic** — a tool that pulls factual claims out of your documents,
+**attaches the file and section each one came from**, and automatically checks that
+those facts do not contradict each other. An LLM does the extraction; a
+**deterministic engine — one that returns the same result every time** — does the
+verification. No LLM guesswork enters the verification step, so the same facts and
+the same question always produce the same verdict. (The engine is built on
+Datalog/wirelog.)
+
+Supported formats include markdown and plain text, but also Word, PDF, HWP, and
+PowerPoint — factlog converts non-text documents to text automatically before
+processing them.
+
+An extracted claim does not become a fact on its own. Anything that needs a
+judgement call goes into a review queue, and a human has to approve it with
+`factlog accept` before it becomes input to the verification engine — see
+[candidate vs accepted — the trust boundary](docs/guide/concepts.en.md).
+
+factlog is a [Claude Code](https://code.claude.com) plugin. Inside a session you use
+it through `/factlog ...` slash commands; the steps where a human reviews and
+approves you run yourself in the terminal through the Python CLI
+(`python3 -m factlog ...`). Both entry points call the same verification engine —
+slash command · Python CLI · verification engine are one tool.
 
 ![How factlog works: Claude proposes, the engine verifies, a human confirms](docs/how-it-works.svg)
 
@@ -103,19 +110,12 @@ For the local install (development), what `/factlog setup` does, PEP 668 venv
 guidance, and the Windows Python executable, see the
 [install guide](docs/guide/install.en.md).
 
-## Two entry points — slash command and CLI
+## What is deterministic and what is not
 
-Inside a session you use factlog through `/factlog ...` slash commands; human gates
-like review and approval you run yourself in the terminal through the Python CLI
-(`python3 -m factlog ...`). Both entry points call the same deterministic engine —
-slash command · Python CLI · verification engine are one tool.
-
-The LLM (Claude, inside the session) handles extraction and drafting queries; a
-**deterministic engine** built on Datalog/wirelog handles verification. The same set
-of accepted facts and the same query always yield the same verification result. The
-extraction step, by contrast, is non-deterministic — run it again and you may get
-different facts. For what is and is not guaranteed, see
-[determinism & limitations](docs/guide/determinism.en.md).
+Verification is deterministic; **extraction is not.** Pulling facts out of a document
+is the LLM's job, so running it again may give you different facts. Conversely, the
+same accepted facts and the same query always yield the same verdict. For what is and
+is not guaranteed, see [determinism & limitations](docs/guide/determinism.en.md).
 
 ## Quick start
 
