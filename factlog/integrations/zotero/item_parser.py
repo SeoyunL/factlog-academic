@@ -48,19 +48,25 @@ from factlog.text_norm import fold_decimal_digits
 # (``literal_types``, #388). The fold mechanism itself is one Unicode fact shared
 # with the CSL export boundary, so it lives in ``text_norm`` (#410).
 #
-# The pairing is per-pattern, and only two of the three are paired:
+# The pairing is per-pattern, and only two of the three are paired — so the output
+# contract is per-FIELD, not module-wide. This module does NOT promise ASCII digits:
 #
 # - ``_YEAR_RE`` / ``_PMID_RE`` -> ``extract_year`` / ``extract_pmid`` fold their
-#   capture, so those two fields leave this module ASCII (#398).
-# - ``_DOI_CORE_RE`` has NO fold. ``_doi_from_extra("DOI: 10.１２３４/abc")`` returns
-#   ``10.１２３４/abc`` verbatim (measured), so a full-width DOI does leave here, and
-#   the ``DOI`` field read straight off the item is untouched too. That is the
-#   defect ``extract_pmid``'s docstring describes and #405 tracks — but #405 fixes
-#   it at the join-key site (``normalize_cross_id``) so already-imported DOIs
-#   collide too, which means this module keeps emitting the full-width spelling
-#   even after #405 lands. Pairing ``_DOI_CORE_RE`` here would be a separate change
-#   (and only a partial one: under ISO 26324 only the ``10.<registrant>`` prefix is
-#   a decimal number, the suffix is opaque and must not be folded).
+#   capture, so ``year`` and ``pmid`` leave here ASCII (#398).
+# - ``_DOI_CORE_RE`` has NO fold, and neither has the ``DOI`` field read straight
+#   off the item, so ``doi`` leaves here in whatever digits Zotero held:
+#   ``_doi_from_extra("DOI: 10.１２３４/abc")`` returns ``10.１２３４/abc`` verbatim
+#   (measured). Pairing it here would be a separate change, and only a partial one
+#   — under ISO 26324 only the ``10.<registrant>`` prefix is a decimal number, the
+#   suffix is opaque and must not be folded.
+#
+# The consequence a non-ASCII ``doi`` has — a full-width and an ASCII spelling of
+# one paper taking different cross-source join keys, so it imports twice — belongs
+# to the join-key site, and #405 folds it there (``normalize_cross_id``) so that
+# already-imported DOIs collide too, not only newly-imported ones. Until #405 lands
+# the split is live and pinned in ``tests/unit/test_zotero_item_parser.py``. Either
+# way it is not work queued against this module: what ``_DOI_CORE_RE`` captures
+# leaves here as captured, and that is the intended contract, not a gap.
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
 # A DOI in `extra` is taken only from a line that carries a DOI label, and only
