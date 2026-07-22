@@ -58,20 +58,35 @@ A digit fold placed there would change the stored string, so the dedup keys woul
 merge and the entity split would go with them. That is a **data rewrite**, a
 different decision from this one, and it is not made here.
 
-What rejection does buy is a **report**: the value degrades to the ordinary
-"does not parse" path and surfaces at
-``common.typed_projection_outcome``'s ``typed-relations`` projection warning.
-``entity_audit``'s ``malformed typed literal`` section is a **second** exit for
-``date``/``number``/``ordinal`` — but **not for** ``amount``: today
-``entity_audit._is_malformed_compound_term`` returns early for a compound
-``amount`` whenever the relation has no ``amount`` spec, so a full-width
-``amount(１００,"억")`` reports through the projection warning ONLY. #393/#394
-narrow that exemption to unit resolution alone, judging the number-group shape
-with or without a spec; once they merge, ``amount`` gains the second exit and the
-four types behave alike. Nothing in this module changes when they do.
+What rejection does buy is a **report**, and it now has **two visible exits for all
+four types** (measured, post-#394): the value degrades to the ordinary "does not
+parse" path and surfaces both at ``common.typed_projection_outcome``'s
+``typed-relations`` projection warning and in ``entity_audit``'s ``malformed typed
+literal`` section::
+
+    _is_malformed_compound_term(v), no typed declaration
+      date(２０２０,１)      -> True
+      number(１２３)        -> True
+      ordinal(３)          -> True
+      amount(１００,"억")   -> True
+
+``amount`` reached only the first exit until #394. ``_is_malformed_compound_term``
+returned early for any compound ``amount`` under a relation with no ``amount``
+spec, so a full-width amount was refused by this module yet invisible in the audit.
+#394 narrowed that exemption to **unit resolution alone** and judges the shape
+first, so a value whose ``num`` group fails is malformed with or without a
+declaration — which is exactly the full-width case. Nothing in this module changed
+for that to happen; the coupling is one-way, and ``entity_audit`` pins it.
 
 Because a full-width digit is hard to see in a warning, the report sites append
 ``non_ascii_digits`` to name the actual offending characters.
+
+**Expect a rise in these warnings after this lands, from one known producer.**
+``zotero``'s ``extract_year`` passes a full-width year through verbatim (#398), so
+an ordinary Zotero import can write a value this module now refuses; ``csl``'s
+``_YEAR_RE`` folds one silently via ``int()`` and is the milder sibling (#399).
+Neither is fixed here. If ``does not parse`` warnings appear on records nobody
+hand-edited, #398 is the first place to look.
 """
 from __future__ import annotations
 
