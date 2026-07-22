@@ -96,5 +96,19 @@ class TestTheJoinKeyDelegatesHere:
     def test_lowercasing_first_would_give_the_same_answer(self):
         # Why the delegation is safe in either order: no decimal digit has a
         # case, so folding and lowercasing commute.
+        #
+        # A DOCUMENTATION TEST, and deliberately kept as one: it records a fact
+        # about Unicode, not a decision this code makes. It has no unique
+        # mutation coverage — measured, no mutant kills it alone; it dies only
+        # alongside seven others. `normalize_cross_id` in fact lowercases
+        # *before* folding, exactly as origin/main did, so nothing here depends
+        # on the order. The property is what would let a future reader reorder
+        # the two without fear, and it is verified over every Unicode codepoint:
+        # `Nd` characters with a case mapping, 0; non-`Nd` characters that
+        # lowercase *into* an `Nd`, 0 — the second being the one that would
+        # actually break the commutation.
+        #
+        # The neighbouring `test_case_is_preserved` is the opposite kind: it
+        # alone kills a fold-also-lowercases mutant.
         for value in ("10.１２３４/AbC", "10.1378/CHEST.128"):
             assert fold_doi_prefix(value).lower() == fold_doi_prefix(value.lower())
