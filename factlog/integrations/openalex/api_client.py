@@ -206,11 +206,20 @@ def normalize_pmid(value: str) -> str:
     unreachable input for a guarantee about what gets written — but it is a trade,
     not a free win.
 
-    Folding is no substitute *as the issue proposed it* — fold, then the existing
-    ``isdigit()`` — because ``fold_decimal_digits`` is exactly as wide as ``Nd`` by
-    design and leaves ``²`` and ``①`` alone, so ``"²²".isdigit()`` is still true
-    after. A fold followed by an ASCII check would close the hole too; that variant
-    was rejected on the grounds above, not on this one.
+    **Why folding lost, in order of weight.** The deciding grounds are the two
+    above: ``_optional`` already classes this function as a strict normalizer for
+    user input and layers the tolerance in the *wrapper*, and the codebase folds
+    upstream data it cannot ask anyone to fix while refusing what a person typed
+    (``zotero.item_parser.extract_year``, #398), folding on the derived key rather
+    than on the value it stores. Those hold against *any* folding variant.
+
+    A third, narrower observation is easy to overstate, so its scope is written
+    here: folding does not close this hole **as the issue proposed it** — fold,
+    then the existing ``isdigit()`` — because ``fold_decimal_digits`` is exactly as
+    wide as ``Nd`` by design and leaves ``²`` and ``①`` alone, so ``"²²".isdigit()``
+    is still true after. A fold followed by an ASCII check *would* close it. So
+    this point defeats one formulation of folding, not folding as such; it is not
+    why the option lost.
 
     Mirrored by ``pubmed.client``'s ``normalize_pmid``, whose callers are all
     request-side; the two share this policy so one id cannot mean different things
