@@ -18,7 +18,7 @@
 
 **슬라이드(PPT) 발표자료의 주장·근거 점검하기**
 
-- 발표 자료를 텍스트로 정리해 KB의 `sources/` 에 둔다
+- `.pptx` 파일을 그대로 KB의 `sources/` 에 둔다 (내장 변환기가 자동으로 텍스트로 바꾼다 — 슬라이드 본문만 읽고 발표자 노트는 제외하며, 표는 셀당 한 줄로 펼쳐진다. [소스 파일 형식](../reference/sources.md) 참고)
 - (Claude Code에서 실행) `/factlog sync` 로 슬라이드의 주장을 후보 사실로 뽑는다
 - (터미널에서 실행) `factlog review` 로 검토하고, 근거가 분명한 주장만 `factlog accept` 로 승인한다
 - (Claude Code에서 실행) `/factlog ask` 로 승인된 주장끼리 모순이 없는지 확인한다
