@@ -20,6 +20,8 @@ deterministically and informationally (always exit 0):
 
   4. Literal used as subject — a compound term in the subject position.
   5. Malformed typed literal — compound-term FORM the engine cannot parse.
+  6. Conflicting typed declaration — one relation form claimed by two disagreeing
+     typed-relations.md lines (its unit table is then unusable, so it is skipped).
 
 A typed literal written as a COMPOUND TERM (`date(2020,3,8)`, `number(19)`) is a
 literal by syntax alone, whatever the relation says, so it never counts as an
@@ -139,45 +141,139 @@ def _is_malformed_compound_term(value: str, spec: object | None = None) -> bool:
     `typed-relations.md` line may attach an inline table (`(파운드=1700, 원=1)`).
     Judging it against literal_types' built-in table alone called `amount(5,"파운드")`
     malformed while the engine parsed it to 8500 — an advisory tool telling a human
-    to fix correct data, which is worse than the noise this audit removes. So an
-    amount is judged ONLY through its relation's declared spec (*spec*); with no
-    spec we do not judge it at all. A miss beats a false accusation.
+    to fix correct data, which is worse than the noise this audit removes.
 
-    The type is taken from the WRAPPER NAME, not from the relation's declared type.
-    So `date(2020,1)` under a relation declared `number` reads as well-formed here
-    even though the engine, which parses by the DECLARED type, would reject it. That
-    mismatch is a separate check (relation type vs value type), not this one.
+    So exactly ONE step is exempted, and only when the table is unreadable: UNIT
+    RESOLUTION. An amount whose SHAPE already fails never reaches unit resolution,
+    so no unit table could change the verdict and it is judged with or without a
+    spec. Exempting the whole `amount` type instead (#394) silenced precisely the
+    population this section exists for: a KB writing compound terms before declaring
+    them.
+
+    SHAPE here means the WHOLE of literal_types' `_AMOUNT_COMPOUND_RE`, not just its
+    `num` group: a failed number (`amount(abc,"억")`, `amount(,"억")`), a missing
+    unit argument (`amount(5)`) and a malformed one (`amount(5,)`) are all rejected
+    before any unit lookup, so all of them are unit-table-independent alike. #394
+    proposed splitting on the `num` group specifically; the whole-regex test is a
+    superset with the same justification, and drawing the line at `num` would have
+    left the arity failures exempt for no reason.
+
+    The type is taken from the WRAPPER NAME, not from the relation's declared type,
+    for EVERY type including `amount`. So `date(2020,1)` under a relation declared
+    `number` reads as well-formed here even though the engine, which parses by the
+    DECLARED type, would reject it. That mismatch belongs to a separate check
+    (relation type vs value type) which does NOT exist yet — no caller performs it
+    today, so the blind spot is real and merely out of scope here, not covered
+    elsewhere. *spec* is consulted for one purpose only — to read
+    a unit table — so a relation declared non-`amount` supplies no table and its
+    amounts are treated exactly like the no-spec case: shape is still judged, unit
+    resolution is not. That is a narrowing of the unit exemption, not a second
+    typing rule.
     """
     type_tag = _compound_term_type(value)
     if type_tag is None:
         return False
     if type_tag == "amount":
-        units = getattr(spec, "units", None)
+        # Shape first: ANY whole-regex failure is unit-independent, so it is judged
+        # before any spec/table question. Read-only use of literal_types' regex —
+        # re-deriving the shape here would be a second definition to drift from.
+        # (A shape-only public predicate in literal_types would be the cleaner
+        # contract; that file is being changed by #388, so it is left untouched here
+        # and this stays the single private reference to relocate later.)
+        if literal_types._AMOUNT_COMPOUND_RE.match(value) is None:
+            return True
         if getattr(spec, "type", None) != "amount":
             return False
-        return literal_types.normalize(type_tag, value, units) is None
+        return literal_types.normalize(type_tag, value, getattr(spec, "units", None)) is None
     return literal_types.normalize(type_tag, value) is None
 
 
-def _typed_spec_by_form() -> dict[str, object]:
-    """Every SURFACE form naming a typed relation → its TypedRelSpec.
+def _judged_fields(spec: object | None) -> tuple[object, object]:
+    """The only parts of a TypedRelSpec that change a malformed verdict.
+
+    Kept beside `_is_malformed_compound_term` because it must mirror it exactly:
+    that function reads `type` and `units` and nothing else. `alias` names the
+    engine side-relation and never reaches a verdict, so two declarations differing
+    only there agree as far as this audit is concerned — and since common.py forbids
+    a duplicate alias, comparing it would make EVERY pair of lines differ (#393).
+
+    `units` is a dict, so this tuple is compared with `==`, never hashed.
+    """
+    return getattr(spec, "type", None), getattr(spec, "units", None)
+
+
+def _typed_spec_by_form() -> tuple[dict[str, object], dict[str, list[str]]]:
+    """Every SURFACE form naming a typed relation → its TypedRelSpec, plus the forms
+    two or more declarations disagree about.
 
     Same alias/NFC expansion as `attribute_relation_forms`: a KB that declares the
     canonical while its facts carry an alias must still find the declaration, or the
     `amount` unit table silently goes missing and every non-default unit reads as
     malformed.
+
+    That expansion makes forms COLLIDE. Declaring a canonical and its alias on
+    separate lines with different unit tables made both lines expand onto the same
+    forms, and the last one written silently won — so an amount written under the
+    CANONICAL relation was judged against the ALIAS line's table and reported
+    malformed while the engine parsed it fine (#393). A last-writer-wins map cannot
+    be right here: the two declarations are contradictory, not ordered.
+
+    So a contested form is dropped from the mapping entirely — the same treatment as
+    an undeclared relation, i.e. its amounts are not judged (a miss beats a false
+    accusation) — and returned separately so `audit` can say out loud that the KB
+    contradicts itself. Dropping alone would fix the false accusation while leaving
+    the author with no way to learn why their table stopped applying.
+
+    "Disagree" is decided on the fields this audit actually CONSUMES — `type` and
+    `units`, the only two `_is_malformed_compound_term` ever reads. Comparing whole
+    TypedRelSpecs made the carve-out below unreachable: `alias` is a field, and
+    common.py rejects a duplicate alias outright (`duplicate alias ...`), so two
+    distinct lines can never be `==`. Every canonical/alias pair would then be
+    reported as a self-contradiction and lose its table — including pairs declaring
+    the SAME unit table, which main judged correctly. That is a new false positive
+    in a fix whose whole point is removing one, so the comparison must ignore the
+    fields nothing downstream reads.
+
+    Two lines agreeing on `type` and `units` are therefore not a conflict: nothing
+    the audit consumes is contested, so the form keeps its table.
+
+    A contested form reports EVERY line that claims it, not just the two that first
+    disagreed. Recording only the disagreeing pair dropped a claimant whenever two
+    lines agreed before a third differed (the agreeing ones overwrite each other as
+    "the" declarer), so the report named 2 of 3 lines and sent the author to fix the
+    wrong ones. Claimants keep DECLARATION order — the order the author reads them
+    in typed-relations.md — which is deterministic (`typed_relations` preserves file
+    order) and more useful than an alphabetical one.
     """
     specs = typed_relations()
     if not specs:
-        return {}
+        return {}, {}
     aliases = relation_aliases()
     by_form: dict[str, object] = {}
+    # Every name claiming a form, in declaration order — the claimant list is built
+    # for all forms, not only contested ones, because a form becomes contested after
+    # some of its claimants have already been seen.
+    claimants: dict[str, list[str]] = defaultdict(list)
+    contested: set[str] = set()
     for name, spec in specs.items():
         nfc_name = unicodedata.normalize("NFC", name)
         canon = aliases.get(nfc_name, nfc_name)
-        for form in {nfc_name, canon} | surface_variants(canon, aliases):
+        # The expansion is a set; sort it so the ITERATION is reproducible. Report
+        # order does not depend on this (the return statement orders both levels),
+        # and the forms of one spec are distinct, so this is defensive only.
+        for form in sorted({nfc_name, canon} | surface_variants(canon, aliases)):
+            if nfc_name not in claimants[form]:
+                claimants[form].append(nfc_name)
+            if form in contested:
+                # Stays out of by_form no matter what a later line declares.
+                continue
+            previous = by_form.get(form)
+            if previous is not None and _judged_fields(previous) != _judged_fields(spec):
+                contested.add(form)
+                del by_form[form]
+                continue
             by_form[form] = spec
-    return by_form
+    return by_form, {form: claimants[form] for form in sorted(contested)}
 
 
 def _looks_literal(value: str) -> bool:
@@ -199,8 +295,9 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
     # advise declaring a relation that WAS already declared, just under its alias.
     literal_rels = attribute_relation_forms()
     # Read once: the `amount` unit table a relation declares (see
-    # _is_malformed_compound_term).
-    typed_by_form = _typed_spec_by_form()
+    # _is_malformed_compound_term). Forms two declarations disagree about carry no
+    # usable table and are reported instead (#393).
+    typed_by_form, typed_form_conflicts = _typed_spec_by_form()
     # Excludes declared-literal objects; compound terms go too, since their form
     # already proves they are values and pairing them is pure noise (#386).
     entities = {e for e in entity_set(facts) if not _is_compound_term(e)}
@@ -264,6 +361,7 @@ def audit(facts: list[dict[str, str]]) -> dict[str, object]:
         "literal_suspects": literal_suspects,
         "literal_subjects": sorted(literal_subjects),
         "malformed_literals": sorted(malformed_literals),
+        "typed_form_conflicts": typed_form_conflicts,
     }
 
 
@@ -289,7 +387,8 @@ def main(argv: list[str] | None = None) -> int:
         # invisible to a human scanning the summary, and to a wrapper script reading
         # this one line. Every section the audit can print is countable here.
         f"{len(a['literal_subjects'])} literal subject(s), "
-        f"{len(a['malformed_literals'])} malformed literal(s)"
+        f"{len(a['malformed_literals'])} malformed literal(s), "
+        f"{len(a['typed_form_conflicts'])} conflicting typed declaration(s)"
     )
 
     print("\nentities (fact count, statuses):")
@@ -321,6 +420,16 @@ def main(argv: list[str] | None = None) -> int:
         print("\nmalformed typed literal (compound-term form the engine cannot parse):", file=sys.stderr)
         for v in a["malformed_literals"]:
             print(f"  • '{v}' — not a value any typed relation can order or compare", file=sys.stderr)
+
+    if a["typed_form_conflicts"]:
+        # The parser accepts these declarations (exit 0), so without this section a
+        # KB author is never told the two lines contradict each other — they only
+        # see amounts stop being judged, with no cause (#393).
+        print("\nconflicting typed declaration (one relation form, two declarations):", file=sys.stderr)
+        for form, names in a["typed_form_conflicts"].items():
+            claimants = ", ".join(f"'{n}'" for n in names)
+            print(f"  • '{form}' is declared by {claimants} — amounts under it are left unjudged", file=sys.stderr)
+            print("      → keep ONE typed-relations.md line per relation (aliases share the canonical's)", file=sys.stderr)
 
     return 0
 

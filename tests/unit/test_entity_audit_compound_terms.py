@@ -227,3 +227,303 @@ class TestMalformedCompoundTerms:
         # Either way it is never an entity and never loses the declare advice.
         assert found["entities"] == ["P1"]
         assert found["literal_suspects"]["published_year"] == {"date(2020)"}
+
+
+class TestAmountShapeIsJudgedWithoutADeclaration:
+    """#394 — the unit exemption covers unit RESOLUTION, not the whole type.
+
+    A KB that writes compound terms before declaring them is the population this
+    section exists for; exempting `amount` wholesale left exactly that population
+    with no signal.
+
+    These values fail literal_types' `_AMOUNT_COMPOUND_RE` AS A WHOLE — not its
+    `num` group specifically. Two of them (`amount(abc,...)`, `amount(,...)`) do
+    fail on `num`, but `amount(5)` matches `num` fine and fails on ARITY: no unit
+    argument. The property that matters is the same for both kinds and is the whole
+    reason the shape gate precedes the spec question — a value the regex rejects
+    never reaches unit lookup, so no declaration and no unit table could change the
+    verdict.
+    """
+
+    @pytest.mark.parametrize("value", ['amount(abc,"억")', 'amount(,"억")', "amount(5)"])
+    def test_shape_failure_is_malformed_with_no_typed_declaration(self, value):
+        found = entity_audit.audit([_row("P1", "예산", value)])
+
+        assert found["malformed_literals"] == [value]
+
+    def test_fullwidth_digits_are_not_malformed_today(self):
+        """COUPLING (#388): `amount(１００,"억")` — FULL-WIDTH digits.
+
+        WILL FLIP WHEN #388 MERGES, BY DESIGN. Today `_AMOUNT_COMPOUND_RE`'s `\\d`
+        matches full-width digits, so the shape PASSES and the value falls through to
+        the unit-table question — unjudged with no spec, hence not malformed. #388
+        narrows those classes to ASCII, after which the shape FAILS and this same
+        value becomes malformed with no declaration.
+
+        That direction is #388's intent, not an accident: its own rationale names
+        this audit's malformed section as where such values must surface. So when
+        #388 lands, this test is EXPECTED to fail and the assertion below should be
+        updated to `[value]` — the failure is the notification, which is the whole
+        reason it is pinned to a concrete answer.
+
+        Deliberately NOT written as `[] if _AMOUNT_COMPOUND_RE.match(value) else ...`.
+        Deriving the expectation from the very regex under test passes no matter what
+        that regex says: it survived a simulated #388 narrowing unchanged, proving it
+        pinned nothing. A hard answer is what makes the flip observable.
+        """
+        value = 'amount(１００,"억")'
+        found = entity_audit.audit([_row("P1", "예산", value)])
+
+        assert found["malformed_literals"] == []
+        # Independent of the flip: it is compound-shaped either way, so it is never
+        # an entity and never silently dropped from the report.
+        assert value not in found["entities"]
+
+    def test_unit_resolution_failure_stays_unjudged_with_no_declaration(self):
+        # The other half of the split, and the half that keeps the fix honest: the
+        # unit table really is per-KB, so an unresolved unit must stay silent.
+        found = entity_audit.audit([_row("P1", "예산", 'amount(5,"달러")')])
+
+        assert found["malformed_literals"] == []
+
+    def test_shape_failure_is_malformed_under_a_non_amount_relation(self, monkeypatch):
+        # INFO in #394: the wrapper name decides the type for every type. A relation
+        # declared `number` supplies no unit table, so it is the no-spec case — the
+        # shape is still judged.
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {"예산": TypedRelSpec(type="number", alias="budget")},
+        )
+        found = entity_audit.audit([_row("P1", "예산", 'amount(abc,"억")')])
+
+        assert found["malformed_literals"] == ['amount(abc,"억")']
+
+    def test_a_declared_amount_of_good_shape_is_still_not_malformed(self, monkeypatch):
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {"예산": TypedRelSpec(type="amount", alias="budget", units={"파운드": 1700})},
+        )
+        found = entity_audit.audit([_row("P1", "예산", 'amount(5,"파운드")')])
+
+        assert found["malformed_literals"] == []
+
+
+def test_judged_fields_covers_every_typed_rel_spec_field():
+    """Tripwire: `_judged_fields` names a FIXED subset of TypedRelSpec's fields.
+
+    It compares `type` and `units` and deliberately ignores `alias` (an engine-side
+    name that never reaches a verdict, and one common.py forbids two lines from
+    sharing — comparing it made every pair differ, #393). That subset is only
+    correct as long as the field list is what it is today: add a field that
+    `_is_malformed_compound_term` goes on to read, and conflict detection silently
+    stops noticing declarations that disagree about it.
+
+    Nothing else fails in that case, so this asserts the field list itself. On
+    failure, decide explicitly whether the new field changes a verdict and either
+    add it to `_judged_fields` or extend the expected set here with a reason.
+    """
+    import dataclasses
+
+    from common import TypedRelSpec
+
+    assert {f.name for f in dataclasses.fields(TypedRelSpec)} == {"type", "alias", "units"}
+
+
+class TestConflictingTypedDeclarations:
+    """#393 — two declarations claiming one surface form must not silently win.
+
+    The canonical and its alias each carrying their OWN unit table made both lines
+    expand onto both forms; the last written overwrote the first, so a value written
+    under the CANONICAL was judged against the ALIAS's table and falsely reported
+    malformed. The parser accepts the pair (exit 0), so nothing else told the author.
+    """
+
+    @staticmethod
+    def _two_tables(monkeypatch):
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units={"달러": 1300}),
+            },
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+
+    def test_the_issues_reproduction_is_no_longer_a_false_accusation(self, monkeypatch):
+        self._two_tables(monkeypatch)
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "게재연도", 'amount(5,"파운드")'),
+        ])
+
+        assert found["malformed_literals"] == []
+
+    def test_the_conflict_is_reported_not_just_swallowed(self, monkeypatch):
+        # Dropping the form alone would fix the false accusation while leaving the
+        # author with no way to learn why the table stopped applying.
+        self._two_tables(monkeypatch)
+        found = entity_audit.audit([_row("P1", "published_year", 'amount(9,"파운드")')])
+
+        assert found["typed_form_conflicts"] == {
+            "published_year": ["published_year", "게재연도"],
+            "게재연도": ["published_year", "게재연도"],
+        }
+
+    def test_shape_failures_survive_a_conflicted_form(self, monkeypatch):
+        # Skipping the contested form must skip UNIT resolution only — it must not
+        # become a way to switch the whole judgement off.
+        self._two_tables(monkeypatch)
+        found = entity_audit.audit([_row("P1", "published_year", 'amount(abc,"파운드")')])
+
+        assert found["malformed_literals"] == ['amount(abc,"파운드")']
+
+    def test_agreeing_declarations_are_not_a_conflict(self, monkeypatch):
+        # Two DISTINCT objects carrying an equal table. Passing one object twice
+        # would only prove `previous is spec` and would pass even if the comparison
+        # were identity-based, so the carve-out has to be shown on separate objects.
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+            },
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "published_year", 'amount(5,"달러")'),
+        ])
+
+        assert found["typed_form_conflicts"] == {}
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+
+    def test_declarations_differing_only_in_alias_are_not_a_conflict(self, monkeypatch):
+        """The carve-out must survive the one difference real KBs ALWAYS have.
+
+        common.py raises on a duplicate alias, so two lines can never share one —
+        which means whole-spec equality made the carve-out unreachable and reported
+        a self-contradiction for agreeing declarations (a NEW false positive, worse
+        than main's last-writer-wins, which at least picked an identical table).
+        `alias` names the engine side-relation and never reaches a verdict.
+        """
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units={"파운드": 1700}),
+            },
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "게재연도", 'amount(5,"파운드")'),
+            _row("P3", "published_year", 'amount(5,"달러")'),
+        ])
+
+        # No conflict, the shared table still applies, and coverage does not regress:
+        # the genuinely unresolvable unit is still reported.
+        assert found["typed_form_conflicts"] == {}
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+
+    @staticmethod
+    def _three_lines(monkeypatch, third_units):
+        """Three lines on one canonical, DECLARED in an order that is not
+        alphabetical — so declaration order and sorted order are distinguishable."""
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "출판연도": TypedRelSpec(type="amount", alias="a3", units={"파운드": 1700}),
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units=third_units),
+            },
+        )
+        monkeypatch.setattr(
+            entity_audit,
+            "relation_aliases",
+            lambda: {"게재연도": "published_year", "출판연도": "published_year"},
+        )
+
+    def test_every_claimant_is_named_even_when_some_agree(self, monkeypatch):
+        """The first two lines AGREE; only the third differs.
+
+        Recording just the disagreeing pair dropped whichever agreeing line was
+        overwritten as "the" declarer, so the report named 2 of 3 lines — and sent
+        the author to edit the wrong ones. All three claim the form; all three are
+        named.
+        """
+        self._three_lines(monkeypatch, {"달러": 1300})
+        found = entity_audit.audit([_row("P1", "published_year", 'amount(9,"파운드")')])
+
+        assert found["typed_form_conflicts"]["published_year"] == [
+            "출판연도", "published_year", "게재연도",
+        ]
+
+    def test_report_order_is_fixed_not_incidental(self, monkeypatch):
+        """Ordering must be asserted as a LIST — dict `==` ignores key order.
+
+        Three contested forms and three claimants, so both the outer (form) and
+        inner (claimant) orderings have something to get wrong. Without this,
+        reversing either ordering in `_typed_spec_by_form` left every test passing.
+        Forms come out sorted; claimants keep declaration order, which is why the
+        fixture declares them non-alphabetically.
+        """
+        self._three_lines(monkeypatch, {"달러": 1300})
+        found = entity_audit.audit([_row("P1", "published_year", 'amount(9,"파운드")')])
+        claimants = ["출판연도", "published_year", "게재연도"]
+
+        assert list(found["typed_form_conflicts"].items()) == [
+            ("published_year", claimants),
+            ("게재연도", claimants),
+            ("출판연도", claimants),
+        ]
+
+    def test_three_agreeing_lines_are_still_not_a_conflict(self, monkeypatch):
+        # The completeness fix must not turn "seen more than once" into "contested".
+        self._three_lines(monkeypatch, {"파운드": 1700})
+        found = entity_audit.audit([
+            _row("P1", "published_year", 'amount(9,"파운드")'),
+            _row("P2", "published_year", 'amount(5,"달러")'),
+        ])
+
+        assert found["typed_form_conflicts"] == {}
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+
+    def test_an_unrelated_declaration_keeps_its_table(self, monkeypatch):
+        # The conflict must be scoped to the contested form, not disable typing.
+        from common import TypedRelSpec
+
+        monkeypatch.setattr(
+            entity_audit,
+            "typed_relations",
+            lambda: {
+                "published_year": TypedRelSpec(type="amount", alias="a1", units={"파운드": 1700}),
+                "게재연도": TypedRelSpec(type="amount", alias="a2", units={"달러": 1300}),
+                "예산": TypedRelSpec(type="amount", alias="a3", units={"파운드": 1700}),
+            },
+        )
+        monkeypatch.setattr(entity_audit, "relation_aliases", lambda: {"게재연도": "published_year"})
+        found = entity_audit.audit([
+            _row("P1", "예산", 'amount(5,"달러")'),
+            _row("P2", "예산", 'amount(5,"파운드")'),
+        ])
+
+        assert found["malformed_literals"] == ['amount(5,"달러")']
+        assert "예산" not in found["typed_form_conflicts"]
