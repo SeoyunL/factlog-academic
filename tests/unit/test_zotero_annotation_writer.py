@@ -2,8 +2,9 @@
 """Unit tests for the Zotero annotation source writer (phase 3, #28)."""
 from __future__ import annotations
 
+from factlog.integrations.zotero._textio import yaml_scalar
 from factlog.integrations.zotero.annotation_writer import (
-    _HEAD_SCAN_BYTES,
+    _HEAD_SCAN_CHARS,
     AnnotationResult,
     html_to_text,
     render_annotations,
@@ -172,7 +173,7 @@ class TestWrite:
         # is again unknowable from the head alone (#418).
         filler = "".join(f"x: {'y' * 76}\n" for _ in range(60))
         text = f"---\ntitle: My note\nsource_kind: annotations\n{filler}---\n\nbody\n"
-        assert text.index("\n---\n\nbody") > _HEAD_SCAN_BYTES
+        assert text.index("\n---\n\nbody") > _HEAD_SCAN_CHARS
         _assert_write_refused(tmp_path, text, reason="does not close inside the scanned head")
 
     def test_unterminated_and_foreign_reasons_differ(self, tmp_path):
@@ -202,20 +203,22 @@ class TestWrite:
         # now pins the invariant that replaced it — the fence lands inside the head
         # whatever the title is — while keeping the property that made the old test
         # useful: the boundary is DERIVED from the front-matter layout and then
-        # contrasted with the measured number, so a layout change or an off-by-one
-        # in the cap breaks exactly one assertion loudly instead of going vacuous.
+        # contrasted with the measured number, so it breaks loudly instead of going
+        # vacuous. Measured, rather than assumed: a layout change trips the two
+        # derived-vs-measured contrasts (this one and the zotero_key one below) and
+        # nothing else; an off-by-one in the cap trips three invariant assertions.
         probe_len = 100
         probe = render_annotations({"zotero_key": "K", "title": "T" * probe_len}, [_hl()], [])
         # The longest title still emitted verbatim is the one putting the whole
-        # "\n---" fence at exactly _HEAD_SCAN_BYTES - 4; beyond it the cap bites.
-        last_verbatim = probe_len + (_HEAD_SCAN_BYTES - 3 - probe.index("\n---", 3)) - 1
+        # "\n---" fence at exactly _HEAD_SCAN_CHARS - 4; beyond it the cap bites.
+        last_verbatim = probe_len + (_HEAD_SCAN_CHARS - 3 - probe.index("\n---", 3)) - 1
         assert last_verbatim == 4016  # measured for the current front-matter layout
 
         for title_len in (last_verbatim, last_verbatim + 1, 20000):
             title = "T" * title_len
             bib = {"zotero_key": "K", "title": title}
             text = render_annotations(bib, [_hl()], [])
-            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_BYTES
+            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_CHARS
             emitted = text.split("title: ", 1)[1].split("\n", 1)[0]
             assert (emitted == f'"{title}"') is (title_len == last_verbatim)
 
@@ -225,11 +228,17 @@ class TestWrite:
             assert res.status == "updated"  # no length disowns our own file any more
 
     def test_capped_title_is_marked_as_cut(self, tmp_path):
-        # A cut title must not read as if it were the real one.
-        text = render_annotations({"zotero_key": "K", "title": "T" * 20000}, [_hl()], [])
-        emitted = text.split("title: ", 1)[1].split("\n", 1)[0]
-        assert emitted.endswith('…"')
-        assert f"# Annotations — {emitted[1:-1]}" in text  # heading shows the same title
+        # A cut title must not read as if it were the real one, and the heading must
+        # show the same title the front matter does. Compared through yaml_scalar
+        # rather than by slicing the quotes off: the front matter carries the
+        # ESCAPED title and the heading the raw one, so a backslash-heavy title
+        # would fail a naive comparison while the code is right.
+        for title in ("T" * 20000, "\\" * 20000, 'a"b' * 8000):
+            text = render_annotations({"zotero_key": "K", "title": title}, [_hl()], [])
+            emitted = text.split("title: ", 1)[1].split("\n", 1)[0]
+            assert emitted.endswith('…"')
+            heading = next(ln for ln in text.splitlines() if ln.startswith("# Annotations — "))
+            assert yaml_scalar(heading[len("# Annotations — ") :]) == emitted
 
     def test_escape_heavy_title_is_capped_on_emitted_width(self, tmp_path):
         # yaml_scalar doubles a backslash, so counting input characters would let
@@ -237,21 +246,43 @@ class TestWrite:
         for ch in ("\\", '"', "\t"):
             bib = {"zotero_key": "K", "title": ch * 20000}
             text = render_annotations(bib, [_hl()], [])
-            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_BYTES
+            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_CHARS
             target = tmp_path / str(ord(ch))
             assert write_annotations(bib, [_hl("first")], [], "s", target).status == "written"
             res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", target)
             assert res.status == "updated"
 
     def test_long_zotero_key_shrinks_the_title_not_the_fence(self, tmp_path):
-        # The budget is shared: a longer key leaves less room for the title, and
-        # the fence stays put rather than the two together overrunning the head.
-        bib = {"zotero_key": "K" * 3000, "title": "T" * 20000}
-        text = render_annotations(bib, [_hl()], [])
-        assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_BYTES
-        assert write_annotations(bib, [_hl("first")], [], "s", tmp_path).status == "written"
-        res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", tmp_path)
-        assert res.status == "updated"
+        # The budget is shared: a longer key leaves less room for the title. Probed
+        # AT and PAST the point where the key alone would exhaust it, because that
+        # is where sharing stops being enough and the key has to be capped too —
+        # capping only the title moved the #430 cliff onto the key rather than
+        # removing it (measured: it reappeared at key_len=4018). Derived from the
+        # layout and then contrasted, like the title boundary above.
+        probe_key, probe_title = "K", "T" * 100
+        probe = render_annotations({"zotero_key": probe_key, "title": probe_title}, [_hl()], [])
+        slack = _HEAD_SCAN_CHARS - (probe.index("\n---", 3) + len("\n---"))
+        exhausts_budget = len(probe_key) + len(probe_title) + slack
+        assert exhausts_budget == 4017  # longest key still emitted verbatim, measured
+
+        for key_len in (3000, exhausts_budget, exhausts_budget + 1, 20000):
+            bib = {"zotero_key": "K" * key_len, "title": "T" * 20000}
+            text = render_annotations(bib, [_hl()], [])
+            assert text.index("\n---", 3) + len("\n---") <= _HEAD_SCAN_CHARS
+            emitted_key = text.split("zotero_key: ", 1)[1].split("\n", 1)[0]
+            assert (emitted_key == '"' + "K" * key_len + '"') is (key_len <= exhausts_budget)
+
+            target = tmp_path / str(key_len)
+            assert write_annotations(bib, [_hl("first")], [], "s", target).status == "written"
+            res = write_annotations(bib, [_hl("first"), _hl("second")], [], "s", target)
+            assert res.status == "updated"
+
+    def test_key_is_served_before_the_title(self, tmp_path):
+        # When the two cannot both fit, the key wins the budget: it identifies the
+        # item, the title only describes it.
+        text = render_annotations({"zotero_key": "K" * 2000, "title": "T" * 20000}, [_hl()], [])
+        assert '"' + "K" * 2000 + '"' in text  # key verbatim
+        assert text.split("title: ", 1)[1].split("\n", 1)[0].endswith('…"')  # title cut
 
     def test_large_body_still_detected_as_ours(self, tmp_path):
         # Our own fence sits at the top, so a body far past the scanned head must
@@ -259,7 +290,7 @@ class TestWrite:
         many = [_hl("z" * 200, page=str(i)) for i in range(40)]
         first = write_annotations(BIB, many, [], "s", tmp_path)
         assert first.status == "written"
-        assert len(first.path.read_bytes()) > _HEAD_SCAN_BYTES
+        assert len(first.path.read_bytes()) > _HEAD_SCAN_CHARS
         res = write_annotations(BIB, many + [_hl("newest")], [], "s", tmp_path)
         assert res.status == "updated"
 

@@ -48,7 +48,9 @@ from factlog.integrations.zotero._textio import (
 # and so be claimed as ours and overwritten — measured at 65536, a file with the
 # fence at 4844 goes from "skipped" back to "updated". The narrow window costs an
 # over-rejection for absurdly long front matter instead (see _not_ours_reason).
-_HEAD_SCAN_BYTES = 4096
+# Characters, not bytes: the head is read in text mode, so a multi-byte title is
+# measured the same way render_annotations budgets for it.
+_HEAD_SCAN_CHARS = 4096
 
 # Appended to a title we had to cut so the cut is visible in the file itself.
 _TRUNCATED_SUFFIX = "…"
@@ -147,18 +149,26 @@ def render_annotations(parsed_bib: dict, annotations: list[dict], notes: list[di
     if not highlight_blocks and not note_texts:
         return ""
 
+    key = _clean(parsed_bib.get("zotero_key"))
     title = _clean(parsed_bib.get("title")) or "Untitled"
-    # Marker first so it is always near the top of the scanned head.
-    head = ["---", _MARKER, f"zotero_key: {yaml_scalar(_clean(parsed_bib.get('zotero_key')))}"]
-    tail = ["imported_from: zotero", "---"]
-    # Spend whatever the rest of the block leaves on the title, so the closing
-    # fence lands inside the head _is_ours scans however long the title is. The
-    # budget is derived from the block we are about to emit rather than hardcoded:
-    # adding a field or a longer zotero_key narrows the title instead of silently
-    # pushing the fence back out of the window (#430).
-    overhead = len("\n".join([*head, 'title: ""', *tail[:-1]]))
-    title = _fit_scalar(title, _HEAD_SCAN_BYTES - len("\n---") - overhead)
-    lines = [*head, f"title: {yaml_scalar(title)}", *tail, ""]
+    # Marker first so it is always near the top of the scanned head. EVERY variable
+    # length field is capped, not just the title: whatever is left uncapped becomes
+    # the next thing that pushes the closing fence out of the head and makes us
+    # disown our own file for good (#430). The budget is derived from the block we
+    # are about to emit rather than hardcoded, so adding a field narrows what the
+    # values may spend instead of silently reopening that cliff.
+    skeleton = ["---", _MARKER, 'zotero_key: ""', 'title: ""', "imported_from: zotero"]
+    budget = _HEAD_SCAN_CHARS - len("\n---") - len("\n".join(skeleton))
+    # The key identifies the item, so it is served first and the title lives on
+    # what remains. Both are for a human reading the file — nothing reads either
+    # back (front_matter.read_scalars skips annotation sources by their marker).
+    key = _fit_scalar(key, budget)
+    title = _fit_scalar(title, budget - (len(yaml_scalar(key)) - 2))
+    lines = ["---", _MARKER, f"zotero_key: {yaml_scalar(key)}"]
+    lines.append(f"title: {yaml_scalar(title)}")
+    lines.append("imported_from: zotero")
+    lines.append("---")
+    lines.append("")
     lines.append(f"# Annotations — {title}\n")
 
     if highlight_blocks:
@@ -176,14 +186,15 @@ def _not_ours_reason(path: Path) -> str:
     """Empty if the file's front-matter block carries our marker, else why it does not.
 
     The two refusals are reported apart because they mean different things to
-    whoever reads the skip: one is someone else's file, the other is a file we
-    cannot classify at all — possibly one of ours whose front matter was hand-
-    grown past the head. Saying "not a zotero notes file" for the second was a
-    false report (#430).
+    whoever reads the skip. One is a file we can read and can tell is not ours.
+    The other is a file whose ownership is undecidable: it may be ours with front
+    matter hand-grown past the head, someone else's unterminated block, or a plain
+    document that merely opens with ``---``. Reporting the second as "not a zotero
+    notes file" asserted more than we know, and was false for our own files (#430).
     """
     try:
         with path.open("r", encoding="utf-8") as fh:
-            head = fh.read(_HEAD_SCAN_BYTES)
+            head = fh.read(_HEAD_SCAN_CHARS)
     except OSError:
         return _NOT_OURS
     if not head.startswith("---"):
@@ -196,8 +207,8 @@ def _not_ours_reason(path: Path) -> str:
         # in a user's *body* pass the overwrite gate and destroy their file. The
         # opposite error costs a silent skip, which is bad but recoverable. Not
         # knowing where the block ends means not ours. Our own writes stay clear of
-        # this by capping the title (see render_annotations), so reaching it now
-        # takes front matter someone lengthened by hand.
+        # this by capping every variable field (see render_annotations), so reaching
+        # it now takes front matter someone lengthened by hand.
         return _UNTERMINATED
     block = rest[:end]
     return "" if _MARKER_LINE_RE.search(block) else _NOT_OURS
