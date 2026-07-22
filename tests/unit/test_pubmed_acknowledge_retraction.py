@@ -310,6 +310,20 @@ class TestRefusesBeforeTheRequest:
         assert client.call_count == 0
         assert "refusing to acknowledge without a terminal" in capsys.readouterr().err
 
+    def test_no_tty_advice_scopes_yes_to_recording(self, tmp_path, fake, capsys):
+        # #429: the advice may not promise `--yes` as a general way through. It works for
+        # a record and is refused for a clear (#106), so it names the direction it buys.
+        kb = _kb(tmp_path)
+        _seed(kb, retracted=False)
+        fake(FakeClient())
+        assert run(["pubmed-acknowledge-retraction", "--id", "32738937",
+                    "--target", str(kb)]) == 1
+        err = capsys.readouterr().err
+        assert "--yes with --id to record a retraction non-interactively" in err
+        assert "--yes can only record" in err
+        # The unscoped promise this replaced must not come back.
+        assert "confirm non-interactively" not in err
+
     def test_no_ledger_is_pointed_at_backfill_before_any_request(self, tmp_path, fake, capsys):
         kb = _kb(tmp_path)
         _seed_front_matter_only(kb)  # front matter, no sidecar
@@ -373,6 +387,30 @@ class TestClearIsGatedOnAHuman:
         # The recorded retraction is left exactly as it was.
         assert _stat(sidecar_path(md, kb)) == before
         assert _ledger(md, kb)[("pubmed", "32738937")]["retracted"] is True
+
+    def test_the_two_refusals_on_a_clear_do_not_contradict(self, tmp_path, fake, capsys):
+        # #429: without a terminal, a clear is refused twice — once by the TTY gate, then
+        # again by #106 if the operator follows the advice. The first message must not
+        # send them into the second as if it were the way through.
+        kb = _kb(tmp_path)
+        md = _seed(kb, retracted=True)  # ledger records a retraction
+        before = _stat(sidecar_path(md, kb))
+        fake(FakeClient(_set(_plain_record("32738937"))))  # PubMed reversed it
+
+        base = ["pubmed-acknowledge-retraction", "--id", "32738937", "--target", str(kb)]
+        assert run(base) == 1
+        first = capsys.readouterr().err
+        assert run(base + ["--yes"]) == 1
+        second = capsys.readouterr().err
+
+        # The first refusal already says the second one's rule, so following it is a
+        # choice, not a surprise.
+        assert "--yes can only record" in first
+        assert "refusing to clear the retraction recorded for 32738937 with --yes" in second
+        # Both point at the one path that does work.
+        assert "terminal" in first and "terminal" in second
+        # Two refusals, zero writes.
+        assert _stat(sidecar_path(md, kb)) == before
 
     def test_interactive_clear_removes_the_field(self, tmp_path, fake, capsys, monkeypatch):
         kb = _kb(tmp_path)

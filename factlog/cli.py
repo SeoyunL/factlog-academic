@@ -4406,13 +4406,20 @@ def cmd_pubmed_acknowledge_retraction(args: argparse.Namespace) -> int:
     # never be guessed. `--yes` (only ever paired with the required, explicit `--id`) is the
     # deliberate act that stands in for the prompt; without it a non-interactive run refuses
     # and writes nothing. This refuses BEFORE any request is spent.
+    #
+    # The message scopes what `--yes` can do rather than promising it outright (#429): a
+    # clear is refused under `--yes` too (#106), but whether THIS id is a clear needs the
+    # upstream value, which only the fetch this gate exists to avoid can supply. So the
+    # advice is narrowed unconditionally instead of branching on a value we cannot read.
     assume_yes = getattr(args, "yes", False)
     if not assume_yes and not sys.stdin.isatty():
         print(
             f"factlog {command}: refusing to acknowledge without a terminal to confirm "
             "at. This silences PubMed's retraction signal for one id. Re-run in a "
-            "terminal, or pass --yes with --id to confirm non-interactively. Nothing "
-            "written.",
+            "terminal, or pass --yes with --id to record a retraction "
+            "non-interactively. --yes can only record: clearing a retraction the "
+            "ledger already carries needs a human at the prompt, so a clear will "
+            "refuse again under --yes. Nothing written.",
             file=sys.stderr,
         )
         return 1
@@ -5460,13 +5467,20 @@ def cmd_arxiv_acknowledge_withdrawal(args: argparse.Namespace) -> int:
     # (only ever paired with the required, explicit `--id`) is the deliberate act that
     # stands in for the prompt; without it, a non-interactive run refuses and writes
     # nothing. There is no `--all` and no wildcard: the blast radius is one id.
+    #
+    # The message scopes what `--yes` can do rather than promising it outright (#429): a
+    # clear is refused under `--yes` too (#106), but whether THIS id is a clear needs the
+    # upstream value, which only the fetch this gate exists to avoid can supply. So the
+    # advice is narrowed unconditionally instead of branching on a value we cannot read.
     assume_yes = getattr(args, "yes", False)
     if not assume_yes and not sys.stdin.isatty():
         print(
             f"factlog {command}: refusing to acknowledge without a terminal to confirm "
             "at. This silences arXiv's withdrawal signal for one id. Re-run in a "
-            "terminal, or pass --yes with --id to confirm non-interactively. Nothing "
-            "written.",
+            "terminal, or pass --yes with --id to record a withdrawal "
+            "non-interactively. --yes can only record: clearing a withdrawal the "
+            "ledger already carries needs a human at the prompt, so a clear will "
+            "refuse again under --yes. Nothing written.",
             file=sys.stderr,
         )
         return 1
@@ -6148,13 +6162,20 @@ def cmd_openalex_acknowledge_retraction(args: argparse.Namespace) -> int:
     # refuses and writes nothing. There is no `--all` and no wildcard: the blast radius is
     # one id. This refuses BEFORE the query, so no request is spent on a run that cannot
     # confirm.
+    #
+    # The message scopes what `--yes` can do rather than promising it outright (#429): a
+    # clear is refused under `--yes` too (#106), but whether THIS id is a clear needs the
+    # upstream value, which only the fetch this gate exists to avoid can supply. So the
+    # advice is narrowed unconditionally instead of branching on a value we cannot read.
     assume_yes = getattr(args, "yes", False)
     if not assume_yes and not sys.stdin.isatty():
         print(
             f"factlog {command}: refusing to acknowledge without a terminal to confirm "
             "at. This silences OpenAlex's retraction signal for one id. Re-run in a "
-            "terminal, or pass --yes with --id to confirm non-interactively. Nothing "
-            "written.",
+            "terminal, or pass --yes with --id to record a retraction "
+            "non-interactively. --yes can only record: clearing a retraction the "
+            "ledger already carries needs a human at the prompt, so a clear will "
+            "refuse again under --yes. Nothing written.",
             file=sys.stderr,
         )
         return 1
