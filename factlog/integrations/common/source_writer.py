@@ -67,6 +67,7 @@ from factlog.integrations.common.provenance import (
     sidecar_path,
     write_provenance,
 )
+from factlog.text_norm import fold_decimal_digits
 
 # Byte budgets for the filename (most filesystems cap a name at 255 bytes).
 # Author and title are individually bounded, then the whole stem is capped with
@@ -230,11 +231,56 @@ def build_slug(author: str, year: str, title: str) -> str:
     return f"{byte_trunc(f'{author_slug}-{year_slug}-{title_slug}', STEM_MAX_BYTES)}.md"
 
 
+# A DOI prefix, ASCII-spelled: ``10.`` then the registrant code. The trailing
+# ``(?:\.[0-9]+)*`` is not decoration — the DOI Handbook (2.2.2) lets a registrant
+# subdivide its code (``10.1000.10``), and each part is still a decimal number, so
+# a grammar narrower than the spec would leave exactly the DOIs this fix is about
+# splitting into two files.
+_DOI_PREFIX_RE = re.compile(r"10\.[0-9]+(?:\.[0-9]+)*")
+
+
+def _normalize_doi(value: str) -> str:
+    """Comparison form of a DOI: lowercased, prefix digits folded to ASCII.
+
+    The **prefix is normalized, the suffix is preserved** (#405), and the split is
+    the **first** ``/`` — a DOI suffix may itself contain slashes (``10.1002/x/y``),
+    and all of them belong to the opaque half. Under ISO 26324 the registrant code
+    in ``10.<registrant>`` is a decimal number, so ``10.１２３４`` is a *spelling* of
+    ``10.1234`` and the two name one registrant — the same argument that lets the
+    parser fold a PMID. The suffix is an opaque string, where respelling a
+    character would invent a different identifier, so it passes through byte for
+    byte even when it holds non-ASCII digits.
+
+    Folded only when the folded head is exactly a DOI prefix; anything else (a
+    ``doi.org`` URL or a ``doi:`` label left in a hand-edited file, plain junk) is
+    returned merely lowercased, so this cannot quietly rewrite a value it does not
+    understand.
+
+    A value with **no** slash is likewise only lowercased, deliberately: with no
+    suffix to delimit it, there is nothing to distinguish a bare prefix from junk
+    that happens to start with digits, and a DOI missing its suffix is not a DOI
+    that could match anything anyway.
+    """
+    lowered = value.lower()
+    head, slash, suffix = lowered.partition("/")
+    if not slash:
+        return lowered
+    folded = fold_decimal_digits(head)
+    if not _DOI_PREFIX_RE.fullmatch(folded):
+        return lowered
+    return f"{folded}{slash}{suffix}"
+
+
 def normalize_cross_id(kind: str, value: str) -> str:
     """Canonical comparison form for a cross-source identifier.
 
     DOIs are case-insensitive, so a Zotero record's ``10.1378/CHEST...`` must
     match OpenAlex's lowercased form; otherwise the same paper imports twice.
+    They are also digit-spelling-insensitive in the prefix — see
+    :func:`_normalize_doi`, which is the single place that decides what a DOI
+    join key looks like. The import paths keep writing the DOI they were given;
+    normalizing here, on the derived key, means an *already imported* full-width
+    DOI collides too, which a fix at ``_DOI_CORE_RE`` would not achieve.
 
     An ``arxiv_id`` is canonicalised the way :func:`normalize_arxiv_id` does —
     version stripped, subject class dropped, archive lowercased — so
@@ -256,7 +302,7 @@ def normalize_cross_id(kind: str, value: str) -> str:
     """
     normalized = value.strip()
     if kind == "doi":
-        return normalized.lower()
+        return _normalize_doi(normalized)
     if kind == "arxiv_id":
         try:
             return normalize_arxiv_id(normalized).base

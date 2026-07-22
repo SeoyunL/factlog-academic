@@ -67,7 +67,7 @@ class TestFoldDecimalDigits:
             assert fold_decimal_digits(once) == once
 
     def test_folds_substrings_and_groups_independently(self):
-        # #405 will fold a DOI *prefix* only, leaving the opaque suffix alone, so
+        # #405 folds a DOI *prefix* only, leaving the opaque suffix alone, so
         # the fold must be usable on a slice or a regex group. It is, because it
         # is per-character: folding a part equals the same part of the folded
         # whole. This asserts the property, not #405's behaviour.

@@ -157,37 +157,31 @@ class TestPmidAndDoi:
         assert extract_pmid("PMID: １23４567") == "1234567"
         assert literal_types.parse_number(extract_pmid("PMID: １２３４５６７")) == 1234567
 
-    def test_doi_digits_are_not_normalized_known_limitation(self):
-        # CHARACTERIZATION, NOT AN ENDORSEMENT. This pins what the code does
-        # today so a future fix is a visible, intentional change — it does not
-        # assert that today's behaviour is right. It is not.
+    def test_doi_is_stored_as_given_and_folded_only_in_the_join_key(self):
+        # The parser stores the DOI the library gave it, unchanged. Folding at
+        # `_DOI_CORE_RE` would fix only *newly* imported records, so #405 put the
+        # fold at the join-key site (`normalize_cross_id`) instead, where a
+        # full-width DOI already sitting in `sources/` collides too. This pins
+        # that division of labour: parser preserves, join key normalizes.
         #
-        # Under ISO 26324 a DOI prefix `10.<registrant>` is a decimal number
-        # (`_DOI_CORE_RE` spells it `10\.\d+/`); only the suffix is opaque. So
-        # the same "it is a number, respell it" argument that justifies
-        # normalizing PMID applies to the DOI *prefix*, and leaving it produces
-        # a real defect: `normalize_cross_id` only strips/lowercases, so the
-        # two spellings below are different join keys and one paper imports as
-        # two files. DOI is the primary cross-source join key, so later
-        # OpenAlex/PubMed imports (always ASCII) then fail to match in silence.
+        # Until #405 this was a "CHARACTERIZATION, NOT AN ENDORSEMENT" pin
+        # asserting the two spellings were *different* join keys — the defect
+        # that imported one paper as two files. They now collide.
         #
-        # Pre-existing, out of scope for #398 (which fixes the producer of the
-        # #388 warnings), tracked as #405. That issue leaves the site open — its
-        # stated preference is the join-key site (`normalize_cross_id`), with a
-        # fold here at `_DOI_CORE_RE` listed as the alternative. On the preferred
-        # outcome only the `normalize_cross_id` assertion below inverts, because
-        # this module goes on emitting the full-width spelling: neither
-        # `_DOI_CORE_RE` nor the raw `DOI` field is paired with a fold the way
-        # `_YEAR_RE`/`_PMID_RE` are (#410). If #405 lands on the import site
-        # instead, the two `parse_item` assertions invert as well.
+        # This module still emits the full-width spelling, and that is not an
+        # oversight: neither `_DOI_CORE_RE` nor the raw `DOI` field is paired
+        # with a fold the way `_YEAR_RE`/`_PMID_RE` are (#410). The two DOI
+        # sources are independent, so a fold at `_DOI_CORE_RE` alone would have
+        # missed the raw-field path entirely — one more reason the fold belongs
+        # at the single join-key site.
         out = parse_item(_item(DOI="10.１２３４/abc"))
         assert out["doi"] == "10.１２３４/abc"
         # Same on the `extra` fallback path, so the leak is not specific to one
         # of the two DOI sources.
         assert parse_item(_item(extra="DOI: 10.１２３４/abc"))["doi"] == "10.１２３４/abc"
-        # The defect this leaves behind, pinned explicitly so it cannot be
-        # mistaken for intended behaviour:
-        assert normalize_cross_id("doi", "10.１２３４/abc") != normalize_cross_id(
+        # And the join key folds both spellings together regardless, which is
+        # what keeps the leak above from splitting a paper across two files.
+        assert normalize_cross_id("doi", "10.１２３４/abc") == normalize_cross_id(
             "doi", "10.1234/abc"
         )
 

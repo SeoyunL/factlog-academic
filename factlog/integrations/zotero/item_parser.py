@@ -60,23 +60,20 @@ from factlog.text_norm import fold_decimal_digits
 #   — under ISO 26324 only the ``10.<registrant>`` prefix is a decimal number, the
 #   suffix is opaque and must not be folded.
 #
-# The consequence a non-ASCII ``doi`` has — a full-width and an ASCII spelling of
-# one paper taking different cross-source join keys, so it imports twice — is
-# tracked as #405. That issue lists TWO candidate sites and leaves the choice open:
-# folding the prefix here at ``_DOI_CORE_RE``, or folding at the join-key site
-# (``normalize_cross_id``). Its stated preference is the join-key site, because a
+# The consequence a non-ASCII ``doi`` once had — a full-width and an ASCII spelling
+# of one paper taking different cross-source join keys, so it imported twice — was
+# #405, and it is fixed at the join-key site (``normalize_cross_id``), not here. A
 # join key is a derived comparison value rather than a stored one, so normalizing
-# there also collides already-imported DOIs instead of only newly-imported ones. If
-# it lands that way this module keeps emitting the full-width spelling; if it lands
-# on the import site instead, the fold belongs right here. Until then the split is
-# live and pinned in ``tests/unit/test_zotero_item_parser.py``.
+# there also collides DOIs already sitting in ``sources/`` instead of only
+# newly-imported ones — and it covers both DOI paths at once, which a fold at
+# ``_DOI_CORE_RE`` could not have done. So this module goes on emitting whatever
+# spelling Zotero held, by design.
 #
-# On the join-key outcome, the verbatim spelling that stays in ``doi`` is NOT a
-# residual defect — it is provenance. The join key is the thing that had to be
-# normalized; the stored value keeping the source's own spelling is what lets a
-# reader see what Zotero actually held. Whether to fold the stored value anyway is
-# a separate question with its own worth-it judgement, and it is #420, not a gap
-# this module is silently leaving open.
+# That verbatim spelling is NOT a residual defect — it is provenance. The join key
+# is the thing that had to be normalized; the stored value keeping the source's own
+# spelling is what lets a reader see what Zotero actually held. Whether to fold the
+# stored value anyway is a separate question with its own worth-it judgement, and it
+# is #420, not a gap this module is silently leaving open.
 _YEAR_RE = re.compile(r"\d{4}")
 _PMID_RE = re.compile(r"\bPMID\s*[:=]?\s*(\d+)", re.IGNORECASE)
 # A DOI in `extra` is taken only from a line that carries a DOI label, and only
@@ -139,21 +136,18 @@ def extract_pmid(extra: object) -> str:
     of the same identifier and converting it yields the PubMed record actually
     meant.
 
-    **The DOI path is left alone for scope, not because it is correct.** An earlier
-    draft of this note claimed DOIs are opaque and therefore must not be touched.
-    That is only half true and the half it gets wrong matters: under ISO 26324 a DOI
-    prefix ``10.<registrant>`` is a *decimal* number — ``_DOI_CORE_RE`` even spells
-    it ``10\\.\\d+/`` — and only the suffix is an opaque string. So the honest
-    asymmetry is "normalize the prefix, preserve the suffix", not "leave DOIs
-    alone", and a full-width DOI really is broken today: ``normalize_cross_id``
-    only strips and lowercases, so ``10.１２３４/abc`` and ``10.1234/abc`` are
-    different join keys and the same paper imports as two files. DOI is the primary
-    cross-source join key, so this silently defeats later OpenAlex/PubMed matching.
-    That is a pre-existing bug, out of scope here, and tracked as #405 — see
-    ``tests/unit/test_zotero_item_parser.py`` for the pinned current behaviour.
-    The likely fix belongs at the join-key site (``normalize_cross_id``) rather
-    than here at ``_DOI_CORE_RE``, so that already-imported full-width DOIs
-    collide correctly too instead of only newly-imported ones.
+    **The DOI path is deliberately left alone, and is not broken by that.** An
+    earlier draft of this note claimed DOIs are opaque and therefore must not be
+    touched. That is only half true: under ISO 26324 a DOI prefix
+    ``10.<registrant>`` is a *decimal* number — ``_DOI_CORE_RE`` even spells it
+    ``10\\.\\d+/`` — and only the suffix is an opaque string, so the honest
+    asymmetry is "normalize the prefix, preserve the suffix". #405 applies that
+    asymmetry at the join-key site
+    (:func:`~factlog.integrations.common.source_writer.normalize_cross_id`), not
+    here, so a full-width DOI **already sitting in** ``sources/`` collides with
+    the ASCII one too; folding at ``_DOI_CORE_RE`` would have fixed only newly
+    imported records. This function keeps the DOI exactly as the library spelled
+    it, and the derived comparison key does the folding.
     """
     if not isinstance(extra, str):
         return ""
