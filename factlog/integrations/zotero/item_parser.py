@@ -69,8 +69,14 @@ def _ascii_digits(run: str) -> str:
 
     Only ever called on text captured by a ``\\d`` group, and Python's ``\\d`` is
     exactly the Unicode ``Nd`` (decimal number) category — every member of which
-    has a defined decimal value — so ``unicodedata.digit`` is total here and the
-    function cannot raise. Verified against all 680 code points ``\\d`` matches.
+    has a defined decimal value by definition — so ``unicodedata.digit`` is total
+    here and the function cannot raise. That argument is what carries the totality;
+    it does not depend on the size of ``Nd``, which grows with each Unicode
+    revision. (Spot-checked exhaustively over ``Nd`` under Unicode 15.0.0.)
+
+    The precondition is real, though: this is a helper for ``\\d`` captures, not a
+    general-purpose sanitizer. Handed a non-``Nd`` character it raises
+    ``ValueError`` rather than passing it through.
 
     Deliberately NOT ``NFKC``, for two measured reasons:
 
@@ -101,6 +107,15 @@ def extract_year(date: object) -> str:
     ``２０２０-06-01`` match nothing at all (no 4-run of ASCII digits survives), so
     ``year`` would silently go empty and lose a fact the source did state. Keeping
     the wide match and converting preserves the year.
+
+    **Side effect on slugs, in both directions.** ``year`` feeds the source slug,
+    and ``slugify("２０２０")`` is ``"item"`` — so a legacy full-width import landed
+    at ``kim-item-paper-one.md``. After this change the same record slugs as
+    ``kim-2020-paper-one.md``: the broken name is repaired for new imports, which is
+    a real (and unplanned) gain beyond silencing the warning. The cost is that the
+    slug *moves*. On the default path ``skip_duplicates=True`` catches the record by
+    ``zotero_key`` first, so nothing extra is written; with ``skip_duplicates=False``
+    a re-import writes a second file under the new name and the old one remains.
     """
     match = _YEAR_RE.search(date) if isinstance(date, str) else None
     return _ascii_digits(match.group(0)) if match else ""
@@ -114,9 +129,20 @@ def extract_pmid(extra: object) -> str:
     ASCII-normalized for the same reason as :func:`extract_year`, and safely so: a
     PMID is by definition a decimal integer, so a non-ASCII spelling is a rendering
     of the same identifier and converting it yields the PubMed record actually
-    meant. The DOI path is deliberately left alone — a DOI suffix is an opaque
-    string, not a number, so rewriting its characters would fabricate a *different*
-    identifier rather than respell the same one.
+    meant.
+
+    **The DOI path is left alone for scope, not because it is correct.** An earlier
+    draft of this note claimed DOIs are opaque and therefore must not be touched.
+    That is only half true and the half it gets wrong matters: under ISO 26324 a DOI
+    prefix ``10.<registrant>`` is a *decimal* number — ``_DOI_CORE_RE`` even spells
+    it ``10\\.\\d+/`` — and only the suffix is an opaque string. So the honest
+    asymmetry is "normalize the prefix, preserve the suffix", not "leave DOIs
+    alone", and a full-width DOI really is broken today: ``normalize_cross_id``
+    only strips and lowercases, so ``10.１２３４/abc`` and ``10.1234/abc`` are
+    different join keys and the same paper imports as two files. DOI is the primary
+    cross-source join key, so this silently defeats later OpenAlex/PubMed matching.
+    That is a pre-existing bug, out of scope here, and tracked separately — see
+    ``tests/unit/test_zotero_item_parser.py`` for the pinned current behaviour.
     """
     if not isinstance(extra, str):
         return ""

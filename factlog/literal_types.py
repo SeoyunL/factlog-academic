@@ -81,15 +81,22 @@ for that to happen; the coupling is one-way, and ``entity_audit`` pins it.
 Because a full-width digit is hard to see in a warning, the report sites append
 ``non_ascii_digits`` to name the actual offending characters.
 
-**One known producer fed this, and no longer does.** ``zotero``'s ``extract_year``
-passed a full-width year through verbatim, so an ordinary Zotero import could write
-a value this module refuses; #398 normalizes it (and ``extract_pmid``) to ASCII at
-the import boundary instead. The split is intentional: a hand-written literal is
-refused so the author sees it, while an imported one is normalized, because there
-the odd digit comes from an external library the user cannot edit from inside
-factlog. ``csl``'s ``_YEAR_RE`` folds one silently via ``int()`` and is the milder
-sibling (#399). If ``does not parse`` warnings still appear on records nobody
-hand-edited, look for a writer that skipped that boundary.
+**One known producer stopped feeding this, for new imports only.** ``zotero``'s
+``extract_year`` passed a full-width year through verbatim, so an ordinary Zotero
+import could write a value this module refuses; #398 normalizes it (and
+``extract_pmid``) to ASCII at the import boundary instead. The split is intentional:
+a hand-written literal is refused so the author sees it, while an imported one is
+normalized, because there the odd digit comes from an external library the user
+cannot edit from inside factlog. ``csl``'s ``_YEAR_RE`` folds one silently via
+``int()`` and is the milder sibling (#399).
+
+**Sources imported before #398 are not repaired and do not self-heal.** They keep
+their full-width ``year:`` and go on producing these warnings, and re-running the
+import does not fix them — the record is recognised by ``zotero_key`` and reported
+``skipped``, so the stale value is never rewritten. Recovery is deliberate: edit the
+``year:`` by hand, or force a re-import of that record. So if ``does not parse``
+warnings appear on records nobody hand-edited, **the first thing to check is whether
+the source predates #398**, not whether some writer skipped the boundary.
 """
 from __future__ import annotations
 

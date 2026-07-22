@@ -9,6 +9,7 @@ retracted tags, creator/tag order preservation).
 from __future__ import annotations
 
 from factlog import literal_types
+from factlog.integrations.common.source_writer import normalize_cross_id
 from factlog.integrations.zotero.item_parser import (
     _YEAR_RE,
     ItemParser,
@@ -156,12 +157,29 @@ class TestPmidAndDoi:
         assert extract_pmid("PMID: １23４567") == "1234567"
         assert literal_types.parse_number(extract_pmid("PMID: １２３４５６７")) == 1234567
 
-    def test_doi_digits_are_left_alone(self):
-        # Deliberate asymmetry: a DOI is an opaque identifier, not a number.
-        # Rewriting its characters would name a *different* DOI, so the odd
-        # spelling is preserved for a human to see rather than silently altered.
+    def test_doi_digits_are_not_normalized_known_limitation(self):
+        # CHARACTERIZATION, NOT AN ENDORSEMENT. This pins what the code does
+        # today so a future fix is a visible, intentional change — it does not
+        # assert that today's behaviour is right. It is not.
+        #
+        # Under ISO 26324 a DOI prefix `10.<registrant>` is a decimal number
+        # (`_DOI_CORE_RE` spells it `10\.\d+/`); only the suffix is opaque. So
+        # the same "it is a number, respell it" argument that justifies
+        # normalizing PMID applies to the DOI *prefix*, and leaving it produces
+        # a real defect: `normalize_cross_id` only strips/lowercases, so the
+        # two spellings below are different join keys and one paper imports as
+        # two files. DOI is the primary cross-source join key, so later
+        # OpenAlex/PubMed imports (always ASCII) then fail to match in silence.
+        #
+        # Pre-existing, out of scope for #398 (which fixes the producer of the
+        # #388 warnings), tracked as a follow-up issue.
         out = parse_item(_item(DOI="10.１２３４/abc"))
         assert out["doi"] == "10.１２３４/abc"
+        # The defect this leaves behind, pinned explicitly so it cannot be
+        # mistaken for intended behaviour:
+        assert normalize_cross_id("doi", "10.１２３４/abc") != normalize_cross_id(
+            "doi", "10.1234/abc"
+        )
 
     def test_doi_prefers_data_field(self):
         out = parse_item(_item(DOI="10.1/x", extra="DOI: 10.2/y"))
