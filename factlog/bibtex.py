@@ -204,8 +204,14 @@ def read_front_matter(path: Path | str) -> dict:
             if not head.startswith("---"):
                 # No opening fence: nothing to find, and no reason to read the body.
                 return {}
-            # Re-scan the accumulated text each pass, so a fence straddling a chunk
-            # boundary is still found.
+            # Stop as soon as the accumulated text holds a fence. Scanning the
+            # accumulation rather than the latest chunk is a *read budget*, not a
+            # correctness property: ``parse_front_matter`` searches all of ``head``
+            # either way, so a straddling fence missed here would not be lost —
+            # the loop would just keep reading, to EOF or to the cap, whichever
+            # comes first. On a 3.6MB file whose fence straddles the first chunk
+            # boundary that is 16,384 chars read against 1,048,576, for the same
+            # 8188-char block and the same dict.
             while "\n---" not in head[3:] and len(head) < _FRONT_MATTER_MAX_CHARS:
                 chunk = fh.read(_FRONT_MATTER_CHUNK_CHARS)
                 if not chunk:
