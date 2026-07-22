@@ -21,8 +21,8 @@ under a second name, which is how the two integrations drifted apart in the firs
 still true; #406 closed three of the holes, not the set. ``_openalex_show_results``,
 ``_arxiv_show_results`` and ``_pubmed_show_results`` (``cli.py``) printed their ``result``
 rows with bare f-strings until #406 routed the id and title through this function — but
-at least five positional emitters remain open, measured on the tree that closed those
-three:
+at least five positional emitters remain open (#416), measured on the tree that closed
+those three:
 
 * ``cli.py`` lines 4739 and 4954, ``print(f"query\\t{composed}")`` — carries the user's
   own ``--query`` argument. Measured: ``arxiv-search --query $'a\\tb' --show-query
