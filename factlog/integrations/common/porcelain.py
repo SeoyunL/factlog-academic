@@ -17,14 +17,14 @@ Porcelain named the rule; it is not the only place that needs it. A stderr warni
 second contract (#396) — and such a caller reuses this rule rather than growing a near-copy
 under a second name, which is how the two integrations drifted apart in the first place.
 
-**Not every porcelain emitter is gated (#406).** ``_openalex_show_results``,
-``_arxiv_show_results`` and ``_pubmed_show_results`` (``cli.py``) print their ``result``
-rows with bare f-strings, so the *first* contract above is open in all three search
-commands. Out of scope for #396, which fixed the warning path in one of them; recorded
-here so the gap is not mistaken for a checked path.
+``_openalex_show_results``, ``_arxiv_show_results`` and ``_pubmed_show_results``
+(``cli.py``) printed their ``result`` rows with bare f-strings until #406 routed the id
+and title through this function. That gap was out of scope for #396, which fixed the
+warning path in one of the three; it stood recorded here in the meantime so it would not
+be mistaken for a checked path.
 
-Note what kind of gap that is, because this module has now seen both kinds. Those three
-are **ungated** — no neutralization at all. The three ``*-backfill-provenance`` commands
+Note what kind of gap that was, because this module has now seen both kinds. Those three
+were **ungated** — no neutralization at all. The three ``*-backfill-provenance`` commands
 were something worse to review: **stale, not ungated**. Each kept its own local copy of
 the tab/CR/LF rule, which *looked* checked while silently falling behind when #396 widened
 the shared set, so eight characters it now neutralizes still split those rows in two. They

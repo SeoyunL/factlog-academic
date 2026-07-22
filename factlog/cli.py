@@ -3576,13 +3576,19 @@ def _openalex_check_limit(args, config, command: str) -> bool:
 
 def _openalex_show_results(works, count: int, *, porcelain: bool, scope: str = "",
                            heading: str = "") -> None:
+    from factlog.integrations.common.porcelain import porcelain_field
+
     if porcelain:
         # `scope` distinguishes the two directions of openalex-cite, which emit
         # two result blocks into one stream; openalex-search leaves it empty.
         prefix = f"\t{scope}" if scope else ""
         for index, work in enumerate(works, 1):
             flag = "retracted" if work.openalex_is_retracted else "-"
-            print(f"result{prefix}\t{index}\t{work.openalex_id}\t{flag}\t{work.title or ''}")
+            # Id and title are upstream data: a tab adds a column and a line break
+            # splits the row, either way a positional consumer reads the wrong
+            # field (#406).
+            print(f"result{prefix}\t{index}\t{porcelain_field(work.openalex_id)}\t{flag}\t"
+                  f"{porcelain_field(work.title or '')}")
         print(f"found{prefix}\t{count}")
         return
 
@@ -4578,13 +4584,18 @@ def _arxiv_show_results(works, total: int, *, porcelain: bool) -> None:
     an error (contrast an id_list miss).
     """
     from factlog.integrations.arxiv.source_writer import withdrawal_agent
+    from factlog.integrations.common.porcelain import porcelain_field
 
     if porcelain:
         # The agent that withdrew a paper is a prose warning, so it goes to
         # stderr, keeping the machine contract on stdout clean (see below).
         for index, work in enumerate(works, 1):
             flag = "withdrawn" if work.withdrawn else "-"
-            print(f"result\t{index}\t{work.versioned_id}\t{flag}\t{work.title or ''}")
+            # Id and title are upstream data: a tab adds a column and a line break
+            # splits the row, either way a positional consumer reads the wrong
+            # field (#406).
+            print(f"result\t{index}\t{porcelain_field(work.versioned_id)}\t{flag}\t"
+                  f"{porcelain_field(work.title or '')}")
         print(f"found\t{total}")
         return
 
@@ -4796,10 +4807,16 @@ def _pubmed_show_results(works, count: int, *, porcelain: bool,
     is a legitimate answer, so it prints a plain "0 results"; whether that zero is
     *suspicious* is surfaced separately on stderr by the silent-zero guard.
     """
+    from factlog.integrations.common.porcelain import porcelain_field
+
     if porcelain:
         for index, work in enumerate(works, 1):
             flag = "retracted" if work.retracted else "-"
-            print(f"result\t{index}\t{work.pmid}\t{flag}\t{work.title or ''}")
+            # Pmid and title are upstream data: a tab adds a column and a line break
+            # splits the row, either way a positional consumer reads the wrong
+            # field (#406).
+            print(f"result\t{index}\t{porcelain_field(work.pmid)}\t{flag}\t"
+                  f"{porcelain_field(work.title or '')}")
         print(f"found\t{count}")
         return
 
