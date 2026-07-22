@@ -91,3 +91,37 @@ def test_the_report_and_the_projection_cannot_disagree():
         assert (reason is not None) is drops, value
         warned = bool(typed_projection_warnings([row("A", "rank", value)], SPECS))
         assert warned is drops, f"report and projection disagree on {value!r}"
+
+
+class TestFullWidthDigitsAreReported:
+    """A full-width literal no longer parses (#388), so it must reach the report —
+    and the report must name the offending characters.
+
+    Without the second half the warning reads `date(２０２０,１) does not parse as
+    date`, which in a terminal is indistinguishable from a value that is fine. A
+    human would look for a typo that is not there.
+    """
+
+    SPECS = {"pub": TypedRelSpec(type="date", alias="pubdate")}
+
+    def test_full_width_object_is_warned(self):
+        warns = typed_projection_warnings([row("A", "pub", "date(２０２０,１)")], self.SPECS)
+        assert len(warns) == 1
+        assert "does not parse as date" in warns[0]
+        assert "EXCLUDED" in warns[0]
+
+    def test_warning_names_the_offending_digits(self):
+        warns = typed_projection_warnings([row("A", "pub", "date(２０２０,１)")], self.SPECS)
+        assert "non-ASCII digit" in warns[0]
+        # the actual characters, so a human can find and replace them
+        for ch in "２０１":
+            assert ch in warns[0]
+
+    def test_ascii_equivalent_stays_silent(self):
+        assert typed_projection_warnings([row("A", "pub", "date(2020,1)")], self.SPECS) == []
+
+    def test_ordinary_parse_failure_does_not_claim_a_digit_problem(self):
+        """The hint is conditional: a plain bad value must not be blamed on digits."""
+        warns = typed_projection_warnings([row("A", "pub", "date(abc)")], self.SPECS)
+        assert len(warns) == 1
+        assert "non-ASCII digit" not in warns[0]

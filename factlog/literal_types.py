@@ -9,7 +9,9 @@ scalar**. This module is **pure**: no engine, no I/O, no ``pyrewire`` import.
 Contract for every parser:
 - returns the canonical scalar, or ``None`` if the string does not parse as that
   type (the caller emits a warning and loads the fact untyped);
-- never raises on bad input, and never guesses.
+- never raises on bad input, and never guesses;
+- reads **ASCII digits only** — a full-width/other Unicode digit does not parse
+  (see the digits note below).
 
 ``amount`` (e.g. ``100억``, ``1,000원``) carries a **unit**, so it normalizes to a
 declared **integer base unit** via a reviewable unit table (Korean monetary units
@@ -17,6 +19,74 @@ only in this first cut: ``원/천/만/억/조``). Amounts compare in integer bas
 a sub-base-unit fraction is rounded to the nearest int (ROUND_HALF_UP). The engine
 has no float column, so the base-unit value MUST be an exact integer — see
 ``parse_amount``.
+
+**Digits are ASCII-only (#388).** Every numeric group below is spelled ``[0-9]``,
+never ``\\d``: Python's ``\\d`` matches the whole Unicode ``Nd`` category, so a
+full-width ``date(２０２０,１)`` used to parse to the same scalar as ``date(2020,1)``
+while the *stored object string* stayed different. That split one value in two
+depending on context — a typed relation grouped the pair as equal (``_group_key``
+keys on the scalar), an object-match query for the ASCII spelling missed the
+full-width row, and without a typed declaration the two became separate entities.
+The codebase normalizes to **NFC**, which preserves full-width digits (only NFKC
+folds them), so nothing upstream collapses them either.
+
+So a non-ASCII digit is **rejected**, not silently folded. The reason is the one
+#388 gives, and it is a policy choice, not a claim of wider coverage: this
+repository prefers an **explicit refusal over a silent fold** (``--category``
+pre-validation, the silent-zero guard), and a full-width digit in a numeric field
+is far more likely an **input accident** — a CJK source, a PDF conversion, an IME
+left in full-width mode — than a value a human meant to write. Refusing makes the
+accident *visible* at the point a human can still fix it.
+
+Rejection is deliberately **narrow**, and does NOT make the value single-state:
+
+- It only reaches values that go **through a parser**, i.e. objects of relations
+  declared in ``policy/typed-relations.md``. A value under an **undeclared**
+  relation never touches this module, so the full-width and ASCII spellings stay
+  **two separate entities** — measured, unchanged from before this module was
+  narrowed. That is a **residual symptom of #388 that this module does not fix**
+  and cannot: nothing here is on that code path.
+- The value the KB **stores** is untouched either way. Refusing to parse does not
+  rewrite ``accepted.dl``; the full-width string is still what an object-match
+  query has to match.
+
+The place that *could* collapse all three symptoms at once is the **merge stage**,
+where ``tools/merge_candidates.py``'s ``normalize_rows`` already rewrites the
+stored object string **before** computing the dedup key (that is how
+``canonical_amount`` folds ``amount(7,억)`` and ``amount(7,"억")`` into one row).
+A digit fold placed there would change the stored string, so the dedup keys would
+merge and the entity split would go with them. That is a **data rewrite**, a
+different decision from this one, and it is not made here.
+
+What rejection does buy is a **report**, and it now has **two visible exits for all
+four types** (measured, post-#394): the value degrades to the ordinary "does not
+parse" path and surfaces both at ``common.typed_projection_outcome``'s
+``typed-relations`` projection warning and in ``entity_audit``'s ``malformed typed
+literal`` section::
+
+    _is_malformed_compound_term(v), no typed declaration
+      date(２０２０,１)      -> True
+      number(１２３)        -> True
+      ordinal(３)          -> True
+      amount(１００,"억")   -> True
+
+``amount`` reached only the first exit until #394. ``_is_malformed_compound_term``
+returned early for any compound ``amount`` under a relation with no ``amount``
+spec, so a full-width amount was refused by this module yet invisible in the audit.
+#394 narrowed that exemption to **unit resolution alone** and judges the shape
+first, so a value whose ``num`` group fails is malformed with or without a
+declaration — which is exactly the full-width case. Nothing in this module changed
+for that to happen; the coupling is one-way, and ``entity_audit`` pins it.
+
+Because a full-width digit is hard to see in a warning, the report sites append
+``non_ascii_digits`` to name the actual offending characters.
+
+**Expect a rise in these warnings after this lands, from one known producer.**
+``zotero``'s ``extract_year`` passes a full-width year through verbatim (#398), so
+an ordinary Zotero import can write a value this module now refuses; ``csl``'s
+``_YEAR_RE`` folds one silently via ``int()`` and is the milder sibling (#399).
+Neither is fixed here. If ``does not parse`` warnings appear on records nobody
+hand-edited, #398 is the first place to look.
 """
 from __future__ import annotations
 
@@ -41,7 +111,7 @@ DEFAULT_AMOUNT_UNITS: dict[str, int] = {
     "조": 10**12,
 }
 
-_DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
+_DATE_RE = re.compile(r"^([0-9]{4})[.\-/]([0-9]{1,2})(?:[.\-/]([0-9]{1,2}))?$")
 # The compound form is year-precision friendly: month AND day are optional, so
 # ``date(2020)`` parses (a bibliographic record normally knows only the year —
 # see #385). This mirrors the prose path, where a missing day already defaults
@@ -50,32 +120,61 @@ _DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
 # wrapper it is indistinguishable from a plain number, so only the explicitly
 # typed compound term opts into year precision.
 _DATE_COMPOUND_RE = re.compile(
-    r"^date\(\s*(\d{4})(?:\s*,\s*(\d{1,2})(?:\s*,\s*(\d{1,2}))?)?\s*\)$",
+    r"^date\(\s*([0-9]{4})(?:\s*,\s*([0-9]{1,2})(?:\s*,\s*([0-9]{1,2}))?)?\s*\)$",
     re.IGNORECASE,
 )
-_NUMBER_RE = re.compile(r"^-?\d[\d,]*(?:\.\d+)?$")
+_NUMBER_RE = re.compile(r"^-?[0-9][0-9,]*(?:\.[0-9]+)?$")
 _NUMBER_COMPOUND_RE = re.compile(
-    r"^number\(\s*\"?(-?\d[\d,]*(?:\.\d+)?)\"?\s*\)$",
+    r"^number\(\s*\"?(-?[0-9][0-9,]*(?:\.[0-9]+)?)\"?\s*\)$",
     re.IGNORECASE,
 )
-_ORDINAL_KO_RE = re.compile(r"^제?(\d+)\s*(?:호|위|번|차|등|째)$")
-_ORDINAL_EN_RE = re.compile(r"^(\d+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
-_ORDINAL_COMPOUND_RE = re.compile(r"^ordinal\(\s*(\d+)\s*\)$", re.IGNORECASE)
+_ORDINAL_KO_RE = re.compile(r"^제?([0-9]+)\s*(?:호|위|번|차|등|째)$")
+_ORDINAL_EN_RE = re.compile(r"^([0-9]+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
+_ORDINAL_COMPOUND_RE = re.compile(r"^ordinal\(\s*([0-9]+)\s*\)$", re.IGNORECASE)
 # <number><unit>, contiguous OR a single space between them. The number part is a
 # plain/comma/decimal magnitude with an OPTIONAL leading sign (a loss/credit may be
 # negative); the unit is validated against the table by the caller. A leading `제`
 # (ordinal marker) can't match because the `num` group is anchored to an optional
-# sign + leading digit (`^-?\d…`), so `제3호`-style ordinals never match (the first
-# char `제` is neither `-` nor a digit → no match).
-_AMOUNT_RE = re.compile(r"^(?P<num>-?\d[\d,]*(?:\.\d+)?) ?(?P<unit>\D+)$")
+# sign + leading digit (`^-?[0-9]…`), so `제3호`-style ordinals never match (the
+# first char `제` is neither `-` nor a digit → no match).
+# The unit tail stays `\D+` (NOT `[^0-9]+`) on purpose: `\D` excludes the whole
+# Unicode `Nd` category, so a full-width digit can never be absorbed into a unit
+# either. Both spellings end at `None` anyway — the unit is looked up in a table
+# whose keys hold no digits — but `\D+` fails at the match, one step earlier.
+_AMOUNT_RE = re.compile(r"^(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?) ?(?P<unit>\D+)$")
 # Compound amount: the unit may be quoted ("...", allowing spaces and commas) or
 # bare (no comma/paren/quote). The number is optionally quoted. Canonicalisation
 # always emits the quoted unit form (see ``canonical_amount``).
 _AMOUNT_COMPOUND_RE = re.compile(
-    r'^amount\(\s*"?(?P<num>-?\d[\d,]*(?:\.\d+)?)"?\s*,\s*'
+    r'^amount\(\s*"?(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?)"?\s*,\s*'
     r'(?:"(?P<qunit>[^"]*)"|(?P<unit>[^,)"]+))\s*\)$',
     re.IGNORECASE,
 )
+
+
+_ASCII_DIGITS = frozenset("0123456789")
+
+
+def non_ascii_digits(value: str) -> str:
+    """The distinct non-ASCII Unicode decimal digits in *value*, first-appearance
+    order, as one string (``""`` when there are none). Pure; never raises.
+
+    EXACTLY the set the parsers used to accept and no longer do: ``str.isdecimal``
+    is the ``Nd`` category, which is what ``\\d`` matched, minus ``0-9``. It is NOT
+    ``str.isdigit`` — that also admits superscripts (``²``, category ``No``), which
+    ``\\d`` never matched, so reporting one would name a character that was never
+    the cause.
+
+    This exists for the WARNING TEXT, not for parsing. ``date(２０２０,１)`` and
+    ``date(2020,1)`` render nearly identically in a terminal, so "does not parse as
+    date" alone sends a human hunting for a typo that is invisible. Callers append
+    the offending characters; nothing here decides whether a value parses.
+    """
+    seen: list[str] = []
+    for ch in value:
+        if ch.isdecimal() and ch not in _ASCII_DIGITS and ch not in seen:
+            seen.append(ch)
+    return "".join(seen)
 
 
 def _amount_unit(match: re.Match[str]) -> str:

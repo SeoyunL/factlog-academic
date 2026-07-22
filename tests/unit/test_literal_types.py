@@ -390,6 +390,182 @@ class TestNormalizeDispatcher:
         assert not hasattr(lt, "EasySession")
 
 
+class TestFullWidthDigitsRejected:
+    """All four parsers read ASCII digits only (#388).
+
+    Python's ``\\d`` is the whole Unicode ``Nd`` category, so a full-width
+    ``date(２０２０,１)`` used to parse to the SAME scalar as ``date(2020,1)`` while the
+    stored object string stayed different. One value then behaved as two: a typed
+    relation grouped the pair as equal (``_group_key`` keys on the scalar), an
+    object-match query for the ASCII spelling missed the full-width row, and with no
+    typed declaration the two became separate entities. NFC (this codebase's
+    normalization) preserves full-width digits — only NFKC folds them — so nothing
+    upstream collapsed them either. Rejecting routes such a value to the visible
+    "does not parse" path instead.
+    """
+
+    FULLWIDTH = "０１２３４５６７８９"
+
+    # (parser-name, full-width form, the ASCII form that MUST still parse, scalar)
+    @pytest.mark.parametrize("raw,ascii_raw,expected", [
+        # date: compound and prose, plus a MIXED half/full-width form — the mixed
+        # case is the one a partial fix (year only, or compound only) would miss.
+        ("date(２０２０,１)", "date(2020,1)", 20200101),
+        ("date(２０２０)", "date(2020)", 20200101),
+        ("date(2020,１)", "date(2020,1)", 20200101),
+        ("date(２０２０,1)", "date(2020,1)", 20200101),
+        ("date(2020,1,１５)", "date(2020,1,15)", 20200115),
+        ("２０３０.１", "2030.1", 20300101),
+        ("2030.１.１５", "2030.1.15", 20300115),
+    ])
+    def test_date(self, raw, ascii_raw, expected):
+        assert lt.parse_date(raw) is None
+        assert lt.parse_date(ascii_raw) == expected
+
+    @pytest.mark.parametrize("raw,ascii_raw,expected", [
+        ("１２３", "123", 123.0),
+        ("number(１２３)", "number(123)", 123.0),
+        ("1,０００", "1,000", 1000.0),      # mixed: full-width inside the group
+        ("3.１４", "3.14", 3.14),           # mixed: full-width in the fraction
+        ("-１", "-1", -1.0),
+    ])
+    def test_number(self, raw, ascii_raw, expected):
+        assert lt.parse_number(raw) is None
+        assert lt.parse_number(ascii_raw) == expected
+
+    @pytest.mark.parametrize("raw,ascii_raw,expected", [
+        ("１２３", "123", 123000),
+        ("number(１２３)", "number(123)", 123000),
+        ("2.５", "2.5", 2500),
+    ])
+    def test_number_scaled(self, raw, ascii_raw, expected):
+        """The scaled parser shares _NUMBER_RE, so it must reject identically —
+        it, not parse_number, is what `normalize('number', …)` dispatches to."""
+        assert lt.parse_number_scaled(raw) is None
+        assert lt.parse_number_scaled(ascii_raw) == expected
+
+    @pytest.mark.parametrize("raw,ascii_raw,expected", [
+        ("ordinal(３)", "ordinal(3)", 3),
+        ("제３호", "제3호", 3),        # Korean ordinal branch
+        ("３위", "3위", 3),
+        ("３rd", "3rd", 3),           # English ordinal branch
+        ("제1０호", "제10호", 10),     # mixed within one rank
+    ])
+    def test_ordinal(self, raw, ascii_raw, expected):
+        assert lt.parse_ordinal(raw) is None
+        assert lt.parse_ordinal(ascii_raw) == expected
+
+    @pytest.mark.parametrize("raw,ascii_raw,expected", [
+        ('amount(１００,"억")', 'amount(100,"억")', 10000000000),
+        ("amount(１００,억)", "amount(100,억)", 10000000000),   # bare-unit form
+        ("１００억", "100억", 10000000000),                      # prose form
+        ("1,０００원", "1,000원", 1000),                         # mixed, comma group
+        ("2.６억", "2.6억", 260000000),                          # mixed, fraction
+    ])
+    def test_amount(self, raw, ascii_raw, expected):
+        assert lt.parse_amount(raw, lt.DEFAULT_AMOUNT_UNITS) is None
+        assert lt.parse_amount(ascii_raw, lt.DEFAULT_AMOUNT_UNITS) == expected
+
+    def test_amount_canonicalisation_also_rejects(self):
+        """canonical_amount shares _AMOUNT_COMPOUND_RE. If it still matched, a
+        full-width amount would be rewritten into the canonical form and land in
+        accepted.dl looking well-formed while parse_amount calls it untyped."""
+        assert lt.canonical_amount('amount(１００,"억")') is None
+        assert lt.canonical_amount('amount(100,"억")') == 'amount(100,"억")'
+
+    @pytest.mark.parametrize("type_tag,raw", [
+        ("date", "date(２０２０,１)"),
+        ("number", "number(１２３)"),
+        ("ordinal", "ordinal(３)"),
+        ("amount", 'amount(１００,"억")'),
+    ])
+    def test_normalize_dispatcher_rejects(self, type_tag, raw):
+        """The dispatcher is what every caller (projection, _group_key,
+        entity_audit) actually goes through, so pin the rejection there too."""
+        assert lt.normalize(type_tag, raw) is None
+
+    @pytest.mark.parametrize("raw,ascii_raw,shown", [
+        ("date(２０２０,１)", "date(2020,1)", "2020-01"),
+        ("number(１２３)", "number(123)", "123"),
+        ('amount(１００,"억")', 'amount(100,"억")', "100억"),
+    ])
+    def test_humanize_leaves_full_width_verbatim(self, raw, ascii_raw, shown):
+        """humanize must not display a value the parsers reject as if it were clean.
+
+        This is the only place the compound regexes' digit class is observable for
+        `number` THROUGH BEHAVIOUR: parse_number re-validates the captured group
+        against _NUMBER_RE, so a full-width `number(１２３)` is rejected either way.
+        humanize does not re-validate — it strips the wrapper and prints. Left wide,
+        it would render `number(１２３)` as `123`, i.e. show a human the ASCII value
+        the KB does NOT hold, while the projection warns the fact is excluded. The
+        display and the warning would then contradict each other.
+
+        This test was once the ONLY mutation defence for `_NUMBER_COMPOUND_RE`, which
+        is a bad place for it: `humanize`'s own docstring declares it DISPLAY-ONLY, so
+        a parsing-layer invariant was being held up by a display-layer test — a
+        refactor of the display path would have dropped the coverage silently. The
+        invariant now has a direct anchor in
+        `test_number_compound_regex_rejects_full_width_directly` below; this test
+        keeps only the display claim it is actually about.
+        """
+        assert lt.humanize(raw) == raw
+        assert lt.humanize(ascii_raw) == shown
+
+    def test_number_compound_regex_rejects_full_width_directly(self):
+        """Anchor `_NUMBER_COMPOUND_RE`'s digit class at the parsing layer itself.
+
+        Reaching into a private regex is deliberate here. `_NUMBER_COMPOUND_RE` is the
+        one narrowed regex with NO observable behavioural consequence of its own —
+        parse_number re-validates the captured group against `_NUMBER_RE`, so widening
+        this one back to `\\d` changes no parse result. Every other narrowed regex is
+        covered by a real parsing test (`_AMOUNT_COMPOUND_RE`, for one, feeds
+        parse_amount/canonical_amount directly and fails loudly there).
+
+        Without this assertion the only thing that noticed the mutation was a
+        display-only humanize test. Asserting the regex directly costs a private
+        reference and buys a defence that lives in the same layer as the invariant.
+        """
+        assert lt._NUMBER_COMPOUND_RE.match("number(１２３)") is None
+        assert lt._NUMBER_COMPOUND_RE.match("number(1２3)") is None
+        # the ASCII form must still match, or the narrowing went too far
+        assert lt._NUMBER_COMPOUND_RE.match("number(123)") is not None
+        assert lt._NUMBER_COMPOUND_RE.match('number("-1,234.5")') is not None
+
+    def test_every_ascii_digit_still_parses(self):
+        """Guard against a fix that narrows too far (e.g. `[1-9]`)."""
+        assert lt.parse_number("1234567890") == 1234567890.0
+        assert lt.parse_ordinal("ordinal(1234567890)") == 1234567890
+
+
+class TestNonAsciiDigits:
+    """The diagnostic that names WHY a value did not parse (#388). Full-width
+    digits are near-invisible in a warning line, so the report sites append this."""
+
+    def test_reports_offending_characters(self):
+        assert lt.non_ascii_digits("date(２０２０,１)") == "２０１"
+
+    def test_first_appearance_order_and_deduplicated(self):
+        assert lt.non_ascii_digits("１１２") == "１２"
+
+    def test_empty_for_ascii(self):
+        assert lt.non_ascii_digits("date(2020,1)") == ""
+        assert lt.non_ascii_digits("") == ""
+
+    def test_ignores_non_decimal_digit_lookalikes(self):
+        """`²` is category `No`, which `\\d` never matched, so it was never the
+        cause of a rejection and must not be named as one."""
+        assert lt.non_ascii_digits("2²") == ""
+
+    def test_matches_exactly_what_the_parsers_reject(self):
+        """The helper's claim and the parsers' behaviour must not drift: every
+        digit it names must in fact fail, and a value it calls clean must parse."""
+        for digit in TestFullWidthDigitsRejected.FULLWIDTH:
+            assert lt.non_ascii_digits(digit) == digit
+            assert lt.parse_number(f"1{digit}") is None
+        assert lt.non_ascii_digits("100") == ""
+        assert lt.parse_number("100") == 100.0
+
+
 class TestLiteralReConsistency:
     """Pinning test (#117 option b): the entity_audit detector and these
     normalizers must not drift. Every canonical literal example that entity_audit

@@ -229,6 +229,82 @@ class TestMalformedCompoundTerms:
         assert found["literal_suspects"]["published_year"] == {"date(2020)"}
 
 
+class TestFullWidthDigitLiterals:
+    """A full-width literal is a value someone must fix, so it must stay visible
+    (#388). It reaches a human by two different routes, and both are pinned here
+    because they are decided in two different files.
+    """
+
+    def test_full_width_compound_term_is_reported_as_malformed(self):
+        # literal_types rejects it, so the compound-term route reports it. This is
+        # the intended surfacing, not collateral damage: the alternative is a value
+        # that groups as equal to its ASCII twin but stores and queries differently.
+        found = entity_audit.audit([_row("P1", "when", "date(２０２０,１)")])
+
+        assert found["malformed_literals"] == ["date(２０２０,１)"]
+        # still not an entity — the wrapper form alone proves it is a value
+        assert found["entities"] == ["P1"]
+        # AND it reports a SECOND time under "literal suspects". Pinned because it
+        # is a decision, not an accident: `_LITERAL_RE` stays wide so the prose case
+        # below survives (see test_full_width_prose_value_stays_a_literal_suspect),
+        # and a compound term is `_looks_literal` by syntax, so the overlap follows.
+        # Without this assertion the repeat reads like something nobody noticed, and
+        # the next reader "fixes" it — losing the prose row in the process.
+        assert found["literal_suspects"]["when"] == {"date(２０２０,１)"}
+
+    def test_ascii_twin_is_not_malformed(self):
+        found = entity_audit.audit([_row("P1", "when", "date(2020,1)")])
+
+        assert found["malformed_literals"] == []
+
+    def test_full_width_prose_value_stays_a_literal_suspect(self):
+        # The OTHER route. `_LITERAL_RE` keeps the wide `\d` on purpose: it asks
+        # "should a human look?", not "does this parse?". Narrowing it to `[0-9]`
+        # for consistency with literal_types would file this as an ordinary entity
+        # and hide the row #388 exists to surface.
+        found = entity_audit.audit([_row("P1", "published_year", "２０２０.１")])
+
+        assert found["literal_suspects"]["published_year"] == {"２０２０.１"}
+
+    def test_printed_line_names_the_offending_digits(self, monkeypatch, capsys, tmp_path):
+        # A full-width literal renders almost identically to a good one, so the
+        # bare "cannot parse" line would accuse a value the human cannot tell apart.
+        csv = tmp_path / "candidates.csv"
+        csv.write_text("", encoding="utf-8")
+        monkeypatch.setattr(entity_audit, "CANDIDATES_CSV", csv)
+        # main() only prints; the KB-root check is not what is under test here.
+        monkeypatch.setattr(entity_audit, "ensure_dirs", lambda *a, **k: None)
+        monkeypatch.setattr(
+            entity_audit, "load_facts", lambda *a, **k: [_row("P1", "when", "date(２０２０,１)")]
+        )
+
+        assert entity_audit.main([]) == 0
+        err = capsys.readouterr().err
+
+        assert "malformed typed literal" in err
+        assert "non-ASCII digit" in err
+        for ch in "２０１":
+            assert ch in err
+
+    def test_printed_line_does_not_blame_digits_for_an_ordinary_failure(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        csv = tmp_path / "candidates.csv"
+        csv.write_text("", encoding="utf-8")
+        monkeypatch.setattr(entity_audit, "CANDIDATES_CSV", csv)
+        # main() only prints; the KB-root check is not what is under test here.
+        monkeypatch.setattr(entity_audit, "ensure_dirs", lambda *a, **k: None)
+        monkeypatch.setattr(
+            entity_audit, "load_facts", lambda *a, **k: [_row("P1", "when", "date(abc)")]
+        )
+
+        assert entity_audit.main([]) == 0
+        err = capsys.readouterr().err
+
+        assert "malformed typed literal" in err
+        assert "non-ASCII digit" not in err
+
+
 class TestAmountShapeIsJudgedWithoutADeclaration:
     """#394 — the unit exemption covers unit RESOLUTION, not the whole type.
 
@@ -251,30 +327,36 @@ class TestAmountShapeIsJudgedWithoutADeclaration:
 
         assert found["malformed_literals"] == [value]
 
-    def test_fullwidth_digits_are_not_malformed_today(self):
-        """COUPLING (#388): `amount(１００,"억")` — FULL-WIDTH digits.
+    def test_fullwidth_digits_are_malformed_by_shape(self):
+        """COUPLING (#388): `amount(１００,"억")` — FULL-WIDTH digits. THE FLIP HAPPENED.
 
-        WILL FLIP WHEN #388 MERGES, BY DESIGN. Today `_AMOUNT_COMPOUND_RE`'s `\\d`
-        matches full-width digits, so the shape PASSES and the value falls through to
-        the unit-table question — unjudged with no spec, hence not malformed. #388
-        narrows those classes to ASCII, after which the shape FAILS and this same
-        value becomes malformed with no declaration.
+        This test was written to FAIL when #388 merged, and it did. It previously
+        asserted `[]`: `_AMOUNT_COMPOUND_RE`'s `\\d` matched full-width digits, so the
+        shape PASSED and the value fell through to the unit-table question — unjudged
+        with no spec, hence not malformed. #388 narrowed those classes to ASCII, so
+        the shape now FAILS and the value is malformed with no declaration. The
+        assertion below is flipped to `[value]` as that plan directed; the failure did
+        its job as a notification.
 
-        That direction is #388's intent, not an accident: its own rationale names
-        this audit's malformed section as where such values must surface. So when
-        #388 lands, this test is EXPECTED to fail and the assertion below should be
-        updated to `[value]` — the failure is the notification, which is the whole
-        reason it is pinned to a concrete answer.
+        The flip is the point where #388's rationale becomes true. #388 rejects a
+        full-width literal so a human sees it, and names TWO exits: the
+        `typed-relations` projection warning and this section. Before #394 split the
+        unit exemption, `amount` reached only the first — `_is_malformed_compound_term`
+        returned early for any compound `amount` without an `amount` spec, so the
+        full-width value was refused by the parser yet invisible here. With shape
+        judged ahead of the spec question, all four types now surface identically.
 
-        Deliberately NOT written as `[] if _AMOUNT_COMPOUND_RE.match(value) else ...`.
-        Deriving the expectation from the very regex under test passes no matter what
-        that regex says: it survived a simulated #388 narrowing unchanged, proving it
-        pinned nothing. A hard answer is what makes the flip observable.
+        Deliberately NOT written as `[] if _AMOUNT_COMPOUND_RE.match(value) else ...`,
+        and still not, now that the answer is `[value]`. Deriving the expectation from
+        the very regex under test passes no matter what that regex says: it survived a
+        simulated #388 narrowing unchanged, proving it pinned nothing. A hard answer is
+        what made the flip observable, and is what keeps this load-bearing — widening
+        `_AMOUNT_COMPOUND_RE` back fails this test.
         """
         value = 'amount(１００,"억")'
         found = entity_audit.audit([_row("P1", "예산", value)])
 
-        assert found["malformed_literals"] == []
+        assert found["malformed_literals"] == [value]
         # Independent of the flip: it is compound-shaped either way, so it is never
         # an entity and never silently dropped from the report.
         assert value not in found["entities"]

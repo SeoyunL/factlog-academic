@@ -3091,7 +3091,12 @@ def typed_projection_outcome(
     """
     scalar = literal_types.normalize(spec.type, row["object"], spec.units)
     if scalar is None:
-        return None, f"does not parse as {spec.type}"
+        # A full-width digit is a parse failure the eye cannot see: `date(２０２０,１)`
+        # reads as correct in a terminal, so the bare reason would send a human
+        # hunting a typo that is not there (#388). Name the characters.
+        odd = literal_types.non_ascii_digits(row["object"])
+        detail = f" (non-ASCII digit(s) {odd!r} — rewrite them as ASCII 0-9)" if odd else ""
+        return None, f"does not parse as {spec.type}{detail}"
     # Every _TYPED_COL is an int64 column. pyrewire silently accepts a float into
     # one (wrong comparison), so a non-int from a future normalizer must be dropped
     # loudly, not inserted.

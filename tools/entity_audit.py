@@ -75,6 +75,24 @@ from factlog import literal_types  # noqa: E402
 # 100억, 제3호). Advisory only — a human confirms before declaring the relation;
 # a few false positives (e.g. a named concept like '4차 산업혁명') are acceptable
 # in exchange for not missing the motivating value forms.
+#
+# The `\d` here is DELIBERATELY left wide (the whole Unicode `Nd` category) even
+# though literal_types now reads ASCII digits only (#388). The two ask different
+# questions: literal_types decides whether a value PARSES, this decides whether a
+# human should LOOK. A prose `２０２０.１` is exactly a value someone must fix, so
+# narrowing this to `[0-9]` would drop it out of "literal suspects" and file it as
+# an ordinary entity — hiding the very row #388 set out to surface. This is the ONLY
+# section that catches the prose case: `２０２０.１` is not `_is_compound_term`, so it
+# never reaches "malformed typed literal".
+#
+# The cost is DOUBLE REPORTING, and it is intended, not an oversight: a compound
+# `date(２０２０,１)` is `_looks_literal` by syntax, so it lands in BOTH "literal
+# suspects" and "malformed typed literal". The two sections answer different
+# questions — "should this relation be declared?" and "does this value parse?" — and
+# a human acting on either is right. Suppressing the suspects entry to de-duplicate
+# would trade a visible repeat for an invisible gap in the prose case above.
+# `test_entity_audit_compound_terms.py` asserts BOTH memberships so the overlap
+# cannot be "fixed" silently.
 _LITERAL_RE = re.compile(
     r"^\d{4}[.\-/]\d{1,2}([.\-/]\d{1,2})?$"                       # date
     r"|^\d[\d,]*(\.\d+)?$"                                        # number / comma / decimal
@@ -419,7 +437,15 @@ def main(argv: list[str] | None = None) -> int:
     if a["malformed_literals"]:
         print("\nmalformed typed literal (compound-term form the engine cannot parse):", file=sys.stderr)
         for v in a["malformed_literals"]:
-            print(f"  • '{v}' — not a value any typed relation can order or compare", file=sys.stderr)
+            # `date(２０２０,１)` looks right on screen; without naming the characters
+            # this line accuses a value the human cannot tell apart from a good one
+            # (#388). literal_types owns the digit question, here and in the parser.
+            odd = literal_types.non_ascii_digits(v)
+            hint = f" [non-ASCII digit(s) {odd!r} — rewrite them as ASCII 0-9]" if odd else ""
+            print(
+                f"  • '{v}' — not a value any typed relation can order or compare{hint}",
+                file=sys.stderr,
+            )
 
     if a["typed_form_conflicts"]:
         # The parser accepts these declarations (exit 0), so without this section a
