@@ -319,10 +319,14 @@ def normalize_cross_id(kind: str, value: str) -> str:
 
     No current write path produces one otherwise — OpenAlex takes its PMID from
     the API's ``ids.pmid`` and PubMed from the response ``<PMID>``, both ASCII
-    upstream. The validators those paths pass through (``normalize_pmid``, in both
-    ``openalex.api_client`` and ``pubmed.client``) would nonetheless *admit* a
-    full-width id, because ``str.isdigit`` is true of every Unicode decimal digit;
-    that is a latent gap (#427), not a route a value travels today.
+    upstream. **Neither is guarded against one**, and not in the same way: the
+    OpenAlex value passes ``api_client.normalize_pmid``, which would *admit* a
+    full-width id because ``str.isdigit`` is true of every Unicode decimal digit,
+    while the PubMed value passes no validator at all — ``pubmed.client``'s
+    ``normalize_pmid`` guards the **outgoing request** (``_id_param``, plus the two
+    CLI entry points taking a user-typed id), never the response. "Both ASCII
+    upstream" is therefore the only thing holding the PubMed path up. Both are
+    latent gaps (#427), not routes a value travels today.
 
     An ``arxiv_id`` is canonicalised the way :func:`normalize_arxiv_id` does —
     version stripped, subject class dropped, archive lowercased — so
