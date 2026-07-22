@@ -17,52 +17,85 @@ Porcelain named the rule; it is not the only place that needs it. A stderr warni
 second contract (#396) — and such a caller reuses this rule rather than growing a near-copy
 under a second name, which is how the two integrations drifted apart in the first place.
 
-**The gaps this note tracked are closed; do not read that as "the set is closed".**
-#396 wrote "not every porcelain emitter is gated", #406 closed three ``result`` rows and
-said so, and #416 closed the eleven this paragraph then listed. What is measured today:
-every caller-influenced field on a positional row under ``factlog/`` reaches
-:func:`porcelain_field`. Every bare ``print(f"…\\t…")`` that remains interpolates an
-``int``, a ``len()`` or a ``'0'``/``'1'`` literal — a count cannot carry a tab.
+**Not every porcelain emitter is gated.** That was true when #396 wrote it, it stayed true
+after #406 closed three ``result`` rows, and it is the right thing to assume now. #416
+closed fourteen more. The last AST sweep found **105 tab-carrying f-strings under
+``factlog/``, with no ungated caller-influenced field among them** — read that as a
+measurement with a date on it, never as "the set is closed".
 
-What #416 closed, with the evidence for each, because the two strengths were not equal:
+An earlier revision of this paragraph did write it as a closed set, in those words, and
+was wrong when it said so: three emitters were open at the time, and the review that
+caught them reproduced all three end to end. *Why* it was wrong outlasts the claim. It
+rested on grepping ``print(f"``, and **that search cannot see a row built any other way**
+— ``rows.append(f"…")``, a list comprehension, a row assembled and handed to someone else
+to print. All three misses were ``rows.append``; the ``candidate`` row #406 missed was a
+comprehension. A shape-based search finds the shape it already knows, and reports silence
+as absence.
+
+So the instruction is: **walk the AST for f-strings whose literal parts contain a tab, and
+check each interpolated field for a gate call.** ``print(f"`` is not the search, it is one
+spelling of one shape. Do not trust a count in this note — the 105 included — without
+re-running that sweep.
+
+What #416 closed, with the evidence for each, because the strengths are not equal:
 
 * Both ``query`` rows (``arxiv-search``, ``pubmed-search``) — the user's own ``--query``,
   the most caller-influenced value on any row here. **Measured:** ``--query $'a\\tb'
   --show-query --porcelain`` emitted ``query\\ta\\tb``, three columns against a contract
   of two.
-* All five ``target`` rows — a path built from the user's ``--target``, and a POSIX
-  filename may hold a tab or a newline outright. **Measured, all five**, by putting the
-  KB in a directory whose name carries the character. #406 left four of these five at
-  grep strength and said so; running them settled it in the direction the note feared.
+* **Eight ``target`` rows**, all **measured**, by putting the KB in a directory whose name
+  carries the character: five in ``cli.py``, and three more built by ``rows.append`` in
+  ``pubmed/refresh.py``, ``openalex/refresh.py`` and ``arxiv/check_versions.py``. A path
+  from the user's ``--target``, and a POSIX directory name may hold a tab outright. The
+  last three are the ones the ``print(f"`` search could not see; note that
+  ``pubmed-refresh`` emits **two** of these rows, and #416's first pass gated one and
+  missed the other *in the same command*.
 * Three of the four dry-run ``item``/``work`` rows — the fourth, ``_pubmed_finish``'s, was
   already gated by #141, which is why this shape existed four times with one checked.
-  **Measured for three of the four:** a tab-carrying Zotero key, a tab-carrying versioned
-  arXiv id from the client response, and — through that pubmed sibling — a tab-carrying
-  PMID from a real efetch body, which arrives and is neutralized to a space, so the gate
-  is doing visible work rather than guarding an unreachable path. The OpenAlex one is the
-  exception and is **not measured**: ``openalex-import`` rejects a response id that is
-  not ``W<digits>``, and a hostile title is slugified before it reaches the filename
-  column, so no route was found that carries a tab there. It is gated regardless —
-  ``outcome.key`` *is* ``work.openalex_id``, the same value ``_openalex_show_results``
-  gates one row over, and a caller gates its value rather than reasoning about what its
-  own parser admits.
-* The ``candidate`` row (``_candidate_porcelain_lines``, #75). **Measured**, through the
-  real importer. This one is worth its own sentence: it was **not in the list #406 wrote**,
-  and it was found by re-running the grep this paragraph tells you to run rather than by
-  trusting the list. The note's own advice caught the note's own omission.
+  **Measured for two:** a tab-carrying Zotero key (no validator stands between the Zotero
+  API and this row), and — through that pubmed sibling — a tab-carrying PMID from a real
+  efetch body, which arrives and is neutralized to a space, so that gate is doing visible
+  work rather than guarding an unreachable path.
 
-Line numbers are deliberately absent now. Every earlier revision carried them, every
-revision's numbers went stale within a merge or two, and the last one was stale on
-arrival — so the instruction is the durable part: **grep the bare ``print(f"`` rows
-before trusting any claim here, including this one.** That instruction has earned itself
-twice: once when the ``target`` group turned up after this paragraph claimed five
-emitters, and once when the ``candidate`` row turned up after it claimed ten.
+  **Gated but with no route found: the arXiv and OpenAlex ``work`` rows.** For arXiv,
+  ``versioned_id`` is only ever built from an ``arxiv_id`` that came through
+  ``normalize_arxiv_id``/``parse_entry_id``, and an exhaustive run — every character this
+  module neutralizes, at every insertion point — carries none of them through. For
+  OpenAlex, ``normalize_work_id`` is the same story, and a hostile title is slugified
+  before it can reach the filename column. Both are gated anyway: ``outcome.key`` *is*
+  ``work.openalex_id``/``work.versioned_id``, the values ``_openalex_show_results`` and
+  ``_arxiv_show_results`` gate one row over, and a caller gates its value rather than
+  reasoning about what its own parser admits. An earlier revision of this note called the
+  arXiv one "measured" on the strength of a test that handed the row a fabricated id
+  through a fake client — which fixes the emitter and shows nothing about reachability.
+* The ``candidate`` row (``_candidate_porcelain_lines``, #75) — **not in the list #406
+  wrote**, and found only by re-running the sweep rather than trusting that list. Its two
+  columns differ and the note keeps them apart: ``existing_path.name`` is **measured** (the
+  path comes from a scan of ``sources/``, so renaming a real source file to hold a tab puts
+  one there — five columns without the gate, four with it), while ``key`` has **no route
+  found**, for the ``normalize_work_id`` reason above.
 
-The tense matters. This paragraph is in the past tense because the holes it names are
-shut, and #406's revision was rewritten into the past tense while ten were still open,
-which quietly invited a reader to mistake an ungated path for a checked one. If you open
-a new emitter, add it here in the present tense and say which strength of evidence you
-have — "measured" and "grep" are different claims and #416 kept them apart on purpose.
+Line numbers are deliberately absent. Every earlier revision carried them, every
+revision's numbers went stale within a merge or two, and the last set was stale on
+arrival — so the sweep, not the list, is the durable part. It has now earned itself three
+times: the ``target`` group turned up after this paragraph claimed five emitters, the
+``candidate`` row after it claimed ten, and three ``rows.append`` rows after it claimed
+the set was closed. Each time the list was wrong and re-running the search was right.
+
+Two habits this note asks of the next person, both learned the hard way:
+
+**Say which strength of evidence you have.** "Measured" and "gated, no route found" are
+different claims, and #416 got this wrong before review caught it — twice labelling as
+measured a row whose value had been injected through a fake client or a test helper that
+bypassed the real normalizer. Fixing an emitter and reaching an emitter are different
+experiments; a test that hands a row a fabricated value proves the first and is silent on
+the second. **Gating a value you cannot show is reachable is right** — that is what these
+gates are for. Calling it measured is what is wrong.
+
+**Do not upgrade a hedge without an experiment that earns it.** Before #416 this note
+read "at least ten" and "the count above is a floor". Those were correct. #416 replaced
+them with an absolute claim that was false on the day it was written. A hedge is not
+clutter to be tidied away; it is the part of the sentence carrying what is not known.
 
 Note what kind of gap those were, because this module has seen both kinds. The ones above
 were **ungated** — no neutralization at all. The three ``*-backfill-provenance`` commands
@@ -72,6 +105,11 @@ the shared set, so eight characters it now neutralizes still split those rows in
 were converted to call this function (#396). A near-copy does not stay correct by being
 correct once, which is the whole argument for one definition; an obvious gap at least
 announces itself — provided a note like this one keeps announcing it.
+
+Qualify that last clause with what #416 found, though: a gap announces itself *to a search
+that can see it*. The three ``rows.append`` rows were as ungated as any bullet above and
+stayed invisible through two issues, because both searched for a shape they did not have.
+"Obvious" is a property of the search, not of the gap.
 """
 from __future__ import annotations
 

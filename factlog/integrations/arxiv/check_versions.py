@@ -1791,7 +1791,11 @@ def porcelain_lines(
         rows.append(f"version_conflict\t{summary.version_conflict}")
     if updates:
         rows.append(f"updated\t{sum(1 for u in updates if u.status == UPDATE_WRITTEN)}")
-    rows.append(f"target\t{target}")
+    # Gated like every other caller-influenced field on a positional row: the path comes
+    # from the user's --target and a POSIX directory name may hold a tab (#416, measured
+    # — three columns where the contract says two). It outlived #416's first pass because
+    # that pass searched for `print(f"`, which cannot see a row built by `rows.append`.
+    rows.append(f"target\t{porcelain_field(str(target))}")
     return rows
 
 
