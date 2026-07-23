@@ -6612,6 +6612,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     from factlog.bibtex import is_annotation_source, read_front_matter, safe_cite_key, to_bibtex
     from factlog.csl import to_csl
+    from factlog.front_matter_scan import front_matter_absence
 
     if getattr(args, "bibtex", False) == getattr(args, "csl", False):
         # neither or both
@@ -6643,7 +6644,18 @@ def cmd_export(args: argparse.Namespace) -> int:
         rel = path.relative_to(target).as_posix()
         fm = read_front_matter(path)
         if not fm:
-            skipped.append(f"{rel} (no YAML front matter)")
+            # `read_front_matter` returns {} for several different files, and one
+            # blunt "no YAML front matter" read as all of them -- most misleadingly
+            # for a block whose *closing* fence a human deleted, where the fix is a
+            # single `---` line, not the absent front matter the message implied.
+            # `front_matter_absence` (#422) names which of the four "no block"
+            # reasons it was, as an observation and not a guess about the file's
+            # owner (following annotation_writer, #430); when a block IS present but
+            # holds no readable keys the absence is None, and that is its own note.
+            # This rescans, but only here on the skipped path -- the citable path
+            # above still reads each source once.
+            reason = front_matter_absence(path) or "front matter has no recognizable keys"
+            skipped.append(f"{rel} ({reason})")
             continue
         if is_annotation_source(fm):
             continue

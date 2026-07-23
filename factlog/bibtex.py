@@ -196,8 +196,9 @@ def read_front_matter(path: Path | str) -> dict:
     is therefore not a constant but ``cap / chars-per-author``, measured at 22,795
     authors for 46-character names, 29,959 for 35-character, 65,535 for
     16-character. Those three are ASCII, where characters and bytes coincide; a
-    35-character CJK name costs 81 bytes and still thresholds at 31,775 authors,
-    where a byte reading would predict 12,945. A block can exceed the cap threefold
+    35-character CJK name costs 81 bytes and still thresholds at 29,959 authors —
+    identical to the 35-character ASCII case, since the count is of characters — where
+    a byte reading would predict 12,945. A block can exceed the cap threefold
     in bytes and still be cited. ``front_matter_scan``'s cap comment illustrates the
     same curve at ~40 characters per author; every point on it is far past the few
     thousand the largest real collaborations run to. Dropping the record whole is

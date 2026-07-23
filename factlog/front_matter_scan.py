@@ -160,9 +160,9 @@ def front_matter_block(path: Path | str) -> str | None:
     window truncated the block mid-way and silently dropped every key past it, and
     both readers were measured losing real metadata to it: the arXiv writer emits
     one long ``authors:`` line ahead of ``year``/``journal``/``imported_from``, so
-    against the 2048-byte window 50 authors (2104-byte block) already lost
+    against the 2048-character window 50 authors (2104-byte block) already lost
     ``imported_from`` and 60 lost ``year`` and ``journal`` too (#409), and against
-    the 4096-byte one a 200-author collaboration (7903-byte block) exported as a
+    the 4096-character one a 200-author collaboration (7903-byte block) exported as a
     bare ``@misc`` with a title and nothing else — no author, year, venue, DOI, nor
     the type key that makes it a preprint (#395). The ID-keyed paths survived in
     both cases, because the writers emit their identity keys first; what broke was
