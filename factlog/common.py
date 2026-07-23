@@ -1060,17 +1060,21 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     makes pyrewire treat canonical as IDB and silently drops every compile-emitted
     EDB atom, producing wrong answers with rc=0.
 
-    Detection strategy: track whether we are inside a rule body (i.e. a ``:-`` has
-    been seen and the rule has not yet ended with ``.``).  On each non-comment line,
-    strip quoted strings (so ``"canonical("`` inside a reason literal is not
-    mistaken for a predicate call), then:
+    Detection strategy: split the policy into logical STATEMENTS (a clause up to its
+    terminating ``.``), stripping quoted strings first so ``"canonical("`` inside a
+    reason literal is not mistaken for a predicate call.  Then tokenize each
+    statement's HEAD — the predicate name left of ``:-``, or the whole clause for a
+    bare fact — and reject it only when that name is exactly ``canonical``.  A
+    substring search was wrong in BOTH directions and this replaces it: ``canonical
+    (X, ...)`` with a space before the paren slipped past ``find("canonical(")`` (a
+    head evaded the guard, rc=0), while ``not_canonical(X, ...)`` — a user predicate
+    that merely CONTAINS the reserved name — was rejected as a head.
 
-    - If we are NOT already in a body, a ``canonical(`` token on this line is a
-      head occurrence (either a head in a single-line rule, or a bare fact).
-    - If we ARE already in a body, ``canonical(`` is a body reference → allowed.
-
-    The ``.decl canonical`` in WIRELOG_PROGRAM is never passed as *policy_text*, so
-    it is safe from this check.
+    The ``.decl canonical`` in WIRELOG_PROGRAM is never passed as *policy_text*, but
+    a hand-authored ``.decl canonical(...)`` in the policy re-declares the engine EDB
+    and is still rejected (checked, then stripped, before statement splitting because
+    a ``.decl`` directive carries no clause-terminating dot and would otherwise merge
+    into — and mask — the head of the statement that follows it).
 
     Raises :class:`FactlogError` on first offending line with an actionable message.
     """
@@ -1093,13 +1097,27 @@ def _assert_no_canonical_head(policy_text: str) -> None:
         if line.strip() and not line.strip().startswith(("//", "#"))
     ]
     bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
+    # A `.decl <name>(...)` directive has no clause-terminating '.', so it merges into
+    # the statement that follows it and would hide that statement's real head from the
+    # tokenizer below. Reject a `.decl canonical(...)` re-declaration first (preserving
+    # the prior guard's behavior), then strip every `.decl ...(...)` so the head
+    # tokenizer sees only rule heads and bare facts.
+    for name in re.findall(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", bare):
+        if name == "canonical":
+            raise FactlogError(_ERR)
+    bare = re.sub(r"\.decl\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", bare)
+
     for statement in _split_policy_statements(bare):
-        canon_pos = statement.find("canonical(")
-        if canon_pos < 0:
-            continue
-        neck_pos = statement.find(":-")
-        if neck_pos < 0 or canon_pos < neck_pos:
-            # A bare canonical fact (no neck) or canonical left of the neck → head.
+        # Tokenize the HEAD (the predicate name left of ':-', or the whole clause for
+        # a bare fact); do NOT substring-search the statement. `find("canonical(")`
+        # was wrong in both directions: `canonical (X, ...)` (one space) slipped past
+        # it while `not_canonical(X, ...)` — a user predicate that merely CONTAINS the
+        # reserved name — was rejected. `\s*\(` tolerates the space; matching the whole
+        # name rules out `not_canonical`.
+        head = statement.split(":-", 1)[0]
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", head)
+        if m and m.group(1) == "canonical":
+            # A canonical head or bare fact → reject.
             raise FactlogError(_ERR)
         # canonical to the right of the neck → body reference → allowed.
 
