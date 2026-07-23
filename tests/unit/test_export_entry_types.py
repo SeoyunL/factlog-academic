@@ -57,6 +57,43 @@ from factlog.integrations.pubmed.work_parser import ParsedPubMedWork
 from factlog.integrations.zotero.item_parser import parse_item
 from factlog.integrations.zotero.source_writer import SourceWriter as ZoteroSourceWriter
 
+# The window ``read_front_matter`` used to take before #395. Kept explicit so a
+# fixture whose block fits inside it is caught: such a block would pass even against
+# the unfixed reader, leaving the test meaningless. ``read_text(...)[:4096]`` slices
+# a decoded string, so the window is 4096 *characters*, not bytes — the guard below
+# counts accordingly.
+_OLD_SCAN_CHARS = 4096
+
+
+def _exceeds_old_window(block: str) -> bool:
+    """True when *block* is longer than ``read_front_matter``'s old ``[:4096]`` window.
+
+    Counts characters, not bytes: the old reader sliced a decoded string
+    (``read_text(encoding="utf-8")[:4096]``), so its 4096 was a character count. A
+    block can overrun 4096 *bytes* while still fitting inside the 4096-*character*
+    window the reader actually took — a CJK ``authors:`` line is exactly that — so a
+    byte count would wrongly certify such a block as stressing the window when the old
+    reader would have swallowed it whole.
+    """
+    return len(block) > _OLD_SCAN_CHARS
+
+
+def test_the_old_window_guard_counts_characters_not_bytes():
+    """Pin ``_exceeds_old_window`` to the character count the old reader used.
+
+    A block of 4000 CJK characters is 12000 UTF-8 bytes: it overruns 4096 *bytes* but
+    sits inside the 4096-*character* window ``read_text(...)[:4096]`` took, so the old
+    reader would have read it whole and it does *not* stress that window. The guard
+    must say so — counting bytes would wrongly certify it as oversized. Reverting
+    ``_exceeds_old_window`` to ``len(block.encode())`` makes this fail, which is what
+    keeps the guard honest once the 200-author ASCII fixture (bytes == chars) can no
+    longer tell the two measures apart.
+    """
+    block = "가" * 4000
+    assert len(block) <= _OLD_SCAN_CHARS < len(block.encode())
+    assert not _exceeds_old_window(block)
+
+
 # --------------------------------------------------------------------------
 # Records built by the real writers, so the keys under test are the keys that
 # actually reach a KB.
@@ -645,7 +682,7 @@ class TestExportPathOnDisk:
         """#395, fixed: the front-matter read now stops at the closing fence.
 
         This assertion was inverted — #384 pinned the defect here rather than
-        fixing it. `read_front_matter` used to read only the first 4096 bytes,
+        fixing it. `read_front_matter` used to read only the first 4096 characters,
         and the arXiv writer emits a single long `authors:` line before
         `year`/`journal`/`preprint`, so a large collaboration pushed all of them
         out of the window: the record kept `arxiv_id`/`arxiv_version`/`authors`/
@@ -657,8 +694,9 @@ class TestExportPathOnDisk:
         path = tmp_path / "big.md"
         text = _arxiv_md(journal_ref="Nature 585, 357 (2020)", n_authors=200)
         path.write_text(text, encoding="utf-8")
-        # Guards the guard: a block under 4096 bytes would pass even unfixed.
-        assert len(text.split("---")[1].encode()) > 4096
+        # Guards the guard: a block inside the old 4096-character window would pass
+        # even unfixed.
+        assert _exceeds_old_window(text.split("---")[1]), "block fits the old window"
 
         fm = read_front_matter(path)
         # Every key the writer emitted survives, in particular the ones that used
