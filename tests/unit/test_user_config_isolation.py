@@ -20,8 +20,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import conftest
-
 _RESOLVE = (
     "import json, os;"
     "from pathlib import Path;"
@@ -39,33 +37,35 @@ def _resolved_paths(**popen_kwargs) -> dict:
     return json.loads(proc.stdout)
 
 
-def _assert_sandboxed(paths: dict, sandbox: Path) -> None:
+def _assert_sandboxed(paths: dict, sandbox: Path, real_config: Path) -> None:
     home = Path(paths["home"]).resolve()
     config = Path(paths["config"]).resolve()
     assert home == sandbox.resolve(), f"child resolved ~ to {home}"
     assert config.is_relative_to(sandbox.resolve()), f"child would write {config}"
-    if conftest.REAL_HOME:
-        real_config = Path(conftest.REAL_HOME).resolve() / ".config" / "factlog" / "config.json"
-        assert config != real_config
+    assert config != real_config.resolve()
 
 
-def test_inherited_env_keeps_a_child_out_of_the_real_home(isolated_user_config):
+def test_inherited_env_keeps_a_child_out_of_the_real_home(
+    isolated_user_config, real_user_config_path
+):
     """The ``_seed_kb`` convention: ``subprocess.run`` with no ``env`` at all.
 
     This is the pattern that actually invokes ``init``, so patching os.environ
     (not the call sites) is what makes it safe.
     """
-    _assert_sandboxed(_resolved_paths(), isolated_user_config)
+    _assert_sandboxed(_resolved_paths(), isolated_user_config, real_user_config_path)
 
 
-def test_explicit_env_copy_keeps_a_child_out_of_the_real_home(isolated_user_config, tmp_path):
+def test_explicit_env_copy_keeps_a_child_out_of_the_real_home(
+    isolated_user_config, real_user_config_path, tmp_path
+):
     """The ``_compile`` convention: ``env={**os.environ, ...}``.
 
     A copy of ``os.environ`` inherits the patched values too, so the same single
     fixture covers both conventions.
     """
     env = {**os.environ, "FACTLOG_ROOT": str(tmp_path / "kb"), "PYTHONPATH": os.getcwd()}
-    _assert_sandboxed(_resolved_paths(env=env), isolated_user_config)
+    _assert_sandboxed(_resolved_paths(env=env), isolated_user_config, real_user_config_path)
 
 
 def test_init_adopting_a_dead_root_writes_only_inside_the_sandbox(isolated_user_config, tmp_path):
@@ -81,7 +81,13 @@ def test_init_adopting_a_dead_root_writes_only_inside_the_sandbox(isolated_user_
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(json.dumps({"root": "/nonexistent/dead-kb"}) + "\n", encoding="utf-8")
     # Guard before spawning: a broken fixture must fail the test, not the config.
-    assert os.environ["XDG_CONFIG_HOME"] == str(config.parent.parent)
+    # Read with .get so a fixture that never set XDG_CONFIG_HOME fails the
+    # assertion with a legible message instead of raising a bare KeyError.
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    assert xdg == str(config.parent.parent), (
+        f"isolation fixture did not point XDG_CONFIG_HOME at the sandbox (got {xdg!r}); "
+        "aborting before init could reach a real config"
+    )
 
     kb = tmp_path / "kb"
     subprocess.run(
