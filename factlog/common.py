@@ -91,6 +91,10 @@ REVIEW_STATUSES = {"needs_review", "candidate"}
 # Superseded rows are retained in candidates.csv for audit but are NOT engine
 # input (they never reach accepted.dl) and are ignored by conflict detection.
 SUPERSEDED_STATUSES = {"superseded"}
+# The complete status vocabulary, so consumers (e.g. run_logic_check) test
+# membership against a single source of truth instead of re-listing statuses by
+# hand — the omission that made every superseded row warn as "unknown".
+KNOWN_STATUSES = ENGINE_STATUSES | REVIEW_STATUSES | SUPERSEDED_STATUSES
 QUERY_PREDICATES = {"relation", "path", "count", "conflict", "review_required"}
 RELATION_FACT_RE = re.compile(r"^relation\((.*)\)\.$")
 # 1.0.3 is the floor: it bundles/validates wirelog v0.52.0, the first release

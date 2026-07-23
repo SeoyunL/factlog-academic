@@ -35,3 +35,28 @@ class TestRelationResultsCommaLiteral:
         facts = [_fact("A", "knows", "B")]
         rows = rlc.relation_results('relation("A", "knows", "B")?', facts)
         assert rows == [("A", "knows", "B")]
+
+
+def _row(status):
+    return {"subject": "PMID_1", "relation": "개입_영양소", "object": "EPA", "status": status}
+
+
+class TestStatusWarnings:
+    """`superseded` is a legitimate non-engine status and must not warn;
+    only a genuinely unrecognised status does."""
+
+    def test_superseded_produces_no_warning(self):
+        assert rlc.status_warnings([_row("superseded")]) == []
+
+    def test_every_known_status_is_silent(self):
+        from common import KNOWN_STATUSES
+
+        assert rlc.status_warnings([_row(s) for s in KNOWN_STATUSES]) == []
+
+    def test_unrecognised_status_still_warns(self):
+        warnings = rlc.status_warnings([_row("bogus")])
+        assert warnings == ["unknown status treated as non-engine input: bogus"]
+
+    def test_superseded_does_not_mask_a_typo_in_the_same_batch(self):
+        warnings = rlc.status_warnings([_row("superseded"), _row("bogus")])
+        assert warnings == ["unknown status treated as non-engine input: bogus"]
