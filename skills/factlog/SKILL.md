@@ -6,7 +6,7 @@ description: >-
   logic check, and attempt gated self-correction. Use when the user asks to
   "sync facts", "check the wiki", "run factlog", "verify facts", or update a
   knowledge base from its source documents.
-argument-hint: "setup | add | sync | query | check | repair | ask"
+argument-hint: "setup | add | sync | query | check | repair | ask | ingest | zotero-import | openalex-* | arxiv-* | pubmed-* | review | accept | reject | amend | provenance | vocab | search | sources | status | export | eject | ignore | use | lang | where"
 allowed-tools: Bash(*factlog_python.sh *) Bash(python3 *) Bash(python *) Bash(py *) Read Edit Write Grep Glob
 ---
 
@@ -865,6 +865,301 @@ question for later review (a non-engine-input sink, never `facts/query.dl`):
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
 ```
+
+---
+
+## Academic source imports — zotero / openalex / arxiv / pubmed
+
+**Purpose:** pull bibliographic records from Zotero, OpenAlex, arXiv, and PubMed
+into `sources/` so the normal pipeline can extract facts from them. These four
+integrations are **input adapters, not fact stores.**
+
+**What an import produces:** one `sources/<slug>.md` original per record, plus a
+provenance ledger under `<kb>/source-provenance/`. That original is a *source*,
+not a fact — it still has to go through `sync → review → accept` before anything
+it says reaches `facts/accepted.dl`. Never report an imported record as a
+verified fact.
+
+**Two invariants hold across all four** (they are why these commands are safe to
+re-run):
+
+1. **A user's own file is never clobbered, and an imported `sources/<slug>.md`
+   bibliographic record is never rewritten.** Note the scope: this is not a claim
+   that nothing is ever written under `sources/`. `zotero-import --pdf` places PDF
+   attachments there, and `--annotations` writes `sources/<stem>-notes.md` and
+   **overwrites it on a later run when the highlights changed** — but only when
+   the file is tool-owned (marked `source_kind: annotations` in its front matter);
+   a file that is not ours is skipped, never clobbered.
+2. **Import is idempotent**, so re-importing an identity key already in the KB
+   (`zotero_key` / `openalex_id` / `arxiv_id` / `pmid`) is skipped rather than
+   duplicated.
+
+The stronger promise — *every* write lands in the provenance ledger or the
+check-log, and `sources/` is not touched at all — belongs specifically to the
+refresh, acknowledge, and backfill families described below, not to the import
+commands.
+
+Every one of these commands accepts `--target <kb>` (defaults to the active KB —
+resolve it as described in "Resolve the active KB root first") and most accept
+`--dry-run` (report what would be imported, write nothing) and `--porcelain`
+(tab-separated machine-readable output).
+
+Long-form documentation lives in the repo, not in this skill: `docs/academic-import.md`
+for the shared contract, and `docs/zotero-import.md` / `docs/openalex.md` /
+`docs/arxiv.md` / `docs/pubmed.md` per integration.
+
+### Selectors and required arguments
+
+**Every entry-point command below takes a flag selector. None of them accept a
+bare positional string.** Where a row says *exactly one of*, the flags are an
+argparse mutually-exclusive **required** group: omitting all of them is an error
+(`error: one of the arguments --collection --tag --items is required`), and
+passing two is also an error.
+
+| Command | Required selector | Notes |
+| --- | --- | --- |
+| `zotero-import` | **exactly one of** `--collection NAME` \| `--tag TAG` \| `--items KEY,KEY` | `--pdf` also fetches PDF attachments; `--annotations` also imports highlights/notes into `sources/<stem>-notes.md` |
+| `openalex-search` | `--query TEXT` | costs 10 credits per search; `--year`, `--type`, `--limit` (default 25, max 200), `--all` |
+| `openalex-import` | **exactly one of** `--work-id W…` \| `--doi 10.…` | free |
+| `openalex-cite` | `--for <source-slug>` | `--direction citing\|cited\|both` (default `citing`), `--limit`, `--auto-import` |
+| `openalex-refresh` | *(none — whole KB)* | scope with `--older-than DAYS` (default 30; `0` re-checks everything); `--auto-update` |
+| `openalex-acknowledge-retraction` | `--id W…` | one id only, no `--all`, no wildcard; `--yes` required off a terminal |
+| `openalex-backfill-provenance` | *(none — whole KB)* | no network; `--dry-run` previews |
+| `arxiv-import` | `--id 2311.09277` | repeatable, up to 100 ids per run; pin a version inline (`2311.09277v2`) — there is no `--version` flag |
+| `arxiv-search` | `--query TEXT` | `--category` (repeatable), `--year`, `--limit`, `--sort submitted\|updated\|relevance`, `--all`, `--show-query` |
+| `arxiv-check-versions` | *(none — whole KB)* | `--older-than DAYS`, `--auto-update` |
+| `arxiv-acknowledge-withdrawal` | `--id 2311.09277` | **base id only** — a version pin is rejected, since identity is the base id; `--yes` off a terminal |
+| `arxiv-backfill-provenance` | *(none — whole KB)* | no network; `--dry-run` previews |
+| `pubmed-import` | `--pmid 32738937` | repeatable, up to 200 ids per run; a `pmid:` prefix is accepted |
+| `pubmed-search` | `--query TEXT` | PubMed syntax; `--mesh` (repeatable), `--year`, `--limit`, `--all`, `--show-query` |
+| `pubmed-mesh` | `--for <source-slug>` | proposal-only — writes nothing |
+| `pubmed-refresh` | *(none — whole KB)* | `--older-than DAYS`, `--only-flagged`, `--auto-update`, `--dry-run` |
+| `pubmed-acknowledge-retraction` | `--id 32738937` | one PMID only; `--yes` off a terminal |
+| `pubmed-backfill-provenance` | *(none — whole KB)* | no network, no NCBI email needed; `--dry-run` previews |
+
+`--for` takes a **factlog source slug** — the KB's own name for an already-imported
+source, not a paper title and not an upstream id. Get it from `factlog sources`,
+**but do not paste that output verbatim.** `factlog sources` prints a KB-relative
+path (`sources/demo.md`) while the resolver assembles `<kb>/sources/<slug>.md`, so
+passing `--for sources/demo.md` looks for `<kb>/sources/sources/demo.md` and fails
+with `no source sources/demo.md in <kb>/sources`. **The slug is the bare file stem:
+strip the `sources/` prefix.** The `.md` suffix is optional — both `--for demo` and
+`--for demo.md` resolve. This holds identically for `openalex-cite` and
+`pubmed-mesh`.
+
+### Handling a bare natural-language argument (do not guess)
+
+A human types `/factlog zotero-import "protein folding"`. That string carries no
+selector, and **you cannot tell from the string alone** whether it names a Zotero
+collection, a tag, or a search phrase. The three read different item sets, so a
+guess silently imports the wrong library slice — and because import is idempotent
+and non-destructive, nothing downstream will flag the mistake.
+
+**Rule: never infer the selector. Search first, then ask the human.**
+
+1. **Check deterministically what the string could be.** For Zotero, run the
+   collection reading under `--dry-run`:
+
+   ```bash
+   "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog zotero-import --collection "protein folding" --dry-run --target "$FACTLOG_ROOT"
+   ```
+
+   If it is not a collection the client fails (exit 1) with
+   `collection 'protein folding' not found. Available collections: …`, and that
+   error **names the collections it knows** — the closest thing to a lookup table
+   the CLI offers. Read the names it prints; do not assume the list is complete,
+   and never assume a name absent from it does not exist.
+
+   **All three selectors are validated the same way (#453): a value the library
+   does not hold is a hard error (exit 1), not a silent import of nothing.**
+
+   - `--collection` — an unknown name exits 1 and names the collections that do
+     exist (up to 20, then `... (N more)`). Two further failures list nothing:
+     `collection 'x' is ambiguous (N matches)` when several collections share the
+     name, and `... is ambiguous by case` when they differ only in case. Neither
+     tells you which to pick, so there is no deterministic next step — take the
+     ambiguity to the human and let them name the collection.
+   - `--tag` — an unknown tag exits 1 and names the available tags under the same
+     20-name cap. Under `--porcelain` a hard failure writes nothing to stdout and
+     still exits 1, so a typo can never read back as a successful "imported 0".
+   - `--items` — an unknown key exits 1, naming every key that did not resolve.
+     `--items` is all-or-nothing: one bad key stops the whole batch, so the valid
+     keys alongside it are not imported either.
+
+   Read a *successful* run carefully, though. A `--tag` that exits 0 with 0 items
+   means the tag exists and is currently empty — a real answer, not a lookup
+   failure; do not report it as "tag not found". An `--items` key naming a PDF
+   attachment or a note likewise resolves to 0 items at exit 0: the key exists but
+   is not a bibliographic item (`1 requested` alongside `0 item(s)`). Neither is
+   an error.
+
+   A selector that resolves proves only that *that* selector matches. A
+   successful `--collection` dry-run never proves the string was not *also* a tag.
+   Resolving is not disambiguating, **which is precisely why the next step is a
+   question and not a guess.**
+
+2. **Ask the human which selector they meant**, showing what you found — the
+   collection names the CLI reported, and whether the string matched one. One
+   focused question; do not offer to "try both".
+
+3. **Only then run the real import**, with the selector the human named.
+
+The same rule generalises to the other three:
+
+- `openalex-import` — a string shaped like `W2741809807` is a `--work-id`; one
+  shaped like `10.1007/s10462-023-10448-w` is a `--doi`. **Anything else is not
+  an identifier at all**, so it is a search phrase, not an import target: run
+  `openalex-search --query "<text>" --dry-run` and ask which result to import.
+  Do not silently upgrade a search into an import. **This is the one
+  disambiguation step that costs something:** OpenAlex has no `--show-query`
+  equivalent, so the only way to look is to search, and a search costs 10 credits
+  whether or not you import (`--dry-run` does not make it free). Confirm with the
+  human before probing OpenAlex on a string that may not even be a query.
+- `arxiv-import` — `--id` takes arXiv ids (`2311.09277`, optionally `vN`). Free
+  text is not an id: use `arxiv-search --query "<text>" --show-query` (prints the
+  exact query without spending a request) or `--dry-run`, then ask.
+- `pubmed-import` — `--pmid` takes numeric PMIDs. Free text is not a PMID: use
+  `pubmed-search --query "<text>" --show-query` / `--dry-run`, then ask.
+- `openalex-cite --for` / `pubmed-mesh --for` — a paper *title* is not a slug.
+  Resolve it against `factlog sources` and ask if more than one source matches.
+
+**Never supply a bulk or confirmation flag the human did not ask for.** `--all`
+(search: import every result without prompting), `--auto-import` (`openalex-cite`),
+`--auto-update` (refresh family), and `--yes` (acknowledge family) all exist to
+serve non-interactive runs, not to save the human a question. Adding one on your
+own initiative converts "show me what's there" into a write.
+
+### Refresh, acknowledgement, and backfill
+
+`openalex-refresh` / `arxiv-check-versions` / `pubmed-refresh` re-query upstream
+and **report** drift (a changed DOI, journal, work type, or arXiv version). With
+`--auto-update` they record the changed metadata in the provenance ledger. They
+never touch `sources/*.md`.
+
+**A retraction or withdrawal is never absorbed automatically** — under both modes
+it is surfaced for human review, and it re-appears on every run until a human
+closes it with `openalex-acknowledge-retraction` / `arxiv-acknowledge-withdrawal`
+/ `pubmed-acknowledge-retraction`. Those commands take **one** `--id`, by design:
+the blast radius is a single record chosen by a person. They may *record* a
+retraction non-interactively with `--yes`, but **clearing** one silences a
+recorded signal and is refused unless a human confirms it at a terminal. Relay
+the retraction/withdrawal finding to the human; do not acknowledge on their
+behalf.
+
+The `*-backfill-provenance` commands give ledger-less records (imported before
+ledgers existed) the ledger their front matter implies, so a retraction can be
+acknowledged at all. They use no network and never touch `sources/*.md`;
+`--dry-run` names the ids that would be written and the ids refused.
+
+### Credentials and configuration
+
+Each integration is an optional extra, and settings resolve per integration:
+
+> **explicit path  >  `<kb>/policy/<name>-config.toml`  >  `${XDG_CONFIG_HOME:-~/.config}/factlog/<name>.toml`  >  defaults**
+
+| Integration | Extra (install this) | Dependency it pulls | Auth | Human prerequisite |
+| --- | --- | --- | --- | --- |
+| Zotero | `zotero` | `pyzotero` | none (Local API) | Zotero 7 running, Settings → Advanced → "Allow other applications…" enabled |
+| OpenAlex | `openalex` | `httpx` | none | `email` optional (courtesy identification) |
+| arXiv | `arxiv` | `httpx`, `feedparser` | none | `email` optional |
+| PubMed | `pubmed` | `httpx` | none | **`email` required**, `api_key` recommended |
+
+The **extra** is what goes in brackets — `pip install 'factlog-academic[zotero]'`.
+The dependency column is what that extra installs, not an installable extra name:
+`pip install 'factlog-academic[pyzotero]'` fails.
+
+**Secrets never come from the KB.** A KB is often its own version-controlled
+repo, so Zotero's `web_api_key` and PubMed's `api_key` are read only from the
+user-level XDG file or an explicitly passed path — an `api_key` in
+`<kb>/policy/*-config.toml` is ignored. `NCBI_API_KEY` in the environment
+overrides the key from any file. OpenAlex's `email` is not a credential and is
+safe in a KB policy file.
+
+---
+
+## KB inspection and curation commands
+
+These read or edit the KB directly. None of them run the engine's logic check,
+so none of them produce verified answers on their own — `/factlog check` and
+`/factlog ask` remain the only sources of engine-backed evidence. All accept
+`--target <kb>` (default: the active KB).
+
+### Inspect
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog status --target "$FACTLOG_ROOT"
+```
+
+- `factlog status` — one-screen KB summary: engine version, fact counts,
+  vocabulary sizes, source counts, conflicts, and whether `logic_report.txt` is
+  present. Run this first when you need to orient in an unfamiliar KB.
+- `factlog sources` — every registered source with its original, its conversion
+  (if any), and its fact count. **This is where source slugs come from** for
+  `openalex-cite --for` and `pubmed-mesh --for`.
+- `factlog search <term>` — case-insensitive substring match across
+  subject/relation/object. Quote a term containing spaces. Use it to find the
+  exact spelling of an entity before writing a query.
+- `factlog vocab [--entities] [--relations] [--all]` — entity and relation names
+  with counts. It reports **engine facts** by default; `--all` widens it to
+  non-engine names (`candidate`/`needs_review`/`superseded`). When a
+  `/factlog query` draft fails validation on an unknown token, this is the
+  authoritative list of what the engine will accept.
+- `factlog provenance <SUBJECT> [RELATION] [OBJECT]` (alias `factlog trace`) —
+  trace a fact to its source paths, status, confidence, note, and staleness.
+  `-` wildcards a position. Unlike `/factlog ask`, it covers **all statuses**,
+  not just engine input, so use it for out-of-band audits of a candidate.
+
+### Curate the pending queue
+
+The review commands are the supported alternative to hand-editing
+`facts/candidates.csv` — they update the backing rows and recompile
+`facts/accepted.dl`, and their decisions survive a re-merge.
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog review --target "$FACTLOG_ROOT"
+```
+
+- `factlog review [--status candidate|needs_review]` — list facts awaiting a
+  human decision (both statuses by default). Show this queue to the human; do
+  not decide it for them.
+- `factlog accept <SUBJECT> [RELATION [OBJECT]]` — set matching *pending* rows to
+  `accepted`. `-` wildcards a position, `--dry-run` prints the plan.
+- `factlog reject <SUBJECT> [RELATION [OBJECT]]` — set matching pending rows to
+  `superseded` (same wildcard and `--dry-run` support).
+- `factlog amend <subject> <relation> <object> [--set-subject X] [--set-relation Y]
+  [--set-object Z] [--set-note TEXT] [--accept] [--dry-run]` — correct a fact's
+  value durably: it rewrites `facts/candidates.csv` **and** the backing
+  `runs/*.json`, so a re-merge does not resurrect the old value.
+
+Because `accept`/`reject` match a *prefix* with `-` wildcards, a two-term
+invocation can match far more rows than intended. Run `--dry-run` first and show
+the human the planned changes whenever the triple is not fully specified.
+
+### Remove, exclude, export
+
+- `factlog eject (sources... | --fact S R O | --orphans)` — the inverse of
+  `ingest`. **At least one of the three is required**: with none of them the
+  command refuses (`factlog eject: nothing to eject (give a source, --orphans, or
+  --fact S R O)`, exit 2). Naming a source removes it and its facts; `--fact`
+  retires one fact by triple (repeatable) and leaves the source in place;
+  `--orphans` auto-detects
+  every orphaned source (a conversion whose original is gone, or a cited source
+  with no file). By default retired rows are marked `superseded` and the user's
+  original under `sources/` is left alone — **`--purge` deletes the rows outright
+  and `--delete-original` deletes the user's file**, so use `--dry-run` and get
+  explicit human agreement before either.
+- `factlog ignore [patterns...] [--remove]` — manage `policy/sync-ignore.md`, the
+  glob list `/factlog sync` skips during extraction. With no arguments it lists
+  the current patterns.
+- `factlog export (--bibtex | --csl) [-o FILE]` — emit source provenance as
+  BibTeX or CSL-JSON (for Pandoc/Zotero/Word). **Exactly one of the two formats
+  is required** — there is no default, and omitting both fails with
+  `factlog export: specify exactly one format (--bibtex or --csl)` (exit 2).
+  Writes to stdout unless `--output` names a file.
+- `factlog use <kb> [--lang CODE]` — move the active KB (and optionally set the
+  narration language in the same step). This is the explicit way to switch KBs;
+  it is what the Active-KB contract above tells you to prefer over re-running
+  `setup` on a different `--target`.
 
 ---
 
