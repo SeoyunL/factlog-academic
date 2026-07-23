@@ -1480,21 +1480,22 @@ path(S, O) :- edge(S, M), path(M, O).
 
 
 def decode_wirelog_value(session: EasySession, value: object) -> object:
-    """Resolve a wirelog integer ID back to its interned symbol string.
+    """Pass an already-decoded wirelog value through unchanged.
 
-    Uses the private ``session._intern`` table exposed by pyrewire's EasySession.
-    This is a private API (underscore-prefixed), intentionally pinned to
-    ``pyrewire>=1.0.3,<2.0`` in pyproject.toml to guard against breakage if the
-    internals change in a future major release.  The <2.0 upper bound in
-    requirements.txt mirrors this constraint.
+    ``EasySession.step()`` already decodes each row against the schema: it
+    resolves a STRING column by intern lookup and falls back to the raw ``int``
+    on a miss. ``run_wirelog`` pre-interns every policy literal, fact value and
+    canonical atom, so symbol columns arrive as ``str`` (without that they arrive
+    as raw ids) -- the pre-interning is load-bearing, not dead code.
 
-    Python 3.11+ is required (the engine dependency ``pyrewire`` needs 3.11+;
-    see ``requires-python`` in pyproject.toml).  The ``X | Y`` unions and
-    ``tuple[...]`` annotations used here need 3.10+, which the 3.11 floor
-    satisfies.
+    This layer must not re-decode. It used to look at the value alone
+    (``isinstance(value, int) and session._intern.contains_id(value)``), which
+    could not help a symbol column (already ``str``) and only harmed a genuine
+    ``int64`` scalar small enough to be a valid intern id, rewriting it into
+    whatever symbol held that id; ``bool`` being an ``int`` subclass was looked up
+    as id 1 by the same mistake. Only the schema knows a column's type, and the
+    ``pyrewire>=1.0.3,<2.0`` pin keeps step()'s decoding contract stable.
     """
-    if isinstance(value, int) and session._intern.contains_id(value):
-        return session._intern.lookup(value)
     return value
 
 
@@ -1510,10 +1511,11 @@ def _project_typed_relations(session, specs, accepted) -> None:
 
     NB: hand-authored comparison-predicate rules (#120) use arity-2
     (subject, reason) heads with a quoted reason string; the scalar stays in
-    the body. A bare scalar in a head would be mis-decoded as an interned
-    symbol by decode_wirelog_value (it round-trips ints through the intern
-    table), so it must never appear there. Those rules live in the optional
-    policy/logic-policy.extra.dl, not here.
+    the body. A bare scalar in a head reaches the report as a raw int with
+    nothing to say what it MEANS -- decode_wirelog_value now passes emitted
+    values straight through, so the scalar renders as a meaningless bare number
+    where a reason belongs -- so it must never appear there. Those rules live in
+    the optional policy/logic-policy.extra.dl, not here.
     """
     if not specs:
         return
@@ -1585,9 +1587,12 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
         session.intern(row["relation"])
         session.intern(row["object"])
 
-    # Intern canonical-atom symbols so decode_wirelog_value round-trips for any
-    # canonical/3 tuple the engine emits or a rule references.  canonical/3 is
-    # pure EDB — never a rule head — so we only intern, never insert.
+    # Intern canonical-atom symbols so the engine's _decode_row can resolve any
+    # canonical/3 tuple it emits or a rule references. NOT dead code: _decode_row
+    # resolves a STRING column through this table and falls back silently to the
+    # raw int on a miss, so dropping an intern here does not raise — it prints a
+    # bare id where a name belongs. canonical/3 is pure EDB — never a rule head —
+    # so we only intern, never insert.
     _c_aliases = relation_aliases()
     if _c_aliases:
         for s, canon, o in canonical_atoms(accepted, _c_aliases):
