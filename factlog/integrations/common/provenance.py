@@ -422,12 +422,17 @@ def excluded_sources_by_id(kb_root: Path | str, id_key: str) -> dict[str, tuple[
     ``normalize_cross_id`` does the normalizing rather than each caller's own validator,
     because it is the one built to run over hand-editable files — it returns junk unchanged
     instead of raising, so a single malformed ``arxiv_id:`` cannot abort a whole KB's report.
-    That tolerance is also the limit of the fix, and the limit is worth stating: it repairs a
-    *spelling* of a well-formed id, never a *wrapping* of one. ``pmid: "pmid:123"`` and
-    ``arxiv_id: "https://arxiv.org/abs/2311.09277"`` still fail to match, and an
-    ``openalex_id`` gets only ``.strip()`` — ``normalize_cross_id`` has no ``openalex_id``
-    branch — so a stored ``https://openalex.org/W1`` misses as before (measured). Widening
-    any of those changes the join key too, and belongs with it.
+    That tolerance still bounds what the fold repairs: a *spelling* of a well-formed id, and —
+    for the two identifiers that carry a canonical URL form — a *wrapping* of one. A stored
+    ``arxiv_id: "https://arxiv.org/abs/2311.09277"`` still fails to match (arXiv's normalizer
+    does unwrap URLs, but this key is folded to its version-free base, not URL-stripped here),
+    and ``pmid: "pmid:123"`` still misses (no PMID URL/label unwrap). But a stored
+    ``openalex_id: "https://openalex.org/W1"`` now matches ``--id W1`` (#444):
+    ``normalize_cross_id`` gained an ``openalex_id`` branch reusing
+    ``openalex.api_client.normalize_work_id``. That widening was safe to make here because —
+    unlike ``doi``/``pmid``/``arxiv_id`` — ``openalex_id`` is not in ``CROSS_SOURCE_IDS``, so
+    it is never a dedup join key; this lookup is its only caller (measured by enumerating
+    ``normalize_cross_id``'s callers, not by reading its body).
 
     Two sources whose ids differ only by spelling now collapse into one entry listing both
     paths. That is the answer the enumerating callers (``backfill``, the refresh and version

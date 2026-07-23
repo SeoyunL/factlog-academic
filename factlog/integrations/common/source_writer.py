@@ -40,6 +40,7 @@ from pathlib import Path
 
 from factlog.common import slugify, walk_source_dir
 from factlog.integrations.arxiv.id_normalizer import ArxivIdError, normalize_arxiv_id
+from factlog.integrations.openalex.api_client import OpenAlexError, normalize_work_id
 from factlog.integrations.common._textio import atomic_write_text
 from factlog.integrations.common.doi import fold_doi_prefix
 from factlog.integrations.common.front_matter import read_first_author, read_scalars
@@ -329,15 +330,29 @@ def normalize_cross_id(kind: str, value: str) -> str:
     it imports only stdlib and arXiv config, so ``common`` depending on it is no
     cycle.
 
+    An ``openalex_id`` is unwrapped with :func:`openalex.api_client.normalize_work_id`
+    — the one place that turns an ``https://openalex.org/W1`` URL into the bare
+    ``W1`` — so a hand-edited source storing the URL form is found by the same
+    bare id every ``--id`` caller already canonicalises (#428, #444). Unlike the
+    join keys above (``doi``, ``pmid``, ``arxiv_id``), ``openalex_id`` is **not a
+    cross-source join key**: it is absent from ``CROSS_SOURCE_IDS``, so the only
+    caller that reaches this branch is :func:`provenance.excluded_sources_by_id`'s
+    lookup. Widening it therefore touches that lookup alone and leaves dedup
+    untouched — confirm by grepping the callers, not this sentence. A bare,
+    already-canonical ``W1`` normalizes to itself, so the common case is
+    byte-identical to the old ``.strip()``.
+
     **Tolerant of junk on purpose.** ``normalize_cross_id`` runs over
     hand-editable source files (via :meth:`BaseSourceWriter._index`), where one
-    malformed ``arxiv_id:`` would otherwise abort *every* import in the KB.
-    ``normalize_arxiv_id`` *raises* ``ArxivIdError`` on a bad value; here we catch
-    it and fall back to ``value.strip()`` so the bad file simply does not match
-    anything (arXiv ids are case-significant, so this is deliberately not
-    lowercased). The CLI stays strict — a mistyped ``--arxiv-id`` is validated at
-    input — but junk already sitting in a file is tolerated, mirroring the
-    parser's optional-field handling.
+    malformed ``arxiv_id:`` or ``openalex_id:`` would otherwise abort *every*
+    import in the KB. ``normalize_arxiv_id`` raises ``ArxivIdError`` and
+    ``normalize_work_id`` raises ``OpenAlexError`` on a bad value; here we catch
+    each and fall back to ``value.strip()`` so the bad file simply does not match
+    anything (arXiv and OpenAlex ids are case-significant in their opaque part, so
+    this is deliberately not lowercased — ``normalize_work_id`` does upper-case a
+    leading ``w`` to ``W``, its own rule). The CLI stays strict — a mistyped
+    ``--arxiv-id`` or ``--id`` is validated at input — but junk already sitting in
+    a file is tolerated, mirroring the parser's optional-field handling.
     """
     normalized = value.strip()
     if kind == "doi":
@@ -348,6 +363,11 @@ def normalize_cross_id(kind: str, value: str) -> str:
         try:
             return normalize_arxiv_id(normalized).base
         except ArxivIdError:
+            return normalized
+    if kind == "openalex_id":
+        try:
+            return normalize_work_id(normalized)
+        except OpenAlexError:
             return normalized
     return normalized
 
