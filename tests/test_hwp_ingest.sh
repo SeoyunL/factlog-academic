@@ -20,6 +20,10 @@ export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB conf
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON="${PYTHON:-python3}"
+# Resolve to an absolute path before the restricted-PATH cases below (#459): a bare
+# command name would fall outside PATH="/usr/bin:/bin" and the interpreter itself
+# would be unfound (rc 127), masking the hwp5html-absent behaviour under test.
+PYTHON_ABS="$(command -v "$PYTHON")" || { echo "PYTHON not found: $PYTHON" >&2; exit 1; }
 
 pass=0
 fail=0
@@ -53,7 +57,7 @@ printf '\xd0\xcf\x11\xe0\x00binary' > "$KB/sources/doc.hwp"   # OLE-ish; never p
 
 # explicit: fails, with the install hint
 set +e
-out="$(PATH="/usr/bin:/bin" "$PYTHON" -m factlog ingest --target "$KB" "$KB/sources/doc.hwp" 2>&1)"
+out="$(PATH="/usr/bin:/bin" "$PYTHON_ABS" -m factlog ingest --target "$KB" "$KB/sources/doc.hwp" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -ne 0 ] && ok "explicit .hwp with hwp5html absent fails (rc!=0)" || bad "expected failure when hwp5html absent (rc=$rc)"
@@ -61,7 +65,7 @@ printf '%s' "$out" | grep -qF "install pyhwp" && ok "missing-tool message hints 
 
 # --scan: soft skip, run does not fail
 set +e
-PATH="/usr/bin:/bin" "$PYTHON" -m factlog ingest --target "$KB" --scan >/dev/null 2>&1
+PATH="/usr/bin:/bin" "$PYTHON_ABS" -m factlog ingest --target "$KB" --scan >/dev/null 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 0 ] && ok "--scan with hwp5html absent soft-skips (rc 0)" || bad "--scan failed on absent tool (rc=$rc)"
