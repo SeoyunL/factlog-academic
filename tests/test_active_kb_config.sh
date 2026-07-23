@@ -7,6 +7,8 @@
 #   - `factlog ingest` with no --target uses the active KB (from any cwd)
 #   - a tool (coverage) with no --wiki uses the active KB
 #   - `factlog use <missing>` errors; no config -> cwd fallback (backward compat)
+#   - `factlog where` warns on stderr (never stdout/porcelain) when the active KB
+#     is under a temp dir or no longer exists (#461)
 #
 # Usage: bash tests/test_active_kb_config.sh
 
@@ -72,8 +74,11 @@ PY
 [ "$verdict" = "OK" ] && ok "resolve_root precedence: flag > env > config > cwd" || bad "$verdict"
 
 # --- init records active KB; where reports it --------------------------------
+# --activate: KB is under mktemp -d (a temp dir), which init refuses to adopt
+# silently (#461). This test is about init RECORDING the active KB, so it opts in
+# explicitly; the silent-adoption guard itself is pinned in test_init_active_kb.sh.
 rm -f "$XDG_CONFIG_HOME/factlog/config.json"
-"$PYTHON" -m factlog init --target "$KB" >/dev/null
+"$PYTHON" -m factlog init --target "$KB" --activate >/dev/null
 unset FACTLOG_ROOT
 "$PYTHON" -m factlog where | grep -qF "active KB: $(cd "$KB" && pwd -P)" && ok "init records active KB; where reports it" || bad "where did not report init'd KB"
 
@@ -87,7 +92,7 @@ out="$(cd /tmp && "$PYTHON" "$PLUGIN_ROOT/tools/source_coverage.py" 2>&1 || true
 printf '%s' "$out" | grep -qF "sources/c.bin.docx" && ok "coverage (no --wiki) uses active KB" || bad "coverage did not use active KB: $out"
 
 # --- factlog use switches active KB ------------------------------------------
-"$PYTHON" -m factlog init --target "$KB2" >/dev/null   # also records KB2
+"$PYTHON" -m factlog init --target "$KB2" --activate >/dev/null   # also records KB2 (temp -> --activate, #461)
 "$PYTHON" -m factlog use "$KB" >/dev/null
 "$PYTHON" -m factlog where | grep -qF "active KB: $(cd "$KB" && pwd -P)" && ok "factlog use switches active KB" || bad "use did not switch active KB"
 
@@ -115,6 +120,34 @@ printf '%s' "$plain" | grep -qF "active KB: $(cd "$KB" && pwd -P)" \
   && printf '%s' "$plain" | grep -qF "config file:" \
   && ok "plain factlog where output unchanged (active KB / resolved from / config file)" \
   || bad "plain where output regressed: $plain"
+
+# --- where warns (stderr only) about a temp / missing active KB (#461) --------
+# $KB is under mktemp -d, so it IS a temp active KB. `where` must warn on stderr
+# — never on stdout, never in --porcelain — so the silent pollution #461
+# describes (imports writing into a soon-deleted KB, reporting success) has a
+# tripwire the user can see. `2>&1 >/dev/null` captures stderr while dropping stdout.
+werr="$("$PYTHON" -m factlog where 2>&1 >/dev/null)"
+printf '%s' "$werr" | grep -qi "temporary directory" \
+  && ok "where warns on stderr that the active KB is temporary" \
+  || bad "where did not warn about a temp active KB: $werr"
+
+wout="$("$PYTHON" -m factlog where 2>/dev/null)"
+printf '%s' "$wout" | grep -qi "warning" \
+  && bad "where leaked its warning onto stdout: $wout" \
+  || ok "where keeps the temp warning off stdout"
+
+perr="$("$PYTHON" -m factlog where --porcelain 2>&1 >/dev/null)"
+[ -z "$perr" ] && ok "where --porcelain stays silent (no warning) for machine callers" \
+  || bad "porcelain emitted a warning to stderr: $perr"
+
+# A deleted active KB is reported as missing — the more actionable fact than "temp".
+DKB="$(mktemp -d)/deleted-kb"
+"$PYTHON" -m factlog init --target "$DKB" --activate >/dev/null
+rm -rf "$DKB"
+derr="$("$PYTHON" -m factlog where 2>&1 >/dev/null)"
+printf '%s' "$derr" | grep -qi "does not exist" \
+  && ok "where warns on stderr that the active KB no longer exists" \
+  || bad "where did not warn about a missing active KB: $derr"
 
 echo ""
 echo "========================================"

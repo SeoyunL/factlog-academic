@@ -762,21 +762,70 @@ def active_kb_is_usable(current: str | None) -> bool:
     return Path(current).is_dir()
 
 
-def init_adopts_target(current: str | None, target, activate: bool = False) -> bool:
+def target_under_tempdir(target) -> bool:
+    """Does `target` resolve to a temporary directory, or below one?
+
+    True when the resolved path equals or lives under any of the process temp
+    roots — ``tempfile.gettempdir()``, ``$TMPDIR``, ``/tmp``, ``/var/tmp`` — which
+    is where pytest basetemps, `mktemp -d`, and scratch KBs land. The comparison
+    resolves both sides so macOS's ``/tmp`` -> ``/private/tmp`` (and ``$TMPDIR``'s
+    ``/var/folders/...`` -> ``/private/var/folders/...``) symlinks don't defeat the
+    containment check.
+
+    Pure so the adoption guard can be pinned without running the CLI (#461).
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    try:
+        resolved = Path(target).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+    roots: list[str] = [tempfile.gettempdir()]
+    env = os.environ.get("TMPDIR")
+    if env:
+        roots.append(env)
+    roots.extend(("/tmp", "/var/tmp"))
+
+    for root in roots:
+        try:
+            base = Path(root).expanduser().resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if resolved == base or base in resolved.parents:
+            return True
+    return False
+
+
+def init_adopts_target(
+    current: str | None, target, activate: bool = False, target_is_temp: bool = False
+) -> bool:
     """Should `init` make `target` the active KB?
 
-    Yes when nothing usable is configured (the first-run convenience), when the
-    target already IS the active KB (re-init is a no-op), or when the user asked
-    for it with --activate. Otherwise NO: scaffolding a KB must not silently
+    Yes when the user asked for it with --activate, when the target already IS the
+    active KB (re-init is a no-op), or when nothing usable is configured — the
+    first-run convenience. Otherwise NO: scaffolding a KB must not silently
     retarget accept/reject/amend/sync at it (#210).
 
-    Pure so it can be pinned without running the CLI.
+    The one exception carved out of the first-run convenience is `target_is_temp`:
+    a scratch KB under a temporary directory can vanish and would silently
+    retarget every mutating command at a dead path, so it is refused unless the
+    user opts in with --activate (#461). A re-init of a temp KB that is ALREADY
+    the active one is still a no-op adoption, not a refusal.
+
+    `target_is_temp` defaults False so existing callers are unchanged; cmd_init
+    computes it with `target_under_tempdir`. Pure so it can be pinned without
+    running the CLI.
     """
     if activate:
         return True
-    if not active_kb_is_usable(current):
+    if current == str(target):
         return True
-    return current == str(target)
+    if not active_kb_is_usable(current):
+        return not target_is_temp
+    return False
 
 
 def setup_active_kb_action(previous: str | None, target) -> str:
@@ -816,7 +865,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     _init_kb(target)
 
     current = factlog_config.read_root()
-    if init_adopts_target(current, target, getattr(args, "activate", False)):
+    activate = getattr(args, "activate", False)
+    is_temp = target_under_tempdir(target)
+    if init_adopts_target(current, target, activate, target_is_temp=is_temp):
         factlog_config.write_root(target)
         # --activate is an opt-in, not a licence to be silent: replacing a KB the
         # user was working in has to name what it displaced, exactly as setup does.
@@ -826,6 +877,22 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"factlog init: {action}")
         if action.startswith("CHANGED"):
             print(f"factlog init: warning — {action}", file=sys.stderr)
+        return 0
+
+    # A refused first-run adoption whose only obstacle is the temp guard gets its
+    # own message: the target IS a fresh scratch KB, so pointing the user at
+    # `factlog use` on a path that will soon vanish would be wrong. Tell them why
+    # it was skipped and how to opt in instead (#461).
+    if is_temp and not active_kb_is_usable(current):
+        print("factlog init: active KB left unchanged")
+        print(f"  {target} is under a temporary directory, so it was NOT adopted automatically.")
+        print("  A temp KB can vanish and would then silently retarget your commands (#461).")
+        print(f"  To adopt it anyway: factlog init --target {target} --activate")
+        print(
+            f"factlog init: warning — {target} is under a temporary directory and was not adopted; "
+            f"pass --activate to use it deliberately",
+            file=sys.stderr,
+        )
         return 0
 
     # Say it on stderr too: a script that only checks the exit code would
@@ -950,6 +1017,8 @@ def cmd_lang(args: argparse.Namespace) -> int:
 
 
 def cmd_where(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
     root, source = factlog_config.resolve_root()
     # --porcelain: emit ONLY the active KB root (absolute path), one line, no
     # label. This is the machine-parseable contract for `export FACTLOG_ROOT=...`
@@ -966,6 +1035,27 @@ def cmd_where(args: argparse.Namespace) -> int:
     lang = factlog_config.read_lang()
     if lang:
         print(f"narration language: {lang} (assistant prose only; set with `factlog lang`)")
+    # Warn on stderr (so the porcelain contract above and the stdout report stay
+    # clean) when the active KB is one a user rarely means to be pointed at: a
+    # path that no longer exists, or one under a temporary directory that can
+    # vanish underfoot. Silence here is how the #461 pollution went unnoticed —
+    # import commands write into a soon-deleted KB and report success. A missing
+    # path is reported as such rather than as "temp" even when it is both, since
+    # "it's gone" is the more actionable fact.
+    if root:
+        if not Path(root).is_dir():
+            print(
+                f"factlog where: warning — the active KB {root} does not exist "
+                f"(a deleted or never-created path); set one with `factlog use <dir>`",
+                file=sys.stderr,
+            )
+        elif target_under_tempdir(root):
+            print(
+                f"factlog where: warning — the active KB {root} is under a temporary "
+                f"directory and may vanish, silently losing writes (#461); point at a "
+                f"durable KB with `factlog use <dir>`",
+                file=sys.stderr,
+            )
     return 0
 
 

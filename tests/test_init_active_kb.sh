@@ -7,15 +7,22 @@
 # observed in a real KB was every `accept` returning "no fact matches" because the
 # commands were pointed at someone else's scratch KB.
 #
+# Every target here lives under mktemp -d — a TEMPORARY directory — so this file
+# also pins the #461 guard: a scratch KB that can vanish must not be adopted as
+# the active KB silently, since it would then retarget every mutating command at a
+# path that soon disappears. The non-temp first-run convenience (a genuine ~/wiki)
+# is unaffected and is pinned as a pure unit in tests/unit/test_active_kb_adoption.py.
+#
 # Pins:
-#   (a) first init (no active KB configured) adopts the target — the first-run
-#       convenience is kept
-#   (b) a SECOND init elsewhere leaves the active KB alone and says so
+#   (a) a TEMP first-run target is NOT silently adopted; the refusal explains the
+#       reason (temp dir) and the fix (--activate), and the KB is still scaffolded (#461)
+#   (a2) --activate adopts a temp target deliberately (opt-in is never blocked)
+#   (b) a SECOND init elsewhere over a usable active KB leaves it alone and says so
 #   (c) the KB is still scaffolded either way (init's actual job)
 #   (d) re-init of the ALREADY-active KB keeps it active and says so
 #   (e) `factlog use` still switches deliberately
 #   (f) --activate is the explicit opt-in for scripts that DO want the new KB
-#   (g) a config pointing at a DELETED KB does not trap the user
+#   (g) a config pointing at a DELETED KB does not trap the user (--activate still adopts)
 #
 # `setup` also touches the active KB, but it is NOT driven here: it installs
 # dependencies before reaching the KB block, so running it in CI's dependency-free
@@ -47,12 +54,34 @@ SCRATCH="$TMP_ROOT/scratch-kb"
 
 active() { "$PYTHON" -m factlog where | sed -n '1s/^active KB: //p'; }
 
-# ------------------------------------------------------------------------ (a)
-"$PYTHON" -m factlog init --target "$MINE" >/dev/null
-if [ "$(active)" = "$MINE" ]; then
-  ok "(a) first init adopts the target as the active KB"
+# --------------------------------------------------------------- (a) temp guard
+# $MINE lives under mktemp -d, i.e. a temporary directory. A plain first-run init
+# must NOT silently adopt it (#461): a scratch KB can vanish and would then
+# retarget every mutating command at a dead path.
+out="$("$PYTHON" -m factlog init --target "$MINE")"
+if [ "$(active)" != "$MINE" ]; then
+  ok "(a) a temp first-run target is NOT silently adopted"
 else
-  bad "(a) first init did not set the active KB (got '$(active)')"
+  bad "(a) init silently adopted a temp KB (got '$(active)')"
+fi
+if grep -qi "temporary directory" <<<"$out" && grep -q -- "--activate" <<<"$out"; then
+  ok "(a) the temp refusal explains the reason and the fix (--activate)"
+else
+  bad "(a) temp refusal did not explain reason + --activate: $out"
+fi
+if [ -d "$MINE/sources" ] && [ -d "$MINE/facts" ]; then
+  ok "(a) the KB is still scaffolded even when not adopted"
+else
+  bad "(a) init did not scaffold $MINE"
+fi
+
+# ----------------------------------------------------------------------- (a2)
+# Opting in adopts the temp KB deliberately — the escape hatch the refusal names.
+"$PYTHON" -m factlog init --target "$MINE" --activate >/dev/null
+if [ "$(active)" = "$MINE" ]; then
+  ok "(a2) --activate adopts a temp target on request"
+else
+  bad "(a2) --activate did not adopt the temp target (got '$(active)')"
 fi
 
 # ------------------------------------------------------------------- (b) + (c)
@@ -110,16 +139,24 @@ else
 fi
 
 # ------------------------------------------------------------------------ (g)
-# A config left pointing at a deleted KB must not make init refuse forever.
+# A config left pointing at a DELETED KB must not trap the user. The temp guard
+# still holds (a temp target is not silently adopted even over a dead config, so
+# it can't re-poison the config), but --activate is never trapped.
 GONE="$TMP_ROOT/gone-kb"
 "$PYTHON" -m factlog init --target "$GONE" --activate >/dev/null
 rm -rf "$GONE"
 FRESH="$TMP_ROOT/fresh-kb"
 "$PYTHON" -m factlog init --target "$FRESH" >/dev/null
-if [ "$(active)" = "$FRESH" ]; then
-  ok "(g) a deleted active KB does not trap the user"
+if [ "$(active)" != "$FRESH" ]; then
+  ok "(g) a temp target is not silently adopted even when the active KB is dead"
 else
-  bad "(g) init refused to adopt after the active KB was deleted (got '$(active)')"
+  bad "(g) temp guard leaked after the active KB was deleted (got '$(active)')"
+fi
+"$PYTHON" -m factlog init --target "$FRESH" --activate >/dev/null
+if [ "$(active)" = "$FRESH" ]; then
+  ok "(g) --activate still adopts, so a deleted active KB never traps the user"
+else
+  bad "(g) --activate failed to adopt after the active KB was deleted (got '$(active)')"
 fi
 
 echo "---"

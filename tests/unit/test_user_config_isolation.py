@@ -76,6 +76,11 @@ def test_init_adopting_a_dead_root_writes_only_inside_the_sandbox(isolated_user_
     and the test would pass vacuously. Since the sandbox config is the only file
     ``init`` can rewrite, asserting it now names the new KB proves the adoption
     fired *here* rather than in the developer's home.
+
+    ``--activate`` forces that adoption: ``tmp_path`` is a temp dir, which the
+    #461 guard refuses to adopt silently even over a dead root, so the opt-in is
+    what makes the write fire. This test is about *where* the write lands, not
+    whether the silent path fires, so opting in is exactly right.
     """
     config = isolated_user_config / ".config" / "factlog" / "config.json"
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -91,7 +96,7 @@ def test_init_adopting_a_dead_root_writes_only_inside_the_sandbox(isolated_user_
 
     kb = tmp_path / "kb"
     subprocess.run(
-        [sys.executable, "-m", "factlog", "init", "--target", str(kb)],
+        [sys.executable, "-m", "factlog", "init", "--target", str(kb), "--activate"],
         capture_output=True, check=True, cwd=os.getcwd(),
     )
 

@@ -25,7 +25,7 @@ ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 
 KB="$(mktemp -d)/wiki"
-"$PYTHON" -m factlog init --target "$KB" >/dev/null   # records active KB
+"$PYTHON" -m factlog init --target "$KB" --activate >/dev/null   # records active KB (temp -> --activate, #461)
 H="subject,relation,object,source,status,confidence,note"
 printf '%s\n%s\n%s\n%s\n' "$H" \
   '갑봇,통합,을서비스,sources/a.md,confirmed,0.9,' \
