@@ -112,14 +112,14 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
             results.append(policy_result_line(predicate, line, inferred))
-        elif line.startswith("path"):
+        elif predicate == "path":
             constants = quoted_constants(line)
             if len(constants) >= 2:
                 is_reachable = (constants[0], constants[1]) in inferred["path"]
                 trace = dependency_path(facts, constants[0], constants[1]) if is_reachable else []
                 value = " -> ".join(trace) if trace else "(not found)"
                 results.append(f"path {constants[0]} -> {constants[1]}: {value}")
-        elif line.startswith("relation"):
+        elif predicate == "relation":
             rows = relation_results(line, facts)
             args = query_args(line)
             result_values: list[str] = []
@@ -131,7 +131,7 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
                 result_values.append(", ".join(bindings) if bindings else f"{subject}, {relation}, {object_}")
             suffix = "; " + "; ".join(result_values) if result_values else ""
             results.append(f"relation results: {len(rows)} rows{suffix}")
-        elif line.startswith("count"):
+        elif predicate == "count":
             # count(subject, relation)? -> number of DISTINCT objects for that
             # (subject, relation) over engine facts (0 is a verified answer).
             # Same semantics as ask_router.evaluate's count branch.
@@ -148,7 +148,7 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
                     and (not rel_const or f["relation"] == rel)
                 }
                 results.append(f"count results: {len(objects)} (distinct objects)")
-        elif line.startswith("review_required"):
+        elif predicate == "review_required":
             constants = quoted_constants(line)
             question = constants[0] if constants else "(missing question)"
             results.append(f"review_required: {question}")
