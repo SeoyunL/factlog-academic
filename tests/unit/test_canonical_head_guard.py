@@ -102,6 +102,37 @@ class TestAssertNoCanonicalHead:
         with pytest.raises(fcommon.FactlogError, match="rule bodies"):
             fcommon._assert_no_canonical_head(policy)
 
+    def test_rejects_canonical_head_with_space_before_paren(self):
+        """`canonical (X, ...) :- ...` (space before the paren) is still a head —
+        a substring `find("canonical(")` missed it, letting the head evade the guard
+        with rc=0. Head tokenization tolerates the whitespace."""
+        policy = 'canonical (X, "r", O) :- relation(X, "r", O).\n'
+        with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_rejects_bare_canonical_fact_with_space_before_paren(self):
+        """A bare `canonical (...)` fact with a space before the paren is a head."""
+        policy = 'canonical ("doc1", "결론", "true").\n'
+        with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
+            fcommon._assert_no_canonical_head(policy)
+
+    def test_allows_not_canonical_head(self):
+        """A user predicate that merely CONTAINS the reserved name — `not_canonical`
+        — must NOT be rejected as a canonical head. A substring match flagged it,
+        so a legitimate policy could no longer run `factlog check`."""
+        policy = 'not_canonical(X, "r") :- relation(X, "r", _).\n'
+        fcommon._assert_no_canonical_head(policy)
+
+    def test_allows_not_canonical_bare_fact(self):
+        """A bare `not_canonical(...)` fact must not be mistaken for a canonical head."""
+        policy = 'not_canonical("A", "b").\n'
+        fcommon._assert_no_canonical_head(policy)
+
+    def test_allows_not_canonical_in_body(self):
+        """`not_canonical` used only in a rule body must be allowed."""
+        policy = 'conflict(X, "r") :- not_canonical(X, "r", _).\n'
+        fcommon._assert_no_canonical_head(policy)
+
     def test_canonical_in_string_literal_not_flagged(self):
         """A string literal containing 'canonical(' must not trigger the guard."""
         # The word "canonical" inside a quoted string is not a predicate call.
