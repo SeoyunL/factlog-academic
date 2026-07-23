@@ -114,6 +114,30 @@ class TestNormalizeCrossId:
         # arXiv ids are case-significant; the fallback leaves case untouched.
         assert normalize_cross_id("arxiv_id", "NotAnId") == "NotAnId"
 
+    def test_openalex_id_is_not_in_the_cross_source_set(self):
+        # The whole reason widening it here is safe (#444): it is never a dedup
+        # join key, so this branch's only caller is `excluded_sources_by_id`.
+        assert ("openalex_id", "OpenAlex id") not in CROSS_SOURCE_IDS
+        assert not any(kind == "openalex_id" for kind, _ in CROSS_SOURCE_IDS)
+
+    def test_openalex_url_is_unwrapped_to_the_bare_id(self):
+        assert normalize_cross_id("openalex_id", "https://openalex.org/W1") == "W1"
+
+    def test_openalex_bare_id_is_byte_identical_to_the_old_strip(self):
+        # The common case must not move: a canonical bare id normalizes to itself.
+        assert normalize_cross_id("openalex_id", "W2741809807") == "W2741809807"
+        assert normalize_cross_id("openalex_id", " W1 ") == "W1"
+
+    def test_openalex_url_and_bare_id_collide(self):
+        assert normalize_cross_id("openalex_id", "https://openalex.org/W1") == \
+            normalize_cross_id("openalex_id", "W1")
+
+    def test_malformed_openalex_id_falls_back_to_stripped_value_not_raise(self):
+        # `normalize_work_id` rejects a zero-padded / `W0` id; the branch catches
+        # it so one bad hand-edited file cannot abort a whole KB's report.
+        assert normalize_cross_id("openalex_id", "  W0  ") == "W0"
+        assert normalize_cross_id("openalex_id", "not-a-work") == "not-a-work"
+
 
 class TestDoiDigitSpelling:
     """Where the DOI fold stops: prefix normalized, suffix preserved (#405).

@@ -93,12 +93,13 @@ class TestTwoSpellingsAreOnePaper:
 
 
 class TestTheToleranceAndItsLimit:
-    """What the fix deliberately does NOT repair, measured rather than assumed.
+    """What the fix repairs and what it deliberately does NOT, measured not assumed.
 
     ``normalize_cross_id`` is used precisely because it runs over hand-editable
-    files without raising. The cost of that tolerance is that it repairs a
-    *spelling* of a well-formed id and never a *wrapping* of one, and these pin
-    the boundary so a future reader does not over-read the fix.
+    files without raising. It repairs a *spelling* of a well-formed id always, and
+    a *wrapping* of one only for the identifiers whose normalizer unwraps a URL:
+    ``openalex_id`` gains that here (#444), while ``pmid`` still does not. These
+    pin the boundary so a future reader neither over- nor under-reads the fix.
     """
 
     def test_a_malformed_id_does_not_abort_the_report(self, tmp_path):
@@ -118,19 +119,35 @@ class TestTheToleranceAndItsLimit:
         assert result.get("123") is None
         assert result["pmid:123"] == ("runs/sources/a.md",)
 
-    def test_an_openalex_url_still_misses(self, tmp_path):
-        # `normalize_cross_id` has no `openalex_id` branch — the value is only
-        # stripped — so `openalex-acknowledge-retraction --id W1` does not find
-        # this. Widening it would change the join key too, and belongs there.
+    def test_an_openalex_url_is_found_by_its_bare_id(self, tmp_path):
+        # Was `test_an_openalex_url_still_misses`, the characterization test that
+        # pinned the pre-#444 miss. #444 added an `openalex_id` branch to
+        # `normalize_cross_id` (reusing `normalize_work_id`), so a hand-edited
+        # source storing the URL form is now found by the bare id that
+        # `openalex-acknowledge-retraction --id W1` canonicalises to. This was safe
+        # to widen here because `openalex_id` is not a dedup join key (it is absent
+        # from `CROSS_SOURCE_IDS`); this lookup is the branch's only caller.
         kb = _kb(tmp_path)
         _excluded(kb, "a.md", 'openalex_id: "https://openalex.org/W1"')
         result = excluded_sources_by_id(kb, "openalex_id")
-        assert result.get("W1") is None
-        assert result["https://openalex.org/W1"] == ("runs/sources/a.md",)
+        assert result.get("W1") == ("runs/sources/a.md",)
+        assert result.get("https://openalex.org/W1") is None
 
-    def test_a_stored_openalex_id_that_needs_no_repair_is_found(self, tmp_path):
-        # The other half of the previous test: the `openalex_id` path is not
-        # broken, it is merely unwidened. The common case still matches.
+    def test_a_stored_openalex_id_that_needs_no_repair_is_unmoved(self, tmp_path):
+        # The negative twin of the widening: a bare, already-canonical `W1`
+        # normalizes to itself, so the common case is byte-identical to the old
+        # `.strip()` and the key does not move.
         kb = _kb(tmp_path)
         _excluded(kb, "a.md", 'openalex_id: "W1"')
         assert excluded_sources_by_id(kb, "openalex_id").get("W1") == ("runs/sources/a.md",)
+
+    def test_a_malformed_openalex_id_does_not_abort_the_report(self, tmp_path):
+        # `normalize_work_id` raises on a zero-padded/`W0` id; the branch catches it
+        # and falls back to `.strip()`, so one bad hand-edited file cannot take out
+        # a whole KB's report — the same tolerance the arxiv branch relies on.
+        kb = _kb(tmp_path)
+        _excluded(kb, "bad.md", 'openalex_id: "W0"')
+        _excluded(kb, "good.md", 'openalex_id: "https://openalex.org/W1"')
+        result = excluded_sources_by_id(kb, "openalex_id")
+        assert result["W0"] == ("runs/sources/bad.md",)
+        assert result["W1"] == ("runs/sources/good.md",)
