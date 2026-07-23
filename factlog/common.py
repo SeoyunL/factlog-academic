@@ -1688,10 +1688,18 @@ def _canonical_value(value: str) -> str:
     a match. An ``amount`` compound term is normalised to its always-quoted
     canonical form (``amount(7,억)`` / ``amount(7,"억")`` -> ``amount(7,"억")``),
     the same form merge stores — so a query literal matches the stored object
-    whether or not the author quoted the unit. Any non-amount string is returned
-    unchanged, so dates/numbers/ordinals/entities are unaffected. Total: never
-    raises."""
-    return literal_types.canonical_amount(value) or value
+    whether or not the author quoted the unit.
+
+    NFC folding at the single query-value comparison chokepoint (#213): every
+    query-match path routes value comparison through here, so folding once here
+    makes an NFD-stored relation or object meet an NFC-typed query constant (and
+    the reverse) without touching any per-path code. macOS text is routinely NFD,
+    so an NFD-stored fact would otherwise never meet an NFC-typed query constant.
+    Idempotent no-op on NFC-only data, so a KB that was already NFC compares
+    byte-identically. Non-amount strings are otherwise returned unchanged, so
+    dates/numbers/ordinals/entities keep their form. Total: never raises."""
+    nfc = unicodedata.normalize("NFC", value)
+    return literal_types.canonical_amount(nfc) or nfc
 
 
 def _is_quoted_string(arg: str) -> bool:
