@@ -52,6 +52,14 @@ are not imported either. For a script feeding keys in batches, one typo now stop
 the whole batch — split the keys across calls if you would rather import whatever
 resolves.
 
+`--tag` matches a **literal tag name** only. Zotero's `tag` parameter is a search
+expression, so a **leading `-` negates** (every item *without* that tag) and `||`
+is **OR** (a union). A tag whose own name starts with `-` or contains `||` cannot
+be looked up literally and is rejected as an error (exit 1) — the Local API offers
+no way to escape these characters. An explicit failure beats silently importing
+the wrong items and reporting `Errors: 0`. An interior hyphen (e.g. `Computer
+Science - Performance`) is literal and resolves normally.
+
 Without `--target` the migration goes to the active KB, and `--porcelain` emits
 machine-readable output for scripts. `--pdf` also fetches each item's PDF
 attachments and converts their full text with the existing `ingest` path (the
