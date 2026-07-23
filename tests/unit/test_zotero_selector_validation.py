@@ -188,6 +188,60 @@ class TestTagResolution:
         assert f"t{_SUGGEST_LIMIT:03d}" not in str(ei.value)
 
 
+class TestTagMetacharacters:
+    """A tag whose name uses Zotero's tag-search metacharacters can't be a literal.
+
+    The ``tag`` parameter is a search expression: a leading ``-`` negates and
+    ``||`` is OR (measured on the Local API, port 23119, which has no documented
+    escape). Such a name is rejected before any query runs, so #460's negation
+    ("-draft" pulls in every item *without* that tag) can't fire — even when the
+    tag really exists and #453's existence check would otherwise certify it.
+    """
+
+    def test_leading_hyphen_tag_is_rejected_even_when_it_exists(self):
+        # "-draft" is a real library tag, so resolution's existence check would
+        # pass; the metacharacter guard must reject it before that, and no
+        # negated items(tag=...) query may reach the backend.
+        backend = FakeBackend(items=[_item("A", tags=["-draft"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag("-draft")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_leading_hyphen_tag_is_rejected_when_absent(self):
+        backend = FakeBackend(items=[_item("A", tags=["kept"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag("-missing")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_or_tag_is_rejected_even_when_it_exists(self):
+        backend = FakeBackend(items=[_item("A", tags=["a||b"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag("a||b")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_or_tag_is_rejected_when_absent(self):
+        backend = FakeBackend(items=[_item("A", tags=["kept"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag("x||y")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_error_names_the_syntax_collision(self):
+        # The message must explain the cause (negation / OR), not just "invalid".
+        c = _client(tags=["kept"])
+        with pytest.raises(ZoteroError, match="negation and OR"):
+            c.get_items_by_tag("-draft")
+
+    def test_interior_hyphen_tag_is_still_a_literal_lookup(self):
+        # Only a *leading* '-' is a metacharacter; an interior hyphen is part of
+        # the name and must still resolve and query literally (no regression).
+        backend = FakeBackend(items=[_item("A", tags=["Computer Science - Performance"])])
+        out = ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag(
+            "Computer Science - Performance"
+        )
+        assert [i["key"] for i in out] == ["A"]
+        assert ("items", {"tag": "Computer Science - Performance"}) in backend.calls
+
+
 class TestCollectionSuggestionCap:
     """The shared _suggest() caps the collection listing too (a contract change)."""
 
