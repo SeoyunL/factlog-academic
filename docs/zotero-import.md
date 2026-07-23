@@ -44,8 +44,8 @@ factlog zotero-import (--collection <name> | --tag <tag> | --items <k1,k2,...>)
 | 옵션 | 설명 |
 |---|---|
 | `--collection <name>` | 컬렉션 이름으로 이관(정확 일치 → 대소문자 무시 폴백; 다중 일치는 모호성 오류, 없으면 사용 가능한 이름 안내) |
-| `--tag <tag>` | 태그로 이관 |
-| `--items <ids>` | 쉼표로 구분한 Zotero item 키 목록 |
+| `--tag <tag>` | 태그로 이관(정확 일치 → 대소문자 무시 폴백; 다중 일치는 모호성 오류, 없으면 사용 가능한 태그 안내) |
+| `--items <ids>` | 쉼표로 구분한 Zotero item 키 목록(라이브러리에 없는 키는 오류) |
 | `--target <path>` | 대상 KB(기본: 활성 KB — `factlog where` 참조) |
 | `--dry-run` | 파일을 만들지 않고 이관 계획(예상 파일명 포함)만 표시 |
 | `--porcelain` | 스크립트용 기계 출력(탭 구분) |
@@ -53,6 +53,11 @@ factlog zotero-import (--collection <name> | --tag <tag> | --items <k1,k2,...>)
 | `--annotations` | 각 항목의 하이라이트·노트를 `sources/<stem>-notes.md`로 이관(아래 참조) |
 
 컬렉션에 섞여 있는 첨부(PDF)·노트는 제외하고 **top-level 서지 아이템만** 가져옵니다.
+
+세 선택자 모두 **라이브러리에 없는 값**은 오류(exit 1)로 알려 줍니다. 오타 하나가
+"0건 이관 성공"으로 보여서 빈 KB가 CI를 통과하는 일을 막기 위해서입니다. 반대로
+**있지만 비어 있는** 값(예: 아무 서지 항목도 달려 있지 않은 태그)은 그대로 성공
+(exit 0, 0건)입니다. 구분되는 것은 "없음"과 "비어 있음"입니다.
 
 ### 예시
 

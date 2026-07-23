@@ -33,6 +33,12 @@ factlog zotero-import --tag "to-review"                  # by tag
 factlog zotero-import --items "KH78JUPE,64DA4TQJ"        # individual items
 ```
 
+All three selectors reject a value the library does not hold: an unknown
+collection, tag, or item key is an error (exit 1) that names what *is* available,
+so a typo cannot pass CI as a successful import of nothing. A selector that
+exists but matches nothing — a tag carrying no bibliographic items, say — is
+still a success (exit 0, 0 items). The distinction is *absent* versus *empty*.
+
 Without `--target` the migration goes to the active KB, and `--porcelain` emits
 machine-readable output for scripts. `--pdf` also fetches each item's PDF
 attachments and converts their full text with the existing `ingest` path (the

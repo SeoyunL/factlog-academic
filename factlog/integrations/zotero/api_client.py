@@ -38,6 +38,11 @@ _DOWNLOADABLE_LINK_MODES = frozenset({"imported_file", "imported_url"})
 # Annotation types that carry no text (nothing to import as a source in phase 3).
 _NON_TEXT_ANNOTATION_TYPES = frozenset({"image", "ink"})
 
+# How many names a "not found" message lists before summarising the rest. A real
+# library accumulates hundreds of auto-imported tags, so the whole set would bury
+# the error it is meant to explain.
+_SUGGEST_LIMIT = 20
+
 
 class ZoteroError(Exception):
     """A Zotero request could not be satisfied (bad collection, web mode, ...)."""
@@ -59,6 +64,40 @@ def _unreachable_msg(exc: Exception) -> str:
         "applications on this computer to communicate with Zotero' enabled? "
         "(Settings > Advanced)"
     )
+
+
+def _tag_name(entry) -> str:
+    """The tag string of one ``tags()`` entry.
+
+    pyzotero hands back plain strings, but the raw Local API payload is a list of
+    ``{"tag": ...}`` objects — accept both so a backend that skips pyzotero's
+    processing (including the test fakes) still resolves.
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        name = entry.get("tag")
+        if isinstance(name, str):
+            return name
+    return ""
+
+
+def _item_key(item) -> str:
+    if not isinstance(item, dict):
+        return ""
+    key = item.get("key") or _data(item).get("key")
+    return key if isinstance(key, str) else ""
+
+
+def _suggest(names) -> str:
+    """A deterministic, length-capped ``a, b, c`` listing for a not-found error."""
+    ordered = sorted(set(names))
+    if not ordered:
+        return "(none)"
+    if len(ordered) <= _SUGGEST_LIMIT:
+        return ", ".join(ordered)
+    shown = ordered[:_SUGGEST_LIMIT]
+    return f"{', '.join(shown)}, ... ({len(ordered) - _SUGGEST_LIMIT} more)"
 
 
 def _is_downloadable_pdf(data: dict) -> bool:
@@ -192,7 +231,7 @@ class ZoteroClient:
             raise ZoteroError(
                 f"collection name {name!r} is ambiguous by case ({len(insensitive)} matches)."
             )
-        available = ", ".join(sorted(_data(c).get("name", "") for c in collections)) or "(none)"
+        available = _suggest(_data(c).get("name", "") for c in collections)
         raise ZoteroError(f"collection {name!r} not found. Available collections: {available}")
 
     def get_items_by_collection(self, name: str) -> list[dict]:
@@ -201,8 +240,36 @@ class ZoteroClient:
             lambda: self._bibliographic(self._all(self.backend.collection_items_top(key)))
         )
 
+    def list_tags(self) -> list[str]:
+        """Every tag name in the library (read-only), in Zotero's order."""
+        raw = self._fetch(lambda: self._all(self.backend.tags()))
+        return [name for name in (_tag_name(entry) for entry in raw) if name]
+
+    def _resolve_tag(self, tag: str) -> str:
+        """The library's own spelling of ``tag``, or a ZoteroError naming what exists.
+
+        A tag needs no name->key lookup, so nothing forced an existence check here
+        the way ``_collection_key`` forces one for collections — and an unknown tag
+        used to come back as an ordinary empty result (#453). Resolution mirrors
+        the collection rules (exact, then a unique case-insensitive match) so the
+        two selectors fail the same way, and the resolved spelling is what gets
+        queried because the API matches tags exactly.
+        """
+        if not isinstance(tag, str) or not tag.strip():
+            raise ZoteroError("tag must be a non-empty string.")
+        tags = self.list_tags()
+        if tag in tags:
+            return tag
+        insensitive = sorted({t for t in tags if t.lower() == tag.lower()})
+        if len(insensitive) == 1:
+            return insensitive[0]
+        if len(insensitive) > 1:
+            raise ZoteroError(f"tag {tag!r} is ambiguous by case ({len(insensitive)} matches).")
+        raise ZoteroError(f"tag {tag!r} not found. Available tags: {_suggest(tags)}")
+
     def get_items_by_tag(self, tag: str) -> list[dict]:
-        return self._fetch(lambda: self._bibliographic(self._all(self.backend.items(tag=tag))))
+        resolved = self._resolve_tag(tag)
+        return self._fetch(lambda: self._bibliographic(self._all(self.backend.items(tag=resolved))))
 
     def get_items_by_ids(self, ids: list[str]) -> list[dict]:
         keys = [i.strip() for i in ids if i and i.strip()]
@@ -214,11 +281,18 @@ class ZoteroClient:
         for start in range(0, len(keys), _ID_BATCH):
             batch = keys[start : start + _ID_BATCH]
             out.extend(
-                self._fetch(
-                    lambda b=batch: self._bibliographic(self._all(self.backend.items(itemKey=",".join(b))))
-                )
+                self._fetch(lambda b=batch: self._all(self.backend.items(itemKey=",".join(b))))
             )
-        return out
+        # A key the library does not hold is dropped from the response with no
+        # other signal, so an all-typo request used to look like a successful
+        # import of nothing (#453). Checked against the *raw* response: a key that
+        # does resolve but names an attachment or note is filtered below as a
+        # non-bibliographic item, not reported as missing.
+        found = {_item_key(item) for item in out}
+        missing = [k for k in dict.fromkeys(keys) if k not in found]
+        if missing:
+            raise ZoteroError(f"item key(s) not found in Zotero: {', '.join(missing)}")
+        return self._bibliographic(out)
 
     # -- attachments (phase 2) ---------------------------------------------
     def get_pdf_attachments(self, parent_key: str) -> list[dict]:
