@@ -156,7 +156,7 @@ def front_matter_absence(path: Path | str) -> str | None:
 def front_matter_block(path: Path | str) -> str | None:
     """The text between the opening ``---`` and the closing fence, or None.
 
-    Reads to the block's **closing fence**, not to a fixed byte count. A fixed
+    Reads to the block's **closing fence**, not to a fixed character count. A fixed
     window truncated the block mid-way and silently dropped every key past it, and
     both readers were measured losing real metadata to it: the arXiv writer emits
     one long ``authors:`` line ahead of ``year``/``journal``/``imported_from``, so

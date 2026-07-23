@@ -209,7 +209,7 @@ class TestReadsToTheClosingFence:
     def test_every_emitted_key_survives_a_large_collaboration(self, kind, source):
         """No key the writer emitted falls off the end of the read.
 
-        The old window cut at a byte count, so which keys survived depended on
+        The old window cut at a character count, so which keys survived depended on
         where the writer happened to put its ``authors:`` line. Asked key by key
         against the writer's own output, nothing is left to that accident.
         """
