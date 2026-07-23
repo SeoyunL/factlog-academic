@@ -345,6 +345,21 @@ class TestAcknowledgeCommand:
         assert _md_snapshot(tmp_path) == before
         assert _ledger_withdrawn_by(tmp_path, "1706.03762") == "author"
 
+    def test_no_tty_advice_scopes_yes_to_recording(self, tmp_path, fake, capsys):
+        # #429: the advice may not promise `--yes` as a general way through. It works for
+        # a record and is refused for a clear (#106), so it names the direction it buys.
+        _seed(tmp_path, "1706.03762", 7, withdrawn_by=None)
+        fake(FakeClient([_work("1706.03762", version=7, withdrawn_by="author")]))
+        assert run([
+            "arxiv-acknowledge-withdrawal", "--id", "1706.03762",
+            "--target", str(tmp_path),
+        ]) == 1
+        err = capsys.readouterr().err
+        assert "--yes with --id to record a withdrawal non-interactively" in err
+        assert "--yes can only record" in err
+        # The unscoped promise this replaced must not come back.
+        assert "confirm non-interactively" not in err
+
     def test_version_pinned_id_is_rejected(self, tmp_path, fake, capsys):
         _seed(tmp_path, "1706.03762", 7, withdrawn_by="author")
         client = fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)]))
@@ -761,6 +776,30 @@ class TestYesCannotClear:
         # Byte- and mtime_ns-identical: no ledger write, no .md write.
         assert _kb_snapshot(tmp_path) == before
         assert _ledger_withdrawn_by(tmp_path, "1706.03762") == "author"
+
+    def test_the_two_refusals_on_a_clear_do_not_contradict(self, tmp_path, fake, capsys):
+        # #429: without a terminal, a clear is refused twice — once by the TTY gate, then
+        # again by #106 if the operator follows the advice. The first message must not
+        # send them into the second as if it were the way through.
+        _seed(tmp_path, "1706.03762", 7, withdrawn_by="author")
+        before = _kb_snapshot(tmp_path)
+        fake(FakeClient([_work("1706.03762", version=7, withdrawn_by=None)] * 2))
+
+        base = ["arxiv-acknowledge-withdrawal", "--id", "1706.03762",
+                "--target", str(tmp_path)]
+        assert run(base) == 1
+        first = capsys.readouterr().err
+        assert run(base + ["--yes"]) == 1
+        second = capsys.readouterr().err
+
+        # The first refusal already says the second one's rule, so following it is a
+        # choice, not a surprise.
+        assert "--yes can only record" in first
+        assert "refusing to clear the withdrawal" in second
+        # Both point at the one path that does work.
+        assert "terminal" in first and "terminal" in second
+        # Two refusals, zero writes.
+        assert _kb_snapshot(tmp_path) == before
 
     def test_yes_refusal_says_why_the_absence_is_not_trustworthy(
         self, tmp_path, fake, capsys

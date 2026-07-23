@@ -354,6 +354,19 @@ class TestAcknowledgeCommand:
         assert client.call_count == 0  # it refuses BEFORE hitting the API
         assert _kb_snapshot(tmp_path) == before
 
+    def test_no_tty_advice_scopes_yes_to_recording(self, tmp_path, fake, capsys):
+        # #429: the advice may not promise `--yes` as a general way through. It works for
+        # a record and is refused for a clear (#106), so it names the direction it buys.
+        _seed(tmp_path, "W1", is_retracted=False)
+        fake(FakeClient({"W1": _raw_work("W1", is_retracted=True)}))
+        assert run(["openalex-acknowledge-retraction", "--id", "W1",
+                    "--target", str(tmp_path)]) == 1
+        err = capsys.readouterr().err
+        assert "--yes with --id to record a retraction non-interactively" in err
+        assert "--yes can only record" in err
+        # The unscoped promise this replaced must not come back.
+        assert "confirm non-interactively" not in err
+
     def test_invalid_id_is_rejected_before_any_call(self, tmp_path, fake, capsys):
         _seed(tmp_path, "W1", is_retracted=True)
         client = fake(FakeClient({"W1": _raw_work("W1", is_retracted=False)}))
@@ -583,6 +596,29 @@ class TestYesCannotClear:
         # Byte- and mtime_ns-identical: no ledger write, no .md write.
         assert _kb_snapshot(tmp_path) == before
         assert _ledger_is_retracted(tmp_path, "W1") is True
+
+    def test_the_two_refusals_on_a_clear_do_not_contradict(self, tmp_path, fake, capsys):
+        # #429: without a terminal, a clear is refused twice — once by the TTY gate, then
+        # again by #106 if the operator follows the advice. The first message must not
+        # send them into the second as if it were the way through.
+        _seed(tmp_path, "W1", is_retracted=True)
+        before = _kb_snapshot(tmp_path)
+        fake(FakeClient({"W1": _raw_work("W1", is_retracted=False)}))
+
+        base = ["openalex-acknowledge-retraction", "--id", "W1", "--target", str(tmp_path)]
+        assert run(base) == 1
+        first = capsys.readouterr().err
+        assert run(base + ["--yes"]) == 1
+        second = capsys.readouterr().err
+
+        # The first refusal already says the second one's rule, so following it is a
+        # choice, not a surprise.
+        assert "--yes can only record" in first
+        assert "refusing to clear the retraction recorded for W1 with --yes" in second
+        # Both point at the one path that does work.
+        assert "terminal" in first and "terminal" in second
+        # Two refusals, zero writes.
+        assert _kb_snapshot(tmp_path) == before
 
     def test_the_refusal_does_not_claim_openalex_misread_anything(
         self, tmp_path, fake, capsys
