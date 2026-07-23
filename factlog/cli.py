@@ -865,7 +865,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     _init_kb(target)
 
     current = factlog_config.read_root()
-    if init_adopts_target(current, target, getattr(args, "activate", False)):
+    activate = getattr(args, "activate", False)
+    is_temp = target_under_tempdir(target)
+    if init_adopts_target(current, target, activate, target_is_temp=is_temp):
         factlog_config.write_root(target)
         # --activate is an opt-in, not a licence to be silent: replacing a KB the
         # user was working in has to name what it displaced, exactly as setup does.
@@ -875,6 +877,22 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"factlog init: {action}")
         if action.startswith("CHANGED"):
             print(f"factlog init: warning — {action}", file=sys.stderr)
+        return 0
+
+    # A refused first-run adoption whose only obstacle is the temp guard gets its
+    # own message: the target IS a fresh scratch KB, so pointing the user at
+    # `factlog use` on a path that will soon vanish would be wrong. Tell them why
+    # it was skipped and how to opt in instead (#461).
+    if is_temp and not active_kb_is_usable(current):
+        print(f"factlog init: active KB left unchanged")
+        print(f"  {target} is under a temporary directory, so it was NOT adopted automatically.")
+        print(f"  A temp KB can vanish and would then silently retarget your commands (#461).")
+        print(f"  To adopt it anyway: factlog init --target {target} --activate")
+        print(
+            f"factlog init: warning — {target} is under a temporary directory and was not adopted; "
+            f"pass --activate to use it deliberately",
+            file=sys.stderr,
+        )
         return 0
 
     # Say it on stderr too: a script that only checks the exit code would

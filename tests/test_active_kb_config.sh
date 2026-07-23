@@ -72,8 +72,11 @@ PY
 [ "$verdict" = "OK" ] && ok "resolve_root precedence: flag > env > config > cwd" || bad "$verdict"
 
 # --- init records active KB; where reports it --------------------------------
+# --activate: KB is under mktemp -d (a temp dir), which init refuses to adopt
+# silently (#461). This test is about init RECORDING the active KB, so it opts in
+# explicitly; the silent-adoption guard itself is pinned in test_init_active_kb.sh.
 rm -f "$XDG_CONFIG_HOME/factlog/config.json"
-"$PYTHON" -m factlog init --target "$KB" >/dev/null
+"$PYTHON" -m factlog init --target "$KB" --activate >/dev/null
 unset FACTLOG_ROOT
 "$PYTHON" -m factlog where | grep -qF "active KB: $(cd "$KB" && pwd -P)" && ok "init records active KB; where reports it" || bad "where did not report init'd KB"
 
@@ -87,7 +90,7 @@ out="$(cd /tmp && "$PYTHON" "$PLUGIN_ROOT/tools/source_coverage.py" 2>&1 || true
 printf '%s' "$out" | grep -qF "sources/c.bin.docx" && ok "coverage (no --wiki) uses active KB" || bad "coverage did not use active KB: $out"
 
 # --- factlog use switches active KB ------------------------------------------
-"$PYTHON" -m factlog init --target "$KB2" >/dev/null   # also records KB2
+"$PYTHON" -m factlog init --target "$KB2" --activate >/dev/null   # also records KB2 (temp -> --activate, #461)
 "$PYTHON" -m factlog use "$KB" >/dev/null
 "$PYTHON" -m factlog where | grep -qF "active KB: $(cd "$KB" && pwd -P)" && ok "factlog use switches active KB" || bad "use did not switch active KB"
 

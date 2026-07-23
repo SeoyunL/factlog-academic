@@ -23,7 +23,7 @@ ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 
 KB="$(mktemp -d)/wiki"
-"$PYTHON" -m factlog init --target "$KB" >/dev/null   # also records active KB
+"$PYTHON" -m factlog init --target "$KB" --activate >/dev/null   # also records active KB (temp -> --activate, #461)
 
 # Build a binary original with an NFD name + its NFC-named conversion + a candidate
 # row that cites the conversion in NFC. Mirrors the macOS ingest situation.
