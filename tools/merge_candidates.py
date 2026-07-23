@@ -719,6 +719,23 @@ def existing_superseded_rows(root: Path) -> list[dict[str, str]]:
     return rows
 
 
+def existing_keepable_rows(root: Path) -> list[dict[str, str]]:
+    """candidates.csv rows a rebuild would DESTROY — everything but tombstones.
+
+    `superseded` rows are carried over by existing_superseded_rows() regardless of
+    runs/, so they survive a rebuild. Every other row is reconstructed from
+    runs/*.json and vanishes if runs/ is empty."""
+    csv_path = root / "facts" / "candidates.csv"
+    if not csv_path.is_file():
+        return []
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        return [
+            {k: (row.get(k) or "") for k in FACT_HEADER}
+            for row in csv.DictReader(f)
+            if (row.get("status") or "").strip() not in SUPERSEDED_STATUSES
+        ]
+
+
 def existing_engine_keys(root: Path) -> dict[tuple[str, str, str, str], str]:
     """Map (subject, relation, object, source-without-#anchor) -> engine status
     for rows currently marked confirmed/accepted in candidates.csv.
@@ -806,6 +823,14 @@ def main() -> int:
         action="store_true",
         help="exit non-zero if any input row is rejected during normalisation",
     )
+    parser.add_argument(
+        "--allow-delete",
+        action="store_true",
+        help=(
+            "permit a rebuild that deletes facts a human accepted (DESTRUCTIVE; only when the "
+            "loss is intended — normally restore runs/*.json instead)"
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(args.wiki).expanduser().resolve()
@@ -848,6 +873,32 @@ def main() -> int:
     # ------------------------------------------------------------------
     raw_rows = load_candidate_files(root, input_pattern)
     print(f"  candidate rows loaded: {len(raw_rows)}")
+
+    # ------------------------------------------------------------------
+    # 1b. Refuse to erase a populated KB
+    # ------------------------------------------------------------------
+    # runs/*.json is the SOURCE OF TRUTH for candidates.csv, which is rebuilt from
+    # it on every merge. If runs/ is gone but candidates.csv still holds facts, the
+    # rebuild writes an (almost) empty table: every accepted fact a human reviewed
+    # is destroyed, and only `superseded` rows survive. That happened silently, and
+    # finalize then reported "no contradictions" over an empty engine input.
+    #
+    # runs/ is easy to lose: the docs called it an engine artifact and the shipped
+    # .gitignore excluded it, so a version-controlled KB loses every fact on a
+    # fresh clone. Until that contract is settled, refuse the destructive write.
+    if not raw_rows:
+        keepable = existing_keepable_rows(root)
+        if keepable and not args.allow_delete:
+            print(
+                f"merge_candidates: REFUSING to rebuild facts/candidates.csv — '{input_pattern}' yielded 0 "
+                f"candidate rows but candidates.csv still holds {len(keepable)} fact(s).\n"
+                f"  runs/*.json is the source of truth for candidates.csv; rebuilding from an empty runs/ "
+                f"would destroy every reviewed fact and leave only superseded rows.\n"
+                f"  Restore runs/*.json (version-control it with the KB), or accept the loss:\n"
+                f"    python3 tools/merge_candidates.py --wiki {root} --allow-delete",
+                file=sys.stderr,
+            )
+            return 1
 
     # ------------------------------------------------------------------
     # 2. Normalise and deduplicate
@@ -911,6 +962,49 @@ def main() -> int:
                 restored += 1
         if restored:
             print(f"  preserved {restored} human-accepted row(s) from candidates.csv")
+
+    # --- the ratchet --------------------------------------------------------
+    # A row a human has ruled on may only leave candidates.csv through a human
+    # gate: `factlog eject --fact` retires it as a tombstone (carried over above).
+    # If this merge would drop such a row because the runs no longer assert it, the
+    # backing runs/*.json was LOST, not retired — and the rebuild would erase the
+    # decision.
+    #
+    # Guarding only "runs/ is empty" was a cliff, not a ratchet: the real disaster
+    # is a KB cloned without runs/ and then re-synced, where extraction writes a
+    # FEW rows, the empty-check stays silent, and every fact that was not
+    # re-extracted vanishes with exit 0. The question is not how many rows came in;
+    # it is whether this merge destroys a human decision.
+    #
+    # "Ruled on" means engine statuses (confirmed/accepted) AND needs_review: the
+    # empty-runs guard above already counts needs_review as keepable, and guarding
+    # one but not the other gave the absurd split of refusing a total loss while
+    # silently accepting a partial one. One definition, both guards.
+    protected = dict(engine_keys)
+    protected.update(dict.fromkeys(existing_review_keys(root), "needs_review"))
+    destroyed = sorted(key for key in protected if key not in present_keys)
+    if destroyed and not args.allow_delete:
+        print(
+            f"merge_candidates: REFUSING to rebuild facts/candidates.csv — it would delete "
+            f"{len(destroyed)} fact(s) a human has ruled on, which the current runs/ no longer "
+            f"assert.\n"
+            f"  Such a fact may only leave the KB through `factlog eject --fact SUBJECT RELATION "
+            f"OBJECT` (which leaves a tombstone). `factlog reject` will NOT do it — it only "
+            f"retires rows still pending. Its backing runs/*.json is missing, so this rebuild "
+            f"would erase the decision instead:",
+            file=sys.stderr,
+        )
+        for subject, relation, object_, source in destroyed[:10]:
+            print(f"    - {subject} / {relation} / {object_}   ({source})", file=sys.stderr)
+        if len(destroyed) > 10:
+            print(f"    ... and {len(destroyed) - 10} more", file=sys.stderr)
+        print(
+            f"  Restore runs/*.json (version-control it with the KB), or re-run with "
+            f"--allow-delete to accept the loss:\n"
+            f"    python3 tools/merge_candidates.py --wiki {root} --allow-delete",
+            file=sys.stderr,
+        )
+        return 1
 
     # Respect a deliberate human re-review: a row the human pulled back to
     # needs_review in candidates.csv must not be silently re-promoted by a stale

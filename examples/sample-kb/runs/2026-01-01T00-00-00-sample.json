@@ -1,0 +1,74 @@
+[
+ {
+  "subject": "Claude Code",
+  "relation": "developed_by",
+  "object": "Anthropic",
+  "source": "sources/example.md#what-is-claude-code",
+  "status": "confirmed",
+  "confidence": "0.99",
+  "note": "stated directly in source"
+ },
+ {
+  "subject": "Claude Code",
+  "relation": "is_a",
+  "object": "command-line tool",
+  "source": "sources/example.md#what-is-claude-code",
+  "status": "confirmed",
+  "confidence": "0.99",
+  "note": "primary description"
+ },
+ {
+  "subject": "Claude Code",
+  "relation": "uses",
+  "object": "Claude model family",
+  "source": "sources/example.md#key-capabilities",
+  "status": "confirmed",
+  "confidence": "0.95",
+  "note": "Sonnet and Opus mentioned"
+ },
+ {
+  "subject": "factlog",
+  "relation": "is_a",
+  "object": "Claude Code plugin",
+  "source": "sources/example.md#plugin-system",
+  "status": "confirmed",
+  "confidence": "0.99",
+  "note": "distributed as a plugin"
+ },
+ {
+  "subject": "factlog",
+  "relation": "performs",
+  "object": "fact extraction",
+  "source": "sources/example.md#factlog-skill",
+  "status": "confirmed",
+  "confidence": "0.95",
+  "note": "via Claude in-session"
+ },
+ {
+  "subject": "factlog",
+  "relation": "performs",
+  "object": "logic checking",
+  "source": "sources/example.md#factlog-skill",
+  "status": "confirmed",
+  "confidence": "0.95",
+  "note": "via deterministic Python scripts"
+ },
+ {
+  "subject": "Claude Code",
+  "relation": "supports",
+  "object": "plugin system",
+  "source": "sources/example.md#plugin-system",
+  "status": "confirmed",
+  "confidence": "0.95",
+  "note": "distributes reusable skills"
+ },
+ {
+  "subject": "Anthropic",
+  "relation": "develops",
+  "object": "Claude Code",
+  "source": "sources/example.md#what-is-claude-code",
+  "status": "needs_review",
+  "confidence": "0.90",
+  "note": "inferred from developed_by relation"
+ }
+]
