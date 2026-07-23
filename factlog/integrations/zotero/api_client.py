@@ -262,9 +262,26 @@ class ZoteroClient:
         the collection rules (exact, then a unique case-insensitive match) so the
         two selectors fail the same way, and the resolved spelling is what gets
         queried because the API matches tags exactly.
+
+        The Zotero ``tag`` parameter is a search expression, not a literal: a
+        leading ``-`` negates and ``||`` is OR (measured against the Local API,
+        which offers no documented escape — a backslash is matched literally and
+        finds nothing). So a tag whose own name starts with ``-`` or contains
+        ``||`` cannot be looked up literally; querying it would run a *negation*
+        or a *union* instead, and #453's existence check would even certify the
+        wrong result as real. Such a tag is rejected here rather than silently
+        mis-queried. An interior hyphen (``Computer Science - Performance``) is
+        literal, so only a leading ``-`` is treated as the metacharacter.
         """
         if not isinstance(tag, str) or not tag.strip():
             raise ZoteroError("tag must be a non-empty string.")
+        if tag.startswith("-") or "||" in tag:
+            raise ZoteroError(
+                f"tag {tag!r} cannot be looked up literally: a leading '-' or '||' "
+                "collides with Zotero's tag-search syntax (negation and OR), so the "
+                "query would run a search instead of matching the tag by name, and "
+                "the Local API offers no escape for these characters."
+            )
         tags = self.list_tags()
         if tag in tags:
             return tag
