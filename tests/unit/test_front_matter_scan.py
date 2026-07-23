@@ -25,6 +25,11 @@ from factlog.integrations.common.backfill import IMPORTED_AT_KEY
 from factlog.front_matter_scan import (
     FRONT_MATTER_CHUNK_CHARS,
     FRONT_MATTER_MAX_CHARS,
+    FRONT_MATTER_NO_OPENING_FENCE,
+    FRONT_MATTER_UNCLOSED,
+    FRONT_MATTER_UNREADABLE,
+    FRONT_MATTER_UNSCANNED,
+    front_matter_absence,
     front_matter_block,
 )
 from factlog.integrations.common.front_matter import (
@@ -409,6 +414,129 @@ class TestUnclosedBlockCarriesNothing:
         assert front_matter_block(path) is None
         assert read_scalars(path, ("title",)) == {}
         assert read_first_author(path) == ""
+
+
+class TestAbsenceReason:
+    """Which of the four files a ``None`` came from (#422).
+
+    ``front_matter_block`` answers ``None`` to a file with no opening fence, one
+    whose fence never closes, one whose block outruns the cap, and one that will
+    not decode — and the fail-closed policy costs an operator something different
+    in each. These pin that the reasons are actually told apart, and in particular
+    that the cap case does not borrow the unclosed case's wording, which would
+    assert a fence is missing from a file that has one.
+    """
+
+    def test_a_located_block_has_no_reason(self, tmp_path):
+        """The control: nothing to report about a well-formed source.
+
+        Without it every assertion below would also pass if the function had been
+        wired to report a reason unconditionally.
+        """
+        path = tmp_path / "ok.md"
+        path.write_text('---\ntitle: "T"\n---\n\nbody\n', encoding="utf-8")
+        assert front_matter_block(path) == '\ntitle: "T"'
+        assert front_matter_absence(path) is None
+
+    def test_an_empty_block_is_a_block(self, tmp_path):
+        """``---\\n---`` locates an empty block, which is not an absence.
+
+        The block is ``""``, so a reason chosen on the block's truthiness rather
+        than on its presence would call this file unclosed.
+        """
+        path = tmp_path / "empty.md"
+        path.write_text("---\n---\n\nbody\n", encoding="utf-8")
+        assert front_matter_block(path) == ""
+        assert front_matter_absence(path) is None
+
+    def test_a_deleted_closing_fence_is_reported_as_unclosed(self, tmp_path):
+        """The case the issue is about: a human removed the ``---``.
+
+        The file is a real writer's render with its closing fence dropped, so the
+        thing being classified is the source that actually goes missing from
+        de-duplication, not a hand-shaped approximation of one.
+        """
+        text = _openalex_md()
+        head, sep, body = text.partition("\n---\n")
+        assert sep, "writer render is not fence-delimited"
+        intact = tmp_path / "intact.md"
+        intact.write_text(text, encoding="utf-8")
+        # Paired with the intact render, so the reason is shown to follow from the
+        # deleted fence and not from something else about the fixture.
+        assert front_matter_absence(intact) is None
+
+        path = tmp_path / "damaged.md"
+        path.write_text(head + "\n" + body, encoding="utf-8")
+        assert front_matter_block(path) is None
+        assert front_matter_absence(path) == FRONT_MATTER_UNCLOSED
+
+    def test_a_closed_block_past_the_cap_is_not_called_unclosed(self, tmp_path):
+        """A block that *does* close, further out than the search goes.
+
+        The reader cannot see the fence and returns ``None`` either way, so this is
+        the one case where the two reasons are distinguishable only by the loop's
+        exit. Calling it unclosed would tell an operator to restore a ``---`` that
+        is already in the file.
+        """
+        path = tmp_path / "huge.md"
+        pad = "x" * FRONT_MATTER_MAX_CHARS
+        path.write_text(f'---\ntitle: "T"\nauthors: {pad}\n---\n\nbody\n', encoding="utf-8")
+        assert "\n---" in path.read_text(encoding="utf-8")[3:], "fixture has no closing fence"
+
+        assert front_matter_block(path) is None
+        assert front_matter_absence(path) == FRONT_MATTER_UNSCANNED
+        assert FRONT_MATTER_UNSCANNED != FRONT_MATTER_UNCLOSED
+
+    def test_the_unscanned_reason_names_the_cap_it_stopped_at(self):
+        """The number in the message is the constant, not a copy of today's value.
+
+        A hardcoded figure would keep printing 1048576 after the cap moved, which
+        is the failure mode that makes a precise-looking message worse than a vague
+        one. Characters, not bytes — the cap counts characters, so the message must
+        say so or a CJK front matter is misread by up to 3x.
+        """
+        assert str(FRONT_MATTER_MAX_CHARS) in FRONT_MATTER_UNSCANNED
+        assert "characters" in FRONT_MATTER_UNSCANNED
+        assert "bytes" not in FRONT_MATTER_UNSCANNED
+
+    def test_no_opening_fence_is_its_own_reason(self, tmp_path):
+        """An ingest conversion is not a damaged source and must not read as one.
+
+        Conversions carry an HTML provenance comment instead of YAML, so they are
+        the ordinary majority of "no block" files. Folding them in with the two
+        fence reasons would warn on every one of them.
+        """
+        path = tmp_path / "converted.md"
+        path.write_text("<!-- provenance -->\n\nbody\n", encoding="utf-8")
+        assert front_matter_absence(path) == FRONT_MATTER_NO_OPENING_FENCE
+        assert front_matter_absence(path) not in (FRONT_MATTER_UNCLOSED,
+                                                  FRONT_MATTER_UNSCANNED)
+
+    @pytest.mark.parametrize("name,writer", [
+        ("missing", lambda path: None),
+        ("mojibake", lambda path: path.write_bytes(b'---\ntitle: "T"\n\xff\xfe\n')),
+    ])
+    def test_a_file_that_cannot_be_read_is_not_a_fence_complaint(self, tmp_path, name,
+                                                                 writer):
+        """Both arms of the ``except`` report unreadable, not a missing fence.
+
+        The mojibake file *does* open with ``---``, so a reason picked after the
+        opening-fence test rather than inside the handler would call it unclosed
+        and send the operator looking for a fence in a file the codec never got
+        through.
+        """
+        path = tmp_path / f"{name}.md"
+        writer(path)
+        assert front_matter_absence(path) == FRONT_MATTER_UNREADABLE
+
+    @pytest.mark.parametrize("kind", sorted(WRITERS))
+    def test_an_intact_writer_render_is_never_warned_about(self, kind, source):
+        """No writer's own output can trip the warning, at 200 authors.
+
+        The warning fires on a source tree the writers wrote, so a reason that
+        misfired on an intact render would report every imported paper in the KB.
+        """
+        assert front_matter_absence(source(kind)) is None
 
 
 class TestEveryConsumer:
