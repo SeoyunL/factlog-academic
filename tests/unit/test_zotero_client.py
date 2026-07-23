@@ -72,13 +72,26 @@ class ResourceNotFound(Exception):  # pyzotero.zotero_errors.ResourceNotFound (4
     pass
 
 
+def _tags_of(items) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        for entry in item.get("data", {}).get("tags", []):
+            name = entry.get("tag", "")
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
 class FakeBackend:
     """Minimal pyzotero stand-in. Records calls; raises/pages on demand."""
 
     def __init__(self, collections=None, items=None, raise_os=False, exc=None, extra_pages=None,
-                 children=None, files=None, annotations=None):
+                 children=None, files=None, annotations=None, tags=None):
         self._collections = collections or []
         self._items = items or []
+        # Zotero's tag list is the union of the items' own tags; deriving it keeps
+        # a fixture's tags and its library consistent without restating them.
+        self._tags = list(tags) if tags is not None else _tags_of(self._items)
         self._raise_os = raise_os
         self._exc = exc
         self._extra_pages = extra_pages or []
@@ -110,11 +123,21 @@ class FakeBackend:
         self._maybe_raise()
         return list(self._items)
 
+    def tags(self):
+        self.calls.append(("tags",))
+        self._maybe_raise()
+        return list(self._tags)
+
     def items(self, **kwargs):
         self.calls.append(("items", kwargs))
         self._maybe_raise()
         if kwargs.get("itemType") == "annotation":
             return list(self._annotations)
+        if "itemKey" in kwargs:
+            # Zotero answers an itemKey query with only the keys it holds; a
+            # missing key is simply absent (what get_items_by_ids must detect).
+            wanted = set(kwargs["itemKey"].split(","))
+            return [i for i in self._items if i.get("key") in wanted]
         return list(self._items)
 
     def children(self, parent_key):
@@ -132,6 +155,10 @@ class FakeBackend:
 
 def _col(name, key):
     return {"key": key, "data": {"key": key, "name": name}}
+
+
+def _bib(key):
+    return {"key": key, "data": {"key": key, "itemType": "journalArticle", "title": key}}
 
 
 def _client(**kw):
@@ -156,13 +183,13 @@ class TestBibliographicFilter:
         assert [i["key"] for i in c.get_items_by_ids(["KH78JUPE", "ATT1"])] == ["KH78JUPE"]
 
     def test_ids_are_joined_into_itemkey(self):
-        backend = FakeBackend(items=[PREPRINT])
+        backend = FakeBackend(items=[_bib("A"), _bib("B"), _bib("C")])
         ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_ids(["A", "B", "C"])
         assert backend.calls == [("items", {"itemKey": "A,B,C"})]
 
     def test_ids_batched_over_fifty(self):
-        backend = FakeBackend(items=[])
         ids = [f"K{i}" for i in range(120)]
+        backend = FakeBackend(items=[_bib(k) for k in ids])
         ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_ids(ids)
         item_calls = [c for c in backend.calls if c[0] == "items"]
         assert len(item_calls) == 3  # 50 + 50 + 20

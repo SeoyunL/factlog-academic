@@ -33,6 +33,25 @@ factlog zotero-import --tag "to-review"                  # by tag
 factlog zotero-import --items "KH78JUPE,64DA4TQJ"        # individual items
 ```
 
+All three selectors reject a value the library does not hold — an unknown
+collection, tag, or item key is an error (exit 1) — so a typo cannot pass CI as a
+successful import of nothing. What the error says differs by selector: an unknown
+collection or tag lists the names that *are* available (up to 20, with the rest
+summarised as `... (N more)`), while `--items` lists only the keys the library
+does not hold, since reciting every key in a library would help nobody.
+
+A selector that exists but matches nothing is still a success (exit 0, 0 items).
+The distinction is *absent* versus *empty*. A tag carrying no bibliographic items
+is one such case; so is an `--items` key naming a PDF attachment or a note. That
+key does exist, so it is not an error — it is filtered out for not being a
+bibliographic item, which is what `1 requested` alongside `0 item(s)` means. You
+get this by copying an attachment's key out of the Zotero UI.
+
+`--items` is all-or-nothing: if one key is missing, the valid keys alongside it
+are not imported either. For a script feeding keys in batches, one typo now stops
+the whole batch — split the keys across calls if you would rather import whatever
+resolves.
+
 Without `--target` the migration goes to the active KB, and `--porcelain` emits
 machine-readable output for scripts. `--pdf` also fetches each item's PDF
 attachments and converts their full text with the existing `ingest` path (the
