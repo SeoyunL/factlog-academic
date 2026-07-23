@@ -1017,6 +1017,8 @@ def cmd_lang(args: argparse.Namespace) -> int:
 
 
 def cmd_where(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
     root, source = factlog_config.resolve_root()
     # --porcelain: emit ONLY the active KB root (absolute path), one line, no
     # label. This is the machine-parseable contract for `export FACTLOG_ROOT=...`
@@ -1033,6 +1035,27 @@ def cmd_where(args: argparse.Namespace) -> int:
     lang = factlog_config.read_lang()
     if lang:
         print(f"narration language: {lang} (assistant prose only; set with `factlog lang`)")
+    # Warn on stderr (so the porcelain contract above and the stdout report stay
+    # clean) when the active KB is one a user rarely means to be pointed at: a
+    # path that no longer exists, or one under a temporary directory that can
+    # vanish underfoot. Silence here is how the #461 pollution went unnoticed —
+    # import commands write into a soon-deleted KB and report success. A missing
+    # path is reported as such rather than as "temp" even when it is both, since
+    # "it's gone" is the more actionable fact.
+    if root:
+        if not Path(root).is_dir():
+            print(
+                f"factlog where: warning — the active KB {root} does not exist "
+                f"(a deleted or never-created path); set one with `factlog use <dir>`",
+                file=sys.stderr,
+            )
+        elif target_under_tempdir(root):
+            print(
+                f"factlog where: warning — the active KB {root} is under a temporary "
+                f"directory and may vanish, silently losing writes (#461); point at a "
+                f"durable KB with `factlog use <dir>`",
+                file=sys.stderr,
+            )
     return 0
 
 
