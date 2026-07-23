@@ -18,6 +18,7 @@ import pytest
 
 from factlog import cli
 from factlog.integrations.zotero.api_client import (
+    _SUGGEST_LIMIT,
     ZoteroClient,
     ZoteroConnectionError,
     ZoteroError,
@@ -41,11 +42,21 @@ def _attachment(key):
     return {"key": key, "data": {"key": key, "itemType": "attachment", "title": "PDF"}}
 
 
+def _col(name, key):
+    return {"key": key, "data": {"key": key, "name": name}}
+
+
+def _key_of(item) -> str:
+    """How Zotero itself identifies an item: the key in ``data``, else the wrapper."""
+    return item.get("data", {}).get("key") or item.get("key", "")
+
+
 class FakeBackend:
     """pyzotero stand-in: an itemKey/tag-aware library with an explicit tag list."""
 
-    def __init__(self, items=(), tags=None, tag_exc=None):
+    def __init__(self, items=(), tags=None, tag_exc=None, collections=()):
         self._items = list(items)
+        self._collections = list(collections)
         # Zotero's /tags is the union of the items' tags unless a test overrides it
         # (an unused tag, or a tag list that outlives the items carrying it).
         self._tags = list(tags) if tags is not None else [
@@ -65,13 +76,13 @@ class FakeBackend:
 
     def collections(self):
         self.calls.append(("collections",))
-        return []
+        return list(self._collections)
 
     def items(self, **kwargs):
         self.calls.append(("items", kwargs))
         if "itemKey" in kwargs:
             wanted = set(kwargs["itemKey"].split(","))
-            return [i for i in self._items if i["key"] in wanted]
+            return [i for i in self._items if _key_of(i) in wanted]
         if "tag" in kwargs:
             tag = kwargs["tag"]
             return [
@@ -160,6 +171,37 @@ class TestTagResolution:
             c.get_items_by_tag("nope")
         assert "t019" in str(ei.value) and "t020" not in str(ei.value)
 
+    def test_exactly_at_the_cap_is_not_truncated(self):
+        # The boundary itself: _SUGGEST_LIMIT names list in full, one more
+        # truncates. With only a far-past-the-cap case, an off-by-one in the
+        # comparison passes unnoticed.
+        c = _client(tags=[f"t{i:03d}" for i in range(_SUGGEST_LIMIT)])
+        with pytest.raises(ZoteroError) as ei:
+            c.get_items_by_tag("nope")
+        assert "more)" not in str(ei.value)
+        assert f"t{_SUGGEST_LIMIT - 1:03d}" in str(ei.value)
+
+    def test_one_past_the_cap_truncates(self):
+        c = _client(tags=[f"t{i:03d}" for i in range(_SUGGEST_LIMIT + 1)])
+        with pytest.raises(ZoteroError, match=r"\.\.\. \(1 more\)") as ei:
+            c.get_items_by_tag("nope")
+        assert f"t{_SUGGEST_LIMIT:03d}" not in str(ei.value)
+
+
+class TestCollectionSuggestionCap:
+    """The shared _suggest() caps the collection listing too (a contract change)."""
+
+    def test_short_collection_list_is_unabridged(self):
+        c = _client(collections=[_col("Alpha", "K1"), _col("Beta", "K2")])
+        with pytest.raises(ZoteroError, match=r"not found.*Alpha, Beta$"):
+            c.get_items_by_collection("Gamma")
+
+    def test_long_collection_list_is_capped(self):
+        c = _client(collections=[_col(f"C{i:03d}", f"K{i}") for i in range(_SUGGEST_LIMIT + 5)])
+        with pytest.raises(ZoteroError, match=r"\.\.\. \(5 more\)") as ei:
+            c.get_items_by_collection("nope")
+        assert f"C{_SUGGEST_LIMIT:03d}" not in str(ei.value)
+
 
 class TestItemKeyResolution:
     def test_unresolved_key_is_named_in_the_error(self):
@@ -181,6 +223,26 @@ class TestItemKeyResolution:
         # is an empty result rather than a "key not found" failure.
         c = _client(items=[_attachment("ATT1")])
         assert c.get_items_by_ids(["ATT1"]) == []
+
+    def test_key_read_from_data_when_the_wrapper_has_none(self):
+        # parse_item reads the key out of `data`, preferring it over the wrapper,
+        # so resolution has to read it the same way: an item carrying its key only
+        # in `data` did come back and must not be reported missing.
+        c = _client(items=[{"data": {"key": "DATAONLY", "itemType": "journalArticle"}}])
+        assert len(c.get_items_by_ids(["DATAONLY"])) == 1
+
+    def test_key_read_from_the_wrapper_when_data_has_none(self):
+        # The other half of the same fallback.
+        c = _client(items=[{"key": "WRAPONLY", "data": {"itemType": "journalArticle"}}])
+        assert len(c.get_items_by_ids(["WRAPONLY"])) == 1
+
+    def test_data_key_wins_over_a_disagreeing_wrapper_key(self):
+        # If the two placements ever disagree, the resolved key must be the one
+        # the import files the source under (parse_item's), not the wrapper's.
+        c = _client(items=[{"key": "WRAPPER", "data": {"key": "REAL", "itemType": "book"}}])
+        assert len(c.get_items_by_ids(["REAL"])) == 1
+        with pytest.raises(ZoteroError, match="not found in Zotero: WRAPPER"):
+            c.get_items_by_ids(["WRAPPER"])
 
     def test_missing_key_detected_across_batches(self):
         keys = [f"K{i:03d}" for i in range(120)]

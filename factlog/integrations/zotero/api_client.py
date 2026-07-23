@@ -83,9 +83,17 @@ def _tag_name(entry) -> str:
 
 
 def _item_key(item) -> str:
+    """The item key, read the way :func:`parse_item` reads it.
+
+    The key sits on the item wrapper *and* inside ``data`` in a Local API
+    response, and ``data`` wins here for the same reason it wins in the parser:
+    the two must not disagree about which key an item has, or the "did the
+    request resolve?" check below would clear a key that the import then files
+    under a different ``zotero_key``.
+    """
     if not isinstance(item, dict):
         return ""
-    key = item.get("key") or _data(item).get("key")
+    key = _data(item).get("key") or item.get("key")
     return key if isinstance(key, str) else ""
 
 
