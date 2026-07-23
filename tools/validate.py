@@ -12,11 +12,34 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import FACT_HEADER, KNOWN_STATUSES
+from common import FACT_HEADER, KNOWN_STATUSES, source_files
+
+# Imported after ``common``, which is what puts the repo root on sys.path — this
+# module is run as a script from tools/, so ``factlog`` is not importable before
+# that line. Reordering these two breaks `python tools/validate.py`.
+from factlog.front_matter_scan import (  # noqa: E402
+    FRONT_MATTER_UNCLOSED,
+    FRONT_MATTER_UNSCANNED,
+    front_matter_absence,
+)
 
 # An unregistered status is an *error* here, not a warning — so this set drifting
 # from the vocabulary is worse than the #208 warning bug. Derive, never restate.
 VALID_STATUSES = KNOWN_STATUSES
+
+# The absence reasons worth telling an operator about. Not every ``None`` from the
+# reader is one: a file with no opening fence is the normal shape of an ingest
+# conversion, which carries an HTML provenance comment instead of YAML, and an
+# undecodable file is a different complaint with a different remedy. These two are
+# the ones where a source *looks* imported to a human and does not to the reader.
+WARNED_FRONT_MATTER_ABSENCES = (FRONT_MATTER_UNCLOSED, FRONT_MATTER_UNSCANNED)
+
+# What the operator loses while the block stays unreadable — the same cost the
+# reader's fail-closed policy documents, stated where it can still be prevented.
+FRONT_MATTER_CONSEQUENCE = (
+    "the source reads as not yet imported, so it drops out of de-duplication and "
+    "a re-import writes a duplicate .md instead of updating this one"
+)
 
 
 def read(path: Path) -> str:
@@ -249,6 +272,45 @@ def validate(root: Path) -> list[str]:
     return errors
 
 
+def front_matter_warnings(root: Path) -> list[str]:
+    """Sources whose front matter opens and whose closing fence is not found (#422).
+
+    A warning, not an error. The reader treats such a file as carrying no front
+    matter at all, and that choice is right — trusting an unclosed block let a
+    user's own note hand its body lines to the writers' caches as a paper's
+    identity, which fails silently (#409). But the cost lands the other way: a
+    tool-written source whose fence a human deleted stops being recognised as
+    imported, and the operator finds out when a ``…-2.md`` appears next to it.
+    Nothing in the KB is invalid meanwhile — the facts, the refs and the schema all
+    still hold — so this cannot fail the run without breaking every KB that has one
+    such file. It is reported so the cost is visible *before* the duplicate, which
+    is the whole of what the fail-closed trade was missing.
+
+    The file set is ``common.source_files``, the single enumeration point every
+    sources/ walker shares (#67) — both source roots, hidden paths excluded. A
+    private pair of globs here would have reported on ``sources/.obsidian/…`` and
+    other files that ``factlog sources``, ``sync`` and ``export`` all agree are not
+    sources, which is exactly the disagreement that enumerator exists to prevent.
+    Everything it lists is checked, not only what ``facts/candidates.csv`` cites:
+    de-duplication walks the tree, so a source no fact cites is exactly as able to
+    be re-imported into a duplicate.
+
+    Conversions written as ``.txt``/``.csv`` are skipped, matching ``export``'s own
+    suffix test — YAML front matter is a markdown convention and none of the
+    writers put a block in one, so scanning them would report on files that were
+    never meant to carry one.
+    """
+    warnings: list[str] = []
+    for path in source_files(root):
+        if path.suffix.lower() != ".md":
+            continue
+        reason = front_matter_absence(path)
+        if reason in WARNED_FRONT_MATTER_ABSENCES:
+            rel = path.relative_to(root).as_posix()
+            warnings.append(f"{rel}: {reason} — {FRONT_MATTER_CONSEQUENCE}")
+    return warnings
+
+
 def main() -> int:
     # Windows console defaults to the legacy code page (cp949); force UTF-8 so
     # Korean output isn't mangled. No-op elsewhere. Files are always UTF-8.
@@ -263,6 +325,14 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(args.root).expanduser().resolve()
     errors = validate(root)
+    # Printed on both outcomes and ahead of the verdict, so a failing run does not
+    # swallow them and a passing one does not bury them under its own last line.
+    # They never move the exit code: see front_matter_warnings for why.
+    for warning in front_matter_warnings(root):
+        # ``no_closing_fence`` and not ``unclosed``: one of the two reasons is that
+        # the search stopped, which is not the same claim. A tag that holds for
+        # both is greppable without asserting the stronger one.
+        print(f"warning: no_closing_fence: {warning}")
     if errors:
         print("Fact sync validation failed:")
         for error in errors:

@@ -2,8 +2,12 @@
 """Where a source's YAML front matter ends, and how much of the file to read to find out.
 
 This module is the **single source of truth for "which part of this file is front
-matter"**. It answers one question — :func:`front_matter_block` — and takes no
-position on what a caller does with the answer. The two readers built on it want
+matter"**. It answers where the block is — :func:`front_matter_block` — and, when
+there is none, which of the four possible reasons that was
+(:func:`front_matter_absence`, #422). Both are readings of the same scan and
+neither takes a position on what a caller does with the answer: the reader does
+not warn, refuse, or print, so a validator can build an operator-facing message on
+the reason without this module acquiring an opinion. The two readers built on it want
 different things out of a block (:mod:`factlog.bibtex` parses it into a citation,
 :mod:`factlog.integrations.common.front_matter` pulls scalars for the
 de-duplication index) and they keep their own policy: which keys to ask for,
@@ -17,7 +21,9 @@ character on the parts that were right, including a wrong comment that was copie
 along with the code and had to be corrected twice (#417).
 
 **Anything added here has to be a claim about where the block is.** How to parse
-what is inside it is not that claim.
+what is inside it is not that claim; that a missing end is worth warning an
+operator about is not either — only that the end was not found, and how far the
+search got before saying so.
 """
 from __future__ import annotations
 
@@ -57,6 +63,94 @@ from pathlib import Path
 #   divide the cap keep that boundary put; other values shift it.
 FRONT_MATTER_CHUNK_CHARS = 8192
 FRONT_MATTER_MAX_CHARS = 1 << 20
+
+# Why a file yielded no block. :func:`front_matter_block` answers ``None`` to four
+# different files and a caller that has to tell an operator something cannot tell
+# them apart from it; :func:`front_matter_absence` names which one it was.
+#
+# These are still claims about where the block is — "its end is not in this file",
+# "its end is not in the part that was read" — which is what this module is for.
+# Naming a reason is not warning about it: nothing here prints, raises, or refuses.
+# The reader stays silent and the caller decides what is worth saying, the same
+# split the two readers already keep over which keys to ask for.
+#
+# The wording follows ``annotation_writer._UNTERMINATED`` (#430): say what was
+# observed, not what it implies about the file's owner or intent. A block that
+# does not close may be a tool-written source a human damaged, a hand-written note
+# that was never closed, or a document that merely opens with ``---``; the scan
+# cannot tell, so the reason does not guess.
+FRONT_MATTER_NO_OPENING_FENCE = "the file does not open with ---"
+FRONT_MATTER_UNCLOSED = "front matter opens with --- and no closing fence appears before the end of the file"
+FRONT_MATTER_UNSCANNED = (
+    "front matter opens with --- and no closing fence appears in the first "
+    f"{FRONT_MATTER_MAX_CHARS} characters, where the search stops"
+)
+FRONT_MATTER_UNREADABLE = "the file could not be read as UTF-8 text"
+
+
+def _locate(path: Path | str) -> tuple[str | None, str | None]:
+    """``(block, absence)`` for a file — exactly one of the two is not None.
+
+    The single implementation behind both public functions. Keeping the scan in one
+    place is the point of the module (#419); a second copy that only computed the
+    reason would be free to drift into disagreeing with the block about the same
+    file, which is the defect the extraction removed.
+    """
+    try:
+        with Path(path).open("r", encoding="utf-8") as fh:
+            head = fh.read(FRONT_MATTER_CHUNK_CHARS)
+            if not head.startswith("---"):
+                # No opening fence: nothing to find, and no reason to read the body.
+                return None, FRONT_MATTER_NO_OPENING_FENCE
+            # Stop as soon as the accumulated text holds a fence. Scanning the
+            # accumulation rather than the latest chunk is a *read budget*, not a
+            # correctness property: the extraction below searches all of ``head``
+            # either way, so missing a straddling fence here would not lose it —
+            # it would just keep reading to the cap. On a file with a large body
+            # that is the difference between two chunks and a megabyte.
+            while "\n---" not in head[3:] and len(head) < FRONT_MATTER_MAX_CHARS:
+                chunk = fh.read(FRONT_MATTER_CHUNK_CHARS)
+                if not chunk:
+                    break
+                head += chunk
+    except (OSError, UnicodeDecodeError):
+        return None, FRONT_MATTER_UNREADABLE
+    rest = head[3:]
+    end = rest.find("\n---")
+    if end != -1:
+        return rest[:end], None
+    # Which of the two loop exits arrived here is the whole distinction between the
+    # remaining reasons, and it is decided by the length alone: every read before
+    # EOF returns a full chunk, so the loop's length test can only stop it at
+    # exactly the cap. Below the cap the loop ran out of file and the absence of a
+    # fence is a fact about the file; at the cap the search was abandoned and the
+    # absence is only a fact about the part that was read.
+    #
+    # The boundary belongs to the weaker claim: a file that genuinely ends at the
+    # cap with no fence is reported as unscanned rather than unclosed. Both are
+    # true of it, and telling them apart would cost a read past the cap for a case
+    # that needs a megabyte of front matter to reach.
+    if len(head) >= FRONT_MATTER_MAX_CHARS:
+        return None, FRONT_MATTER_UNSCANNED
+    return None, FRONT_MATTER_UNCLOSED
+
+
+def front_matter_absence(path: Path | str) -> str | None:
+    """Why this file has no front-matter block, or None when it has one.
+
+    One of the ``FRONT_MATTER_*`` reasons above. For a caller that has to act on
+    the *absence* rather than on the block: :func:`front_matter_block` collapses
+    four files into one ``None``, and the fail-closed policy it documents has a
+    cost that only shows up afterwards — a tool-written source whose closing fence
+    a human deleted reads as "not imported", drops out of de-duplication, and is
+    noticed when a second ``.md`` appears beside the first. Naming the reason is
+    what lets a validator say so before that happens (#422).
+
+    Costs a second scan when a caller has already asked for the block. That is the
+    price of leaving :func:`front_matter_block`'s signature alone, and it is paid
+    only on the failing path, where the alternative is telling an operator nothing.
+    """
+    return _locate(path)[1]
 
 
 def front_matter_block(path: Path | str) -> str | None:
@@ -139,26 +233,8 @@ def front_matter_block(path: Path | str) -> str | None:
       path caught it, so one such source aborted the entire run with a traceback
       and wrote no output at all. There the catch is not cleanup after anything:
       it fixes a defect that predates the chunked read (#419).
+
+    Which of those four files produced a ``None`` is :func:`front_matter_absence`'s
+    question, not this one's. This stays the reader every caller already has.
     """
-    try:
-        with Path(path).open("r", encoding="utf-8") as fh:
-            head = fh.read(FRONT_MATTER_CHUNK_CHARS)
-            if not head.startswith("---"):
-                # No opening fence: nothing to find, and no reason to read the body.
-                return None
-            # Stop as soon as the accumulated text holds a fence. Scanning the
-            # accumulation rather than the latest chunk is a *read budget*, not a
-            # correctness property: the extraction below searches all of ``head``
-            # either way, so missing a straddling fence here would not lose it —
-            # it would just keep reading to the cap. On a file with a large body
-            # that is the difference between two chunks and a megabyte.
-            while "\n---" not in head[3:] and len(head) < FRONT_MATTER_MAX_CHARS:
-                chunk = fh.read(FRONT_MATTER_CHUNK_CHARS)
-                if not chunk:
-                    break
-                head += chunk
-    except (OSError, UnicodeDecodeError):
-        return None
-    rest = head[3:]
-    end = rest.find("\n---")
-    return None if end == -1 else rest[:end]
+    return _locate(path)[0]
