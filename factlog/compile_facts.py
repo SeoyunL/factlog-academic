@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from factlog.common import (
+    _atomic_write_text,
     FACTS_DIR,
     canonical_atoms,
     corroboration_counts,
@@ -47,7 +48,10 @@ def main() -> None:
                 lines.append(f"canonical({dl_string(s)}, {dl_string(canon)}, {dl_string(o)}).")
 
     out = FACTS_DIR / "accepted.dl"
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Atomic temp+replace: a crash mid-write must never leave a line-boundary-
+    # truncated accepted.dl, which parses cleanly yet drops confirmed facts from the
+    # engine input.
+    _atomic_write_text(out, "\n".join(lines) + "\n")
     # Distinct-source count per collapsed triple, so the compile log surfaces the
     # multi-source provenance of a deduped atom (observability only — accepted.dl,
     # render's `sources: N`, and provenance are unchanged). Computed on the

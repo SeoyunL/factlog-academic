@@ -21,24 +21,16 @@ from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
 from factlog import config as factlog_config
+from factlog.common import _atomic_write_text
 
 MIN_PYTHON = (3, 11)
 MIN_PYREWIRE = (1, 0, 3)  # bundles wirelog v0.52.0 with \" escape support (wirelog#924)
 
 
-def _atomic_write_text(path: _Path, text: str) -> None:
-    """Write *text* to *path* atomically (temp file + os.replace).
-
-    Used for run-file JSON so an interrupted/`amend`/`eject` run can never leave a
-    truncated runs/*.json behind — a corrupt run file still holds retired rows and
-    would resurrect them (or be skipped, losing the run) on the next merge. Mirrors
-    the temp+replace pattern already used for candidates.csv.
-    """
-    import os
-
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+# _atomic_write_text (temp + os.replace) now lives in factlog.common so
+# compile_facts.py can write accepted.dl atomically too. Re-exported here
+# unchanged: run-file JSON writers below still call it as a module-level name, and
+# an interrupted/`amend`/`eject` run can never leave a truncated runs/*.json behind.
 
 
 def _atomic_write_csv(csv_path, rows, fieldnames) -> None:

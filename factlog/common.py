@@ -72,6 +72,22 @@ def run_cli(main_func) -> int:
         return 1
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically (temp file + os.replace).
+
+    An interrupted plain ``write_text`` leaves a file truncated at a byte
+    boundary — and a truncated ``accepted.dl`` still parses cleanly (it is broken
+    only at a line boundary), so the engine evaluates over the surviving facts and
+    the report passes with ``errors: 0`` while a confirmed fact silently answers
+    ``0 rows``. temp+replace guarantees a reader sees either the prior
+    snapshot or the complete new file, never a partial one. Mirrors the pattern
+    already used for run-file JSON and candidates.csv in ``factlog.cli``.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 ROOT = Path(os.environ.get("FACTLOG_ROOT", ".")).expanduser().resolve()
 FACTS_DIR = ROOT / "facts"
 DECISIONS_DIR = ROOT / "decisions"
