@@ -34,7 +34,16 @@ this file is validation rather than transport:
 Rate limiting is a courtesy, not an enforcement: twelve zero-delay requests all
 answered 200. Nothing on the wire will catch a regression in the delay, so it is
 enforced by unit test. arXiv's documented push-back is ``503`` with
-``Retry-After``, not ``429``; both are handled.
+``Retry-After``, not ``429``; both are handled, and the header is *obeyed* rather
+than merely reported: a usable ``Retry-After`` sets the wait before the next
+attempt — never below :data:`BACKOFF_BASE_SECONDS`, which stays as a floor no
+configuration can lower — an unusable one (absent, unparseable, non-finite, zero
+or negative) falls back to the exponential backoff, and a wait longer than
+:data:`MAX_RETRY_AFTER_SECONDS` is not retried at all. Retrying inside a window
+the server named — even a clamped fraction of it — is knocking on a door that was
+just closed while telling the operator to wait. What the message says about the
+attempts is measured, not assumed: the ceiling is judged per response, so a wait
+past it can arrive on any attempt, and the count comes from the retry loop.
 
 ``httpx`` and ``feedparser`` are imported lazily inside :meth:`_default_transport`
 and :meth:`_parse_feed`, so importing this module (and ``import factlog``) stays
@@ -43,6 +52,7 @@ deterministic and network-free.
 """
 from __future__ import annotations
 
+import math
 import time
 from datetime import date
 from dataclasses import dataclass, field
@@ -65,12 +75,31 @@ API_PATH = "/api/query"
 # arXiv's id_list ceiling per request (spec §2.2).
 MAX_ID_LIST = 100
 
-# Total attempts (one try plus two retries) for arXiv's push-back statuses, with
-# exponential backoff (spec §8.3). Only 429 and 503 are retried: a 500 here is
-# deterministic — it is what `start` past the end of the result set returns — so
-# retrying it would just spend the delay three times over.
+# Total attempts (one try plus two retries) for arXiv's push-back statuses
+# (spec §8.3). Only 429 and 503 are retried: a 500 here is deterministic — it is
+# what `start` past the end of the result set returns — so retrying it would just
+# spend the delay three times over.
+#
+# How long an attempt waits is the server's call when it made one: a usable
+# `Retry-After` sets the wait. `BACKOFF_BASE_SECONDS` serves twice over — as the
+# fallback when the server named nothing readable, doubling per attempt (2s, 4s),
+# and as the floor under a wait it did name. See `_backoff`: the floor is what
+# keeps a second, config-independent guard under every retry.
 MAX_ATTEMPTS = 3
 BACKOFF_BASE_SECONDS = 2.0
+
+# The longest server-requested wait this client will sit through. Past it the
+# request stops rather than retries: the wait is reported instead of slept. The
+# ceiling is judged per response and judging it costs no attempt of its own —
+# though attempts already made are of course already spent, since a wait past the
+# ceiling can arrive on any of them. Clamping a long `Retry-After` down to this
+# value instead would keep knocking inside the window the server named — the same
+# mistake in miniature — while the message still quotes the server's number.
+MAX_RETRY_AFTER_SECONDS = 60.0
+
+# Decimals a parsed `Retry-After` is rounded to. One rounding, applied before
+# the ceiling comparison, keeps the number compared, slept and printed identical.
+_WAIT_PRECISION = 3
 
 
 class ArxivError(Exception):
@@ -86,7 +115,27 @@ class ArxivNotFoundError(ArxivError):
 
 
 class ArxivServiceError(ArxivError):
-    """arXiv is pushing back (503 with Retry-After, or 429)."""
+    """arXiv is pushing back (503 with Retry-After, or 429).
+
+    Carries what the retry loop needs to decide, so the decision does not have to
+    be re-derived from the message text: ``retry_after`` is the usable wait the
+    server asked for in seconds (``None`` when it sent none this client can use),
+    and ``retriable`` is ``False`` when that wait exceeds
+    :data:`MAX_RETRY_AFTER_SECONDS`. Both are attributes on the existing class
+    rather than a new subclass, so callers catching ``ArxivServiceError`` keep
+    working unchanged.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: float | None = None,
+        retriable: bool = True,
+    ):
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.retriable = retriable
 
 
 class ArxivResponseError(ArxivError):
@@ -95,11 +144,22 @@ class ArxivResponseError(ArxivError):
 
 @dataclass(frozen=True)
 class _Response:
-    """The subset of an HTTP response this client depends on."""
+    """The subset of an HTTP response this client depends on.
+
+    Header names are case-insensitive on the wire, and httpx, a fake transport
+    and arXiv itself may each pick a different casing. They are folded to
+    lower-case once, here at construction, so no read site has to try both
+    spellings — a defence that only works where someone remembered to write it.
+    """
 
     status_code: int
     headers: dict
     text: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "headers", {str(key).lower(): value for key, value in self.headers.items()}
+        )
 
 
 @dataclass(frozen=True)
@@ -122,6 +182,101 @@ class BatchResult:
 
     works: list
     missing: list[ArxivId]
+
+
+def _retry_after(response: _Response) -> float | None:
+    """The ``Retry-After`` wait in seconds, or ``None`` when it cannot be used.
+
+    ``None`` — meaning "fall back to the exponential backoff, and say nothing
+    about a wait" — covers every form that would otherwise turn into a bad
+    instruction: no header at all, a value ``float()`` rejects, a non-finite one,
+    and zero or negative. ``inf`` and ``nan`` need the explicit
+    :func:`math.isfinite` guard because ``float()`` *accepts* them; a try/except
+    alone would let ``Retry-After: inf`` through as a wait to sleep for.
+
+    Only the delta-seconds form is read. RFC 9110 also allows an HTTP-date, and
+    that is deliberately unsupported: arXiv sends delta-seconds, and resolving a
+    date would put the wall clock into a retry decision — the same request would
+    retry or not depending on when it ran, and on how far the local clock has
+    drifted from the server's. A header this client cannot read deterministically
+    is treated as a header it did not get.
+
+    The value is rounded to :data:`_WAIT_PRECISION` decimals so that the number
+    compared against the ceiling, the number slept, and the number printed are
+    one number. Unrounded, ``Retry-After: 60.0000001`` compares as over a 60s
+    ceiling while printing as ``60s`` — a message that contradicts itself.
+    """
+    raw = response.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds):
+        return None
+    seconds = round(seconds, _WAIT_PRECISION)
+    if seconds <= 0:
+        return None
+    return seconds
+
+
+def _seconds(value: float) -> str:
+    """Render a wait exactly as :func:`_retry_after` rounded it.
+
+    Not ``%g``: it renders 1000000 as ``1e+06``, and "retry after 1e+06s" is not
+    an instruction an operator can act on — the same "nothing the reader can do
+    with this" failure the message rework is meant to remove. Whole seconds
+    print whole (``30``), a fractional wait keeps its fraction (``1.5``), and a
+    large one stays in plain integer seconds.
+    """
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.{_WAIT_PRECISION}f}".rstrip("0").rstrip(".")
+
+
+def _backoff(retry_after: float | None, attempt: int) -> float:
+    """How long to wait before the next attempt.
+
+    A usable ``Retry-After`` decides it, but never below
+    :data:`BACKOFF_BASE_SECONDS`. RFC 9110 makes ``Retry-After`` a *minimum* —
+    "how long the user agent ought to wait **before** making a follow-up
+    request" — so waiting longer is full compliance, and a server that answered
+    503 is not asking to be called back in a millisecond.
+
+    That floor is deliberately independent of configuration. Before
+    ``Retry-After`` was honoured there were two unrelated floors under a retry:
+    this exponential backoff, a code constant, and :class:`_RateLimiter`, a
+    configured interval. Letting the header replace the backoff outright leaves
+    the limiter as the only floor — and ``request_delay = 0`` is a setting an
+    operator can reach, which would turn three retries into three requests in
+    three milliseconds. Two guards that fail independently is the point; one
+    that a config file can switch off is not a guard.
+
+    With the default 3s ``request_delay`` the limiter already waits longer than
+    this floor, so the floor changes nothing there. It only bites where the
+    limiter has been turned off.
+    """
+    if retry_after is None:
+        return BACKOFF_BASE_SECONDS * (2 ** attempt)
+    return max(retry_after, BACKOFF_BASE_SECONDS)
+
+
+def _gave_up_after(exc: ArxivServiceError, attempts: int) -> ArxivServiceError:
+    """Restate a push-back with the attempt count only the retry loop knows.
+
+    A push-back can end the request on any attempt: the ceiling is judged per
+    response, so a wait past it may arrive on the first try, after a short wait
+    was already honoured, or on the last. "Not retried" would be false in two of
+    those three. The count is therefore reported as measured — how many requests
+    were actually sent — rather than asserted from the classification.
+    """
+    plural = "attempt" if attempts == 1 else "attempts"
+    return ArxivServiceError(
+        f"{exc} Gave up after {attempts} {plural}.",
+        retry_after=exc.retry_after,
+        retriable=exc.retriable,
+    )
 
 
 def _user_agent(config: ArxivConfig) -> str:
@@ -208,9 +363,30 @@ class ArxivClient:
         if status == 200:
             return
         if status in (429, 503):
-            retry_after = response.headers.get("retry-after") or response.headers.get("Retry-After")
-            wait = f" retry after {retry_after}s" if retry_after else ""
-            raise ArxivServiceError(f"arXiv is rate limiting or unavailable (HTTP {status}).{wait}")
+            wait = _retry_after(response)
+            # Nothing here says how many attempts were made: `_classify` sees one
+            # response and does not know which attempt it is. A count asserted
+            # from here is only true on the first attempt, and a message that
+            # misstates what the client did is the very defect this retry
+            # handling exists to fix. `_request` appends that sentence.
+            if wait is not None and wait > MAX_RETRY_AFTER_SECONDS:
+                raise ArxivServiceError(
+                    f"arXiv is rate limiting or unavailable (HTTP {status}) and asked to "
+                    f"wait {_seconds(wait)}s, longer than the "
+                    f"{_seconds(MAX_RETRY_AFTER_SECONDS)}s factlog will wait; "
+                    f"retry after {_seconds(wait)}s.",
+                    retry_after=wait,
+                    retriable=False,
+                )
+            # `retry after Ns` is advice to the operator for their *next* run,
+            # quoting what arXiv asked for — not a report of how long this client
+            # slept, which `_backoff` may have floored to a longer value. The two
+            # are never conflated in the wording: nothing here claims "we waited".
+            detail = f"; retry after {_seconds(wait)}s" if wait is not None else ""
+            raise ArxivServiceError(
+                f"arXiv is rate limiting or unavailable (HTTP {status}){detail}.",
+                retry_after=wait,
+            )
         if 300 <= status < 400:
             location = response.headers.get("location", "")
             raise ArxivError(f"arXiv redirected the request (HTTP {status}) to {location!r}.")
@@ -249,10 +425,14 @@ class ArxivClient:
             response = self.transport(params)
             try:
                 self._classify(response)
-            except ArxivServiceError:
-                if attempt == MAX_ATTEMPTS - 1:
-                    raise
-                self._sleep(BACKOFF_BASE_SECONDS * (2 ** attempt))
+            except ArxivServiceError as exc:
+                # `retriable` is False when the server named a wait past
+                # MAX_RETRY_AFTER_SECONDS: that ends the request here, with the
+                # remaining attempts unspent. Either way the count of attempts
+                # actually made is known only here, so it is stated only here.
+                if attempt == MAX_ATTEMPTS - 1 or not exc.retriable:
+                    raise _gave_up_after(exc, attempt + 1) from exc
+                self._sleep(_backoff(exc.retry_after, attempt))
                 continue
             return self._parse_feed(response.text)
         raise ArxivError("arXiv request failed.")  # pragma: no cover
