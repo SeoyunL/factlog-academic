@@ -23,6 +23,29 @@ factlog accept Acme uses FastAPI --dry-run
 `superseded` 와 일치하는 항목은 보고만 되고 그대로 유지됩니다(대기 상태가 아닌
 사실을 폐기하려면 `factlog eject` 를 사용). 둘 다 `accepted.dl` 을 재컴파일합니다.
 
+`accept`/`reject` 는 `candidates.csv` 뿐 아니라 그 근거인 `runs/*.json` 에도 결정을
+기록합니다. merge 가 `candidates.csv` 를 `runs/*.json` 으로부터 재구성하므로, 그렇게
+하지 않으면 결정이 다음 sync 에서 조용히 사라집니다. **이 기록은 게이트가 실제로
+바꾼 행에만 적용됩니다.** 여기서 "행"은 트리플이 아니라 merge 와 동일한 사실 동일성
+`(주어, 관계, 목적어, source 파일)` 입니다(`#앵커` 는 무시). 따라서 같은 트리플이
+서로 다른 문서에서 주장됐다면, 한쪽 문서의 결정이 다른 문서의 근거 행을 건드리지
+않습니다. 대기 상태가 아니어서 "skipped" 로 보고된 행 역시 `runs/*.json` 에서 그대로
+남습니다. `amount` 객체는 merge 와 같은 정규 형태 `amount(N,"단위")` 로 비교되므로
+`amount(7,억)` 과 `amount(7,"억")` 은 한 사실입니다.
+
+주어·관계·목적어는 **저장된 그대로** 비교하고, 유니코드 정규화는 source 에만
+(NFC 로) 적용합니다. source 는 파일시스템 산물이라(macOS 는 파일명을 NFD 로 주고
+추출기는 보통 NFC 를 씁니다) 표기를 맞춰야 같은 문서로 인식되지만, 값은 사람이 쓴
+내용 그대로 보존합니다. 그래서 눈에 같아 보여도 유니코드 표기가 다른 한글 주어는
+**별개의 사실**입니다 — 한쪽을 `accept` 해도 다른 쪽은 움직이지 않고, `factlog
+review` 큐에 둘 다 남습니다. 붙여넣기나 macOS 파일명에서 섞여 들어오는 경우가 있으니,
+같은 사실이 두 번 보이면 `factlog amend` 로 한쪽 값을 다른 쪽에 맞추십시오.
+
+경계: `candidates.csv` 는 `confirmed` 인데 `runs/*.json` 은 아직 `candidate` 인
+드리프트(#233 이전 KB)를 되돌리는 일은 `accept`/`reject` 의 부수효과가 아닙니다.
+`accept`/`reject` 는 자기가 방금 내린 결정만 기록하며, 드리프트 복구는 별도 명령이
+할 일입니다.
+
 상태가 아니라 사실의 **값 자체를 교정**하려면 `factlog amend` 를 사용하십시오.
 
 *Claude Code에 입력:*

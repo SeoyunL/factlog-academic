@@ -579,7 +579,11 @@ matching pending rows to `accepted`, and `factlog reject ...` sets them to
 correct a fact's value, `factlog amend <subject> <relation> <object>
 --set-object ... [--set-subject/--set-relation/--set-note] [--accept]` rewrites
 it durably (updates both `candidates.csv` and the backing `runs/*.json`). These
-human decisions are preserved across re-merge.
+human decisions are preserved across re-merge. `accept`/`reject` also write into
+`runs/*.json`, but only for the rows the gate actually changed, keyed like merge
+on `(subject, relation, object, source file)` — a decision on one source's row
+never moves another source's row, and repairing rows whose two stores already
+drifted apart is a separate command's job, not theirs.
 
 ### Step 2 — Run the logic check
 

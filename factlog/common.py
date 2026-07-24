@@ -2454,6 +2454,44 @@ def normalize_confidence(value: str) -> str:
     return f"{score:.2f}"
 
 
+def fact_key(subject: str, relation: str, object_: str, source: str) -> tuple[str, str, str, str]:
+    """THE definition of fact identity: (subject, relation, object, source-file).
+
+    merge (`normalize_rows`) dedups candidate rows on this tuple, and the review CLI
+    (accept/reject) keys its runs/*.json writes on it. There is exactly ONE definition
+    and both import it: when the two drift apart, a fact a human confirmed disappears
+    from the engine with no warning. That has happened twice already — the decision
+    never reaching runs/*.json (#233), and a decision on one source's row flipping
+    another source's row (#477) — so a second, "equivalent" copy of this rule is a
+    latent recurrence, not a convenience.
+
+    Normalisation, matching merge's own:
+
+    - subject / relation / object are `.strip()`ed only. They are NOT NFC-folded:
+      merge stores content values verbatim, so folding here would make the CLI treat
+      an NFC row and an NFD row as one fact while merge keeps them as two — exactly
+      the #477 failure mode, one level down.
+    - `object` goes through `literal_types.canonical_amount` (left as-is when it is not
+      an amount compound), because merge canonicalises the amount BEFORE keying, so
+      `amount(7,억)` and `amount(7,"억")` are one fact on both sides.
+    - `source` IS NFC-folded and then cut at '#'. The source is a filesystem artifact,
+      not a content value: macOS hands out NFD filenames while extractors emit NFC, and
+      an '#anchor' names a place inside a document, not a different document.
+
+    confidence and note are deliberately absent: merge collapses rows that differ only
+    in those fields, so two run rows differing only there are ONE fact and a decision
+    has to reach both.
+    """
+    obj = str(object_).strip()
+    canon = literal_types.canonical_amount(obj)
+    return (
+        str(subject).strip(),
+        str(relation).strip(),
+        canon if canon is not None else obj,
+        unicodedata.normalize("NFC", str(source).strip()).partition("#")[0],
+    )
+
+
 def dl_atom(row: dict[str, str]) -> str:
     return f"relation({dl_string(row['subject'])}, {dl_string(row['relation'])}, {dl_string(row['object'])})."
 

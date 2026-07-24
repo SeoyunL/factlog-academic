@@ -1254,9 +1254,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_status_to_runs(
-    target, filt: dict, from_statuses: set, new_status: str, nfc
-) -> int:
+def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: str) -> int:
     """Write a status decision into runs/*.json, so accept/reject are durable.
 
     A human decision lived only in candidates.csv, which merge REBUILDS from runs/*.json.
@@ -1265,11 +1263,23 @@ def _apply_status_to_runs(
     to runs; accept/reject did not (#233). This is a status-only change (no value edit),
     so the matching run item is updated in place.
 
+    `decided` holds the common.fact_key of every row the CSV gate ACTUALLY changed --
+    not the caller's filter, and not a bare triple. Scoping by the filter instead let a `-`
+    wildcard reach rows the gate had reported as "non-pending skipped": with a KB
+    predating #233 (decision in candidates.csv, `candidate` still in runs/*.json), a
+    wildcard reject flipped those run rows too, and the next merge rebuilt
+    candidates.csv from them -- silently retiring a confirmed fact the command said it
+    left alone (#477). Keying on the triple alone reopened the same hole one level
+    down: with the same triple asserted by two sources, a decision on source B's row
+    also flipped source A's run row, even for an exact (non-wildcard) triple. So the
+    key is common.fact_key -- literally the function merge dedups with, not a copy of
+    its rules: a copy is how the two drifted apart in the first place (#477).
+
     Returns the number of run rows changed. Import-local like the callers.
     """
     import json
 
-    from factlog.common import KNOWN_STATUSES
+    from factlog.common import KNOWN_STATUSES, fact_key
 
     runs_dir = target / "runs"
     if not runs_dir.is_dir():
@@ -1294,21 +1304,26 @@ def _apply_status_to_runs(
         for item in data:
             if not isinstance(item, dict):
                 continue
-            fields = {
-                "subject": nfc(str(item.get("subject", "")).strip()),
-                "relation": nfc(str(item.get("relation", "")).strip()),
-                "object": nfc(str(item.get("object", "")).strip()),
-            }
-            if not all(fields.get(k) == v for k, v in filt.items()):
+            key = fact_key(
+                item.get("subject", ""),
+                item.get("relation", ""),
+                item.get("object", ""),
+                item.get("source", ""),
+            )
+            if key not in decided:
                 continue
             st = str(item.get("status", "")).strip()
-            # This runs only AFTER the CSV gate found a genuinely-pending match, so the
-            # decision is real. Mirror merge's normalization: a blank or unrecognized
-            # status is coerced to needs_review (PENDING) when candidates.csv is rebuilt,
-            # so the run item merge will treat as pending must be flipped here too --
-            # otherwise the decision vanishes on the next re-merge, the exact silent
-            # downgrade this fix is about, in a row the extractor mis-stamped or an edit
-            # left blank.
+            # This run row IS the row the CSV gate just changed (same fact identity as
+            # merge uses), so the decision is real. Mirror merge's normalization: a blank
+            # or unrecognized status is coerced to needs_review (PENDING) when
+            # candidates.csv is rebuilt, so the run item merge will treat as pending must
+            # be flipped here too -- otherwise the decision vanishes on the next
+            # re-merge, the exact silent downgrade this fix is about, in a row the
+            # extractor mis-stamped or an edit left blank. A run row already carrying a
+            # decided status (confirmed/accepted/superseded) is left alone: the CSV row
+            # this decision moved was pending, so a non-pending run row for the same
+            # fact is drift between the two stores, not something this decision decided.
+            # Repairing that drift is a separate command's job, not accept/reject's.
             if st not in from_statuses and st in KNOWN_STATUSES:
                 continue
             item["status"] = new_status
@@ -1331,7 +1346,7 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import FACT_HEADER, REVIEW_STATUSES
+    from factlog.common import FACT_HEADER, REVIEW_STATUSES, fact_key
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1399,16 +1414,43 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     if "status" not in out_fields:
         out_fields = [*out_fields, "status"]
     changed = 0
+    decided: set[tuple[str, str, str, str]] = set()
     for r in rows:
         if all(fld(r, k) == v for k, v in filt.items()) and (r.get("status") or "").strip() in REVIEW_STATUSES:
             r["status"] = new_status
             changed += 1
+            # MATCHING and IDENTITY are different jobs. Matching (fld/filt above) stays
+            # lenient: it NFC-folds, because a term typed at an IME we do not control
+            # must still find the row it means. Identity does not get that freedom --
+            # the key goes to common.fact_key RAW, exactly as merge stores the value, so
+            # the CLI and merge agree on which run row IS this fact. Folding it here made
+            # an NFC row and an NFD row look like one fact to the CLI while merge kept
+            # them apart, and the decision flipped a row the gate had reported as skipped
+            # (#477).
+            key = fact_key(
+                r.get("subject") or "",
+                r.get("relation") or "",
+                r.get("object") or "",
+                r.get("source") or "",
+            )
+            if not key[3]:
+                # No source FILE, so no fact merge can identify: such a key would match
+                # every run row that also lost its source. Judged on the KEY's source
+                # component, not on the raw field -- fact_key cuts at '#', so a row whose
+                # source is a bare anchor ('#sec1') keys to the very same empty source and
+                # would slip past a raw-field check. One guard, both cases; repeating it in
+                # _apply_status_to_runs would leave neither copy testable.
+                continue
+            decided.add(key)
     _atomic_write_csv(csv_path, rows, out_fields)
 
     # Durability: write the decision into runs/*.json too, the source of truth merge
     # rebuilds candidates.csv from. Without this, deleting candidates.csv and re-merging
-    # silently downgraded the decision (#233).
-    runs_changed = _apply_status_to_runs(target, filt, set(REVIEW_STATUSES), new_status, nfc)
+    # silently downgraded the decision (#233). Scope it to the ROWS just changed, keyed
+    # by common.fact_key -- merge's own fact identity -- not to `filt`: a `-` wildcard
+    # otherwise reaches rows reported as skipped, and a bare triple reaches another
+    # source's row for the same triple (#477).
+    runs_changed = _apply_status_to_runs(target, decided, set(REVIEW_STATUSES), new_status)
 
     recompile_failed = not _recompile_accepted(target, verb)
     recompiled = "accepted.dl NOT recompiled" if recompile_failed else "accepted.dl recompiled"
