@@ -241,6 +241,48 @@ class TestTagMetacharacters:
         assert [i["key"] for i in out] == ["A"]
         assert ("items", {"tag": "Computer Science - Performance"}) in backend.calls
 
+    def test_leading_whitespace_hyphen_tag_is_rejected_even_when_it_exists(self):
+        # " -draft" exists literally, so resolution's existence check would pass
+        # and hand the leading-space name to items(tag=...). Zotero trims the
+        # space and reads "-draft" as a negation, so the guard must judge the
+        # *stripped* value and reject before any query reaches the backend.
+        backend = FakeBackend(items=[_item("A", tags=[" -draft"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag(" -draft")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_leading_whitespace_hyphen_tag_is_rejected_when_absent(self):
+        # The stripped-value guard fires before resolution, so neither the tag
+        # list nor an items query is consulted for a space-then-hyphen name.
+        backend = FakeBackend(items=[_item("A", tags=["kept"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag(" -missing")
+        assert not any(c[0] in ("tags", "items") for c in backend.calls)
+
+    def test_leading_tab_hyphen_tag_is_rejected(self):
+        # strip() covers every whitespace kind, not just the space character.
+        backend = FakeBackend(items=[_item("A", tags=["\t-x"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag("\t-x")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_leading_whitespace_or_tag_is_rejected(self):
+        # An OR expression stays a metacharacter after the leading space is
+        # stripped, so " a||b" is rejected the same as "a||b".
+        backend = FakeBackend(items=[_item("A", tags=[" a||b"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag(" a||b")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_leading_whitespace_plain_tag_still_resolves_literally(self):
+        # Stripping only *decides* whether the name is a metacharacter; a benign
+        # leading space (" planning") is not one, so the tag must still resolve
+        # and query by its literal, space-carrying name (no over-rejection).
+        backend = FakeBackend(items=[_item("A", tags=[" planning"])])
+        out = ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag(" planning")
+        assert [i["key"] for i in out] == ["A"]
+        assert ("items", {"tag": " planning"}) in backend.calls
+
 
 class TestCollectionSuggestionCap:
     """The shared _suggest() caps the collection listing too (a contract change)."""

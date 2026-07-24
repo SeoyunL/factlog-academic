@@ -275,7 +275,8 @@ class ZoteroClient:
         """
         if not isinstance(tag, str) or not tag.strip():
             raise ZoteroError("tag must be a non-empty string.")
-        if tag.startswith("-") or "||" in tag:
+        stripped = tag.strip()
+        if stripped.startswith("-") or "||" in stripped:
             raise ZoteroError(
                 f"tag {tag!r} cannot be looked up literally: a leading '-' or '||' "
                 "collides with Zotero's tag-search syntax (negation and OR), so the "
