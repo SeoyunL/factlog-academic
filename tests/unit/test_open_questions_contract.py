@@ -566,6 +566,29 @@ class TestKeywordDrift:
             importlib.reload(mc)
         assert _merge_module().ROUTED_KEYWORDS <= REVIEW_KEYWORDS
 
+    def test_importing_with_an_added_category_fails_loudly(self):
+        """Add a category to the contract and merge_candidates refuses to load.
+
+        The mirror of the dropped-category case: a category the contract defines
+        but the producer never routes into would grow an empty section on every KB
+        with no signal. The subset check `<=` misses this direction; equality does
+        not.
+        """
+        import importlib  # noqa: PLC0415
+
+        from factlog import review_sections as rs  # noqa: PLC0415
+
+        mc = _merge_module()
+        original = rs.REVIEW_KEYWORDS
+        try:
+            rs.REVIEW_KEYWORDS = frozenset(original | {"신규"})
+            with pytest.raises(RuntimeError, match="신규"):
+                importlib.reload(mc)
+        finally:
+            rs.REVIEW_KEYWORDS = original
+            importlib.reload(mc)
+        assert _merge_module().ROUTED_KEYWORDS == REVIEW_KEYWORDS
+
 
 class TestSplitSectionWarning:
     """An already-split file is not repaired, so it has to be reported.
