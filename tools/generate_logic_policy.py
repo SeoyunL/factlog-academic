@@ -186,23 +186,32 @@ def fixture_policy_json(policy_text: str) -> dict[str, Any]:
         if is_canonical:
             rule["canonical"] = True
         rules.append(rule)
-    if not rules:
-        # Zero rules is a VALID policy, not a failure (#491). A freshly `init`ed KB ships a
-        # logic-policy.md that is prose only, and refusing to compile it left the KB with no
-        # .dl at all — which `factlog check`, tools/validate.py and finalize each had to work
-        # around. The empty-rules condition here is exactly common.logic_policy_text_has_rules
-        # being False (same two parsers), so "compiles to nothing" and "defines no rules"
-        # cannot disagree, and #190's loud path stays keyed on the .md having rules.
-        #
-        # Rejected bullets are still reported, on stderr and non-fatally: a bullet that
-        # LOOKS like a rule but yields no relation is worth telling the author about, and
-        # silence there would be the silent-drop this repo refuses. It is not fatal because
-        # the same diagnosis fires for prose that merely starts with an [id] tag.
-        for detail in rejected:
-            print(
-                f"generate_logic_policy: ignored policy/logic-policy.md {detail}",
-                file=sys.stderr,
-            )
+    if not rules and rejected:
+        # A bullet that TRIED to be a rule and yielded no relation is an authoring error,
+        # and it stays fatal. The #491 relaxation below is only for a .md that attempts no
+        # rule at all; widening it to this case made a mis-typed rule vanish with nothing
+        # said, because the only louder-than-silence channel a successful run has is
+        # stderr, and every caller in the normal workflow discards it — tools/validate.py
+        # reads the child's output only when rc != 0, and tools/finalize.py writes
+        # gen.stderr through only on the failure branch. Silence for a user's lost rule is
+        # the exact thing #190 exists to prevent, so the verdict has to be the exit code.
+        raise SystemExit(
+            "policy/logic-policy.md has no compilable policies: " + "; ".join(rejected)
+        )
+    for detail in rejected:
+        # Reached only with at least one compiled rule (the branch above exits otherwise).
+        # A partial policy is still a policy, so this is not fatal — that was the behaviour
+        # before #491 as well — but the rejects are named rather than dropped in silence.
+        print(
+            f"generate_logic_policy: ignored policy/logic-policy.md {detail}",
+            file=sys.stderr,
+        )
+    # Falling through with rules == [] is the #491 case: the .md attempts no rule at all,
+    # which is what a freshly `init`ed KB's prose-only logic-policy.md looks like, and
+    # compile_policy turns it into the empty-policy .dl. That verdict is exactly
+    # common.logic_policy_text_has_rules being False — same two parsers — so "compiles to
+    # nothing" and "defines no rules" cannot disagree, and #190's loud path stays keyed on
+    # the .md having rules.
     return {"rules": rules}
 
 
@@ -654,12 +663,13 @@ def main() -> int:
     # earlier run created. Absence therefore means "the last run that wrote anything into
     # runs/ finished". A --check run writes nothing under runs/ and touches neither.
     #
-    # BaseException, not Exception: render_prompt (directly, and via read_required on the
-    # prompt template) raises SystemExit from inside this try, and a run cut short by one
-    # leaves the same half-written directory as any other failure. fixture_policy_json
-    # used to be a second such site; since #491 it no longer exits on zero rules, but the
-    # broader catch is what makes the marker's accounting independent of which exception
-    # type each gate happens to use.
+    # BaseException, not Exception: render_prompt (via read_required on the prompt
+    # template) and fixture_policy_json both raise SystemExit from inside this try, and a
+    # run cut short by one leaves the same half-written directory as any other failure.
+    # fixture_policy_json's exit narrowed in #491 — zero rules is now a success and only a
+    # REJECTED bullet exits — but it is still the one SystemExit reachable past
+    # PROMPT_OUT, and tests/unit/test_failed_policy_run_marker.py's no_compilable_bullets
+    # mode is what would go red if this catch were narrowed to Exception.
     written: list[Path] = []
     try:
         prompt = render_prompt(policy_text)

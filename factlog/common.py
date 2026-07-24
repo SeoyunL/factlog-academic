@@ -699,7 +699,15 @@ def _load_logic_policy_from(logic_policy_dl: Path) -> str:
     # Optional sibling for hand-authored rules (e.g. typed comparison predicates,
     # #120). Unlike logic-policy.dl this file is never regenerated or byte-compared
     # by generate_logic_policy.py --check, so authors may edit it directly. Absent
-    # or all-comment/empty → text is byte-identical to today (#116 invariant 1).
+    # or all-comment/empty → this tail contributes nothing and `text` is exactly the
+    # base above (#116 invariant 1).
+    #
+    # That invariant is about THIS tail, not about the base, and #491 moved the base for
+    # one KB shape: a ruleless KB used to have no .dl at all and reach the engine with
+    # text == "", and now it has an empty-policy .dl and reaches it with the single line
+    # "// no policy rules". Measured on a `factlog init` KB, with and without a
+    # comment-only extra.dl. The engine is unaffected — the added line is a comment — but
+    # a reader comparing program bytes across that boundary should expect the difference.
     extra = logic_policy_dl.with_name("logic-policy.extra.dl")
     if extra.is_file():
         extra_text = extra.read_text(encoding="utf-8").strip()
