@@ -33,6 +33,19 @@ MIN_PYREWIRE = (1, 0, 3)  # bundles wirelog v0.52.0 with \" escape support (wire
 # an interrupted/`amend`/`eject` run can never leave a truncated runs/*.json behind.
 
 
+def _narrate(*a, porcelain: bool = False, **k) -> None:
+    """Emit one line of human progress narration, or nothing in porcelain mode.
+
+    The single seam for CLI progress narration. Narration goes to buffered stdout
+    while errors go to unbuffered stderr, so without flushing a redirect (2>&1)
+    shows progress lines *after* the error they precede (#457). Flushing here — at
+    the one call site every narration routes through — keeps that ordering correct
+    without each command re-prescribing ``flush=True`` on every ``print`` (#472).
+    """
+    if not porcelain:
+        print(*a, flush=True, **k)
+
+
 def _atomic_write_csv(csv_path, rows, fieldnames) -> None:
     """Write candidate *rows* to *csv_path* atomically (temp + os.replace).
 
@@ -3273,12 +3286,11 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
     annotations = getattr(args, "annotations", False)
 
     def _human(*a, **k):
-        # Suppress human narration in porcelain mode; errors still go to stderr.
-        # Flush each line: narration goes to buffered stdout while errors go to
-        # unbuffered stderr, so without flushing a redirect (2>&1) shows progress
-        # lines after the error they precede.
-        if not porcelain:
-            print(*a, flush=True, **k)
+        # Thin wrapper over the shared _narrate seam, kept so this command's ~18
+        # call sites (and #457's tests) read unchanged. Suppresses narration in
+        # porcelain mode and flushes so buffered-stdout progress never trails the
+        # unbuffered-stderr error it precedes under a 2>&1 redirect (#457, #472).
+        _narrate(*a, porcelain=porcelain, **k)
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
@@ -3546,8 +3558,7 @@ def cmd_zotero_search(args: argparse.Namespace) -> int:
         print(f"factlog zotero-search: {exc}", file=sys.stderr)
         return 1
 
-    if not porcelain:
-        print(f'Searching Zotero (Local API): "{args.query}"...')
+    _narrate(f'Searching Zotero (Local API): "{args.query}"...', porcelain=porcelain)
     try:
         items, total = _make_zotero_client(config).search_items(
             args.query, qmode=args.qmode, limit=limit
@@ -3887,8 +3898,7 @@ def cmd_openalex_search(args: argparse.Namespace) -> int:
             return 1
 
     client = _make_openalex_client(config)
-    if not porcelain:
-        print(f'Searching OpenAlex: "{args.query}"...')
+    _narrate(f'Searching OpenAlex: "{args.query}"...', porcelain=porcelain)
     try:
         page = client.search_works(
             args.query, year=args.year, work_type=args.type, limit=args.limit
@@ -3911,7 +3921,7 @@ def cmd_openalex_search(args: argparse.Namespace) -> int:
         chosen = _select_search_results(works, interactive=interactive, command="openalex-search")
         if not chosen and not porcelain:
             hint = " Re-run with --all to import every result." if works and not dry_run else ""
-            print(f"\nNothing selected; no files written.{hint}")
+            _narrate(f"\nNothing selected; no files written.{hint}", porcelain=porcelain)
             if warning:
                 print(f"\n{warning}", file=sys.stderr)
             return 0
@@ -5021,8 +5031,7 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
         return 0
 
     client = _make_arxiv_client(config)
-    if not porcelain:
-        print(f'Searching arXiv: "{args.query}"...')
+    _narrate(f'Searching arXiv: "{args.query}"...', porcelain=porcelain)
     try:
         works, total = client.search(
             args.query, categories=categories, year=args.year,
@@ -5054,9 +5063,8 @@ def cmd_arxiv_search(args: argparse.Namespace) -> int:
             works, interactive=interactive, command="arxiv-search"
         )
     if not chosen:
-        if not porcelain:
-            hint = " Re-run with --all to import every result." if works else ""
-            print(f"\nNothing selected; no files written.{hint}")
+        hint = " Re-run with --all to import every result." if works else ""
+        _narrate(f"\nNothing selected; no files written.{hint}", porcelain=porcelain)
         return 0
 
     imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -5245,8 +5253,7 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
     target, config = prepared
 
     client = _make_pubmed_client(config)
-    if not porcelain:
-        print(f'Searching PubMed: "{args.query}"...')
+    _narrate(f'Searching PubMed: "{args.query}"...', porcelain=porcelain)
     try:
         raw = client.esearch(composed, retmax=limit)
     except PubMedConnectionError as exc:
@@ -5323,9 +5330,9 @@ def cmd_pubmed_search(args: argparse.Namespace) -> int:
         interactive = not porcelain and not dry_run and sys.stdin.isatty()
         chosen = _select_search_results(works, interactive=interactive, command="pubmed-search")
     if not chosen:
-        if not porcelain and works:
-            print("\nNothing selected; no files written. Re-run with --all to select "
-                  "every result.")
+        if works:
+            _narrate("\nNothing selected; no files written. Re-run with --all to select "
+                     "every result.", porcelain=porcelain)
         return 0
     return _pubmed_import_selected(chosen, outcome, target=target, config=config,
                                    dry_run=dry_run, porcelain=porcelain)
@@ -6811,8 +6818,8 @@ def cmd_openalex_cite(args: argparse.Namespace) -> int:
 
     warning = _openalex_budget_warning(client)
     if not args.auto_import:
-        if not porcelain:
-            print("\nNothing written. Re-run with --auto-import to import these works.")
+        _narrate("\nNothing written. Re-run with --auto-import to import these works.",
+                 porcelain=porcelain)
         if warning:
             print(warning, file=sys.stderr)
         return 0

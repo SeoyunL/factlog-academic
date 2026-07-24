@@ -472,3 +472,70 @@ class TestBudgetWarning:
         captured = capsys.readouterr()
         assert "credit budget" in captured.err
         assert "credit budget" not in captured.out  # never pollutes the machine contract
+
+
+class _BufferedStdout:
+    """Models a buffered stdout: writes accrue and only surface on flush().
+
+    capsys snapshots each stream separately, so it cannot see the interleave a
+    redirect (2>&1) shows. A shared event log, committed to on flush, reproduces
+    the real terminal ordering. Mirrors #457's fake in test_zotero_cli.py.
+    """
+
+    def __init__(self, events):
+        self._events = events
+        self._pending = []
+
+    def write(self, s):
+        self._pending.append(s)
+        return len(s)
+
+    def flush(self):
+        if self._pending:
+            self._events.append("".join(self._pending))
+            self._pending = []
+
+
+class _UnbufferedStderr:
+    """Models unbuffered stderr: every write surfaces immediately."""
+
+    def __init__(self, events):
+        self._events = events
+
+    def write(self, s):
+        self._events.append(s)
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+class TestSearchNarrationOrdering:
+    """The #457 ordering fix, generalized to openalex-search by #472's _narrate."""
+
+    def test_searching_line_precedes_connection_error_under_redirect(
+        self, tmp_path, fake, monkeypatch
+    ):
+        # Same latent bug as #457, other command: the "Searching OpenAlex" line goes
+        # to buffered stdout and the connection error to unbuffered stderr, so under
+        # a 2>&1 redirect an unflushed narration lands *after* the error it precedes.
+        # _narrate flushes at the shared seam, so it must surface first.
+        import sys
+
+        kb = _kb(tmp_path)
+        fake(FakeClient(raise_exc=OpenAlexConnectionError("cannot reach OpenAlex")))
+        events: list[str] = []
+        monkeypatch.setattr(sys, "stdout", _BufferedStdout(events))
+        monkeypatch.setattr(sys, "stderr", _UnbufferedStderr(events))
+
+        rc = run(["openalex-search", "--query", "q", "--target", str(kb)])
+        # The interpreter flushes stdout at exit, so unflushed narration is not lost
+        # — it surfaces last. Mimic that so an unfixed narration fails as the real
+        # symptom (progress after the error) rather than as absence.
+        sys.stdout.flush()
+
+        merged = "".join(events)
+        assert rc == 2
+        assert "Searching OpenAlex" in merged
+        assert "cannot reach OpenAlex" in merged
+        assert merged.index("Searching OpenAlex") < merged.index("cannot reach OpenAlex")
