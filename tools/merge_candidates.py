@@ -700,11 +700,11 @@ def existing_superseded_keys(root: Path) -> set[tuple[str, str, str, str]]:
         for row in csv.DictReader(f):
             if (row.get("status") or "").strip() in SUPERSEDED_STATUSES:
                 keys.add(
-                    (
-                        (row.get("subject") or "").strip(),
-                        (row.get("relation") or "").strip(),
-                        (row.get("object") or "").strip(),
-                        (row.get("source") or "").strip().partition("#")[0],
+                    fact_key(
+                        row.get("subject") or "",
+                        row.get("relation") or "",
+                        row.get("object") or "",
+                        row.get("source") or "",
                     )
                 )
     return keys
@@ -762,11 +762,11 @@ def existing_engine_keys(root: Path) -> dict[tuple[str, str, str, str], str]:
         for row in csv.DictReader(f):
             status = (row.get("status") or "").strip()
             if status in ENGINE_STATUSES:
-                key = (
-                    (row.get("subject") or "").strip(),
-                    (row.get("relation") or "").strip(),
-                    (row.get("object") or "").strip(),
-                    (row.get("source") or "").strip().partition("#")[0],
+                key = fact_key(
+                    row.get("subject") or "",
+                    row.get("relation") or "",
+                    row.get("object") or "",
+                    row.get("source") or "",
                 )
                 keys[key] = status
     return keys
@@ -788,11 +788,11 @@ def existing_review_keys(root: Path) -> set[tuple[str, str, str, str]]:
     with csv_path.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             if (row.get("status") or "").strip() == "needs_review":
-                keys.add((
-                    (row.get("subject") or "").strip(),
-                    (row.get("relation") or "").strip(),
-                    (row.get("object") or "").strip(),
-                    (row.get("source") or "").strip().partition("#")[0],
+                keys.add(fact_key(
+                    row.get("subject") or "",
+                    row.get("relation") or "",
+                    row.get("object") or "",
+                    row.get("source") or "",
                 ))
     return keys
 
@@ -924,7 +924,7 @@ def main() -> int:
         for row in rows:
             # Anchor-insensitive key (see existing_superseded_keys): a drifted
             # section anchor must not let a retired fact slip back in.
-            key = (row["subject"], row["relation"], row["object"], row["source"].partition("#")[0])
+            key = fact_key(row["subject"], row["relation"], row["object"], row["source"])
             if key in superseded_keys and row["status"] not in SUPERSEDED_STATUSES:
                 row["status"] = "superseded"
                 preserved += 1
@@ -938,16 +938,16 @@ def main() -> int:
     # candidates.csv so a retired fact cannot silently resurrect as 'candidate' on
     # a later re-assertion. Anchor-insensitive key, matching the preservation above.
     present_keys = {
-        (row["subject"], row["relation"], row["object"], row["source"].partition("#")[0])
+        fact_key(row["subject"], row["relation"], row["object"], row["source"])
         for row in rows
     }
     carried = 0
     for tombstone in existing_superseded_rows(root):
-        key = (
+        key = fact_key(
             tombstone["subject"],
             tombstone["relation"],
             tombstone["object"],
-            tombstone["source"].partition("#")[0],
+            tombstone["source"],
         )
         if key not in present_keys:
             rows.append(tombstone)
@@ -964,7 +964,7 @@ def main() -> int:
     if engine_keys:
         restored = 0
         for row in rows:
-            key = (row["subject"], row["relation"], row["object"], row["source"].partition("#")[0])
+            key = fact_key(row["subject"], row["relation"], row["object"], row["source"])
             want = engine_keys.get(key)
             if want and row["status"] not in SUPERSEDED_STATUSES and row["status"] != want:
                 row["status"] = want
@@ -1024,7 +1024,7 @@ def main() -> int:
     if review_keys:
         held = 0
         for row in rows:
-            key = (row["subject"], row["relation"], row["object"], row["source"].partition("#")[0])
+            key = fact_key(row["subject"], row["relation"], row["object"], row["source"])
             if key in review_keys and row["status"] in ENGINE_STATUSES:
                 row["status"] = "needs_review"
                 held += 1
