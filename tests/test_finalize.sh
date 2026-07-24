@@ -325,6 +325,113 @@ else
   echo "SKIP: pyrewire absent — skipping #219 extra.dl interaction (engine-gated)"
 fi
 
+# --- #496: a policy whose every bullet was REJECTED (an [id] tag with the backticks
+# missing) is an authoring defect, not an empty policy. generate exits non-zero on it and
+# validate reports it, but finalize asked only "does the .md have rules?" — False for this
+# shape — and so took the benign-stub route: it wrote "// no policy rules" and exited 0.
+# Two consequences, both pinned below: the state was STICKY (the stub satisfied the skip
+# guard, so every later run stayed silent) and, worst, DESTRUCTIVE (a real compiled .dl was
+# reset to the stub, announced as "logic-policy.md defines no rules", when an author merely
+# dropped the backticks from a working rule).
+#
+# The #491 invariant it must not disturb: a .md with NO tagged bullet at all is a normal
+# ruleless KB — rc and stub unchanged (case D) — and a partial policy still compiles its
+# good rules (case E).
+_496_kb() {  # $1 = kb path, $2 = logic-policy.md contents; seeds one confirmed fact
+  "$PYTHON" -m factlog init --target "$1" >/dev/null 2>&1
+  printf '# src\n\nAcme API uses FastAPI.\n' > "$1/sources/a.md"
+  printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$1/runs/r1.json"
+  [ -n "${2:-}" ] && printf '%s' "$2" > "$1/policy/logic-policy.md"
+  return 0
+}
+REJECTED_MD='# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 uses 관계를 가지면 검토(review)가 필요하다.\n'
+GOOD_MD='# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 `uses` 관계를 가지면 검토(review)가 필요하다.\n'
+
+# (A) rejected-only -> non-zero, NO stub written, warning; and the re-run repeats all
+# three (the old bug went quiet from run 2 on, which is how a KB stayed broken unnoticed).
+KB13="$(mktemp -d)/wiki"
+_496_kb "$KB13" "$(printf "$REJECTED_MD")"
+rc13=0; out13="$("$PYTHON" "$FINALIZE" --target "$KB13" 2>&1)" || rc13=$?
+[ "$rc13" -ne 0 ] && ok "#496(A): a policy with only rejected bullets exits non-zero (rc=$rc13)" || bad "#496(A): rejected-only policy exited 0 (silently unapplied)"
+[ ! -f "$KB13/policy/logic-policy.dl" ] && ok "#496(A): no empty-policy stub written over a rejected policy" || bad "#496(A): stub written over a rejected policy (masks it from check + next finalize)"
+printf '%s' "$out13" | grep -qF "NOT applied" && ok "#496(A): finalize warns the policy is NOT applied" || bad "#496(A): missing not-applied warning"
+# Pin the phrasing that is UNIQUE to this branch, not just a substring generate's own
+# stderr also carries: finalize routes an unusable generate result through a generic
+# "generation failed" warning too, and if this case fell back to that one the rc and the
+# absent .dl would be identical while the operator lost the one line that says what to
+# type. Without this assertion that fallback is an undetectable mutation.
+printf '%s' "$out13" | grep -qF "every policy bullet in policy/logic-policy.md was REJECTED" \
+  && printf '%s' "$out13" | grep -qF "quote the relation name in backticks" \
+  && ok "#496(A): the warning names the actual defect and the fix (missing backticks)" \
+  || bad "#496(A): warning does not name the rejected-bullet defect or its remedy"
+rc13b=0; out13b="$("$PYTHON" "$FINALIZE" --target "$KB13" 2>&1)" || rc13b=$?
+[ "$rc13b" -ne 0 ] && ok "#496(A): re-run stays non-zero (not sticky-silent)" || bad "#496(A): re-run went to 0 (sticky masking regression)"
+printf '%s' "$out13b" | grep -qF "NOT applied" && ok "#496(A): re-run re-warns" || bad "#496(A): re-run went silent"
+[ ! -f "$KB13/policy/logic-policy.dl" ] && ok "#496(A): re-run still writes no stub" || bad "#496(A): re-run wrote a stub"
+# the chain is NOT short-circuited: merge/compile artefacts still land, only the exit code
+# reports the defect (same shape as the #194 loud path).
+[ -s "$KB13/facts/candidates.csv" ] && [ -f "$KB13/facts/accepted.dl" ] && ok "#496(A): merge+compile artefacts still produced (no early return)" || bad "#496(A): the chain was cut short (candidates.csv/accepted.dl missing)"
+
+# (B) the destructive transition: a WORKING compiled .dl must not be reset to the stub
+# when the .md's backticks are dropped. Before the fix this printed "reset to empty policy
+# (logic-policy.md defines no rules)" — a false statement — and exited 0.
+KB14="$(mktemp -d)/wiki"
+_496_kb "$KB14" "$(printf "$GOOD_MD")"
+"$PYTHON" "$FINALIZE" --target "$KB14" >/dev/null 2>&1 || true
+grep -q "requires_review" "$KB14/policy/logic-policy.dl" 2>/dev/null && ok "#496(B): real policy compiled (pre-condition)" || bad "#496(B): real policy did not compile (pre-condition)"
+printf "$REJECTED_MD" > "$KB14/policy/logic-policy.md"
+rc14=0; out14="$("$PYTHON" "$FINALIZE" --target "$KB14" 2>&1)" || rc14=$?
+if [ ! -f "$KB14/policy/logic-policy.dl" ] || [ "$(cat "$KB14/policy/logic-policy.dl")" != "// no policy rules" ]; then
+  ok "#496(B): breaking a working rule does not overwrite the compiled .dl with the stub"
+else
+  bad "#496(B): the compiled .dl was destroyed and replaced by the empty-policy stub"
+fi
+[ "$rc14" -ne 0 ] && ok "#496(B): the broken transition exits non-zero (rc=$rc14)" || bad "#496(B): the broken transition exited 0"
+printf '%s' "$out14" | grep -qF "reset to empty policy" && bad "#496(B): finalize falsely claims 'logic-policy.md defines no rules'" || ok "#496(B): no false 'defines no rules' reset message"
+
+# (C) migration: a KB already poisoned by the pre-fix finalize carries the masking stub on
+# disk. has_rules is False for its .md, so the #194 self-heal never fired and the KB stayed
+# silently broken forever. The widened heal must drop the stub and make it loud again.
+KB15="$(mktemp -d)/wiki"
+_496_kb "$KB15" "$(printf "$REJECTED_MD")"
+printf '// no policy rules\n' > "$KB15/policy/logic-policy.dl"   # simulate the pre-fix stub
+rc15=0; out15="$("$PYTHON" "$FINALIZE" --target "$KB15" 2>&1)" || rc15=$?
+[ ! -f "$KB15/policy/logic-policy.dl" ] && ok "#496(C): a legacy masking stub over a rejected policy is healed away" || bad "#496(C): legacy stub kept (KB stays silently unapplied)"
+[ "$rc15" -ne 0 ] && ok "#496(C): the healed KB now reports the defect (rc=$rc15)" || bad "#496(C): healed KB still exited 0"
+printf '%s' "$out15" | grep -qF "NOT applied" && ok "#496(C): the healed KB warns (was silent before)" || bad "#496(C): healed KB stayed silent"
+
+# (D) #491 invariant: a .md with no tagged bullet at all is a legitimately ruleless KB.
+# rc and the empty-policy stub must be exactly what they were before this fix.
+KB16="$(mktemp -d)/wiki"
+_496_kb "$KB16" "$(printf '# Logic policy\n\n## Rules\n\nNo rules yet — just prose.\n')"
+rc16=0; "$PYTHON" "$FINALIZE" --target "$KB16" >/dev/null 2>&1 || rc16=$?
+[ "$rc16" -eq "$SKIP_RC" ] && ok "#496(D): a prose-only policy keeps its exit code ($SKIP_RC) — #491 unmoved" || bad "#496(D): prose-only policy changed rc to $rc16 (#491 regression)"
+[ "$(cat "$KB16/policy/logic-policy.dl" 2>/dev/null)" = "// no policy rules" ] && ok "#496(D): a prose-only policy still gets the empty-policy .dl" || bad "#496(D): prose-only policy lost its empty-policy .dl"
+
+# (E) a partial policy is still a policy (#491): one good bullet + one rejected bullet
+# compiles the good rule, keeps rc, and names the rejected bullet on stderr.
+KB17="$(mktemp -d)/wiki"
+_496_kb "$KB17" "$(printf '# Logic policy\n\n## Rules\n\n- [c1] 어떤 항목이 `uses` 관계를 가지면 검토(review)가 필요하다.\n- [c2] 어떤 항목이 deployed_on 관계를 가지면 검토가 필요하다.\n')"
+rc17=0; out17="$("$PYTHON" "$FINALIZE" --target "$KB17" 2>&1)" || rc17=$?
+[ "$rc17" -eq "$SKIP_RC" ] && ok "#496(E): a mixed policy keeps its exit code ($SKIP_RC)" || bad "#496(E): mixed policy changed rc to $rc17 (partial policies must stay accepted)"
+grep -q "requires_review" "$KB17/policy/logic-policy.dl" 2>/dev/null && ok "#496(E): the good rule in a mixed policy is compiled" || bad "#496(E): mixed policy did not compile its good rule"
+printf '%s' "$out17" | grep -qF "ignored policy/logic-policy.md line" && ok "#496(E): the rejected bullet in a mixed policy is still named on stderr" || bad "#496(E): rejected bullet in a mixed policy went unreported"
+
+# (F) recovery: adding the backticks back compiles the rule — no leftover stub, no
+# leftover refusal. Runs on KB13, whose .md has been broken across two finalizes.
+printf "$GOOD_MD" > "$KB13/policy/logic-policy.md"
+rc13c=0; "$PYTHON" "$FINALIZE" --target "$KB13" >/dev/null 2>&1 || rc13c=$?
+grep -q "requires_review" "$KB13/policy/logic-policy.dl" 2>/dev/null && ok "#496(F): fixing the bullet compiles the policy again (recovery)" || bad "#496(F): fixed policy did not compile"
+[ "$rc13c" -eq "$SKIP_RC" ] && ok "#496(F): the recovered KB returns to its normal exit code ($SKIP_RC)" || bad "#496(F): recovered KB stuck at rc=$rc13c"
+
+# (G) #356's rule extended: --allow-unverified tolerates ENGINE ABSENCE, never a KB policy
+# defect. Under the pyrewire shadow the rejected-only KB must still exit 3 with the flag —
+# otherwise CI that passes the flag for offline tolerance would wave a broken policy through.
+KB18="$(mktemp -d)/wiki"
+_496_kb "$KB18" "$(printf "$REJECTED_MD")"
+rc18=0; PYTHONPATH="$SHADOW:$PYTHONPATH" "$PYTHON" "$FINALIZE" --target "$KB18" --allow-unverified >/dev/null 2>&1 || rc18=$?
+[ "$rc18" -eq 3 ] && ok "#496(G): --allow-unverified does NOT swallow a rejected-only policy (rc 3)" || bad "#496(G): --allow-unverified swallowed the defect (rc=$rc18, want 3)"
+
 echo ""
 echo "========================================"
 echo "test_finalize: $pass passed, $fail failed"

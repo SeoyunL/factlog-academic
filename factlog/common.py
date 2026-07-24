@@ -672,6 +672,38 @@ def logic_policy_md_has_rules(md_path: Path) -> bool:
     return logic_policy_text_has_rules(md_path.read_text(encoding="utf-8"))
 
 
+def logic_policy_text_has_rejected_items(md_text: str) -> bool:
+    """``logic_policy_md_has_rejected_items`` on policy text already in hand.
+
+    True iff at least one bullet TRIED to be a rule — it carries an ``[id]`` tag, so
+    ``markdown_policy_items`` admits it — but names no backtick relation, which is
+    exactly the ``rejected`` list ``generate_logic_policy.fixture_policy_json`` builds
+    (same two parsers, negated on the same condition, #190). Prose that is not a tagged
+    bullet is invisible here, so a rules-free logic-policy.md stays False: this
+    distinguishes an authoring defect from a legitimately empty policy (#491) and never
+    conflates the two.
+    """
+    return any(
+        not logic_policy_md_relations(sentence)
+        for _lineno, _reason, sentence in markdown_policy_items(md_text)
+    )
+
+
+def logic_policy_md_has_rejected_items(md_path: Path) -> bool:
+    """Deterministic 'does this policy .md contain a bullet that failed to compile?'.
+
+    The companion of ``logic_policy_md_has_rules``: together they partition the tagged
+    bullets, so ``not has_rules and has_rejected_items`` is byte-for-byte the fatal
+    ``not rules and rejected`` verdict ``fixture_policy_json`` raises SystemExit on.
+    ``tools/finalize.py`` and ``_load_logic_policy_from`` key on that pair so a policy
+    whose every bullet was rejected can never be mistaken for an empty policy and
+    papered over with the empty-policy stub (#496).
+    """
+    if not md_path.is_file():
+        return False
+    return logic_policy_text_has_rejected_items(md_path.read_text(encoding="utf-8"))
+
+
 def _load_logic_policy_from(logic_policy_dl: Path) -> str:
     if not logic_policy_dl.is_file():
         # A fresh `init`ed KB has no compiled logic-policy.dl yet. Distinguish
@@ -687,6 +719,21 @@ def _load_logic_policy_from(logic_policy_dl: Path) -> str:
             raise FactlogError(
                 "policy/logic-policy.dl is missing but policy/logic-policy.md defines "
                 "rules; run tools/generate_logic_policy.py (or /factlog add) to compile it"
+            )
+        if logic_policy_md_has_rejected_items(md_path):
+            # has_rules is False, so this is the "every bullet was REJECTED" shape —
+            # generate_logic_policy exits non-zero on it ("no compilable policies"), which
+            # is why no .dl is on disk. Treating it as a benign empty policy would apply an
+            # EMPTY policy to a KB whose author wrote rules and mistyped them, and the
+            # verification gate would report 0 findings — the silent-drop #190 exists to
+            # prevent. #491's "no rules at all is normal" relaxation does not reach here:
+            # a .md with no tagged bullet has nothing rejected and stays graceful (#496).
+            raise FactlogError(
+                "policy/logic-policy.dl is missing and policy/logic-policy.md compiles to "
+                "nothing because EVERY policy bullet was rejected (an [id] tag with no "
+                "backtick relation name). That is an authoring defect, not an empty policy: "
+                "quote the relation name in backticks, then run "
+                "tools/generate_logic_policy.py (or /factlog add) to compile it"
             )
         # No compiled logic-policy.dl, but a hand-authored logic-policy.extra.dl
         # may still exist (#120). Fall through to the extra.dl merge tail with an

@@ -31,7 +31,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import EMPTY_POLICY_DL, logic_policy_md_has_rules
+from common import (
+    EMPTY_POLICY_DL,
+    logic_policy_md_has_rejected_items,
+    logic_policy_md_has_rules,
+)
 
 _TOOLS = Path(__file__).parent
 
@@ -129,7 +133,17 @@ def main(argv: list[str] | None = None) -> int:
     policy_md = root / "policy" / "logic-policy.md"
     # Shared has-rules definition (factlog/common.py) so finalize and
     # _load_logic_policy_from never drift on what "defines rules" means (#190).
-    policy_uncompiled = False  # md defines rules but nothing compiled → NOT applied
+    policy_uncompiled = False  # md attempts rules but nothing compiled → NOT applied
+    # "Every tagged bullet was REJECTED" (an [id] with no backtick relation): has_rules is
+    # False, yet generate_logic_policy exits non-zero on exactly this shape rather than
+    # compiling an empty policy (#491). Keying the three decisions below on has_rules
+    # ALONE therefore read this authoring defect as a ruleless KB and papered it over with
+    # the empty-policy stub — silently, with rc 0, and (worst) destroying a real compiled
+    # .dl the moment an author dropped the backticks from a working rule (#496). The .md is
+    # never written by finalize, so one read-time verdict is used throughout.
+    rejected_only = not logic_policy_md_has_rules(policy_md) and logic_policy_md_has_rejected_items(
+        policy_md
+    )
     # Self-heal a KB poisoned by a pre-#194 finalize: that version wrote the empty
     # stub OVER an uncompilable policy, and the leftover stub then (a) made every
     # later run skip regeneration (the `not policy_dl.is_file()` guard below) and
@@ -137,10 +151,17 @@ def main(argv: list[str] | None = None) -> int:
     # exactly that stub yet the .md defines rules, drop it so this run regenerates
     # (and, if generation still fails, leaves it absent to fail loud) instead of
     # inheriting the silent-ignore. A benign stub (no rules in .md) is left alone.
+    #
+    # rejected_only is healed too (#496): a pre-fix finalize wrote this same stub over a
+    # .md whose every bullet was rejected, and because has_rules is False there the heal
+    # never fired — the stub sat forever, the skip guard below kept generation from
+    # retrying, and /factlog check saw a present .dl and reported 0 findings. Widening the
+    # condition is the migration for KBs already in that state; a genuinely ruleless .md
+    # has nothing rejected, so the benign stub is still left alone (#491).
     if (
         policy_dl.is_file()
         and policy_dl.read_text(encoding="utf-8") == POLICY_STUB
-        and logic_policy_md_has_rules(policy_md)
+        and (logic_policy_md_has_rules(policy_md) or rejected_only)
     ):
         policy_dl.unlink()
     # #217: a real (non-stub) .dl that already exists must NOT be trusted blindly.
@@ -179,11 +200,21 @@ def main(argv: list[str] | None = None) -> int:
         # A benign stub is already POLICY_STUB so this never fires for it (no-op),
         # and the #194 stub-over-rules self-heal above ran first, so a stub is never
         # left masking real rules.
-        policy_dl.write_text(POLICY_STUB, encoding="utf-8")
-        print(
-            "finalize: policy/logic-policy.dl was stale; reset to empty policy "
-            "(logic-policy.md defines no rules)."
-        )
+        if rejected_only:
+            # #496: the .md did NOT go ruleless — its bullets are still there, they just
+            # stopped naming a relation (the usual cause: the backticks were dropped while
+            # editing a working rule). Resetting here destroyed the compiled .dl and said
+            # "logic-policy.md defines no rules", which is false, at rc 0. Remove the .dl
+            # instead — it no longer matches the .md either way — and fall through to the
+            # regeneration path, where generate fails loud and the uncompiled state is
+            # reported (and, with the engine present, run_logic_check refuses to pass).
+            policy_dl.unlink()
+        else:
+            policy_dl.write_text(POLICY_STUB, encoding="utf-8")
+            print(
+                "finalize: policy/logic-policy.dl was stale; reset to empty policy "
+                "(logic-policy.md defines no rules)."
+            )
     if stale_dl or not policy_dl.is_file():
         gen = _run("generate_logic_policy.py", env=env)
         if stale_dl and policy_dl.is_file() and gen.returncode != 0:
@@ -217,16 +248,50 @@ def main(argv: list[str] | None = None) -> int:
                     "generation.",
                     file=sys.stderr,
                 )
+            elif rejected_only:
+                # #496: the .md whose every bullet was REJECTED used to land in the stub
+                # branch below, because has_rules is False for it. That turned generate's
+                # own fatal verdict ("no compilable policies", rc 1) into a stub .dl and
+                # rc 0 — the policy was dropped in silence, and the stub then masked the
+                # state from /factlog check and from every later finalize (the .dl is
+                # present, so nothing regenerates). It is the SAME defect #194 named for
+                # the has-rules half, just reached with the tag typed and the backticks
+                # missing, so it gets the same treatment: no stub, warn, exit non-zero.
+                policy_uncompiled = True
+                sys.stderr.write(gen.stderr)
+                print(
+                    "finalize: WARNING — every policy bullet in policy/logic-policy.md was "
+                    "REJECTED (an [id] tag with no backtick relation name), so "
+                    "generate_logic_policy produced no logic-policy.dl (see the error "
+                    "above) and the policy is NOT applied. This is an authoring defect, "
+                    "not an empty policy: quote the relation name in backticks and re-run "
+                    "— no empty-policy stub was written, so re-running retries generation.",
+                    file=sys.stderr,
+                )
+            elif gen.returncode != 0:
+                # generate failed for a reason that is neither of the two policy shapes
+                # above (an OS-level failure, a rejected canonical marker, an undecodable
+                # relation name...). Whatever it was, no .dl exists and the .md is not a
+                # benign ruleless one we can honestly stub — say so instead of writing
+                # bytes that claim the KB has no policy.
+                policy_uncompiled = True
+                sys.stderr.write(gen.stderr)
+                print(
+                    "finalize: WARNING — generate_logic_policy failed (see the error "
+                    "above) and produced no logic-policy.dl, so the policy is NOT "
+                    "applied. Fix the policy and re-run — no empty-policy stub was "
+                    "written, so re-running retries generation.",
+                    file=sys.stderr,
+                )
             else:
                 # No compilable rules → a no-op stub lets the check run with an empty
                 # policy. This was the fresh-KB path until #491; a prose-only .md no
                 # longer arrives here at all, because generate now succeeds on it and
-                # writes these same bytes itself. What still reaches here is a .md whose
-                # every bullet was REJECTED (an [id] tag with no backtick relation), which
-                # exits generate while leaving has_rules False, plus any OS-level failure
-                # of the generating run. Measured: `init` + a relationless tagged bullet
-                # lands in this branch and finalize ends rc=0 with the stub written —
-                # unchanged from before #491, where the same input took the same route.
+                # writes these same bytes itself. Since #496 the two ways a FAILED
+                # generate reached this branch — an all-rejected .md and an OS-level
+                # failure — are handled above, so what is left is a successful generate
+                # that produced nothing, and the stub is written for a KB that genuinely
+                # has no policy to apply (#491's invariant: rules-free is not an error).
                 policy_dl.parent.mkdir(parents=True, exist_ok=True)
                 policy_dl.write_text(POLICY_STUB, encoding="utf-8")
         elif stale_dl:
@@ -322,8 +387,10 @@ def main(argv: list[str] | None = None) -> int:
     unverified = logic_skipped and not args.allow_unverified
     exit_code = 3 if unverified else 0
     # #356: --allow-unverified accepts an ENGINE-ABSENT skip, not a KB policy defect.
-    # policy_uncompiled means logic-policy.md HAS rules that did NOT compile, so the
-    # policy is silently NOT applied — a correctness fault independent of pyrewire's
+    # policy_uncompiled means logic-policy.md ATTEMPTED rules that did NOT compile —
+    # bullets with relations that the compiler rejected, or (since #496) bullets that named
+    # no relation at all — so the policy is silently NOT applied: a correctness fault
+    # independent of pyrewire's
     # presence. Keep it non-zero regardless of the flag; otherwise CI running finalize
     # with --allow-unverified for no-pyrewire tolerance would also wave through a broken
     # policy (warning on stderr only). The engine-present path fails loud earlier in
