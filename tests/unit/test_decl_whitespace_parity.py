@@ -22,6 +22,20 @@ wider than both and stays that way. These tests pin the agreement, the intention
 gap, and the residual one — because the failure mode of this module is not a
 crash, it is silence.
 
+Since #516 the raw side has ONE member, `_engine_decl_predicates`. The
+assembly-time alias net moved to the skeleton because its raw blind spot is one
+the engine accepts AS A DECLARATION — measured below, since that premise would
+rot silently if pyrewire narrowed.
+
+The skeleton's own blind spot is not excused by the engine rejecting those
+programs; it does not. `_scan_policy` truncates at any literal that fails to close
+on its line, pyrewire accepts a literal spanning lines, and a program in that gap
+truncates AND compiles. What holds instead is that everything the truncation can
+hide in the assembled program is mid-line, which the pre-#516 reading missed too:
+no regression rather than no hole. Both halves are measured here, per shape,
+because generalising from one hand-picked string is how the claim this replaces
+came to be written.
+
 Measured against pyrewire 1.0.3 (TestEngineAcceptsTheseForms below re-measures
 it, so the day the engine narrows, the reason for widening these parsers is
 gone and a test says so).
@@ -69,18 +83,31 @@ WHITESPACE_FORMS = {
 }
 
 # Forms the engine also accepts, and that only a COMMENT-STRIPPING reader resolves.
-# The rule is ONE proposition, not a list of curiosities: the raw-text sites see a
+# The rule is ONE proposition, not a list of curiosities: the raw-text site sees a
 # `.decl` only when it OPENS ITS LINE and NO COMMENT falls anywhere inside the
 # directive — not between `.decl` and the name, and not between the name and the
 # paren. Everything below violates one conjunct or the other. (An earlier wording
 # said only "name and paren not split", which its own third entry refutes: there
-# the `.decl` opens the line and the name touches its paren, and the raw readers
-# still miss it because the comment sits between `.decl` and the name.)
+# the `.decl` opens the line and the name touches its paren, and the raw reader
+# still misses it because the comment sits between `.decl` and the name.)
 #
-# "new" / "pre-existing" is measured against main, per form — #508 did not create
-# them all. Widening only the skeleton readers split the two comment-SPLIT forms,
-# which main missed on both sides; the not-line-initial forms already diverged on
-# main because their paren touches the name. See TestRawTextSitesCannotStripComments.
+# WHOSE gap this is changed in #516 and the list did not: measured, all five are
+# still invisible to `_DECL_LINE_RE`. What moved is the other side. It used to be
+# net 1 (skeleton) against net 2 (raw); now three skeleton readers —
+# policy_predicates, the column guard, and `_assert_no_alias_collision` — stand
+# against the ONE raw reader left, `_engine_decl_predicates`. See
+# TestTheLastRawTextSiteCannotStripComments.
+#
+# "new" / "pre-existing" is measured against the state before #508, per form —
+# #508 did not create them all. Widening only the skeleton readers split the two
+# comment-SPLIT forms, which were missed on both sides before; the not-line-initial
+# forms already diverged because their paren touches the name.
+#
+# This dict is a SINGLE POINT for four parametrized tests: deleting an entry drops
+# a case from TestEngineAcceptsTheseForms, from
+# TestPolicyPredicatesSeesEveryWhitespaceForm::test_comment_stripped_forms_are_visible_too,
+# and from both methods of TestTheLastRawTextSiteCannotStripComments at once, with
+# nothing turning red. Add here, do not narrow here.
 SKELETON_ONLY_FORMS = {
     # new (#508): main's skeleton regex needed the paren to touch the name, so it
     # missed these too, and the two readers were blind together.
@@ -261,55 +288,228 @@ class TestDeclRemovalKeepsTheHeadGuardIntact:
             fcommon._assert_no_canonical_head(policy)
 
 
-class TestRawTextSitesCannotStripComments:
+class TestTheLastRawTextSiteCannotStripComments:
     """Where the four sites still disagree, stated as a rule and measured per form.
 
-    Two sites read a _scan_policy SKELETON (comments removed, string literals
-    blanked); two read RAW text. The raw ones see a `.decl` only when it OPENS ITS
-    LINE and NO COMMENT falls anywhere inside the directive — between `.decl` and
-    the name counts just as much as between the name and the paren. Both conjuncts
-    are needed: `.decl // why` + newline + `p(cols)` opens its line and has its
-    paren against its name, and the raw readers still do not see it.
+    Since #516, THREE sites read a _scan_policy SKELETON (comments removed, string
+    literals blanked) — policy_predicates, the column guard and
+    `_assert_no_alias_collision` — and exactly ONE reads RAW text:
+    `_engine_decl_predicates`, over WIRELOG_PROGRAM. The raw one sees a `.decl`
+    only when it OPENS ITS LINE and NO COMMENT falls anywhere inside the directive
+    — between `.decl` and the name counts just as much as between the name and the
+    paren. Both conjuncts are needed: `.decl // why` + newline + `p(cols)` opens
+    its line and has its paren against its name, and the raw reader still does not
+    see it.
 
     Two of the five forms in SKELETON_ONLY_FORMS are a divergence #508 CREATED:
-    main's skeleton regex required the paren to touch the name, so both readers
-    missed a comment-split `.decl` and were consistently blind. Widening the
-    skeleton side alone split them. The other three already diverged on main. The
-    direction is safe — two nets degrade to one, never to zero — but "created" is
-    the honest word for the first two, and a reader deciding whether to trust this
-    module needs the difference.
+    before it, the skeleton regex required the paren to touch the name, so both
+    readers missed a comment-split `.decl` and were consistently blind. Widening
+    the skeleton side alone split them. The other three already diverged. That
+    history is why the gap is worth measuring rather than assuming.
 
-    Why the raw sites are not simply switched to the skeleton, which would close
-    the gap: _scan_policy(strict=False) STOPS at an unterminated string literal
-    and returns what it lexed so far. Measured — `q(X, "oops...` followed by
-    `.decl pub_year(...)` yields a skeleton that contains no declaration at all,
-    while the raw reader still finds pub_year. A fail-closed collision net that
-    silently loses everything after a stray quote is fail-OPEN, which is worse
-    than the gap it would close. (strict=True raises instead, but that turns a
-    targeted alias check into a new whole-program parse error.) Performance is
-    NOT the reason and should not be cited as one: ~182ms vs ~9ms on 1MB, same
-    result.
+    Why `_assert_no_alias_collision` moved to the skeleton in #516: measured,
+    pyrewire 1.0.3 accepts all five forms below and applies the column schema to
+    them, so the raw blind spot is reachable and silent — a duplicate `.decl` with
+    a different arity compiles rc=0 and changes what is derived.
 
-    The case that matters — a typed alias colliding with such a declaration — is
-    still caught by the parse-time net, which reads the skeleton. Pinned below.
+    The skeleton has a blind spot too: truncation at what `_scan_policy` calls an
+    unterminated literal. It is NOT excused by "the engine rejects those programs",
+    and the test below exists to stop anyone writing that down again. `_scan_policy`
+    wants a literal closed on the line it opens; pyrewire accepts one spanning
+    lines; a program in that gap truncates the skeleton AND compiles. Nor is it
+    containment the other way: the engine rejects plenty that does not truncate at
+    all (`/* */`, a digit-initial name, `.DECL`). NEITHER SET CONTAINS THE OTHER, so
+    an argument resting on their overlap is false. #516 was filed because this
+    docstring's ancestor argued against measurement; the fix is not to argue the
+    other way from the same kind of evidence — a paragraph whose subject is "do not
+    write claims that fail measurement" is the last place to round a relation off
+    to the word that reads better.
+
+    What holds is narrower and is about no REGRESSION, not no blind spot: in the
+    assembled program every `.decl` the truncation can hide is mid-line, and the
+    old anchored reading missed mid-line declarations too. That argument lives in
+    `_assert_no_alias_collision`'s docstring, component by component, and its
+    load-bearing half — accepted.dl coming LAST — is pinned by
+    test_run_wirelog_appends_accepted_dl_last below. Performance is NOT part of
+    this and should not be cited either way.
+
+    Why the raw site is not moved too: its input is a constant we own, so today it
+    would answer alike, and the anchor is what keeps a commented-out line in
+    WIRELOG_PROGRAM from becoming an engine predicate. The gap it leaves is real
+    all the same — the fixture below exists because the four consumers of
+    `_engine_decl_predicates` lose a predicate simultaneously and silently if the
+    next line added to that constant is indented or MixedCase (#332, #334).
     """
 
-    def test_the_skeleton_stops_at_an_unterminated_string(self):
-        """The measurement behind "do not switch the raw sites to the skeleton".
+    # Every shape `_scan_policy` treats as unterminated, with the engine's ACTUAL
+    # verdict on it. The second row is the whole point: the two sets do not
+    # coincide, so "truncated ⇒ the engine kills it" is false.
+    TRUNCATING = {
+        "odd quote": ('q(X, "oops) :- relation(X, "a", _).\n', "rejects"),
+        "literal spanning lines": ('relation("a\nb", "r", "o").\n', "compiles"),
+    }
 
-        Everything after a stray quote is gone from the skeleton, declarations
-        included, while the raw reader still finds them. Reading the skeleton here
-        would trade a narrow gap for a net that opens completely on one typo.
+    # The other direction, so the relation is pinned as INCOMPARABLE rather than as
+    # containment. Prose kept rounding this off to "the truncation set is strictly
+    # wider", which is a different and false claim; these are rejected by the engine
+    # and do not truncate at all.
+    REJECTED_BUT_NOT_TRUNCATING = {
+        "block comment": "/* nope */\n",
+        "digit-initial name": f".decl 1bad({COLS})\n",
+        "uppercase .DECL": f".DECL bad({COLS})\n",
+    }
+
+    @pytest.mark.parametrize("label", sorted(TRUNCATING))
+    def test_the_skeleton_stops_at_an_unterminated_string(self, label):
+        """The truncation is real, and it is NOT confined to programs the engine kills.
+
+        Everything after the truncation point is gone from the skeleton,
+        declarations included, so `_assert_no_alias_collision` does not see pub_year
+        in either shape. The engine's verdict is asserted per shape rather than
+        assumed to be uniform, because it is not: `_scan_policy` requires a literal
+        to close on the line it opens, pyrewire does not, and the spanning-lines
+        shape therefore truncates AND compiles. An earlier draft of this test
+        measured one hand-picked string and generalised from it — that is how the
+        false claim got written, so the shapes are enumerated here now.
+
+        This is a fail-open hole in this net, stated plainly. What keeps it from
+        being a regression is separate and narrower: the declarations it can hide
+        in the real assembled program are mid-line, which the old anchored reading
+        also missed. See `_assert_no_alias_collision`'s docstring.
         """
-        text = 'q(X, "oops) :- relation(X, "a", _).\n' + f".decl pub_year({COLS})\n"
+        prefix, verdict = self.TRUNCATING[label]
+        text = prefix + f".decl pub_year({COLS})\n"
         skeleton, _ = fcommon._scan_policy(text, strict=False)
-        assert "pub_year" not in skeleton
-        assert _seen_by_alias_collision(text, "pub_year")
+        assert "pub_year" not in skeleton, label
+        assert not _seen_by_alias_collision(text, "pub_year"), label
+        if fcommon.EasySession is None:
+            pytest.skip("the engine half of this claim needs pyrewire installed")
+        if verdict == "rejects":
+            with pytest.raises(Exception):
+                fcommon.EasySession(text)
+        else:
+            fcommon.EasySession(text)  # truncates our lexer, compiles for the engine
+
+    @pytest.mark.parametrize("label", sorted(REJECTED_BUT_NOT_TRUNCATING))
+    def test_the_engine_also_rejects_things_that_do_not_truncate(self, label):
+        """The containment claim, refuted in the direction nobody checked.
+
+        With the test above, this makes the relation INCOMPARABLE: each set holds
+        something the other does not. That is weaker than "strictly wider" and it is
+        what is true, and the conclusion drawn from it — that an argument resting on
+        the overlap is worthless — needs only incomparability anyway. The stronger
+        wording bought nothing and was false.
+        """
+        text = self.REJECTED_BUT_NOT_TRUNCATING[label] + f".decl pub_year({COLS})\n"
+        skeleton, _ = fcommon._scan_policy(text, strict=False)
+        assert "pub_year" in skeleton, label  # no truncation
+        if fcommon.EasySession is None:
+            pytest.skip("the engine half of this claim needs pyrewire installed")
+        with pytest.raises(Exception):
+            fcommon.EasySession(text)
+
+    def test_the_alias_net_does_not_raise_a_whole_program_parse_error(self):
+        """strict=False, and why it may not be tightened to strict=True.
+
+        accepted.dl is the last component of the assembled program and
+        `_load_accepted_facts_from` lets a `canonical("A", "x, "B").` row through,
+        so an unterminated literal CAN reach this net. With strict=True the lexer
+        raises, and a targeted alias check would start reporting someone else's
+        parse error — a different message, a different cause, and a KB blocked by
+        the guard rather than by the compile step that owns that diagnosis.
+        """
+        specs = {"게재연도": fcommon.TypedRelSpec("date", "pub_year")}
+        text = f".decl other({COLS})\n" + 'canonical("A", "x, "B").\n'
+        with pytest.raises(fcommon.FactlogError):
+            fcommon._scan_policy(text, strict=True)
+        fcommon._assert_no_alias_collision(specs, text)  # does not raise
+
+    def test_accepted_dl_can_smuggle_a_mid_line_decl_past_this_net(self, tmp_path):
+        """The fail-open case, named rather than denied — and why it is not a regression.
+
+        An earlier draft claimed `_load_accepted_facts_from` rejects `.decl` lines
+        outright and that accepted.dl being last leaves nothing after it to hide.
+        Both are false: the loader skips a line starting with `canonical(` WITHOUT
+        parsing it, so a `.decl` riding on such a line is never inspected, and
+        accepted.dl is many lines, so a truncating line can precede another that
+        carries one.
+
+        The declaration that gets through is mid-line, and the last assertion is
+        what makes this survivable: the anchored reading this net used before #516
+        did not see it either. No regression, and no pretending the hole is closed.
+        """
+        accepted = tmp_path / "accepted.dl"
+        accepted.write_text(
+            'canonical("A", "x, "B").\n'
+            f'canonical("C", "d", "E"). .decl pub_year({COLS})\n',
+            encoding="utf-8",
+        )
+        fcommon._load_accepted_facts_from(accepted)  # the loader does not object
+        text = accepted.read_text(encoding="utf-8")
+        assert not _seen_by_alias_collision(text, "pub_year")
+        assert not fcommon._DECL_LINE_RE.findall(text)  # the old reading missed it too
+
+    def test_a_line_initial_decl_in_accepted_dl_is_still_rejected(self, tmp_path):
+        """The other half: what the loader DOES stop is exactly the dangerous shape.
+
+        A line-initial `.decl` is the one the anchored reading used to catch, so if
+        accepted.dl could carry one past a truncation point the move would be a
+        regression. It cannot — indented or not.
+        """
+        accepted = tmp_path / "accepted.dl"
+        for text in (f".decl pub_year({COLS})\n", f"  .decl pub_year({COLS})\n"):
+            accepted.write_text(text, encoding="utf-8")
+            with pytest.raises(fcommon.FactlogError, match="unsupported fact syntax"):
+                fcommon._load_accepted_facts_from(accepted)
+
+    def test_run_wirelog_appends_accepted_dl_last(self, tmp_path, monkeypatch):
+        """The order argument, pinned against run_wirelog itself.
+
+        The safety argument uses accepted.dl's POSITION: truncation originating
+        there can only hide later accepted.dl lines, which the loader constrains.
+        Put accepted.dl ahead of the policy and a stray quote in it would hide
+        line-initial policy declarations — ones the pre-#516 reading caught — and
+        the move would become a real regression.
+
+        Asserted against the text `_assert_no_alias_collision` actually receives,
+        not against a string this test assembles itself: a hand-built two-line
+        program pins nothing about run_wirelog, and a mutant that swaps the operands
+        at the assembly site survived exactly that.
+        """
+        seen = {}
+
+        def capture(specs, program_text):
+            seen["program"] = program_text
+            raise fcommon.FactlogError("stop before the engine")
+
+        accepted = tmp_path / "accepted.dl"
+        accepted.write_text('canonical("A", "b", "C").\n', encoding="utf-8")
+        monkeypatch.setattr(fcommon, "ACCEPTED_DL", accepted)
+        monkeypatch.setattr(fcommon, "require_pyrewire_version", lambda: None)
+        monkeypatch.setattr(fcommon, "load_logic_policy", lambda: f".decl marker_policy({COLS})\n")
+        monkeypatch.setattr(fcommon, "load_accepted_facts", lambda: [])
+        monkeypatch.setattr(
+            fcommon, "typed_relations", lambda: {"연도": fcommon.TypedRelSpec("date", "pub_year")}
+        )
+        monkeypatch.setattr(fcommon, "_assert_no_alias_collision", capture)
+
+        with pytest.raises(fcommon.FactlogError, match="stop before the engine"):
+            fcommon.run_wirelog()
+
+        program = seen["program"]
+        assert program.index("marker_policy") < program.index('canonical("A", "b", "C")')
+        assert program.startswith(fcommon.WIRELOG_PROGRAM)
 
     @pytest.mark.parametrize("label", sorted(SKELETON_ONLY_FORMS))
-    def test_raw_text_sites_do_not_see_them(self, label, seen_by_engine_decls):
+    def test_the_raw_text_site_does_not_see_them(self, label, seen_by_engine_decls):
+        """The gap, per form, and which side of it each reader is on now.
+
+        `_assert_no_alias_collision` SEES all five since #516 — that assertion is
+        the one that flipped, and it is what makes the move visible rather than a
+        silent refactor. `_engine_decl_predicates` still does not.
+        """
         text = form(SKELETON_ONLY_FORMS[label])
-        assert not _seen_by_alias_collision(text), label
+        assert _seen_by_alias_collision(text), label
         assert not seen_by_engine_decls(text), label
 
     @pytest.mark.parametrize("label", sorted(SKELETON_ONLY_FORMS))
@@ -351,13 +551,19 @@ class TestReservedHeadGuardIsDeliberatelyWider:
             fcommon._assert_no_canonical_head(f".decl {form.replace('p', 'canonical')}({COLS})\n")
 
 
-class TestAnchorStillExcludesComments:
-    """_assert_no_alias_collision reads RAW program text — the only site that does.
+class TestNetTwoStillExcludesComments:
+    """The property #516 had to preserve while changing HOW it is obtained.
 
-    `^` is what keeps `// .decl pub_year(...)` from raising a collision, so it may
-    not simply be deleted to admit indentation. `[ \\t]*` admits the indentation and
-    keeps the exclusion; `\\s*` would let the run cross newlines and the anchor would
-    stop meaning "this line starts here".
+    A collision raised over a commented-out `// .decl pub_year(...)` blocks a KB
+    over a line the engine never reads, so `_assert_no_alias_collision` must not
+    count one. Before #516 the `^` anchor bought that exclusion by accident of
+    position; now the skeleton buys it by actually removing the comment — which is
+    also why the mid-line case below moved from "not at a line start" to "inside a
+    string literal, and the lexer blanked it".
+
+    These stay pinned per case rather than folded into the parity matrix: the
+    exclusion is what makes this net safe to widen, and a widening that quietly
+    took comments with it would fail nothing else here.
     """
 
     SPECS = {"게재연도": fcommon.TypedRelSpec("date", "pub_year")}
@@ -374,24 +580,6 @@ class TestAnchorStillExcludesComments:
         program = f'q(X, ".decl pub_year({COLS})") :- relation(X, "a", _).\n'
         fcommon._assert_no_alias_collision(self.SPECS, program)  # does not raise
 
-    @pytest.mark.parametrize("ws", ["\v", "\f"])
-    def test_vertical_whitespace_is_not_a_line_start(self, ws):
-        """Why the anchor allows `[ \\t]*` and not `\\s*`: the anchor has to mean
-        "this line starts here", and `\\s` matches newlines, so `^\\s*` lets the run
-        cross lines and the anchor stops meaning anything. \\v/\\f are where the two
-        forms actually differ (\\r cannot reach here — Path.read_text translates it
-        to \\n before this text is assembled), so they are what pins the choice.
-
-        NOT justified as "our parser must never be wider than the engine". The
-        engine does ParseError on \\v/\\f (see TestEngineAcceptsTheseForms), but
-        policy_predicates counts `\\v.decl p(...)` all the same, so that is not a
-        rule this module keeps. It is harmless there — a program the engine rejects
-        never reaches a report — and stating a principle the neighbouring line
-        breaks would just be a new thing for someone to rely on wrongly.
-        """
-        program = f".decl relation(subject: symbol, rel: symbol, object: symbol)\n{ws}.decl pub_year(subject: symbol, v: int64)\n"
-        fcommon._assert_no_alias_collision(self.SPECS, program)  # does not raise
-
     def test_a_real_decl_on_that_same_program_still_collides(self):
         """Control: the exclusion above is about the comment, not about the guard
         having stopped working."""
@@ -401,6 +589,69 @@ class TestAnchorStillExcludesComments:
         )
         with pytest.raises(fcommon.FactlogError):
             fcommon._assert_no_alias_collision(self.SPECS, program)
+
+    @pytest.mark.parametrize("ws", ["\v", "\f"])
+    def test_vertical_whitespace_now_collides_here(self, ws):
+        """A behaviour #516 CHANGED, recorded rather than left to be discovered.
+
+        The skeleton reader is unanchored, so `\\v.decl pub_year(...)` is a
+        declaration to it where the anchored reader saw nothing. This net used to
+        accept such a program and now rejects it.
+
+        Not a regression: the engine ParseErrors on \\v/\\f before a `.decl`
+        (asserted below), so the program was never going to produce a report. But
+        it IS the same shape as the objection this PR raises against strict=True —
+        a targeted alias check reporting `collides` for a program whose actual
+        fault is a parse error it does not own. The difference is degree, not kind:
+        strict=True would hand this net someone else's diagnosis for EVERY
+        malformed program, while this is one dead shape, and the fix for it is the
+        compile step's error, not a special case here. Written down so the next
+        person weighing the two knows both were considered.
+        """
+        program = (
+            ".decl relation(subject: symbol, rel: symbol, object: symbol)\n"
+            f"{ws}.decl pub_year(subject: symbol, v: int64)\n"
+        )
+        with pytest.raises(fcommon.FactlogError, match="collides"):
+            fcommon._assert_no_alias_collision(self.SPECS, program)
+        if fcommon.EasySession is None:
+            pytest.skip("the engine half of this claim needs pyrewire installed")
+        with pytest.raises(Exception):
+            fcommon.EasySession(program)
+
+
+class TestTheAnchorOnTheLastRawSite:
+    """`_DECL_LINE_RE`'s `[ \\t]*` — pinned where the pattern is still USED.
+
+    #516 moved `_assert_no_alias_collision` to the skeleton, which left
+    `_engine_decl_predicates` as the pattern's only caller. This case moved with
+    it. Left on the old site it would have gone on passing for a reason that had
+    nothing to do with the anchor, and `[ \\t]*` → `\\s*` would then be a change no
+    test could notice.
+    """
+
+    @pytest.mark.parametrize("ws", ["\v", "\f"])
+    def test_vertical_whitespace_is_not_a_line_start(self, ws, seen_by_engine_decls):
+        """Why the anchor allows `[ \\t]*` and not `\\s*`: the anchor has to mean
+        "this line starts here", and `\\s` matches newlines, so `^\\s*` lets the run
+        cross lines and the anchor stops meaning anything. \\v/\\f are where the two
+        forms actually differ, so they are what pins the choice.
+
+        \\r cannot reach this site, but the reason changed with the site and the old
+        one did not survive the move: WIRELOG_PROGRAM is a module constant, not a
+        file, so nothing here goes through Path.read_text's newline translation —
+        the \\r would have to be typed into a source literal.
+
+        NOT justified as "our parser must never be wider than the engine". The
+        engine does ParseError on \\v/\\f (see TestEngineAcceptsTheseForms), but
+        policy_predicates counts `\\v.decl p(...)` all the same, so that is not a
+        rule this module keeps. It is harmless there — a program the engine rejects
+        never reaches a report — and stating a principle the neighbouring line
+        breaks would just be a new thing for someone to rely on wrongly.
+        """
+        program = f".decl relation(subject: symbol, rel: symbol, object: symbol)\n{ws}.decl pub_year(subject: symbol, v: int64)\n"
+        assert not seen_by_engine_decls(program, "pub_year")
+        assert seen_by_engine_decls(program, "relation")  # control: the scan ran
 
 
 class TestTypedAliasCollisionSurvivesWhitespace:
@@ -466,7 +717,12 @@ class TestEngineDeclPredicatesUnchanged:
 class TestEngineAcceptsTheseForms:
     """The justification, re-measured. Widening our parsers is only correct while
     the ENGINE accepts these forms; if a future pyrewire rejects `p (`, this test
-    fails and the reason for the widening is gone."""
+    fails and the reason for the widening is gone.
+
+    All three tables are measured here, not two. WHITESPACE_FORMS and NAME_FORMS
+    are the premise for what our parsers ACCEPT; SKELETON_ONLY_FORMS is the premise
+    for which gaps are worth calling gaps, and it went unmeasured until #517 — the
+    one table whose header made an engine claim was the one nothing re-checked."""
 
     BASE = ".decl src(x: symbol)\n"
     RULE = '\np(X, "r") :- src(X).\n'
@@ -514,6 +770,31 @@ class TestEngineAcceptsTheseForms:
         assert declared and undeclared  # true with and without the .decl
         assert declared[0][1][0] == "A"  # only true when the .decl was read
         assert undeclared[0][1][0] == 0
+
+    @pytest.mark.parametrize("label", sorted(SKELETON_ONLY_FORMS))
+    def test_engine_reads_a_skeleton_only_form_as_a_declaration(self, label):
+        """SKELETON_ONLY_FORMS calls itself a list of forms "the engine also
+        accepts". That claim was prose until #517; this measures it.
+
+        Read a failure the right way round. If one of these forms stops compiling,
+        or stops applying the column schema, it is NO LONGER A GAP — the engine and
+        the raw reader now agree about it, and it belongs OUT of
+        SKELETON_ONLY_FORMS. It is emphatically not a signal to widen a parser to
+        match: #508's whole direction is that our readers follow the engine, and a
+        list of "gaps" the engine no longer has is documentation that has started
+        lying about where the risk is.
+
+        ACCEPT alone would not measure it. pyrewire derives `p` rows whether or not
+        `p` is declared (see test_a_spaced_declaration_is_taken_AS_A_DECLARATION,
+        which keeps the undeclared control in its body), so "no ParseError, rows
+        came back" is true of a program with no `.decl` at all. What the
+        declaration buys is the column schema, so the interned "A" is the only
+        assertion here doing work.
+        """
+        decl = form(SKELETON_ONLY_FORMS[label], cols="x: symbol, r: symbol")
+        rows = self._rows(self.BASE + decl + self.RULE)  # no ParseError
+        assert rows, label
+        assert rows[0][1][0] == "A", label  # the .decl was read, not just tolerated
 
     @pytest.mark.parametrize("ws", ["\v", "\f"])
     def test_engine_rejects_vertical_whitespace_before_a_decl(self, ws):
