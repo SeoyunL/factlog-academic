@@ -40,8 +40,14 @@ to NFC. Pasted text and macOS filenames do mix the forms in practice, but merge
 folds them onto one fact, so there is no manual reconciliation to do. (This
 identity also matches the engine's grouping axes, which fold to NFC as well.) To
 re-fold a `candidates.csv` built under the earlier spelling policy, use the
-one-shot `factlog migrate-unicode` command (reports conflicts by default; merges
-automatically with `--resolve-status=priority`).
+one-shot `factlog migrate-unicode` command. It reports conflicts by default (safe);
+only `--resolve-status=priority` rewrites `candidates.csv` immediately (no
+interactive confirmation). The command targets the active KB when `--target` is
+omitted, so confirm the target with `--target` before using priority. Priority can
+REVIVE a retired (superseded) row by folding it into a confirmed/accepted one, so
+handle any group whose retirement must stand with `amend` instead. It also folds
+colliding groups only, leaving a lone NFD row as-is — to complete the all-fields
+NFC unification, re-merge (`/factlog sync` or `merge_candidates.py`).
 
 Boundary: repairing drift — `confirmed` in `candidates.csv` while `runs/*.json`
 still says `candidate`, as in a KB predating #233 — is not a side effect of

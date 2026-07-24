@@ -40,7 +40,13 @@ factlog accept Acme uses FastAPI --dry-run
 같은 사실로 접으므로, 사람이 손으로 표기를 맞출 필요가 없습니다. (이 정체성은 엔진의
 그룹화 축과도 일치합니다 — 엔진 역시 NFC 로 접습니다.) 이전 표기 정책으로 쌓인
 `candidates.csv` 를 NFC 로 다시 접으려면 일회성 명령 `factlog migrate-unicode` 를
-쓰십시오(기본은 충돌 리포트만, `--resolve-status=priority` 로 자동 병합).
+쓰십시오. 기본은 충돌 리포트만 출력해 안전하고, `--resolve-status=priority` 를 줄
+때만 즉시 `candidates.csv` 를 재작성합니다(대화형 확인 없음). 이 명령은 `--target`
+없이 활성 KB 로 가므로 priority 를 쓸 때는 `--target` 로 대상을 확인하십시오.
+priority 는 은퇴된(superseded) 행을 confirmed/accepted 로 덮어 되살릴 수 있으니,
+은퇴 유지가 필요하면 그 그룹은 `amend` 로 개별 처리하십시오. 또한 충돌 그룹만
+접으므로 짝 없는 단독 NFD 행은 그대로 남습니다 — 전 필드 NFC 통일을 완결하려면
+재-merge(`/factlog sync` 또는 `merge_candidates.py`)를 돌리십시오.
 
 경계: `candidates.csv` 는 `confirmed` 인데 `runs/*.json` 은 아직 `candidate` 인
 드리프트(#233 이전 KB)를 되돌리는 일은 `accept`/`reject` 의 부수효과가 아닙니다.

@@ -199,6 +199,11 @@ def test_migrate_resolve_priority_folds_to_confirmed(tmp_path, capsys):
     assert kept["confidence"] == "0.90"
     assert "discarded confidence" in out
     assert "0.10" in out
+    # priority is a WRITE mode: it must name the exact file it rewrites, right before the
+    # write, so a run that reached the wrong KB via the active-KB default is visible.
+    assert f"rewriting {csv_path}" in out
+    # and it must point the operator at the re-merge that completes NFC unification.
+    assert "re-merge" in out
 
 
 def test_migrate_resolve_reports_discarded_confidence_not_max(tmp_path, capsys):
@@ -221,3 +226,17 @@ def test_migrate_resolve_reports_discarded_confidence_not_max(tmp_path, capsys):
     discarded = "0.99" if kept["confidence"] == "0.20" else "0.20"
     assert "discarded confidence" in out
     assert discarded in out
+
+
+def test_migrate_help_warns_about_reviving_superseded():
+    """priority can revive a retired (superseded) row; the --resolve-status help must
+    say so, and flag that priority rewrites the KB immediately."""
+    parser = cli.build_parser()
+    action = next(
+        a
+        for a in parser._subparsers._group_actions[0].choices["migrate-unicode"]._actions
+        if getattr(a, "dest", "") == "resolve_status"
+    )
+    help_text = (action.help or "").lower()
+    assert "superseded" in help_text and "reviv" in help_text
+    assert "rewrite" in help_text or "rewrites" in help_text

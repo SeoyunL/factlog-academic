@@ -1750,7 +1750,10 @@ def cmd_migrate_unicode(args: argparse.Namespace) -> int:
     survivor rule). The stored subject/relation/object/source are written on NFC form.
     The survivor keeps its OWN confidence -- discarded confidences are reported, never
     max'd in -- so a human ruling is never silently inflated. The rewrite is
-    deterministic (value-based, not a model judgement).
+    deterministic (value-based, not a model judgement). Caveat: because superseded is the
+    LOWEST priority, folding a retired (superseded) row into a confirmed/accepted one
+    REVIVES the retirement; a group whose retirement must stand should be sorted by hand
+    with `amend`, not by priority.
     """
     import csv
 
@@ -1851,6 +1854,12 @@ def cmd_migrate_unicode(args: argparse.Namespace) -> int:
             ),
         )
 
+    # priority is a WRITE mode: it rewrites the target KB's candidates.csv immediately
+    # (no interactive prompt — the CLI is non-interactive). Name the file being rewritten
+    # once more here, right before the write, so a run that reached the wrong KB via the
+    # active-KB default (no --target) is visible before anything changes.
+    print(f"factlog migrate-unicode: rewriting {csv_path} ...")
+
     kept_rows: list[dict[str, str]] = []
     for key in order:
         members = groups[key]
@@ -1887,6 +1896,11 @@ def cmd_migrate_unicode(args: argparse.Namespace) -> int:
     )
     print(
         "factlog migrate-unicode: note — run `/factlog check` (or compile_facts.py) to refresh accepted.dl."
+    )
+    print(
+        "factlog migrate-unicode: note — this folds colliding groups only; a lone NFD row is left "
+        "as-is. To complete the all-fields NFC unification, re-merge (`/factlog sync` or "
+        "merge_candidates.py), which re-writes every surviving value on NFC form."
     )
     return 0
 
@@ -7479,7 +7493,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["priority"],
         default=None,
         help="fold colliding groups automatically by status priority "
-        "(confirmed>accepted>needs_review>candidate>superseded); default reports only",
+        "(confirmed>accepted>needs_review>candidate>superseded); default reports only. "
+        "WARNING: priority can REVIVE a retired (superseded) row by folding it into a "
+        "confirmed/accepted one — handle any group where the retirement must stand with "
+        "`amend` instead. priority rewrites the target KB's candidates.csv immediately",
     )
     migrate_unicode.add_argument(
         "--target", default=None, help="KB root (default: the active KB; see `factlog where`)"
