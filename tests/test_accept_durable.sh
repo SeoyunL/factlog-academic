@@ -99,5 +99,80 @@ printf 'not json{' > "$KB7/runs/broken.json"
 ERR="$(FACTLOG_ROOT="$KB7" "$PY" -m factlog accept A knows B 2>&1 >/dev/null)"
 printf '%s' "$ERR" | grep -q "could not read broken.json"   && ok "(i) a corrupt run file is warned about, not silently skipped"   || bad "(i) a corrupt run file was skipped silently"
 
+# --- #477: a decision must not retire a CONFIRMED fact through runs/*.json ----------
+# A KB predating #233 holds the human decision in candidates.csv while runs/*.json still
+# says `candidate`. If reject writes its decision into run rows it did not decide, the
+# next merge rebuilds candidates.csv FROM those rows and the confirmed fact drops out of
+# accepted.dl -- the engine silently loses it. Full path: merge -> confirm -> reject ->
+# re-merge -> compile_facts -> the confirmed fact must still be in accepted.dl.
+confirm_in_csv() {  # $1=kb $2=subject -- mark the row confirmed, leaving runs drifted
+  "$PY" - "$1" "$2" <<'PYEOF'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "facts" / "candidates.csv"
+out = []
+for line in p.read_text(encoding="utf-8").splitlines(True):
+    parts = line.split(",")
+    if parts[0] == sys.argv[2] and len(parts) > 4 and parts[4] in ("candidate", "needs_review"):
+        parts[4] = "confirmed"
+        line = ",".join(parts)
+    out.append(line)
+p.write_text("".join(out), encoding="utf-8")
+PYEOF
+}
+remerge_and_compile() {  # $1=kb
+  FACTLOG_ROOT="$1" "$PY" tools/merge_candidates.py --wiki "$1" >/dev/null 2>&1
+  FACTLOG_ROOT="$1" "$PY" tools/compile_facts.py >/dev/null 2>&1
+}
+
+# (j) single source: a wildcard reject alongside a drifted confirmed row
+KB8="$(new_kb)"                       # A knows B and C knows D, both from sources/a.md
+confirm_in_csv "$KB8" A
+FACTLOG_ROOT="$KB8" "$PY" -m factlog reject - knows - >/dev/null 2>&1  # only C is pending
+remerge_and_compile "$KB8"
+[ "$(csv_status "$KB8" A)" = "confirmed" ] && ok "(j) a confirmed row survives a wildcard reject + re-merge" \
+  || bad "(j) the confirmed row was retired by a wildcard reject (#477)"
+grep -q 'relation("A", "knows", "B")' "$KB8/facts/accepted.dl" && ok "(j) the confirmed fact is still engine input" \
+  || bad "(j) the confirmed fact vanished from accepted.dl (#477)"
+[ "$(csv_status "$KB8" C)" = "superseded" ] && ok "(j) the pending row was still rejected" \
+  || bad "(j) the pending row was not rejected"
+
+# (k) multi source: the SAME triple from two sources, exact (non-wildcard) triple
+KB9="$(mktemp -d)/kb"
+"$PY" -m factlog init --target "$KB9" >/dev/null
+printf 'n1\n' > "$KB9/sources/note1.md"
+printf 'n2\n' > "$KB9/sources/note2.md"
+printf '[{"subject":"A","relation":"knows","object":"B","source":"sources/note1.md","status":"candidate","confidence":0.9,"note":""},{"subject":"A","relation":"knows","object":"B","source":"sources/note2.md","status":"candidate","confidence":0.9,"note":""}]' > "$KB9/runs/r1.json"
+FACTLOG_ROOT="$KB9" "$PY" tools/merge_candidates.py --wiki "$KB9" >/dev/null 2>&1
+"$PY" - "$KB9" <<'PYEOF'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "facts" / "candidates.csv"
+p.write_text(
+    p.read_text(encoding="utf-8").replace("sources/note1.md,candidate", "sources/note1.md,confirmed"),
+    encoding="utf-8",
+)
+PYEOF
+OUT9="$(FACTLOG_ROOT="$KB9" "$PY" -m factlog reject A knows B 2>&1)"
+printf '%s' "$OUT9" | grep -q "1 candidate row(s) → superseded, 1 runs/\*.json row(s) updated" \
+  && ok "(k) only the decided source's run row is reported as updated" \
+  || bad "(k) the run count exceeded the rows actually decided (#477): $(printf '%s' "$OUT9" | grep 'runs/')"
+run_status_for_source() {  # $1=kb $2=source
+  "$PY" -c "
+import glob, json, os, sys
+for f in glob.glob(os.path.join(sys.argv[1],'runs','*.json')):
+    for it in json.load(open(f)):
+        if it.get('source')==sys.argv[2]: print(it['status']); raise SystemExit
+print('MISSING')" "$1" "$2"
+}
+[ "$(run_status_for_source "$KB9" sources/note1.md)" = "candidate" ] \
+  && ok "(k) the other source's run row is left alone" \
+  || bad "(k) a decision on one source flipped another source's run row (#477)"
+remerge_and_compile "$KB9"
+grep -q 'sources/note1.md,confirmed' "$KB9/facts/candidates.csv" \
+  && ok "(k) the confirmed multi-source row survives re-merge" \
+  || bad "(k) the confirmed multi-source row was retired on re-merge (#477)"
+grep -q 'relation("A", "knows", "B")' "$KB9/facts/accepted.dl" \
+  && ok "(k) the confirmed fact is still engine input" \
+  || bad "(k) the confirmed fact vanished from accepted.dl (#477)"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "accept durable: all passed"; else echo "accept durable: $fails failed"; exit 1; fi

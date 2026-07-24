@@ -1254,9 +1254,26 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_status_to_runs(
-    target, decided: set, from_statuses: set, new_status: str, nfc
-) -> int:
+def _decision_key(subject: str, relation: str, obj: str, source: str) -> tuple[str, str, str, str]:
+    """Fact identity as merge defines it: (subject, relation, object, source-file).
+
+    merge_candidates.normalize_rows dedups candidate rows on exactly this tuple, with
+    the source NFC-normalised and partitioned on '#' so an anchor does not create a
+    second fact. accept/reject must key their run-row updates the SAME way: a triple
+    alone is not a fact here, because the same triple asserted by two different sources
+    is two rows that merge keeps apart and a human can decide separately (#477).
+
+    Import-local like the review helpers that use it.
+    """
+    import unicodedata
+
+    def n(value: str) -> str:
+        return unicodedata.normalize("NFC", str(value).strip())
+
+    return (n(subject), n(relation), n(obj), n(source).partition("#")[0])
+
+
+def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: str) -> int:
     """Write a status decision into runs/*.json, so accept/reject are durable.
 
     A human decision lived only in candidates.csv, which merge REBUILDS from runs/*.json.
@@ -1265,12 +1282,16 @@ def _apply_status_to_runs(
     to runs; accept/reject did not (#233). This is a status-only change (no value edit),
     so the matching run item is updated in place.
 
-    `decided` is the set of (subject, relation, object) triples the CSV gate ACTUALLY
-    changed -- not the caller's filter. Scoping by the filter instead let a `-` wildcard
-    reach triples the gate had reported as "non-pending skipped": with a KB predating
-    #233 (decision in candidates.csv, `candidate` still in runs/*.json), a wildcard
-    reject flipped those run rows too, and the next merge rebuilt candidates.csv from
-    them -- silently retiring a confirmed fact the command said it left alone (#477).
+    `decided` holds the _decision_key of every row the CSV gate ACTUALLY changed -- not
+    the caller's filter, and not a bare triple. Scoping by the filter instead let a `-`
+    wildcard reach rows the gate had reported as "non-pending skipped": with a KB
+    predating #233 (decision in candidates.csv, `candidate` still in runs/*.json), a
+    wildcard reject flipped those run rows too, and the next merge rebuilt
+    candidates.csv from them -- silently retiring a confirmed fact the command said it
+    left alone (#477). Keying on the triple alone reopened the same hole one level
+    down: with the same triple asserted by two sources, a decision on source B's row
+    also flipped source A's run row, even for an exact (non-wildcard) triple. So the
+    key carries the source file, matching merge's own identity (#477).
 
     Returns the number of run rows changed. Import-local like the callers.
     """
@@ -1301,22 +1322,26 @@ def _apply_status_to_runs(
         for item in data:
             if not isinstance(item, dict):
                 continue
-            triple = (
-                nfc(str(item.get("subject", "")).strip()),
-                nfc(str(item.get("relation", "")).strip()),
-                nfc(str(item.get("object", "")).strip()),
+            key = _decision_key(
+                item.get("subject", ""),
+                item.get("relation", ""),
+                item.get("object", ""),
+                item.get("source", ""),
             )
-            if triple not in decided:
+            if key not in decided:
                 continue
             st = str(item.get("status", "")).strip()
-            # The triple is one the CSV gate just changed, so the decision is real.
-            # Mirror merge's normalization: a blank or unrecognized status is coerced to
-            # needs_review (PENDING) when candidates.csv is rebuilt, so the run item
-            # merge will treat as pending must be flipped here too -- otherwise the
-            # decision vanishes on the next re-merge, the exact silent downgrade this
-            # fix is about, in a row the extractor mis-stamped or an edit left blank.
-            # A run row already carrying a decided status (confirmed/accepted/superseded)
-            # is left alone: same triple, a different source row, not this decision.
+            # This run row IS the row the CSV gate just changed (same fact identity as
+            # merge uses), so the decision is real. Mirror merge's normalization: a blank
+            # or unrecognized status is coerced to needs_review (PENDING) when
+            # candidates.csv is rebuilt, so the run item merge will treat as pending must
+            # be flipped here too -- otherwise the decision vanishes on the next
+            # re-merge, the exact silent downgrade this fix is about, in a row the
+            # extractor mis-stamped or an edit left blank. A run row already carrying a
+            # decided status (confirmed/accepted/superseded) is left alone: the CSV row
+            # this decision moved was pending, so a non-pending run row for the same
+            # fact is drift between the two stores, not something this decision decided.
+            # Repairing that drift is a separate command's job, not accept/reject's.
             if st not in from_statuses and st in KNOWN_STATUSES:
                 continue
             item["status"] = new_status
@@ -1407,19 +1432,25 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     if "status" not in out_fields:
         out_fields = [*out_fields, "status"]
     changed = 0
-    decided: set[tuple[str, str, str]] = set()
+    decided: set[tuple[str, str, str, str]] = set()
     for r in rows:
         if all(fld(r, k) == v for k, v in filt.items()) and (r.get("status") or "").strip() in REVIEW_STATUSES:
             r["status"] = new_status
-            decided.add((fld(r, "subject"), fld(r, "relation"), fld(r, "object")))
+            decided.add(
+                _decision_key(
+                    fld(r, "subject"), fld(r, "relation"), fld(r, "object"), fld(r, "source")
+                )
+            )
             changed += 1
     _atomic_write_csv(csv_path, rows, out_fields)
 
     # Durability: write the decision into runs/*.json too, the source of truth merge
     # rebuilds candidates.csv from. Without this, deleting candidates.csv and re-merging
-    # silently downgraded the decision (#233). Scope it to the triples just changed, not
-    # to `filt` -- a `-` wildcard otherwise reaches rows reported as skipped (#477).
-    runs_changed = _apply_status_to_runs(target, decided, set(REVIEW_STATUSES), new_status, nfc)
+    # silently downgraded the decision (#233). Scope it to the ROWS just changed --
+    # (subject, relation, object, source-file), merge's own fact identity -- not to
+    # `filt`: a `-` wildcard otherwise reaches rows reported as skipped, and a bare
+    # triple reaches another source's row for the same triple (#477).
+    runs_changed = _apply_status_to_runs(target, decided, set(REVIEW_STATUSES), new_status)
 
     recompile_failed = not _recompile_accepted(target, verb)
     recompiled = "accepted.dl NOT recompiled" if recompile_failed else "accepted.dl recompiled"

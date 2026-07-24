@@ -21,6 +21,21 @@ factlog accept Acme uses FastAPI --dry-run
 `superseded` match is reported and left untouched (use `factlog eject` to retire
 a non-pending fact). Both recompile `accepted.dl`.
 
+`accept`/`reject` record the decision in the backing `runs/*.json` as well as in
+`candidates.csv`: merge rebuilds `candidates.csv` from `runs/*.json`, so a
+decision written only to the CSV would vanish silently on the next sync. **That
+record applies only to the rows the gate actually changed.** A "row" here is
+merge's own fact identity — `(subject, relation, object, source file)`, with any
+`#anchor` ignored — not the triple alone. So when the same triple is asserted by
+two documents, deciding one document's row leaves the other document's evidence
+row untouched, and rows reported as "non-pending skipped" stay as they are in
+`runs/*.json` too.
+
+Boundary: repairing drift — `confirmed` in `candidates.csv` while `runs/*.json`
+still says `candidate`, as in a KB predating #233 — is not a side effect of
+`accept`/`reject`. They write down the decision they just made, nothing else;
+recovering drifted rows is a separate command's job.
+
 To **correct** a fact's value (not just its status), use `factlog amend`:
 
 ```bash
