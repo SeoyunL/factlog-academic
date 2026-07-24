@@ -99,6 +99,48 @@ factlog zotero-import --collection "neurosymbolic AI" --annotations
 
 이관 후 후보 사실을 추출하려면 `/factlog sync`를 실행합니다.
 
+## 라이브러리 검색 (`factlog zotero-search`)
+
+컬렉션명·태그명을 **미리 정확히 알아야만** 이관할 수 있다는 제약을 풀어 주는
+발견(discovery) 명령입니다. "protein folding 자료가 라이브러리에 있나?"를 묻고,
+나온 item 키를 그대로 `zotero-import --items`에 넘길 수 있습니다. **아무것도
+이관하지 않으며**(순수 조회), Zotero 원본도 KB도 건드리지 않습니다.
+
+```
+factlog zotero-search <질의> [--qmode {titleCreatorYear,everything}]
+                      [--limit <n>] [--target <kb>] [--porcelain]
+```
+
+| 옵션 | 설명 |
+|---|---|
+| `<질의>` | 검색어(위치 인자, 필수) |
+| `--qmode` | Zotero 검색 모드: `titleCreatorYear`(기본 — 제목·저자·연도 등) 또는 `everything`(전문) |
+| `--limit <n>` | 결과 개수(기본 25, 최대 200) |
+| `--target <path>` | 조회에 쓸 KB(기본: 활성 KB — Local API 정책 파일 위치만 참조, 쓰기 없음) |
+| `--porcelain` | 스크립트용 기계 출력(탭 구분) |
+
+결과는 각 항목의 **item 키 / itemType / 제목**을 보여 줍니다:
+
+```bash
+$ factlog zotero-search "neurosymbolic" --limit 3
+Found 2 results:
+
+  1. [preprint] KH78JUPE "Neurosymbolic Value-Inspired AI (Why, What, and How)"
+  2. [journalArticle] ABCD1234 "..."
+
+Import a result with: factlog zotero-import --items <key>[,<key>...]
+```
+
+**0건과 연결 실패는 구분됩니다.** 검색이 성공했지만 일치 항목이 없으면
+`Found 0 results.`(exit 0) — 정직한 빈 결과입니다. Zotero Local API에 닿지 못하면
+연결 실패로 stderr에 알리고 **exit 2**로 끝냅니다(앱이 꺼져 있는지 확인). 그 밖의
+요청 오류는 exit 1입니다. 스크립트는 이 종료 코드로 "결과 없음"과 "Zotero 없음"을
+구분할 수 있습니다.
+
+`--porcelain`은 다른 `*-search`와 같은 다섯 칸 행을 씁니다 —
+`result\t<index>\t<key>\t<itemType>\t<title>` 다음 `found\t<count>`. 모든 필드는
+탭·줄바꿈이 행을 쪼개지 못하도록 방어됩니다.
+
 ## 출력
 
 사람용:
