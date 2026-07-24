@@ -29,7 +29,8 @@ merge's own fact identity — `(subject, relation, object, source file)`, with a
 `#anchor` ignored — not the triple alone. So when the same triple is asserted by
 two documents, deciding one document's row leaves the other document's evidence
 row untouched, and rows reported as "non-pending skipped" stay as they are in
-`runs/*.json` too.
+`runs/*.json` too. An `amount` object is compared in merge's canonical form
+`amount(N,"unit")`, so `amount(7,억)` and `amount(7,"억")` are one fact.
 
 Boundary: repairing drift — `confirmed` in `candidates.csv` while `runs/*.json`
 still says `candidate`, as in a KB predating #233 — is not a side effect of

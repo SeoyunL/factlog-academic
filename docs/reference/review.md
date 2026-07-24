@@ -30,7 +30,8 @@ factlog accept Acme uses FastAPI --dry-run
 `(주어, 관계, 목적어, source 파일)` 입니다(`#앵커` 는 무시). 따라서 같은 트리플이
 서로 다른 문서에서 주장됐다면, 한쪽 문서의 결정이 다른 문서의 근거 행을 건드리지
 않습니다. 대기 상태가 아니어서 "skipped" 로 보고된 행 역시 `runs/*.json` 에서 그대로
-남습니다.
+남습니다. `amount` 객체는 merge 와 같은 정규 형태 `amount(N,"단위")` 로 비교되므로
+`amount(7,억)` 과 `amount(7,"억")` 은 한 사실입니다.
 
 경계: `candidates.csv` 는 `confirmed` 인데 `runs/*.json` 은 아직 `candidate` 인
 드리프트(#233 이전 KB)를 되돌리는 일은 `accept`/`reject` 의 부수효과가 아닙니다.

@@ -174,5 +174,25 @@ grep -q 'relation("A", "knows", "B")' "$KB9/facts/accepted.dl" \
   && ok "(k) the confirmed fact is still engine input" \
   || bad "(k) the confirmed fact vanished from accepted.dl (#477)"
 
+# (l) an amount object: merge canonicalises it to `amount(N,"unit")` before keying, so a
+# run row still holding the bare or comma-grouped form is the SAME fact. Comparing the
+# two verbatim left the decision out of runs/*.json, and the #233 downgrade came back.
+KB10="$(mktemp -d)/kb"
+"$PY" -m factlog init --target "$KB10" >/dev/null
+printf 'n\n' > "$KB10/sources/a.md"
+printf '[{"subject":"A","relation":"costs","object":"amount(7,\xec\x96\xb5)","source":"sources/a.md","status":"candidate","confidence":0.9,"note":""}]' > "$KB10/runs/r1.json"
+FACTLOG_ROOT="$KB10" "$PY" tools/merge_candidates.py --wiki "$KB10" >/dev/null 2>&1
+OUT10="$(FACTLOG_ROOT="$KB10" "$PY" -m factlog accept A costs 'amount(7,"억")' 2>&1)"
+printf '%s' "$OUT10" | grep -q "1 runs/\*.json row(s) updated" \
+  && ok "(l) an amount decision reaches the run row holding the bare form" \
+  || bad "(l) the amount run row was not updated (#477): $(printf '%s' "$OUT10" | grep 'runs/')"
+[ "$(status_of "$KB10" A)" = "accepted" ] && ok "(l) the run row is accepted" \
+  || bad "(l) the amount run row kept its pending status"
+rm "$KB10/facts/candidates.csv"          # the durability payoff, on an amount fact
+remerge_and_compile "$KB10"
+grep -q 'relation("A", "costs", "amount(7,' "$KB10/facts/accepted.dl" \
+  && ok "(l) the amount fact survives re-merge and is engine input" \
+  || bad "(l) the amount accept was downgraded on re-merge (#233 regression)"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "accept durable: all passed"; else echo "accept durable: $fails failed"; exit 1; fi

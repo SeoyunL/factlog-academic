@@ -1254,25 +1254,6 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-def _decision_key(subject: str, relation: str, obj: str, source: str) -> tuple[str, str, str, str]:
-    """Fact identity as merge defines it: (subject, relation, object, source-file).
-
-    merge_candidates.normalize_rows dedups candidate rows on exactly this tuple, with
-    the source NFC-normalised and partitioned on '#' so an anchor does not create a
-    second fact. accept/reject must key their run-row updates the SAME way: a triple
-    alone is not a fact here, because the same triple asserted by two different sources
-    is two rows that merge keeps apart and a human can decide separately (#477).
-
-    Import-local like the review helpers that use it.
-    """
-    import unicodedata
-
-    def n(value: str) -> str:
-        return unicodedata.normalize("NFC", str(value).strip())
-
-    return (n(subject), n(relation), n(obj), n(source).partition("#")[0])
-
-
 def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: str) -> int:
     """Write a status decision into runs/*.json, so accept/reject are durable.
 
@@ -1282,8 +1263,8 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
     to runs; accept/reject did not (#233). This is a status-only change (no value edit),
     so the matching run item is updated in place.
 
-    `decided` holds the _decision_key of every row the CSV gate ACTUALLY changed -- not
-    the caller's filter, and not a bare triple. Scoping by the filter instead let a `-`
+    `decided` holds the common.fact_key of every row the CSV gate ACTUALLY changed --
+    not the caller's filter, and not a bare triple. Scoping by the filter instead let a `-`
     wildcard reach rows the gate had reported as "non-pending skipped": with a KB
     predating #233 (decision in candidates.csv, `candidate` still in runs/*.json), a
     wildcard reject flipped those run rows too, and the next merge rebuilt
@@ -1291,13 +1272,14 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
     left alone (#477). Keying on the triple alone reopened the same hole one level
     down: with the same triple asserted by two sources, a decision on source B's row
     also flipped source A's run row, even for an exact (non-wildcard) triple. So the
-    key carries the source file, matching merge's own identity (#477).
+    key is common.fact_key -- literally the function merge dedups with, not a copy of
+    its rules: a copy is how the two drifted apart in the first place (#477).
 
     Returns the number of run rows changed. Import-local like the callers.
     """
     import json
 
-    from factlog.common import KNOWN_STATUSES
+    from factlog.common import KNOWN_STATUSES, fact_key
 
     runs_dir = target / "runs"
     if not runs_dir.is_dir():
@@ -1322,7 +1304,7 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
         for item in data:
             if not isinstance(item, dict):
                 continue
-            key = _decision_key(
+            key = fact_key(
                 item.get("subject", ""),
                 item.get("relation", ""),
                 item.get("object", ""),
@@ -1364,7 +1346,7 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import FACT_HEADER, REVIEW_STATUSES
+    from factlog.common import FACT_HEADER, REVIEW_STATUSES, fact_key
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1436,20 +1418,33 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     for r in rows:
         if all(fld(r, k) == v for k, v in filt.items()) and (r.get("status") or "").strip() in REVIEW_STATUSES:
             r["status"] = new_status
-            decided.add(
-                _decision_key(
-                    fld(r, "subject"), fld(r, "relation"), fld(r, "object"), fld(r, "source")
-                )
-            )
             changed += 1
+            # MATCHING and IDENTITY are different jobs. Matching (fld/filt above) stays
+            # lenient: it NFC-folds, because a term typed at an IME we do not control
+            # must still find the row it means. Identity does not get that freedom --
+            # the key goes to common.fact_key RAW, exactly as merge stores the value, so
+            # the CLI and merge agree on which run row IS this fact. Folding it here made
+            # an NFC row and an NFD row look like one fact to the CLI while merge kept
+            # them apart, and the decision flipped a row the gate had reported as skipped
+            # (#477).
+            src = (r.get("source") or "").strip()
+            if not src:
+                # A row with no source is not a fact merge can identify; a blank-source
+                # key would match every run row that also lost its source. Guarded HERE
+                # only -- _apply_status_to_runs must not repeat it, or neither copy of
+                # the guard can be shown to do anything.
+                continue
+            decided.add(
+                fact_key(r.get("subject") or "", r.get("relation") or "", r.get("object") or "", src)
+            )
     _atomic_write_csv(csv_path, rows, out_fields)
 
     # Durability: write the decision into runs/*.json too, the source of truth merge
     # rebuilds candidates.csv from. Without this, deleting candidates.csv and re-merging
-    # silently downgraded the decision (#233). Scope it to the ROWS just changed --
-    # (subject, relation, object, source-file), merge's own fact identity -- not to
-    # `filt`: a `-` wildcard otherwise reaches rows reported as skipped, and a bare
-    # triple reaches another source's row for the same triple (#477).
+    # silently downgraded the decision (#233). Scope it to the ROWS just changed, keyed
+    # by common.fact_key -- merge's own fact identity -- not to `filt`: a `-` wildcard
+    # otherwise reaches rows reported as skipped, and a bare triple reaches another
+    # source's row for the same triple (#477).
     runs_changed = _apply_status_to_runs(target, decided, set(REVIEW_STATUSES), new_status)
 
     recompile_failed = not _recompile_accepted(target, verb)

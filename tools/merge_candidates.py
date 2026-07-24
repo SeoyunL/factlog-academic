@@ -86,6 +86,7 @@ from common import (  # noqa: E402
     attribute_relation_forms,
     is_attribute_relation,
     ensure_dirs,
+    fact_key,
     is_sync_ignored,
     is_text_source,
     normalize_confidence,
@@ -268,8 +269,11 @@ def normalize_rows(
     - status is normalised to 'needs_review' if not in VALID_STATUSES
     - confidence is clamped to [0.00, 1.00]
     - duplicate (subject, relation, object, source-file) tuples collapse to one
-      row.  The dedup key strips any '#anchor' (so 'sources/a.md' and
-      'sources/a.md#sec1' are one fact), consistent with the anchor-insensitive
+      row.  The key is ``common.fact_key`` — the single definition of fact
+      identity, shared with the review CLI so a human decision reaches exactly the
+      run rows this dedup collapsed (#477).  It strips any '#anchor' (so
+      'sources/a.md' and 'sources/a.md#sec1' are one fact) and canonicalises an
+      amount object, consistent with the anchor-insensitive
       status-preservation keys (existing_superseded_keys / existing_engine_keys
       / existing_review_keys).  The surviving row is chosen deterministically:
       the one whose full 'source' sorts lexicographically first — a bare
@@ -322,9 +326,12 @@ def normalize_rows(
         canon_amount = literal_types.canonical_amount(clean["object"])
         if canon_amount is not None:
             clean["object"] = canon_amount
-        # Anchor-insensitive key: source_file is the pre-'#anchor' portion
-        # (already computed above for the source-existence check).
-        key = (clean["subject"], clean["relation"], clean["object"], source_file)
+        # Fact identity comes from ONE place, common.fact_key -- the same function the
+        # review CLI keys its runs/*.json writes on. Re-deriving it here (subject,
+        # relation, object, anchor-stripped source) is how the two definitions drifted
+        # apart and a human-confirmed fact vanished from the engine (#477). canonical_amount
+        # is idempotent, so passing the already-canonicalised object changes nothing.
+        key = fact_key(clean["subject"], clean["relation"], clean["object"], clean["source"])
         existing = dedup.get(key)
         if existing is None:
             dedup[key] = clean
