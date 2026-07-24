@@ -119,17 +119,25 @@ from factlog.review_sections import (  # noqa: E402
 # row belongs to which category is a classification rule and lives here; what heading
 # a keyword resolves to is `section_for`'s to answer.
 #
-# Checked at import because the failure is otherwise invisible where it matters. A
-# keyword that no longer exists in REVIEW_CATEGORIES raises KeyError from
-# `section_for` only when the file has no heading carrying it — that is, on a fresh
-# KB. On a populated one `heading_for` finds the old heading and returns it, so the
-# drift routes bullets to a category the contract no longer names and says nothing.
+# Checked at import because the failure is otherwise invisible where it matters. The
+# two sets must stay identical, and the drift is silent in both directions:
+#   - A keyword this module routes but the contract no longer defines raises KeyError
+#     from `section_for` only on a fresh KB; on a populated one `heading_for` finds the
+#     old heading and returns it, so bullets keep filing under a category the contract
+#     has stopped naming and nothing says so.
+#   - A keyword the contract defines but this module never routes makes the scaffolder
+#     write a heading and the validator demand it while the producer classifies nothing
+#     into it, so every KB grows an empty section forever with no signal at all.
 # Loud on every KB, at import, before a single row is classified.
 ROUTED_KEYWORDS = frozenset({"중복", "모호", "출처", "충돌"})
-if not ROUTED_KEYWORDS <= REVIEW_KEYWORDS:
+if ROUTED_KEYWORDS != REVIEW_KEYWORDS:
+    routed_only = sorted(ROUTED_KEYWORDS - REVIEW_KEYWORDS)
+    contract_only = sorted(REVIEW_KEYWORDS - ROUTED_KEYWORDS)
     raise RuntimeError(  # not `assert`: this must survive `python -O`
-        "merge_candidates routes review bullets with keywords that "
-        f"factlog.review_sections no longer defines: {sorted(ROUTED_KEYWORDS - REVIEW_KEYWORDS)}"
+        "merge_candidates routing keywords have drifted from "
+        "factlog.review_sections.REVIEW_CATEGORIES.\n"
+        f"  routed but the contract no longer defines: {routed_only}\n"
+        f"  the contract defines but nothing routes: {contract_only}"
     )
 
 # ---------------------------------------------------------------------------
