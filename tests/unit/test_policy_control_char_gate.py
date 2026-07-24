@@ -86,6 +86,9 @@ class TestRelationNameControlChars:
         # These round-trip through the engine (#255) and must never be swept up by the gate.
         # str.splitlines() breaks the bullet at them, so the item stops parsing as a rule and
         # the run ends in the ordinary "no compilable policies" exit, not a control-char error.
+        # That exit survives #491: zero rules became a normal outcome only for a .md that
+        # attempts no rule at all, and this bullet attempts one — it carries an [id] tag —
+        # so it is a REJECTED bullet and stays fatal.
         md = _md(f"- [retracted] 문서가 `cites{ch}evil` 이면 철회.")
         with pytest.raises(SystemExit) as exc:
             g.fixture_policy_json(md)

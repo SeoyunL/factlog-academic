@@ -569,6 +569,19 @@ def load_accepted_facts() -> list[dict[str, str]]:
     return _load_accepted_facts_from(ACCEPTED_DL)
 
 
+# The canonical .dl bytes for "this KB has no policy rules" (#491). Single source of
+# truth for the three places that must agree on it: the compiler (compile_policy([])),
+# tools/finalize.py's stub writer/self-heal comparisons, and the tests that pin the pair.
+# It is a plain comment line rather than the compiler's usual two-line "// generated
+# from ..." header ON PURPOSE: finalize has written exactly these bytes for ruleless KBs
+# since #194, so every existing empty KB already holds them. A new header shape would
+# make all of those .dl files stale — red until someone runs finalize once — which is a
+# migration this fix has no reason to impose. The cost is that the empty .dl alone does
+# not carry the "generated file, do not hand-edit" header; it also has nothing in it to
+# hand-edit. tests/unit/test_empty_policy_roundtrip.py pins the parity.
+EMPTY_POLICY_DL = "// no policy rules\n"
+
+
 def markdown_policy_items(text: str) -> list[tuple[int, str, str]]:
     """Parse policy bullets out of a logic-policy.md body.
 
@@ -628,6 +641,20 @@ def logic_policy_md_relations(sentence: str) -> list[str]:
     return re.findall(r"`([^`]+)`", sentence)
 
 
+def logic_policy_text_has_rules(md_text: str) -> bool:
+    """``logic_policy_md_has_rules`` on policy text already in hand.
+
+    Split out so a caller that has read logic-policy.md once — generate_logic_policy's
+    main(), which needs the same verdict to guard #190 on the LLM-draft path — does not
+    read the file a second time and risk judging bytes different from the ones it
+    compiled.
+    """
+    return any(
+        logic_policy_md_relations(sentence)
+        for _lineno, _reason, sentence in markdown_policy_items(md_text)
+    )
+
+
 def logic_policy_md_has_rules(md_path: Path) -> bool:
     """Deterministic 'does this policy .md define compilable rules?' check.
 
@@ -642,11 +669,7 @@ def logic_policy_md_has_rules(md_path: Path) -> bool:
     """
     if not md_path.is_file():
         return False
-    md_text = md_path.read_text(encoding="utf-8")
-    return any(
-        logic_policy_md_relations(sentence)
-        for _lineno, _reason, sentence in markdown_policy_items(md_text)
-    )
+    return logic_policy_text_has_rules(md_path.read_text(encoding="utf-8"))
 
 
 def _load_logic_policy_from(logic_policy_dl: Path) -> str:
@@ -676,7 +699,15 @@ def _load_logic_policy_from(logic_policy_dl: Path) -> str:
     # Optional sibling for hand-authored rules (e.g. typed comparison predicates,
     # #120). Unlike logic-policy.dl this file is never regenerated or byte-compared
     # by generate_logic_policy.py --check, so authors may edit it directly. Absent
-    # or all-comment/empty → text is byte-identical to today (#116 invariant 1).
+    # or all-comment/empty → this tail contributes nothing and `text` is exactly the
+    # base above (#116 invariant 1).
+    #
+    # That invariant is about THIS tail, not about the base, and #491 moved the base for
+    # one KB shape: a ruleless KB used to have no .dl at all and reach the engine with
+    # text == "", and now it has an empty-policy .dl and reaches it with the single line
+    # "// no policy rules". Measured on a `factlog init` KB, with and without a
+    # comment-only extra.dl. The engine is unaffected — the added line is a comment — but
+    # a reader comparing program bytes across that boundary should expect the difference.
     extra = logic_policy_dl.with_name("logic-policy.extra.dl")
     if extra.is_file():
         extra_text = extra.read_text(encoding="utf-8").strip()

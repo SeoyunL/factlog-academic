@@ -76,7 +76,12 @@ def test_prose_mid_sentence_marker_is_not_canonical() -> None:
 
 def test_canonical_prefix_with_zero_relations_is_rejected() -> None:
     """(4) A {canonical} prefix but no backtick relation is rejected exactly like
-    a non-canonical no-relation bullet (SystemExit, same rejected path)."""
+    a non-canonical no-relation bullet (SystemExit, same rejected path).
+
+    Untouched by #491, which made zero rules a normal outcome only for a .md that
+    attempts no rule at all: a rejected bullet is still an authoring error, and a
+    canonical prefix buys it no exemption.
+    """
     with pytest.raises(SystemExit) as excinfo:
         g.fixture_policy_json(_md("- [empty] {canonical} 아무 관계도 없다."))
     assert "at least one backtick relation name" in str(excinfo.value)

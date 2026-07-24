@@ -197,8 +197,11 @@ class TestMissingLogicPolicyDl:
 
     def test_has_rules_matches_compiler(self, tmp_path):
         """has_rules(md) ⟺ generate_logic_policy compiles ≥1 rule — the drift
-        boundary the #190 review demanded be pinned. fixture_policy_json raises
-        SystemExit when it produces no rule, so 'compiles' == 'did not raise'."""
+        boundary the #190 review demanded be pinned. 'compiles' reads BOTH exits the
+        compiler has for producing no rule: it still raises SystemExit on a bullet that
+        attempted a rule and named no relation (no_backtick), and since #491 it returns
+        {"rules": []} for a .md that attempts none (prose, no_tag, fenced_only). Both
+        must land on the same side of the equivalence as the helper."""
         import generate_logic_policy as glp
 
         cases = {
@@ -216,8 +219,7 @@ class TestMissingLogicPolicyDl:
             path.write_text(md, encoding="utf-8")
             helper = common.logic_policy_md_has_rules(path)
             try:
-                glp.fixture_policy_json(md)
-                compiler = True
+                compiler = bool(glp.fixture_policy_json(md)["rules"])
             except SystemExit:
                 compiler = False
             assert helper == compiler, f"{name}: helper={helper} compiler={compiler}"

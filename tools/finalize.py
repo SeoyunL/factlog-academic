@@ -31,14 +31,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import logic_policy_md_has_rules
+from common import EMPTY_POLICY_DL, logic_policy_md_has_rules
 
 _TOOLS = Path(__file__).parent
 
 # Exact content of the empty-policy stub finalize writes for a benign no-rules KB.
 # Matched byte-for-byte to recognise (and self-heal) a stub left by a pre-#194
-# finalize that wrote it OVER an uncompilable policy.
-POLICY_STUB = "// no policy rules\n"
+# finalize that wrote it OVER an uncompilable policy. Aliased to the shared constant
+# (factlog/common.py) since #491: generate_logic_policy now emits the same bytes for a
+# ruleless .md, so a literal here could drift from what the compiler writes and turn
+# every finalize into a "stale" verdict on its own output.
+POLICY_STUB = EMPTY_POLICY_DL
 
 
 # Defensive upper bound so a wedged child (e.g. an engine call that never returns)
@@ -150,8 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     # fall through to regenerate so the current rules are actually applied. In sync
     # → --check exits 0 and we leave everything untouched (deterministic, idempotent,
     # no output). When the .md has NO rules but a real compiled .dl is still on disk,
-    # --check is skipped (it would hard-error on a ruleless .md) so the symmetric
-    # rules→empty reset below handles that case instead. Only the generated
+    # --check is skipped and the symmetric rules→empty reset below handles that case
+    # instead. That branch predates #491, when --check hard-errored on a ruleless .md;
+    # --check now reports exactly this state as stale, so the two agree on the verdict
+    # and the local reset is kept only because it names the transition in its message
+    # ("reset to empty policy") instead of asking the operator to re-run. Only the generated
     # logic-policy.dl is inspected here; hand-authored logic-policy.extra.dl is a
     # separate file and is never touched.
     stale_dl = False
@@ -189,9 +195,9 @@ def main(argv: list[str] | None = None) -> int:
             # keys on the .dl being ABSENT.
             policy_dl.unlink(missing_ok=True)
         if not policy_dl.is_file():
-            # generate produced nothing. Distinguish "no compilable rules" (the
-            # benign fresh-KB case → stub) from a genuine generation failure when
-            # the .md DOES define rules (do not silently drop the user's policy).
+            # generate produced nothing. Distinguish "no compilable rules" (→ stub) from
+            # a genuine generation failure when the .md DOES define rules (do not
+            # silently drop the user's policy).
             if logic_policy_md_has_rules(policy_md):
                 # The policy defines rules but did NOT compile. Deliberately do
                 # NOT write a stub here (#194): a "// no policy rules" .dl would
@@ -212,8 +218,15 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
             else:
-                # Benign: no compilable rules → a no-op stub lets the check run
-                # with an empty policy (fresh-KB case).
+                # No compilable rules → a no-op stub lets the check run with an empty
+                # policy. This was the fresh-KB path until #491; a prose-only .md no
+                # longer arrives here at all, because generate now succeeds on it and
+                # writes these same bytes itself. What still reaches here is a .md whose
+                # every bullet was REJECTED (an [id] tag with no backtick relation), which
+                # exits generate while leaving has_rules False, plus any OS-level failure
+                # of the generating run. Measured: `init` + a relationless tagged bullet
+                # lands in this branch and finalize ends rc=0 with the stub written —
+                # unchanged from before #491, where the same input took the same route.
                 policy_dl.parent.mkdir(parents=True, exist_ok=True)
                 policy_dl.write_text(POLICY_STUB, encoding="utf-8")
         elif stale_dl:
