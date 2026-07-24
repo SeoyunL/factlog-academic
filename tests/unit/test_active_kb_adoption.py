@@ -12,9 +12,11 @@ would make that job run `pip install` and reach the network.
 """
 from __future__ import annotations
 
+import argparse
 import tempfile
 
 import pytest
+from factlog import cli, config as factlog_config
 from factlog.cli import (
     active_kb_is_usable,
     init_adopts_target,
@@ -156,3 +158,134 @@ class TestTempAdoptionGuard:
         gone = tmp_path / "deleted-kb"
         assert active_kb_is_usable(str(gone)) is False
         assert init_adopts_target(str(gone), other, target_is_temp=True) is False
+
+
+class TestInitDeadPathWarning:
+    """`init` keeps the dead-path adoption (#210) but no longer does it silently.
+
+    When the configured active KB has vanished, `init` still adopts a fresh target
+    — refusing would trap the user forever. But that silent retarget is the outer
+    half of the #454 self-perpetuating loop: a KB is written, its directory is
+    removed, and the next run quietly re-adopts. So the adoption now emits a single
+    stderr line naming the reason, the displaced path, and the recovery command.
+
+    These drive `cmd_init` (not the pure decision function) because the warning is
+    a property of the command's output, not of `init_adopts_target`. `tmp_path` is
+    under a temp dir, which would otherwise trip the #461 guard and refuse the
+    adoption entirely, so `target_under_tempdir` is neutralised: the durable
+    dead-path case is what is under test, and its harness cousin (temp targets) is
+    pinned in tests/test_init_active_kb.sh.
+    """
+
+    @pytest.fixture
+    def durable_kb(self, tmp_path, monkeypatch):
+        # Isolate the active-KB config from the dev machine, and treat targets as
+        # durable so the dead-path adoption actually runs.
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        monkeypatch.setattr(cli, "target_under_tempdir", lambda _target: False)
+
+    def _init(self, target, *, activate=False):
+        args = argparse.Namespace(target=str(target), activate=activate)
+        return cli.cmd_init(args)
+
+    def test_dead_path_replacement_warns_on_stderr(self, tmp_path, durable_kb, capsys):
+        # (1) THE CASE: config points at a KB that no longer exists. Adoption is
+        # kept, but a stderr warning names the reason, the previous path, and the
+        # recovery command — and stdout stays clean.
+        gone = tmp_path / "gone-kb"
+        factlog_config.write_root(gone)  # config now points at a path we never create
+        assert active_kb_is_usable(str(gone)) is False
+
+        fresh = tmp_path / "fresh-kb"
+        assert self._init(fresh) == 0
+
+        out, err = capsys.readouterr()
+        assert str(fresh) == factlog_config.read_root()  # adoption still happened
+        # Reason, previous path, and recovery hint are all present on stderr.
+        assert "warning" in err
+        assert "no longer exists" in err
+        assert str(gone.resolve()) in err
+        assert f"factlog use {gone.resolve()}" in err
+        # The recovery hint is conditioned on the KB coming back: `factlog use`
+        # rejects a still-missing path (rc=1), so the message says "Once ... is
+        # back" rather than telling the user to run it immediately.
+        assert "is back" in err
+        # stdout carries no warning: the porcelain/stdout contract is unpolluted.
+        assert "warning" not in out
+
+    def test_first_run_does_not_warn(self, tmp_path, durable_kb, capsys):
+        # (2) Nothing configured yet: adoption is the whole point of first-run and
+        # there is no displaced KB to warn about.
+        assert factlog_config.read_root() is None
+        fresh = tmp_path / "fresh-kb"
+        assert self._init(fresh) == 0
+
+        out, err = capsys.readouterr()
+        assert str(fresh) == factlog_config.read_root()
+        assert "warning" not in err
+        assert "warning" not in out
+
+    def test_reinit_of_same_path_does_not_warn(self, tmp_path, durable_kb, capsys):
+        # (3) Re-init of the already-active KB is a no-op adoption, not a displaced
+        # dead path, so it stays quiet.
+        kb = tmp_path / "kb"
+        kb.mkdir()
+        factlog_config.write_root(kb)
+        capsys.readouterr()
+
+        assert self._init(kb) == 0
+        out, err = capsys.readouterr()
+        assert "warning" not in err
+        assert "warning" not in out
+
+    def test_activate_keeps_changed_warning_not_the_dead_path_one(self, tmp_path, durable_kb, capsys):
+        # (4) --activate over a *usable* different KB: the existing CHANGED warning
+        # still fires (opting in is not a licence to be silent), and the dead-path
+        # warning does NOT, since the previous KB was alive and this was a
+        # deliberate switch rather than an involuntary replacement.
+        prev = tmp_path / "prev-kb"
+        prev.mkdir()
+        factlog_config.write_root(prev)
+        capsys.readouterr()
+
+        fresh = tmp_path / "fresh-kb"
+        assert self._init(fresh, activate=True) == 0
+        out, err = capsys.readouterr()
+        assert "CHANGED active KB" in err
+        assert "no longer exists" not in err
+
+    def test_stdout_is_never_polluted_by_the_warning(self, tmp_path, durable_kb, capsys):
+        # (5) The whole warning is stderr-only, so a caller parsing stdout (or a
+        # future --porcelain reader) sees exactly the adoption summary and nothing
+        # of the warning — the stdout contract the harness relies on is intact.
+        gone = tmp_path / "gone-kb"
+        factlog_config.write_root(gone)
+        capsys.readouterr()
+
+        fresh = tmp_path / "fresh-kb"
+        assert self._init(fresh) == 0
+        out, err = capsys.readouterr()
+        assert "no longer exists" not in out
+        assert "factlog use" not in out
+        assert "no longer exists" in err
+
+    def test_dead_path_with_activate_still_warns(self, tmp_path, durable_kb, capsys):
+        # (F) --activate over a *dead* different KB still warns. Opting in is not a
+        # licence to be silent (#210): the CHANGED notice fires on --activate over a
+        # usable KB, so the dead-path displacement — which `setup_active_kb_action`
+        # would otherwise report as a plain "set active KB" first-run — must be
+        # named too. This is the sibling of (4): there the previous KB was alive so
+        # CHANGED covered it; here it is dead, so the dead-path branch does.
+        gone = tmp_path / "gone-kb"
+        factlog_config.write_root(gone)
+        assert active_kb_is_usable(str(gone)) is False
+        capsys.readouterr()
+
+        fresh = tmp_path / "fresh-kb"
+        assert self._init(fresh, activate=True) == 0
+        out, err = capsys.readouterr()
+        assert str(fresh) == factlog_config.read_root()
+        assert "no longer exists" in err
+        assert str(gone.resolve()) in err
+        # Still stderr-only, even on the deliberate opt-in.
+        assert "no longer exists" not in out

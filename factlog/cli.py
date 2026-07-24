@@ -890,6 +890,26 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"factlog init: {action}")
         if action.startswith("CHANGED"):
             print(f"factlog init: warning — {action}", file=sys.stderr)
+        elif current is not None and not active_kb_is_usable(current) and current != str(target):
+            # The dead-path adoption is kept (a config pointing at a vanished KB
+            # must not trap the user, #210), but it is no longer silent: replacing
+            # an active KB that just disappeared is exactly the retarget #454 tracks
+            # to its self-perpetuating loop. `setup_active_kb_action` says only "set
+            # active KB" here — it treats a dead previous as first-run — so the fact
+            # that a *different*, now-missing KB was displaced would otherwise never
+            # be named. --activate does not buy silence either: like the CHANGED
+            # notice above (#210), a deliberate opt-in still names what it displaced.
+            # The recovery hint is conditioned on the KB returning: `factlog use`
+            # validates the path with is_dir() and rejects it (rc=1) while the KB is
+            # still missing — the exact unmounted case here — so pointing at it
+            # unconditionally would only add a second confusion. stderr only, so
+            # stdout/--porcelain stay a clean contract.
+            print(
+                f"factlog init: warning — previous active KB {current} no longer exists; "
+                f"adopted {target} in its place. Once {current} is back, restore it with: "
+                f"factlog use {current}",
+                file=sys.stderr,
+            )
         return 0
 
     # A refused first-run adoption whose only obstacle is the temp guard gets its
