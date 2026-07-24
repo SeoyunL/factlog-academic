@@ -415,11 +415,11 @@ def review_section_warnings(root: Path) -> list[tuple[str, str]]:
             f"not sections and bullets there are not filed, and nothing is written to "
             f"this file while that holds. Close the fence.",
         ))
-    for keyword, headings in split_review_sections(read(decisions)):
+    for keyword, section_headings in split_review_sections(read(decisions)):
         warnings.append((
             "split_review_section",
-            f"decisions/open-questions.md has {len(headings)} {keyword!r} sections "
-            f"({', '.join(repr(h.title) for h in headings)}); new bullets go to the "
+            f"decisions/open-questions.md has {len(section_headings)} {keyword!r} sections "
+            f"({', '.join(repr(h.title) for h in section_headings)}); new bullets go to the "
             f"first, so the others keep whatever they already hold — merge them by hand",
         ))
     return warnings
