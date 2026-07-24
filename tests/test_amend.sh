@@ -243,6 +243,28 @@ else
   ok "#220 multi-source: both old values stay retired across re-extraction"
 fi
 
+# --- #480: amend matches the run row after merge canonicalised the object -----
+# The run stores amount(7,억); merge rewrites candidates.csv to amount(7,"억").
+# The old runs match keyed on a bare NFC 3-tuple with no canonical_amount, so it
+# missed the run row: the edit reached candidates.csv only and vanished on the
+# next re-merge (candidates.csv is rebuilt from runs/*.json). common.fact_key
+# canonicalises the object on BOTH sides, so the CLI and merge agree which run
+# row IS this fact.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf 'a\n' > "$KB/sources/a.md"
+printf '[{"subject":"Cost","relation":"is","object":"amount(7,억)","source":"sources/a.md","status":"needs_review","confidence":0.5,"note":""}]\n' \
+  > "$KB/runs/T1.json"
+"$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
+grep -q 'Cost,is,"amount(7,""억"")",sources/a.md,needs_review,' "$KB/facts/candidates.csv" \
+  && ok "#480 seed: merge canonicalised amount(7,억) -> amount(7,\"억\")" || bad "#480 seed amount not canonicalised: $(cat "$KB/facts/candidates.csv")"
+out="$("$PYTHON" -m factlog amend Cost is 'amount(7,"억")' --set-note checked --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "1 runs/*.json row(s) updated" && ok "#480 amend matches the canonicalised-amount run row" || bad "#480 amend missed the run row: $out"
+grep -qF '"note": "checked"' "$KB/runs/T1.json" && ok "#480 amend wrote the note to runs/*.json" || bad "#480 note not in runs: $(cat "$KB/runs/T1.json")"
+# durability: the note survives a re-merge rebuilding candidates.csv from runs
+"$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
+grep -qF ',needs_review,0.50,checked' "$KB/facts/candidates.csv" && ok "#480 amend note survives a re-merge (amount object)" || bad "#480 amend note lost after re-merge: $(cat "$KB/facts/candidates.csv")"
+
 echo ""
 echo "========================================"
 echo "test_amend: $pass passed, $fail failed"

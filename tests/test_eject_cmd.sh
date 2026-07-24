@@ -171,6 +171,42 @@ grep -q "wrongrel" "$KB/facts/candidates.csv" && bad "--purge left the fact row"
 grep -q "wrongrel" "$KB/runs/r.json" && bad "--purge left runs row" || ok "fact mode --purge: runs row stripped"
 grep -q "goodrel" "$KB/runs/r.json" && ok "fact mode --purge: unrelated runs row kept" || bad "unrelated runs row lost"
 
+# --- #480: --purge strips the run row even after merge normalised the value ----
+# eject used to key on a bare NFC 3-tuple, so a run row merge had stripped
+# (" A " -> A) or canonicalised (amount(7,억) -> amount(7,"억")) into
+# candidates.csv never matched its own candidate row. --purge reported success,
+# left the run row, and the next merge rebuilt candidates.csv from it — the
+# purged fact came straight back. common.fact_key aligns both keys.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf 'n\n' > "$KB/sources/note.md"
+printf '[{"subject":" A ","relation":"R","object":"X","source":"sources/note.md","status":"candidate","confidence":"0.9","note":""},{"subject":"Cost","relation":"is","object":"amount(7,억)","source":"sources/note.md","status":"candidate","confidence":"0.9","note":""}]\n' \
+  > "$KB/runs/r1.json"
+"$PYTHON" tools/merge_candidates.py --wiki "$KB" >/dev/null 2>&1
+grep -q "^A,R,X,sources/note.md,candidate," "$KB/facts/candidates.csv" && ok "#480 seed: merge stripped ' A ' -> A" || bad "#480 seed subject not stripped: $(cat "$KB/facts/candidates.csv")"
+out="$("$PYTHON" -m factlog eject --fact A R X --purge --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "1 run row(s) stripped" && ok "#480 eject --purge strips the run row (stripped subject)" || bad "#480 stripped-subject run row NOT stripped: $out"
+out2="$("$PYTHON" -m factlog eject --fact Cost is 'amount(7,"억")' --purge --target "$KB" 2>&1)"
+printf '%s' "$out2" | grep -qF "1 run row(s) stripped" && ok "#480 eject --purge strips the run row (canonical amount)" || bad "#480 amount run row NOT stripped: $out2"
+# durability: re-merge must NOT resurrect either purged fact from runs/*.json
+"$PYTHON" tools/merge_candidates.py --wiki "$KB" >/dev/null 2>&1
+if grep -qE "^A,R,X,|amount" "$KB/facts/candidates.csv"; then
+  bad "#480 purged fact revived by re-merge: $(cat "$KB/facts/candidates.csv")"
+else
+  ok "#480 purged facts stay gone across a re-merge (runs were stripped)"
+fi
+grep -q '"A", "R", "X"' "$KB/facts/accepted.dl" && bad "#480 purged fact still in accepted.dl" || ok "#480 purged fact dropped from accepted.dl"
+
+# --- #480: a purge matching NO run row warns (silent-loss signal) --------------
+# A candidates-only fact purged with no backing run must warn, so a real key
+# mismatch (csv_changed > 0, runs_changed == 0) can never pass quietly again.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf 'n\n' > "$KB/sources/note.md"
+printf '%s\n%s\n' "$H" 'Solo,rel,V,sources/note.md,candidate,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog eject --fact Solo rel V --purge --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "matched NO runs/*.json row" && ok "#480 purge with no run match warns" || bad "#480 no-run-match warning missing: $out"
+
 # --- --dry-run changes nothing ------------------------------------------------
 KB="$(mktemp -d)/wiki"; seed_facts "$KB"
 before="$(cat "$KB/facts/candidates.csv")"

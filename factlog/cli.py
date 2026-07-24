@@ -1494,7 +1494,7 @@ def cmd_amend(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import FACT_HEADER
+    from factlog.common import FACT_HEADER, fact_key
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1593,6 +1593,16 @@ def cmd_amend(args: argparse.Namespace) -> int:
     changed = 0
     tombstones: list[dict[str, str]] = []
     seen_tomb_src: set[str] = set()
+    # Identity of every CSV row this amend actually edits, keyed by common.fact_key
+    # -- merge's own fact identity -- so the runs/*.json pass below rewrites exactly
+    # the run rows merge would rebuild these CSV rows from. Matching (is_live_old) stays
+    # lenient (NFC-folded triple, source-agnostic across all sources); identity goes to
+    # fact_key RAW so the CLI and merge agree on which run row IS this fact. A bare
+    # 3-tuple that NFC-folds and skips canonical_amount/source (the prior code) missed
+    # the run row whenever merge had stripped/canonicalised the value on its way into
+    # candidates.csv, so the edit reached the CSV but never runs/*.json and vanished on
+    # the next re-merge (#480).
+    decided: set[tuple[str, str, str, str]] = set()
     for r in rows:
         if not is_live_old(r):
             continue
@@ -1607,6 +1617,17 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 tomb["subject"], tomb["relation"], tomb["object"] = old
                 tomb["status"] = SUPERSEDED
                 tombstones.append(tomb)
+        # Record identity BEFORE the rewrite mutates the triple. Skip a row with no
+        # source FILE: its fact_key has an empty source component, which would match
+        # every sourceless run row -- the same guard accept/reject apply (#477).
+        fk = fact_key(
+            r.get("subject") or "",
+            r.get("relation") or "",
+            r.get("object") or "",
+            r.get("source") or "",
+        )
+        if fk[3]:
+            decided.add(fk)
         for k, v in sets.items():
             r[k] = v
         if args.accept:
@@ -1641,12 +1662,18 @@ def cmd_amend(args: argparse.Namespace) -> int:
             for item in data:
                 if not isinstance(item, dict):
                     continue
-                itriple = (
-                    nfc(str(item.get("subject", "")).strip()),
-                    nfc(str(item.get("relation", "")).strip()),
-                    nfc(str(item.get("object", "")).strip()),
+                if str(item.get("status", "")).strip() == SUPERSEDED:
+                    continue
+                # Same fact identity the CSV gate above recorded (common.fact_key), so
+                # canonical_amount and source normalisation line up with merge and the
+                # NFD/amount cases that the bare 3-tuple missed now match (#480).
+                ikey = fact_key(
+                    item.get("subject", ""),
+                    item.get("relation", ""),
+                    item.get("object", ""),
+                    item.get("source", ""),
                 )
-                if itriple != old or str(item.get("status", "")).strip() == SUPERSEDED:
+                if ikey not in decided:
                     continue
                 if triple_changed:
                     corrected = dict(item)
@@ -2741,9 +2768,18 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 class _EjectSelection(NamedTuple):
     """What an eject mode selected: the predicate that decides which candidate
     rows / runs/*.json items are retired, plus the source-mode-only file actions
-    (empty in fact mode, which never touches source files)."""
+    (empty in fact mode, which never touches source files).
+
+    match_row finds candidates.csv rows (lenient — NFC-folded so a subject and its
+    Unicode twin both retire under one reported spelling). run_match decides which
+    runs/*.json items are stripped, keyed on common.fact_key — merge's own fact
+    identity — so the CLI and merge agree which run row IS this fact and a decision
+    reaches the source of truth merge rebuilds candidates.csv from (#480). Source
+    mode passes the same predicate for both (it keys on the source ref, which both
+    stores already normalise identically)."""
 
     match_row: Callable[[dict], bool]
+    run_match: Callable[[dict], bool]
     conv_to_delete: list[str]
     orig_on_disk: list[str]
     strip_runs: bool
@@ -2753,14 +2789,27 @@ def _select_eject_facts(args, rows, fact_specs, target, nfc):
     """Fact mode: select candidate rows matching the given (subject, relation,
     object) triple(s). Returns an _EjectSelection, or an int exit code when there
     is nothing to do. Prints the plan exactly as cmd_eject used to inline."""
-    targets = {(nfc(s), nfc(rel), nfc(o)) for s, rel, o in fact_specs}
+    from factlog.common import fact_key
+
+    def id3(subject, relation, object_) -> tuple[str, str, str]:
+        # common.fact_key's source-agnostic head: subject/relation stripped, object
+        # through canonical_amount. eject --fact drops the source component on purpose
+        # -- it retires the fact from EVERY source.
+        return fact_key(subject, relation, object_, "")[:3]
+
+    def lkey(subject, relation, object_) -> tuple[str, str, str]:
+        # LENIENT finder key for candidates.csv: id3 plus NFC-folding, so a subject
+        # authored NFD and its NFC twin both retire under the single representative
+        # spelling check_conflicts reports (the subject-axis fold), and a term typed at
+        # an IME we do not control still finds the row it means. Matching gets this
+        # freedom; identity below does not.
+        s, r, o = id3(subject, relation, object_)
+        return (nfc(s), nfc(r), nfc(o))
+
+    targets = {lkey(s, rel, o) for s, rel, o in fact_specs}
 
     def match_row(d: dict) -> bool:
-        return (
-            nfc(str(d.get("subject", ""))),
-            nfc(str(d.get("relation", ""))),
-            nfc(str(d.get("object", ""))),
-        ) in targets
+        return lkey(d.get("subject", ""), d.get("relation", ""), d.get("object", "")) in targets
 
     affected = [r for r in rows if match_row(r)]
     if not affected:
@@ -2777,10 +2826,24 @@ def _select_eject_facts(args, rows, fact_specs, target, nfc):
             f"  - ({nfc(r.get('subject', ''))}, {nfc(r.get('relation', ''))}, "
             f"{nfc(r.get('object', ''))})  [source: {r.get('source', '')}]"
         )
+    # IDENTITY for the runs strip is common.fact_key's RAW head (id3: stripped +
+    # canonical_amount, NO NFC fold) of the candidate rows actually matched -- merge's
+    # own fact identity, so the CLI and merge agree which run row IS this fact. Both a
+    # candidate row and its backing run come from the same source content (same Unicode
+    # form), so the raw key matches across them without folding, while id3's strip /
+    # canonical_amount catch the run values merge normalised on the way into
+    # candidates.csv (" A " -> A, amount(7,억) -> amount(7,"억")) that the prior NFC-only
+    # 3-tuple missed -- the miss that let --purge report success while the run row
+    # survived and the next merge resurrected the fact (#480).
+    decided = {id3(r.get("subject", ""), r.get("relation", ""), r.get("object", "")) for r in affected}
+
+    def run_match(d: dict) -> bool:
+        return id3(d.get("subject", ""), d.get("relation", ""), d.get("object", "")) in decided
+
     # Keep runs/*.json on a supersede: the source stays, so the run keeps
     # re-asserting the fact and merge_candidates' superseded-preservation holds the
     # retirement durably across the next sync. Only --purge strips the run row too.
-    return _EjectSelection(match_row, [], [], args.purge)
+    return _EjectSelection(match_row, run_match, [], [], args.purge)
 
 
 def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
@@ -3078,7 +3141,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
-    return _EjectSelection(match_row, conv_to_delete, orig_on_disk, True)
+    # Source mode keys both stores on the source ref, which candidates.csv and
+    # runs/*.json store identically (both NFC-fold + drop the #anchor here), so the
+    # same predicate serves as the runs matcher.
+    return _EjectSelection(match_row, match_row, conv_to_delete, orig_on_disk, True)
 
 
 def cmd_eject(args: argparse.Namespace) -> int:
@@ -3192,7 +3258,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
         sel = _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc)
     if isinstance(sel, int):
         return sel  # nothing matched / orphan scan empty — code already printed
-    match_row, conv_to_delete, orig_on_disk, strip_runs = sel
+    match_row, run_match, conv_to_delete, orig_on_disk, strip_runs = sel
 
     if args.dry_run:
         print("factlog eject: --dry-run, no changes made")
@@ -3222,7 +3288,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
                 continue
             if not isinstance(data, list):
                 continue  # non-candidate run JSON (e.g. a policy-gen object): leave it
-            kept = [item for item in data if not (isinstance(item, dict) and match_row(item))]
+            kept = [item for item in data if not (isinstance(item, dict) and run_match(item))]
             if len(kept) != len(data):
                 stripped_rows += len(data) - len(kept)
                 if kept:
@@ -3285,6 +3351,17 @@ def cmd_eject(args: argparse.Namespace) -> int:
         print(
             "factlog eject: note — pages/ may still reference the removed facts; "
             "run /factlog sync to regenerate them."
+        )
+    if fact_mode and args.purge and changed and not stripped_rows:
+        # A purge changed candidates.csv but stripped nothing from runs/*.json — the
+        # source of truth merge rebuilds candidates.csv from. That is the exact silent
+        # loss of #480: the fact comes straight back on the next merge. Surface it so a
+        # key mismatch never passes quietly again, and point at the durable route.
+        print(
+            "factlog eject: warning — purged candidate row(s) but matched NO runs/*.json "
+            "row; the fact will be rebuilt on the next merge. If it has run backing, this "
+            "is a key mismatch; otherwise use the default (supersede) to retire it durably.",
+            file=sys.stderr,
         )
     if fact_mode and args.purge:
         print(
