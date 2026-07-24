@@ -53,6 +53,7 @@ deterministic and network-free.
 from __future__ import annotations
 
 import math
+import sys
 import time
 from datetime import date
 from dataclasses import dataclass, field
@@ -100,6 +101,14 @@ MAX_RETRY_AFTER_SECONDS = 60.0
 # Decimals a parsed `Retry-After` is rounded to. One rounding, applied before
 # the ceiling comparison, keeps the number compared, slept and printed identical.
 _WAIT_PRECISION = 3
+
+# A server-directed wait at or above this many seconds is announced on stderr
+# before the client sits through it (#484). Below it the wait is indistinguishable
+# in feel from the exponential backoff (worst case 8s), so a notice would be noise;
+# at or above it the client can go quiet for up to MAX_RETRY_AFTER_SECONDS, and a
+# silent minute is exactly the window in which an interactive `arxiv-search` user
+# reaches for Ctrl-C and throws away the retry #478 obeyed the server to earn.
+WAIT_NOTICE_THRESHOLD_SECONDS = 30.0
 
 
 class ArxivError(Exception):
@@ -279,6 +288,16 @@ def _gave_up_after(exc: ArxivServiceError, attempts: int) -> ArxivServiceError:
     )
 
 
+def _default_warn(message: str) -> None:
+    """Where a wait notice goes when the caller injects nothing: stderr.
+
+    stderr, never stdout, so the ``--porcelain`` contract stays byte-clean — the
+    same rule every other operator-facing line in this integration follows. Tests
+    inject their own ``warn`` to observe the notice without a real stream.
+    """
+    print(message, file=sys.stderr)
+
+
 def _user_agent(config: ArxivConfig) -> str:
     """arXiv operators may throttle unidentified clients (spec §2)."""
     if config.email:
@@ -311,10 +330,17 @@ class _RateLimiter:
 class ArxivClient:
     """Fetch works from the arXiv API. GET only — arXiv is never written to (P4)."""
 
-    def __init__(self, config: ArxivConfig | None = None, transport=None, sleep=time.sleep):
+    def __init__(
+        self,
+        config: ArxivConfig | None = None,
+        transport=None,
+        sleep=time.sleep,
+        warn=_default_warn,
+    ):
         self._config = config or ArxivConfig()
         self._transport = transport
         self._sleep = sleep
+        self._warn = warn
         self._limiter = _RateLimiter(self._config.request_delay, sleep=sleep)
 
     # -- transport ---------------------------------------------------------
@@ -432,10 +458,33 @@ class ArxivClient:
                 # actually made is known only here, so it is stated only here.
                 if attempt == MAX_ATTEMPTS - 1 or not exc.retriable:
                     raise _gave_up_after(exc, attempt + 1) from exc
+                self._announce_wait(exc.retry_after, attempt)
                 self._sleep(_backoff(exc.retry_after, attempt))
                 continue
             return self._parse_feed(response.text)
         raise ArxivError("arXiv request failed.")  # pragma: no cover
+
+    def _announce_wait(self, retry_after: float | None, attempt: int) -> None:
+        """Say, once per honoured wait, that arXiv asked for a long pause (#484).
+
+        Only a server-directed ``Retry-After`` at or above
+        :data:`WAIT_NOTICE_THRESHOLD_SECONDS` is announced. The exponential
+        backoff tops out at 8s, so it never reaches the threshold and never
+        speaks; a ``retry_after`` of ``None`` (no usable header) means the wait
+        *is* that backoff, so it stays silent too. The quoted number is the
+        server's own ``Retry-After``, matching the ceiling message's wording, not
+        the possibly-floored value actually slept.
+
+        ``attempt`` is 0-based and names the try that just failed; the wait
+        precedes the *next* one, so the notice counts ``attempt + 2`` — for the
+        first failure, "attempt 2/3".
+        """
+        if retry_after is None or retry_after < WAIT_NOTICE_THRESHOLD_SECONDS:
+            return
+        self._warn(
+            f"arXiv asked to wait {_seconds(retry_after)}s; "
+            f"waiting (attempt {attempt + 2}/{MAX_ATTEMPTS})..."
+        )
 
     # -- queries -----------------------------------------------------------
     def fetch_works(self, ids) -> BatchResult:

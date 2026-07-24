@@ -32,6 +32,7 @@ from factlog.integrations.arxiv.client import (
     ArxivServiceError,
     BACKOFF_BASE_SECONDS,
     MAX_RETRY_AFTER_SECONDS,
+    WAIT_NOTICE_THRESHOLD_SECONDS,
     _RateLimiter,
     _Response,
     _seconds,
@@ -81,13 +82,16 @@ ERROR_FEED = feed(
 )
 
 
-def client(responses, *, sleeps: list | None = None, **config_kw):
+def client(responses, *, sleeps: list | None = None, warns: list | None = None, **config_kw):
     """An ArxivClient whose transport replays `responses` and never really sleeps.
 
     Pass `sleeps` to record what the client *would* have slept: how long a retry
     waits is the whole question in #478, and a discarded sleep argument cannot
     tell a honoured `Retry-After` from the exponential backoff. `request_delay`
     is 0.0, so the rate limiter never sleeps and the list holds backoff only.
+
+    Pass `warns` to capture the injected wait notice (#484) without a real stream,
+    the same way `sleeps` captures the wait without a real clock.
     """
     queue = list(responses)
     calls = []
@@ -101,6 +105,7 @@ def client(responses, *, sleeps: list | None = None, **config_kw):
         config=config,
         transport=transport,
         sleep=sleeps.append if sleeps is not None else lambda _s: None,
+        warn=warns.append if warns is not None else lambda _m: None,
     )
     return instance, calls
 
@@ -557,6 +562,86 @@ def test_an_unusable_retry_after_falls_back_to_the_exponential_backoff(headers):
     assert len(calls) == 3
     # No wait is quoted at all — an unreadable header must not become advice.
     assert "retry after" not in str(raised.value)
+
+
+# -- a long honoured wait is announced, a short one is silent (#484) ---------
+def test_a_long_honoured_wait_announces_progress_before_sleeping():
+    # #478 made the client sit through a `Retry-After: 60` — designed, but silent,
+    # which is exactly the minute an interactive user reaches for Ctrl-C and
+    # throws the earned retry away. One stderr line per honoured wait keeps the
+    # documented "we obey the server" behaviour visible while it happens.
+    slept, warned = [], []
+    api, calls = client(
+        [_Response(503, {"retry-after": "60"}, ""), ok(feed(entry("1706.03762", 1)))],
+        sleeps=slept,
+        warns=warned,
+    )
+    work = api.fetch_work("1706.03762")
+    assert work.arxiv_id == "1706.03762"
+    assert slept == [60.0]                       # the wait was honoured, not skipped
+    assert warned == ["arXiv asked to wait 60s; waiting (attempt 2/3)..."]
+
+
+def test_a_wait_below_the_threshold_is_honoured_silently():
+    # Below the threshold the wait is indistinguishable in feel from the
+    # exponential backoff (worst case 8s), so a notice would be noise. The wait is
+    # still honoured — only the announcement is withheld.
+    under = _seconds(WAIT_NOTICE_THRESHOLD_SECONDS - 1)
+    slept, warned = [], []
+    api, calls = client(
+        [_Response(503, {"retry-after": under}, ""), ok(feed(entry("1706.03762", 1)))],
+        sleeps=slept,
+        warns=warned,
+    )
+    api.fetch_work("1706.03762")
+    assert slept == [WAIT_NOTICE_THRESHOLD_SECONDS - 1]  # honoured
+    assert warned == []                                  # but not announced
+
+
+def test_the_wait_notice_counts_the_upcoming_attempt_on_each_honoured_wait():
+    # The notice names the attempt the wait precedes, not the one that just
+    # failed: waiting after the first try is "attempt 2/3", after the second is
+    # "attempt 3/3". A server that keeps asking for a long wait speaks each time.
+    slept, warned = [], []
+    api, calls = client(
+        [
+            _Response(503, {"retry-after": "60"}, ""),
+            _Response(503, {"retry-after": "45"}, ""),
+            ok(feed(entry("1706.03762", 1))),
+        ],
+        sleeps=slept,
+        warns=warned,
+    )
+    api.fetch_work("1706.03762")
+    assert warned == [
+        "arXiv asked to wait 60s; waiting (attempt 2/3)...",
+        "arXiv asked to wait 45s; waiting (attempt 3/3)...",
+    ]
+
+
+def test_the_fallback_backoff_never_reaches_the_notice_threshold():
+    # An unusable `Retry-After` falls back to the exponential backoff (2s, 4s),
+    # which tops out below the threshold, so nothing is announced — the notice is
+    # reserved for a server-directed wait, matching the message's "arXiv asked".
+    slept, warned = [], []
+    api, calls = client([_Response(503, {}, "")] * 3, sleeps=slept, warns=warned)
+    with pytest.raises(ArxivServiceError):
+        api.fetch_work("1706.03762")
+    assert slept == [2.0, 4.0]
+    assert warned == []
+
+
+def test_a_wait_past_the_ceiling_is_not_announced_because_it_is_not_slept():
+    # A `Retry-After` over MAX_RETRY_AFTER_SECONDS ends the request instead of
+    # sleeping, so there is no wait to announce — the notice precedes an actual
+    # sleep, never a give-up.
+    slept, warned = [], []
+    api, calls = client([_Response(503, {"retry-after": "3600"}, "")] * 3,
+                        sleeps=slept, warns=warned)
+    with pytest.raises(ArxivServiceError):
+        api.fetch_work("1706.03762")
+    assert slept == []
+    assert warned == []
 
 
 def test_retry_after_is_read_whatever_case_the_header_arrives_in():

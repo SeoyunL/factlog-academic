@@ -4040,10 +4040,19 @@ def cmd_openalex_import(args: argparse.Namespace) -> int:
 
 
 def _make_arxiv_client(config):
-    """Build the real arXiv client. Indirected so tests can inject a fake."""
+    """Build the real arXiv client. Indirected so tests can inject a fake.
+
+    The wait notice (#484) is wired to stderr here, at the CLI seam, the same way
+    ``low_delay_warning`` is: the client carries no hard-coded stream, and a
+    honoured ``Retry-After`` long enough to tempt an interactive user into Ctrl-C
+    prints one progress line instead of going silent for up to a minute. stderr,
+    so the ``--porcelain`` stdout contract is untouched.
+    """
     from factlog.integrations.arxiv.client import ArxivClient
 
-    return ArxivClient(config)
+    return ArxivClient(
+        config, warn=lambda message: print(message, file=sys.stderr)
+    )
 
 
 def _arxiv_prepare(args, command: str):
