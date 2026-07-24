@@ -374,3 +374,67 @@ class TestDryRunSkip:
         assert rc == 0
         assert "would skip" in out
         assert "Would skip:  1" in out
+
+
+class _BufferedStdout:
+    """Models a buffered stdout: writes accrue and only surface on flush().
+
+    capsys can't detect the ordering bug because it snapshots each stream on its
+    own, hiding the interleave a redirect (2>&1) would show. A shared event log,
+    committed to on flush, reproduces the real terminal ordering instead.
+    """
+
+    def __init__(self, events):
+        self._events = events
+        self._pending = []
+
+    def write(self, s):
+        self._pending.append(s)
+        return len(s)
+
+    def flush(self):
+        if self._pending:
+            self._events.append("".join(self._pending))
+            self._pending = []
+
+
+class _UnbufferedStderr:
+    """Models unbuffered stderr: every write surfaces immediately."""
+
+    def __init__(self, events):
+        self._events = events
+
+    def write(self, s):
+        self._events.append(s)
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+class TestNarrationOrdering:
+    def test_progress_precedes_error_under_redirect(self, tmp_path, monkeypatch):
+        # Reproduce the reported bug: a redirect (2>&1) merges buffered stdout and
+        # unbuffered stderr, so unflushed narration lands after the error it
+        # precedes. Fake streams share one event log; narration must be flushed to
+        # appear before the not-found error.
+        import sys
+
+        kb = _kb(tmp_path)
+        client = FakeClient(raise_exc=ZoteroError("collection 'Z' not found"))
+        events: list[str] = []
+        monkeypatch.setattr(sys, "stdout", _BufferedStdout(events))
+        monkeypatch.setattr(sys, "stderr", _UnbufferedStderr(events))
+        monkeypatch.setattr(cli, "_make_zotero_client", lambda config: client)
+
+        rc = cli.main(["zotero-import", "--collection", "Z", "--target", str(kb)])
+        # The interpreter flushes stdout at exit, so unflushed narration is not
+        # lost — it surfaces last. Mimic that so an unfixed _human fails as the
+        # real symptom (narration after the error) rather than as absence.
+        sys.stdout.flush()
+
+        merged = "".join(events)
+        assert rc == 1
+        assert "Connecting to Zotero" in merged
+        assert "not found" in merged
+        assert merged.index("Connecting to Zotero") < merged.index("not found")

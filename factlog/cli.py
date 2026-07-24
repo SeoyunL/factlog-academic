@@ -3274,8 +3274,11 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
 
     def _human(*a, **k):
         # Suppress human narration in porcelain mode; errors still go to stderr.
+        # Flush each line: narration goes to buffered stdout while errors go to
+        # unbuffered stderr, so without flushing a redirect (2>&1) shows progress
+        # lines after the error they precede.
         if not porcelain:
-            print(*a, **k)
+            print(*a, flush=True, **k)
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
