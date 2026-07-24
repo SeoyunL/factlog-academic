@@ -238,3 +238,39 @@ def front_matter_block(path: Path | str) -> str | None:
     question, not this one's. This stays the reader every caller already has.
     """
     return _locate(path)[0]
+
+
+def front_matter_body(path: Path | str) -> str:
+    """The file's text with its front-matter block removed — everything a reader
+    sees *below* the closing ``---``, or the whole file when there is no block.
+
+    The complement of :func:`front_matter_block`, and the same claim about where the
+    block is said from the other side: the block ends at its closing fence, so the
+    body begins on the line after it. A caller that reads the document's structure —
+    which lines are headings, which are list items — has to skip the block first,
+    because a YAML block's closing ``---`` has exactly the shape of a Setext
+    underline and :mod:`factlog.md_lines` will read it as a level-2 heading whose
+    title is the whole front matter (measured: 35 of 35 sources in one real KB).
+    :mod:`factlog.md_lines` says so in its own docstring and points here: delimiting
+    the block is this module's, and a structural reader strips it before asking.
+
+    Reuses :func:`front_matter_block` for the boundary rather than re-finding the
+    fence — the whole point of this module is that "where the block ends" is decided
+    in one place (#419). The block's length locates the closing fence in the raw
+    text; only the end of that physical fence *line* is found here, so the body is
+    what follows it. No opening fence (or an unreadable file) means no block to
+    strip, so the file is its own body.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    block = front_matter_block(path)
+    if block is None:
+        return text
+    # The raw text opens with ``---`` + the block + ``\n`` + the closing fence line.
+    # ``front_matter_block`` owns where the block content ends; the newline that ends
+    # the closing fence line is the only thing located here, and the body is after it.
+    close_fence = 3 + len(block)  # index of the ``\n`` preceding the closing ``---``
+    newline = text.find("\n", close_fence + 1)
+    return "" if newline == -1 else text[newline + 1:]

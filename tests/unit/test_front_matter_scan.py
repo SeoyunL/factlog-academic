@@ -31,6 +31,7 @@ from factlog.front_matter_scan import (
     FRONT_MATTER_UNSCANNED,
     front_matter_absence,
     front_matter_block,
+    front_matter_body,
 )
 from factlog.integrations.common.front_matter import (
     read_first_author,
@@ -516,6 +517,45 @@ class TestAbsenceReason:
         assert front_matter_block(path) is None
         assert front_matter_absence(path) == FRONT_MATTER_UNSCANNED
         assert FRONT_MATTER_UNSCANNED != FRONT_MATTER_UNCLOSED
+
+
+class TestFrontMatterBody:
+    """The complement of ``front_matter_block``: the file below its closing fence.
+
+    A structural reader (``md_lines``) must not see the block, whose closing ``---``
+    it would read as a Setext heading. These pin that the body starts on the line
+    after the fence, that a block's keys and values do not survive into it, and that
+    a file without front matter is returned whole.
+    """
+
+    def test_body_is_text_after_the_closing_fence(self, tmp_path):
+        path = tmp_path / "src.md"
+        path.write_text(
+            '---\ntitle: "A paper"\nauthors: [Ada, Bob]\n---\n\n# Real Heading\n',
+            encoding="utf-8",
+        )
+        # Nothing above and including the closing fence line survives.
+        assert front_matter_body(path) == "\n# Real Heading\n"
+
+    def test_no_front_matter_returns_whole_file(self, tmp_path):
+        path = tmp_path / "note.md"
+        path.write_text("# Only\n\nbody\n", encoding="utf-8")
+        assert front_matter_body(path) == "# Only\n\nbody\n"
+
+    def test_empty_block_leaves_the_body(self, tmp_path):
+        path = tmp_path / "empty.md"
+        path.write_text("---\n---\n\nbody\n", encoding="utf-8")
+        assert front_matter_body(path) == "\nbody\n"
+
+    def test_front_matter_only_file_has_empty_body(self, tmp_path):
+        path = tmp_path / "only-fm.md"
+        path.write_text('---\ntitle: "T"\n---\n', encoding="utf-8")
+        assert front_matter_body(path) == ""
+
+    def test_unreadable_file_is_empty(self, tmp_path):
+        path = tmp_path / "mojibake.md"
+        path.write_bytes(b'---\ntitle: "T"\n---\n\n\xff\xfe body\n')
+        assert front_matter_body(path) == ""
 
     def test_the_unscanned_reason_names_the_cap_it_stopped_at(self):
         """The number in the message is the constant, not a copy of today's value.
