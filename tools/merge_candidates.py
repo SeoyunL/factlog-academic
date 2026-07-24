@@ -254,6 +254,26 @@ def load_candidate_files(root: Path, pattern: str = "runs/*.json") -> list[dict[
 # Normalise & dedup
 # ---------------------------------------------------------------------------
 
+def _flush_skipped_sources(skipped: dict[str, int]) -> None:
+    """Print one 'skip row' line per missing source path, with its row count.
+
+    A single missing source produces one byte-identical warning per row it
+    carries, so a handful of stale paths can bury the merge summary (and the
+    validate failures after it) under a hundred-line scroll (#492).  Folding on
+    the anchor-stripped source_file gives one line per file rather than one per
+    anchor.  Order is by path so the diagnostic block is identical regardless of
+    input row order; *skipped* is cleared so a later flush cannot repeat a line.
+    """
+    for source_file, count in sorted(skipped.items()):
+        print(
+            f"  skip row: source '{source_file}' not found in sources/ "
+            f"(expected a sources/- or runs/sources/-prefixed path like 'sources/{Path(source_file).name}') "
+            f"({count} row{'s' if count != 1 else ''})",
+            file=sys.stderr,
+        )
+    skipped.clear()
+
+
 def normalize_rows(
     root: Path,
     rows: list[dict[str, str]],
@@ -294,6 +314,9 @@ def normalize_rows(
     # winner is fixed by value, not input order.
     dedup: dict[tuple[str, str, str, str], dict[str, str]] = {}
     dropped = 0
+    # Missing sources are counted per anchor-stripped path and reported once at
+    # the end instead of once per row (#492).
+    skipped: dict[str, int] = {}
 
     for row in rows:
         # NFC-normalise the source: macOS stores filenames as NFD, but extracted
@@ -306,13 +329,12 @@ def normalize_rows(
         # will not match and are dropped with a warning.
         source_file = source.partition("#")[0]
         if source_file not in known_sources:
-            print(
-                f"  skip row: source '{source_file}' not found in sources/ "
-                f"(expected a sources/- or runs/sources/-prefixed path like 'sources/{Path(source_file).name}')",
-                file=sys.stderr,
-            )
+            skipped[source_file] = skipped.get(source_file, 0) + 1
             dropped += 1
             if strict:
+                # strict still dies on the FIRST offending row -- flush here so
+                # the diagnostic is not lost to the early exit.
+                _flush_skipped_sources(skipped)
                 raise SystemExit(
                     f"--strict: input row rejected (source not found): {source_file}"
                 )
@@ -352,6 +374,8 @@ def normalize_rows(
             # Keep the row whose full source sorts first (bare < anchored).
             if clean["source"] < existing["source"]:
                 dedup[key] = clean
+
+    _flush_skipped_sources(skipped)
 
     if dropped:
         print(f"  warning: {dropped} row(s) dropped during normalise/dedup", file=sys.stderr)
