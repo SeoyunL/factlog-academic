@@ -342,12 +342,14 @@ def test_service_push_back_retries_then_raises(status):
     # arXiv's documented push-back is 503 + Retry-After, not 429. Handle both.
     slept = []
     api, calls = client([_Response(status, {"retry-after": "12"}, "")] * 3, sleeps=slept)
-    with pytest.raises(ArxivServiceError, match="retry after 12s"):
+    with pytest.raises(ArxivServiceError, match="retry after 12s") as raised:
         api.fetch_works(["1706.03762"])
     assert len(calls) == 3  # MAX_RETRIES
     # The message quoted 12s; the waits have to be the same 12s. Before #478 the
     # header was printed and the client slept the 2s/4s backoff regardless.
     assert slept == [12.0, 12.0]
+    # And it reports the attempts it actually made, which is what `calls` counts.
+    assert f"Gave up after {len(calls)} attempts" in str(raised.value)
 
 
 def test_service_push_back_recovers_when_a_retry_succeeds():
@@ -409,7 +411,67 @@ def test_a_retry_after_past_the_ceiling_is_reported_instead_of_retried(over):
     # What factlog will wait. Matched with its article so it cannot be satisfied
     # by the ceiling appearing inside the server's own number ("60" in "3600").
     assert f"the {int(MAX_RETRY_AFTER_SECONDS)}s" in message
-    assert "not retried" in message
+    assert "Gave up after 1 attempt." in message
+
+
+# The ceiling is judged per response, so a wait past it can arrive on any
+# attempt — and the message has to report the attempts actually made rather than
+# assume it was the first. Each case fixes the request count, the waits and the
+# sentence together; asserting only the message is what let the three disagree.
+@pytest.mark.parametrize(
+    ("responses", "expected_calls", "expected_slept", "expected_sentence"),
+    [
+        pytest.param(
+            [{"retry-after": "30"}, {"retry-after": "3600"}, {}],
+            2, [30.0], "Gave up after 2 attempts.",
+            id="exceeds-after-one-honoured-wait",
+        ),
+        pytest.param(
+            [{}, {}, {"retry-after": "3600"}],
+            3, [2.0, 4.0], "Gave up after 3 attempts.",
+            id="exceeds-on-the-last-attempt",
+        ),
+        pytest.param(
+            [{"retry-after": "3600"}, {}, {}],
+            1, [], "Gave up after 1 attempt.",
+            id="exceeds-on-the-first-attempt",
+        ),
+    ],
+)
+def test_the_attempt_count_reported_is_the_one_actually_made(
+    responses, expected_calls, expected_slept, expected_sentence
+):
+    slept = []
+    api, calls = client([_Response(503, h, "") for h in responses], sleeps=slept)
+    with pytest.raises(ArxivServiceError) as raised:
+        api.fetch_works(["1706.03762"])
+    assert len(calls) == expected_calls
+    assert slept == expected_slept
+    assert expected_sentence in str(raised.value)
+
+
+def test_a_wait_that_only_rounds_over_the_ceiling_is_not_called_over_it():
+    # The number compared, slept and printed is one number. Comparing the raw
+    # float while printing a rounded one produced "asked to wait 60s, longer
+    # than the 60s factlog will wait" — a sentence that contradicts itself.
+    slept = []
+    api, calls = client([_Response(503, {"retry-after": "60.0000001"}, "")] * 3, sleeps=slept)
+    with pytest.raises(ArxivServiceError, match="retry after 60s") as raised:
+        api.fetch_works(["1706.03762"])
+    assert slept == [60.0, 60.0]
+    assert len(calls) == 3
+    assert "longer than" not in str(raised.value)
+
+
+def test_a_very_long_wait_is_stated_in_seconds_not_scientific_notation():
+    # "retry after 1e+06s" is not something an operator can act on.
+    slept = []
+    api, calls = client([_Response(503, {"retry-after": "1000000"}, "")] * 3, sleeps=slept)
+    with pytest.raises(ArxivServiceError, match="retry after 1000000s") as raised:
+        api.fetch_works(["1706.03762"])
+    assert "e+" not in str(raised.value)
+    assert len(calls) == 1
+    assert slept == []
 
 
 def test_a_retry_after_exactly_at_the_ceiling_is_still_retried():
