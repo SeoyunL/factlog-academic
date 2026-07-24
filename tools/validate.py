@@ -26,11 +26,10 @@ from factlog.front_matter_scan import (  # noqa: E402
 from factlog.integrations.common.source_writer import (  # noqa: E402
     IDENTITY_KEYS_BY_SOURCE,
 )
+from factlog.md_lines import bullets, unclosed_fence_line  # noqa: E402
 from factlog.review_sections import (  # noqa: E402
     missing_review_sections,
-    review_bullets,
     split_review_sections,
-    unclosed_fence_line,
 )
 
 # An unregistered status is an *error* here, not a warning — so this set drifting
@@ -320,7 +319,7 @@ def validate(root: Path) -> list[str]:
         # bullet written inside a code fence — a format example — stand in for the
         # review queue: measured, the producer skipped the one real row as a duplicate
         # of that example and this check called the result complete.
-        decision_bullets = review_bullets(decision_text)
+        decision_bullets = bullets(decision_text)
         if any(row.get("status") == "needs_review" for row in rows) and not decision_bullets:
             errors.append("needs_review facts exist but decisions/open-questions.md has no review bullets")
 
@@ -346,7 +345,7 @@ def validate(root: Path) -> list[str]:
     # `- stale_source: …` line written as an example inside a code fence was
     # indistinguishable from a real record and silenced the error for a KB that had
     # recorded nothing. Same shape as the review-bullet miscount above, same reader.
-    recorded_bullets = review_bullets(decision_text)
+    recorded_bullets = bullets(decision_text)
     for page in pages:
         text = read(page)
         # md/txt/csv: pages may cite text sources or pdftotext/textutil .txt
@@ -401,7 +400,7 @@ def review_section_warnings(root: Path) -> list[tuple[str, str]]:
         warnings.append((
             "split_review_section",
             f"decisions/open-questions.md has {len(headings)} {keyword!r} sections "
-            f"({', '.join(repr(h.strip()) for h in headings)}); new bullets go to the "
+            f"({', '.join(repr(h.title) for h in headings)}); new bullets go to the "
             f"first, so the others keep whatever they already hold — merge them by hand",
         ))
     return warnings

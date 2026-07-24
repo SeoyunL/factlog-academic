@@ -20,7 +20,16 @@ keywords = ["claude-code", "skill", "datalog", "wirelog", "knowledge-base", "neu
 dependencies = ["pyrewire>=1.0.3,<2.0"]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+# markdown-it-py is the oracle for tests/unit/test_md_lines_renderer_parity.py.
+# factlog/md_lines.py justifies its fence and Setext rules by saying they give the
+# answer a renderer gives, and a claim about a program this repo did not write has
+# to be re-measured rather than trusted — so CI, which installs `.[test]`, runs that
+# comparison on every push. It stays out of `dependencies`: nothing factlog ships
+# renders markdown, and a developer without the extra gets a skip, the same shape
+# the engine-dependent tests here already use for pyrewire. Floor, not pin:
+# CommonMark is frozen, and a renderer changing its mind about one of those
+# documents is something to be told about rather than insulated from.
+test = ["pytest>=7", "markdown-it-py>=3"]
 # Zotero integration (roadmap phase 1). Kept optional so the core install never
 # pulls a Zotero client; the `zotero` extra enables `zotero-import` (see README).
 zotero = ["pyzotero>=1.5"]

@@ -31,7 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from factlog.review_sections import REVIEW_CATEGORIES, REVIEW_KEYWORDS, _scan_fences
+from factlog.md_lines import fence_flags, headings
+from factlog.review_sections import REVIEW_CATEGORIES, REVIEW_KEYWORDS
 
 _REPO = Path(__file__).resolve().parents[2]
 _MERGE = _REPO / "tools" / "merge_candidates.py"
@@ -120,7 +121,13 @@ def _open_questions(kb: Path) -> str:
 
 
 def _headings(text: str) -> list[str]:
-    return [line for line in text.splitlines() if line.startswith("#")]
+    """The headings of *text*, as the code reads them.
+
+    md_lines' answer and not a `#`-prefix scan of its own: a helper with a blinder
+    the code no longer has proves nothing about the code. Fence-aware, and Setext
+    headings count.
+    """
+    return [found.text for found in headings(text)]
 
 
 def _review_lines(text: str) -> list[str]:
@@ -128,26 +135,25 @@ def _review_lines(text: str) -> list[str]:
 
 
 def _heading_above(text: str, prefix: str) -> str | None:
-    """The **real** `## ` heading the first *prefix* line sits under.
+    """The **real** level-2 heading the first *prefix* line sits under.
 
     Fence-aware on purpose. An earlier version of this helper walked back to any
     `## ` line, which let a bullet orphaned just past a closing fence look correctly
     filed: the heading it "sat under" was the code sample inside the fence. A test
-    that measures placement with a blinder the code no longer has proves nothing.
+    that measures placement with a blinder the code no longer has proves nothing —
+    so it asks md_lines, which is also why a Setext heading counts here.
     """
-    lines = text.splitlines()
-    flags, _ = _scan_fences(text)
-    at = next(i for i, line in enumerate(lines) if line.startswith(prefix))
-    for i in range(at, -1, -1):
-        if not flags[i] and lines[i].startswith("## "):
-            return lines[i]
-    return None
+    at = next(
+        i for i, line in enumerate(text.splitlines()) if line.startswith(prefix)
+    )
+    above = [h for h in headings(text) if h.level == 2 and h.end <= at]
+    return above[-1].text if above else None
 
 
 def _is_fenced(text: str, prefix: str) -> bool:
     """Did the first *prefix* line end up inside a code fence?"""
     lines = text.splitlines()
-    flags, _ = _scan_fences(text)
+    flags, _ = fence_flags(text)
     return flags[next(i for i, line in enumerate(lines) if line.startswith(prefix))]
 
 
@@ -408,7 +414,7 @@ class TestCodeFencesEndToEnd:
         as proof review bullets existed. Measured: zero real bullets in the file a
         human reads, one needs_review row in candidates.csv, rc=0, no warning.
 
-        Both ends read review_sections.review_bullets now, so neither can count it.
+        Both ends read md_lines.bullets now, so neither can count it.
         """
         # Byte-identical to what _seed_needs_review makes the merge write — the
         # collision is the whole point, so this must not drift from it.
@@ -420,7 +426,7 @@ class TestCodeFencesEndToEnd:
         kb = self._fenced_kb(tmp_path, doc)
         assert _merge(kb, tmp_path).returncode == 0
         text = _open_questions(kb)
-        flags, _ = _scan_fences(text)
+        flags, _ = fence_flags(text)
         real = [
             line
             for line, fenced in zip(text.splitlines(), flags)
@@ -516,7 +522,7 @@ class TestCodeFencesEndToEnd:
             "```\n## 모호한 관계명\n```\n\n"
             "## 기존 내용과 충돌할 수 있는 항목\n"
         )
-        out = mc.insert_bullet(text, "## 출처 부족", "- b")
+        out = mc.insert_bullet(text, "출처", "- b")
         assert not _is_fenced(out, "- b"), out
         assert _heading_above(out, "- b") == "## 출처 부족", out
 
@@ -578,12 +584,23 @@ class TestSplitSectionWarning:
         return kb
 
     def test_the_split_is_named_and_does_not_fail_the_run(self, tmp_path):
+        """The two sections are named by their titles, without the `## `.
+
+        A deliberate change to operator-visible output, and the only one in this
+        branch. The message used to print each heading's raw line, which is fine for
+        ATX and wrong for an underlined heading: the raw span is two lines, so a
+        one-line warning carried a literal newline through the middle of itself
+        (`has 2 '출처' sections ('출처\n----', …)`). Naming both spellings the same
+        way is what a reader sees anyway — the `## ` was never information, it was
+        syntax that one of the two spellings happens to use.
+        """
         proc = _validate(self._split_kb(tmp_path), tmp_path)
         out = proc.stdout + proc.stderr
         assert proc.returncode == 0, out
         assert "warning: split_review_section:" in out, out
-        assert "'## 모호 (관계명·개념 판단 필요)'" in out, out
-        assert "'## 모호한 관계명'" in out, out
+        assert "'모호 (관계명·개념 판단 필요)'" in out, out
+        assert "'모호한 관계명'" in out, out
+        assert "\n" not in out.split("split_review_section:")[1].split("\n")[0]
 
     def test_a_kb_with_one_heading_per_category_is_not_warned_about(self, tmp_path):
         kb = _init(tmp_path / "kb", tmp_path)
@@ -660,5 +677,113 @@ class TestBulletPlacement:
         lines = _open_questions(kb).splitlines()
         bullet = next(i for i, line in enumerate(lines) if line.startswith("- needs_review"))
         after = lines[bullet + 1]
-        assert not after.startswith("## "), "\n".join(lines)
+        assert not any(h.start == bullet + 1 for h in headings("\n".join(lines)))
         assert after.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# A KB whose sections are written the other way round (#500).
+# ---------------------------------------------------------------------------
+
+# The four categories underlined instead of prefixed. A human writing markdown by
+# hand does this; nothing in the KB's own documentation told them not to.
+SETEXT_SPELLED = (
+    "# Open Questions\n\n"
+    "중복\n----\n- a\n\n"
+    "모호\n----\n- b\n\n"
+    "출처\n----\n\n"
+    "충돌\n----\n"
+)
+
+
+class TestSetextSpelledSections:
+    """The #500 reproduction, end to end — four measured symptoms, one cause.
+
+    Before this, the scan read `## ` and nothing else, so every one of these four
+    headings was invisible: the file reported all four categories missing, the
+    validator failed it, a merge appended four ATX sections below the ones already
+    there, and the new bullets went to the new sections while `- a` and `- b` stayed
+    orphaned in the old.
+
+    The fourth symptom is the one the issue did not name and the worst of them. Once
+    the merge had run, each category really did have two headings — and
+    `split_review_sections` returned nothing, because it could only see one of each.
+    The warning #495 added to make a split visible was passed by a split #495's own
+    narrowness had just manufactured, and the run exited 0.
+    """
+
+    def test_the_four_sections_are_recognised(self, tmp_path):
+        kb = _init(tmp_path / "kb", tmp_path)
+        (kb / "decisions" / "open-questions.md").write_text(SETEXT_SPELLED, encoding="utf-8")
+        assert _validate(kb, tmp_path).returncode == 0
+
+    def test_a_merge_leaves_the_file_alone_but_for_the_bullet(self, tmp_path):
+        kb = _init(tmp_path / "kb", tmp_path)
+        (kb / "decisions" / "open-questions.md").write_text(SETEXT_SPELLED, encoding="utf-8")
+        _seed_needs_review(kb)
+        assert _merge(kb, tmp_path).returncode == 0
+        text = _open_questions(kb)
+        # no section was opened beside the ones the file already had
+        assert _headings(text) == _headings(SETEXT_SPELLED), text
+        # and the only change is the one bullet
+        added = set(text.splitlines()) - set(SETEXT_SPELLED.splitlines())
+        assert added == {SEEDED_BULLET}, text
+
+    def test_the_bullet_joins_the_section_the_file_already_had(self, tmp_path):
+        kb = _init(tmp_path / "kb", tmp_path)
+        (kb / "decisions" / "open-questions.md").write_text(SETEXT_SPELLED, encoding="utf-8")
+        _seed_needs_review(kb)
+        assert _merge(kb, tmp_path).returncode == 0
+        text = _open_questions(kb)
+        assert _heading_above(text, "- needs_review") == "모호\n----", text
+        assert "- b" in text.splitlines(), "the existing bullet was orphaned"
+        assert _validate(kb, tmp_path).returncode == 0
+
+    def test_a_bullet_at_the_end_of_a_section_keeps_the_next_heading_a_heading(
+        self, tmp_path
+    ):
+        """The 출처 section is empty, so its bullet lands right above 충돌.
+
+        Without a blank line after it, `충돌` is swallowed as a lazy continuation of
+        the bullet's list and the `----` under it renders as a horizontal rule —
+        measured against a CommonMark renderer, the file loses a section a human can
+        see while every scan still reports it. The bullet here is the stale-source
+        one, which is the writer that files under 출처.
+        """
+        mc = _merge_module()
+        kb = _init(tmp_path / "kb", tmp_path)
+        (kb / "decisions" / "open-questions.md").write_text(SETEXT_SPELLED, encoding="utf-8")
+        (kb / "pages" / "p.md").write_text("# p\n\n- see sources/gone.md\n", encoding="utf-8")
+        assert mc.record_stale_page_refs(kb), "the stale ref was not recorded"
+        text = _open_questions(kb)
+        lines = text.splitlines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("- stale_source"))
+        assert lines[at + 1].strip() == "", text
+        # the next heading is still a heading, and it is 충돌's title line
+        following = next(h for h in headings(text) if h.start > at)
+        assert (following.start, following.text) == (at + 2, "충돌\n----"), text
+        assert _headings(text) == _headings(SETEXT_SPELLED), text
+
+    def test_a_file_damaged_by_the_old_behaviour_is_now_reported_as_split(
+        self, tmp_path
+    ):
+        """What a KB merged under the old code looks like, and what it now hears.
+
+        Two headings per category — the human's Setext ones on top with the queue in
+        them, the producer's ATX ones below. That is a split, and it went unreported
+        for as long as only one of the two spellings was visible. It is a warning and
+        not an error, so rc does not move; what changes is that it is said out loud.
+        Nothing repairs it: joining the two moves bullets a human filed.
+        """
+        kb = _init(tmp_path / "kb", tmp_path)
+        damaged = SETEXT_SPELLED + "\n" + "\n\n".join(
+            heading for _, heading in REVIEW_CATEGORIES
+        ) + "\n"
+        (kb / "decisions" / "open-questions.md").write_text(damaged, encoding="utf-8")
+        proc = _validate(kb, tmp_path)
+        assert proc.returncode == 0
+        report = proc.stdout + proc.stderr
+        assert report.count("split_review_section") == len(KEYWORDS), report
+        for keyword in KEYWORDS:
+            assert f"2 {keyword!r} sections" in report, report
+        assert _open_questions(kb) == damaged, "a warning must not rewrite the file"

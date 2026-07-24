@@ -97,16 +97,21 @@ from common import (  # noqa: E402
     sync_ignore_patterns,
 )
 from factlog import literal_types  # noqa: E402
+# No `Heading` here on purpose: this module never holds a heading's coordinates
+# across a write. `insert_bullet` resolves them from the text it is editing and
+# drops them again, which is what keeps a stale one from being expressible.
+from factlog.md_lines import (  # noqa: E402
+    bullets,
+    ends_inside_fence,
+    headings,
+    section_body_end,
+    unclosed_fence_line,
+)
 from factlog.review_sections import (  # noqa: E402
     OPEN_QUESTIONS_SCAFFOLD,
     REVIEW_KEYWORDS,
-    ends_inside_fence,
     ensure_review_sections,
-    review_bullets,
-    section_end_index,
     section_for,
-    section_line_index,
-    unclosed_fence_line,
 )
 
 # The category keywords this module routes bullets with — `decision_section`'s four
@@ -117,7 +122,7 @@ from factlog.review_sections import (  # noqa: E402
 # Checked at import because the failure is otherwise invisible where it matters. A
 # keyword that no longer exists in REVIEW_CATEGORIES raises KeyError from
 # `section_for` only when the file has no heading carrying it — that is, on a fresh
-# KB. On a populated one `_heading_with` finds the old heading and returns it, so the
+# KB. On a populated one `heading_for` finds the old heading and returns it, so the
 # drift routes bullets to a category the contract no longer names and says nothing.
 # Loud on every KB, at import, before a single row is classified.
 ROUTED_KEYWORDS = frozenset({"중복", "모호", "출처", "충돌"})
@@ -676,43 +681,83 @@ def decision_section(row: dict[str, str]) -> str:
     return "모호"
 
 
-def insert_bullet(text: str, section: str, bullet: str) -> str:
+def insert_bullet(text: str, keyword: str, bullet: str) -> str:
+    """*text* with *bullet* filed under its *keyword* section.
+
+    A **category keyword**, not a heading. `section_for` answers with a `Heading`,
+    and a `Heading` is a pair of line indices — coordinates that are only valid for
+    the exact document they were read from. Taking one as an argument made a stale
+    coordinate expressible, and the shape that produced one is the obvious
+    refactoring: resolve the section once, then file several bullets in a loop. Under
+    `origin/main` that was harmless, because `section_for` returned a *string* and
+    `insert_bullet` looked it up again in the current text every time.
+
+    It is not harmless now, and it is silent. Measured on a freshly scaffolded file,
+    hoisting the lookup out of the loop filed the 출처 and 충돌 rows into the 모호
+    section — with `missing_review_sections` empty, `split_review_sections` empty and
+    the run exiting 0, which is every gate this cluster exists to keep honest saying
+    the file is fine while rows sit under the wrong heading.
+
+    So the coordinates are not passed in; they are read here, from the text they
+    belong to, and the caller cannot hold one across a write. The lookup costs
+    nothing that was not already being paid — this function already walks the same
+    text for `bullets`, for `section_body_end` and for `headings`.
+    """
     lines = text.splitlines()
     # Idempotency by exact line, not substring: a plain `bullet in text` dropped a
     # new bullet whenever it was a prefix-substring of a longer existing bullet
     # (e.g. "...note" skipped because "...note extra" was already present).
     #
-    # Against the bullets review_sections counts, not every line in the file. Matching
+    # Against the bullets md_lines counts, not every line in the file. Matching
     # fenced lines too meant a KB that documents its own bullet format in a code fence
     # silently swallowed the first real bullet identical to that example — and
     # validate.py, counting the same fenced line as a review bullet, then reported the
     # file complete. One reader, so the two cannot disagree about it.
-    if bullet.rstrip() in {line.rstrip() for line in review_bullets(text)}:
+    if bullet.rstrip() in {line.rstrip() for line in bullets(text)}:
         return text
-    # Where the section is, and where it ends, are review_sections' to answer — the
-    # same answer the scaffolder and the validator get. This was `lines.index(section)`
-    # and a `startswith("## ")` scan of its own, which found headings *inside code
-    # fences*: measured, a bullet was filed against a fenced heading and written just
-    # past the closing fence, under no section at all, and the run exited 0.
-    index = section_line_index(text, section)
-    if index is None:
-        if text and not text.endswith("\n"):
-            text += "\n"
-        return f"{text}\n{section}\n{bullet}\n"
-
-    insert_at = section_end_index(text, index)
-    if insert_at > index + 1 and lines[insert_at - 1].strip():
-        lines.insert(insert_at, "")
-        insert_at += 1
-    lines.insert(insert_at, bullet)
-    # Keep a blank line between the bullet and the heading that follows it. The
-    # bullet is placed at the section's end, which for a section whose content ends
-    # in a blank line is the heading's own index — so the bullet landed flush against
-    # the next `## `, reading as its lead-in rather than as the previous section's
-    # last item. Routing bullets to a file's *existing* sections (#495) made that the
-    # common case rather than a corner one.
-    if insert_at + 1 < len(lines) and lines[insert_at + 1].startswith("## "):
-        lines.insert(insert_at + 1, "")
+    # Where the section ends is md_lines' to answer — the same answer the scaffolder
+    # and the validator get. This was a `## ` prefix scan of its own, which found
+    # headings *inside code fences*: measured, a bullet was filed against a
+    # fenced heading and written just past the closing fence, under no section at
+    # all, and the run exited 0.
+    #
+    # Where the section *starts* is `section_for`'s answer and is never looked up by
+    # line equality again — `lines.index(section)` asked a different question, "which
+    # line says this", whose answer is the first line of the *body* that happens to
+    # repeat the heading's text. Resolved here rather than by the caller so that the
+    # heading and the text it indexes into cannot come apart; see the docstring.
+    #
+    # After the duplicate check, not before: a bullet that is already filed is
+    # answered without needing a section at all, and `section_for` raises when a
+    # category has none.
+    section = section_for(text, keyword)
+    boundary = section_body_end(text, section)
+    # The bullet needs a blank line on either side of it, and both questions are
+    # about the document as it is *now* — before anything moves. So both are asked in
+    # `text`'s coordinates, answered here, and applied as one splice at `boundary`.
+    #
+    # One splice on purpose. This used to be two inserts, and the first of them
+    # shifted the index the second was still comparing against: whenever a blank line
+    # was opened *above* the bullet, the blank line *below* it was silently skipped.
+    # Measured — and not only on Setext. On an ordinary ATX file the bullet ended up
+    # flush against the next `## `, which is a regression against main; on a Setext
+    # one the blank line is what makes the following heading a heading at all, so the
+    # next section stopped existing, `missing_review_sections` reported it, and the
+    # following merge appended a second section for a category that already had one.
+    # That last step is the exact damage #500 is about, re-created by the fix for it.
+    #
+    # Leading blank: the bullet goes at the end of the section's body, and if that
+    # body ends in a content line the bullet would otherwise abut it.
+    lead = boundary > section.end and bool(lines[boundary - 1].strip())
+    # Trailing blank: is the line the bullet will be pushed in front of the start of
+    # a heading? Asked of md_lines rather than of a `## ` prefix — a Setext heading
+    # has no `## ` on it, so the prefix test let the bullet's list swallow the title
+    # line below it as a lazy continuation and turn its `----` into a horizontal
+    # rule. The scan said the section was there and a renderer showed none, which is
+    # the disagreement this module pair exists to prevent. Asked of `text`, because
+    # after the insert the damage is already done and the scan agrees with it.
+    trail = any(found.start == boundary for found in headings(text))
+    lines[boundary:boundary] = ([""] if lead else []) + [bullet] + ([""] if trail else [])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -777,7 +822,7 @@ def write_decisions(root: Path, rows: list[dict[str, str]]) -> list[str]:
             f"{row['object']} ({row['source']}, confidence={row['confidence']}) - {row['note']}"
         )
         before = text
-        text = insert_bullet(text, section_for(text, decision_section(row)), bullet)
+        text = insert_bullet(text, decision_section(row), bullet)
         if text != before:
             added.append(bullet)
     decisions.write_text(text, encoding="utf-8")
@@ -812,7 +857,7 @@ def record_stale_page_refs(root: Path) -> list[str]:
                 continue
             bullet = f"- stale_source: {page.relative_to(root).as_posix()} references removed source {ref}"
             before = text
-            text = insert_bullet(text, section_for(text, "출처"), bullet)
+            text = insert_bullet(text, "출처", bullet)
             if text != before:
                 added.append(bullet)
     decisions.write_text(text, encoding="utf-8")
