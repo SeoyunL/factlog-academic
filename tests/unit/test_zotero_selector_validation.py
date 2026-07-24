@@ -283,6 +283,27 @@ class TestTagMetacharacters:
         assert [i["key"] for i in out] == ["A"]
         assert ("items", {"tag": " planning"}) in backend.calls
 
+    def test_leading_bom_hyphen_tag_is_rejected(self):
+        # U+FEFF (BOM) is trimmed by Zotero's JS trim() but *not* by Python
+        # str.strip() (measured on the Local API, port 23119). A Python-strip
+        # guard would see "\ufeff-draft" as leading-BOM and let it through, but
+        # Zotero trims to "-draft" and runs a negation — a live bypass. Judging
+        # on Zotero's trim set must reject it before any items(tag=...) query.
+        backend = FakeBackend(items=[_item("A", tags=["\ufeff-draft"])])
+        with pytest.raises(ZoteroError, match="tag-search syntax"):
+            ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag("\ufeff-draft")
+        assert not any(c[0] == "items" for c in backend.calls)
+
+    def test_leading_nel_tag_is_not_over_rejected(self):
+        # U+0085 (NEL) is trimmed by Python str.strip() but *not* by Zotero's JS
+        # trim() (port 23119). A Python-strip guard over-strips "\x85-x" to "-x"
+        # and wrongly rejects it; Zotero keeps the NEL literal, so there is no
+        # leading '-' to collide. The tag must resolve and query verbatim.
+        backend = FakeBackend(items=[_item("A", tags=["\x85-x"])])
+        out = ZoteroClient(ZoteroConfig(), backend=backend).get_items_by_tag("\x85-x")
+        assert [i["key"] for i in out] == ["A"]
+        assert ("items", {"tag": "\x85-x"}) in backend.calls
+
 
 class TestCollectionSuggestionCap:
     """The shared _suggest() caps the collection listing too (a contract change)."""

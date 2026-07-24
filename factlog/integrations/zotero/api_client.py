@@ -43,6 +43,25 @@ _NON_TEXT_ANNOTATION_TYPES = frozenset({"image", "ink"})
 # the error it is meant to explain.
 _SUGGEST_LIMIT = 20
 
+# The exact set of characters Zotero's Local API strips from the leading/trailing
+# edge of a `tag` parameter before matching, measured on port 23119: it applies
+# JS `String.prototype.trim()`, whose set is ECMAScript WhiteSpace + LineTerminator.
+# This is *not* Python `str.strip()`'s set, and the two disagree on the tags that
+# matter for the metacharacter guard:
+#   - U+FEFF (BOM) is trimmed by JS but *not* by Python strip() -> "﻿-draft"
+#     survives Python strip() as leading-BOM, but Zotero trims it to "-draft" and
+#     runs a negation. Judging on this set closes that bypass.
+#   - U+0085 (NEL) is trimmed by Python strip() but *not* by JS trim() -> Python
+#     over-strips it and rejects a literal "\x85-x" tag Zotero would keep verbatim.
+# So the guard must decide on Zotero's set, not Python's. Members: U+0009 U+000A
+# U+000B U+000C U+000D U+0020 U+00A0 U+1680 U+2000-U+200A U+2028 U+2029 U+202F
+# U+205F U+3000 U+FEFF. U+0085 (NEL) is deliberately excluded.
+_ZOTERO_TAG_TRIM = (
+    "\t\n\x0b\x0c\r \xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
 
 class ZoteroError(Exception):
     """A Zotero request could not be satisfied (bad collection, web mode, ...)."""
@@ -292,10 +311,16 @@ class ZoteroClient:
         wrong result as real. Such a tag is rejected here rather than silently
         mis-queried. An interior hyphen (``Computer Science - Performance``) is
         literal, so only a leading ``-`` is treated as the metacharacter.
+
+        Because Zotero trims the parameter's edges before matching, the guard has
+        to judge the *trimmed* value — and trim with Zotero's set, not Python's.
+        The two differ (see ``_ZOTERO_TAG_TRIM``): a leading BOM would let a
+        ``-draft`` negation slip past a Python-``strip()`` guard, while a leading
+        NEL would make Python over-strip and reject a tag Zotero keeps verbatim.
         """
-        if not isinstance(tag, str) or not tag.strip():
+        if not isinstance(tag, str) or not tag.strip(_ZOTERO_TAG_TRIM):
             raise ZoteroError("tag must be a non-empty string.")
-        stripped = tag.strip()
+        stripped = tag.strip(_ZOTERO_TAG_TRIM)
         if stripped.startswith("-") or "||" in stripped:
             raise ZoteroError(
                 f"tag {tag!r} cannot be looked up literally: a leading '-' or '||' "
