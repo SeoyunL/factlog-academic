@@ -8,9 +8,14 @@ there is ONE definition, common.fact_key, which merge_candidates.normalize_rows 
 dedup on and the review CLI keys its runs/*.json writes on.
 
 These tests check that equivalence against merge's OBSERVABLE behaviour (which rows
-collapse, which survive), not by re-reading the implementation: if someone re-derives the
-key in normalize_rows, or teaches one side a normalisation the other does not know, the
-collapse pattern stops matching fact_key's grouping and these fail.
+collapse, which survive), not by re-reading the implementation. What they catch is a
+DIVERGENCE in normalisation: the moment one side applies a fold, a canonicalisation or a
+strip the other does not, the collapse pattern stops matching fact_key's grouping and
+these fail. Re-deriving the key inline while keeping every normalisation identical passes
+— correctly so: that mutant behaves exactly like merge did before this change, which is
+also the evidence that routing merge through fact_key was a no-op for merge itself. The
+argument for the single definition is that the next edit to one side cannot silently
+diverge; these tests are what makes such a divergence loud.
 """
 from __future__ import annotations
 

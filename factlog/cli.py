@@ -1427,16 +1427,21 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
             # an NFC row and an NFD row look like one fact to the CLI while merge kept
             # them apart, and the decision flipped a row the gate had reported as skipped
             # (#477).
-            src = (r.get("source") or "").strip()
-            if not src:
-                # A row with no source is not a fact merge can identify; a blank-source
-                # key would match every run row that also lost its source. Guarded HERE
-                # only -- _apply_status_to_runs must not repeat it, or neither copy of
-                # the guard can be shown to do anything.
-                continue
-            decided.add(
-                fact_key(r.get("subject") or "", r.get("relation") or "", r.get("object") or "", src)
+            key = fact_key(
+                r.get("subject") or "",
+                r.get("relation") or "",
+                r.get("object") or "",
+                r.get("source") or "",
             )
+            if not key[3]:
+                # No source FILE, so no fact merge can identify: such a key would match
+                # every run row that also lost its source. Judged on the KEY's source
+                # component, not on the raw field -- fact_key cuts at '#', so a row whose
+                # source is a bare anchor ('#sec1') keys to the very same empty source and
+                # would slip past a raw-field check. One guard, both cases; repeating it in
+                # _apply_status_to_runs would leave neither copy testable.
+                continue
+            decided.add(key)
     _atomic_write_csv(csv_path, rows, out_fields)
 
     # Durability: write the decision into runs/*.json too, the source of truth merge

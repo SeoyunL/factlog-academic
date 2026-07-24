@@ -32,6 +32,16 @@ row untouched, and rows reported as "non-pending skipped" stay as they are in
 `runs/*.json` too. An `amount` object is compared in merge's canonical form
 `amount(N,"unit")`, so `amount(7,억)` and `amount(7,"억")` are one fact.
 
+Subject, relation and object are compared **verbatim, as stored**; Unicode
+normalisation (to NFC) is applied to the source only. The source is a filesystem
+artifact — macOS hands out NFD filenames while extractors usually emit NFC — so
+its spelling must be reconciled for two references to mean one document, while a
+value stays exactly as a human wrote it. Consequently two subjects that look
+identical but are stored in different Unicode forms are **different facts**:
+accepting one does not move the other, and both stay in the `factlog review`
+queue. Pasted text and macOS filenames do mix the forms in practice, so if the
+same fact appears twice, use `factlog amend` to align one value with the other.
+
 Boundary: repairing drift — `confirmed` in `candidates.csv` while `runs/*.json`
 still says `candidate`, as in a KB predating #233 — is not a side effect of
 `accept`/`reject`. They write down the decision they just made, nothing else;

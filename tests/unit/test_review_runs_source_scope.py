@@ -270,6 +270,10 @@ class TestSourcelessRowIsNotAnIdentity:
     merge drops such a row (its source is not under sources/), so it only reaches
     candidates.csv by hand-editing. Keying on it would make the blank source match every
     other sourceless run row at once -- a decision spilling onto rows nobody decided.
+
+    "No source" is a property of the KEY, not of the raw field: fact_key cuts the source
+    at '#', so a bare anchor ('#sec1') keys to the same empty source file as a blank one
+    and must be turned away by the same guard.
     """
 
     def test_blank_source_csv_row_writes_no_run_row(self, tmp_path, capsys):
@@ -284,6 +288,22 @@ class TestSourcelessRowIsNotAnIdentity:
         _invoke(kb, ["A", "R", "X"], "accepted", "accept")
 
         assert [r["status"] for _, r in _run_rows(kb)] == ["candidate", "candidate"]
+        assert _reported(capsys.readouterr().out) == (1, 0)
+
+    def test_anchor_only_source_csv_row_writes_no_run_row(self, tmp_path, capsys):
+        """'#sec1' keys to the empty source file, so it must be turned away too."""
+        kb = _kb(
+            tmp_path,
+            [_row("A", "R", "X", "#sec1", "candidate")],
+            [
+                _row("A", "R", "X", "", "candidate"),
+                _row("A", "R", "X", "#sec2", "candidate"),
+                _row("A", "R", "X", "sources/note1.md", "candidate"),
+            ],
+        )
+        _invoke(kb, ["A", "R", "X"], "accepted", "accept")
+
+        assert [r["status"] for _, r in _run_rows(kb)] == ["candidate"] * 3
         assert _reported(capsys.readouterr().out) == (1, 0)
 
 
