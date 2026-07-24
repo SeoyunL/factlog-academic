@@ -28,6 +28,7 @@ from factlog.integrations.arxiv.client import (
     ArxivNotFoundError,
     ArxivResponseError,
     ArxivServiceError,
+    MAX_RETRY_AFTER_SECONDS,
     _RateLimiter,
     _Response,
     _user_agent,
@@ -76,8 +77,14 @@ ERROR_FEED = feed(
 )
 
 
-def client(responses, **config_kw):
-    """An ArxivClient whose transport replays `responses` and never sleeps."""
+def client(responses, *, sleeps: list | None = None, **config_kw):
+    """An ArxivClient whose transport replays `responses` and never really sleeps.
+
+    Pass `sleeps` to record what the client *would* have slept: how long a retry
+    waits is the whole question in #478, and a discarded sleep argument cannot
+    tell a honoured `Retry-After` from the exponential backoff. `request_delay`
+    is 0.0, so the rate limiter never sleeps and the list holds backoff only.
+    """
     queue = list(responses)
     calls = []
 
@@ -86,7 +93,11 @@ def client(responses, **config_kw):
         return queue.pop(0)
 
     config = ArxivConfig(request_delay=0.0, **config_kw)
-    instance = ArxivClient(config=config, transport=transport, sleep=lambda _s: None)
+    instance = ArxivClient(
+        config=config,
+        transport=transport,
+        sleep=sleeps.append if sleeps is not None else lambda _s: None,
+    )
     return instance, calls
 
 
@@ -329,10 +340,14 @@ def test_redirects_are_surfaced_not_absorbed():
 @pytest.mark.parametrize("status", [429, 503])
 def test_service_push_back_retries_then_raises(status):
     # arXiv's documented push-back is 503 + Retry-After, not 429. Handle both.
-    api, calls = client([_Response(status, {"retry-after": "12"}, "")] * 3)
+    slept = []
+    api, calls = client([_Response(status, {"retry-after": "12"}, "")] * 3, sleeps=slept)
     with pytest.raises(ArxivServiceError, match="retry after 12s"):
         api.fetch_works(["1706.03762"])
     assert len(calls) == 3  # MAX_RETRIES
+    # The message quoted 12s; the waits have to be the same 12s. Before #478 the
+    # header was printed and the client slept the 2s/4s backoff regardless.
+    assert slept == [12.0, 12.0]
 
 
 def test_service_push_back_recovers_when_a_retry_succeeds():
@@ -342,6 +357,87 @@ def test_service_push_back_recovers_when_a_retry_succeeds():
     ])
     assert api.fetch_work("1706.03762").version == 7
     assert len(calls) == 2
+
+
+# -- Retry-After is obeyed, not just reported (#478) ------------------------
+def test_retry_after_sets_the_wait_between_attempts():
+    slept = []
+    api, calls = client([_Response(503, {"retry-after": "30"}, "")] * 3, sleeps=slept)
+    with pytest.raises(ArxivServiceError, match="30s"):
+        api.fetch_works(["1706.03762"])
+    assert slept == [30.0, 30.0]
+    assert len(calls) == 3
+
+
+def test_a_retry_after_past_the_ceiling_is_reported_instead_of_retried():
+    # A server that says "wait an hour" is not asking to be tried again in two
+    # seconds. Clamping the wait down to the ceiling and retrying would knock
+    # inside the window the server named, so nothing is retried and no attempt
+    # is spent — the operator gets the server's own number instead.
+    over = str(int(MAX_RETRY_AFTER_SECONDS) + 1)
+    slept = []
+    api, calls = client([_Response(503, {"retry-after": over}, "")] * 3, sleeps=slept)
+    with pytest.raises(ArxivServiceError) as raised:
+        api.fetch_works(["1706.03762"])
+    assert len(calls) == 1
+    assert slept == []
+    message = str(raised.value)
+    assert over in message                                 # what arXiv asked for
+    assert str(int(MAX_RETRY_AFTER_SECONDS)) in message    # what factlog will wait
+    assert "not retried" in message
+
+
+def test_a_retry_after_exactly_at_the_ceiling_is_still_retried():
+    # The ceiling is inclusive: `wait > MAX` refuses, so the boundary value is a
+    # wait this client sits through.
+    at = str(int(MAX_RETRY_AFTER_SECONDS))
+    slept = []
+    api, calls = client([_Response(503, {"retry-after": at}, "")] * 3, sleeps=slept)
+    with pytest.raises(ArxivServiceError, match=f"retry after {at}s"):
+        api.fetch_works(["1706.03762"])
+    assert slept == [MAX_RETRY_AFTER_SECONDS, MAX_RETRY_AFTER_SECONDS]
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"retry-after": "0"}, id="zero"),
+        pytest.param({"retry-after": "-5"}, id="negative"),
+        pytest.param({"retry-after": "abc"}, id="not-a-number"),
+        pytest.param({"retry-after": "inf"}, id="infinite"),
+        pytest.param({"retry-after": "nan"}, id="nan"),
+        # RFC 9110 also allows an HTTP-date. Resolving it would put the wall
+        # clock into a retry decision, so it is read as no header at all.
+        pytest.param({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}, id="http-date"),
+    ],
+)
+def test_an_unusable_retry_after_falls_back_to_the_exponential_backoff(headers):
+    # `float("inf")` and `float("nan")` both parse, so a try/except around the
+    # conversion is not enough: without the isfinite guard the client would sleep
+    # forever on `Retry-After: inf`.
+    slept = []
+    api, calls = client([_Response(503, headers, "")] * 3, sleeps=slept)
+    with pytest.raises(ArxivServiceError) as raised:
+        api.fetch_works(["1706.03762"])
+    assert slept == [2.0, 4.0]
+    assert len(calls) == 3
+    # No wait is quoted at all — an unreadable header must not become advice.
+    assert "retry after" not in str(raised.value)
+
+
+def test_retry_after_is_read_whatever_case_the_header_arrives_in():
+    # Header names are case-insensitive; httpx lower-cases them but a proxy or a
+    # fake transport need not. The fold happens once, when _Response is built.
+    assert _Response(503, {"Retry-After": "30"}, "").headers == {"retry-after": "30"}
+
+    slept = []
+    api, calls = client([_Response(503, {"Retry-After": "30"}, "")] * 3, sleeps=slept)
+    with pytest.raises(ArxivServiceError, match="retry after 30s"):
+        api.fetch_works(["1706.03762"])
+    assert slept == [30.0, 30.0]
+    assert len(calls) == 3
 
 
 def test_connection_failure_is_its_own_error_class():
