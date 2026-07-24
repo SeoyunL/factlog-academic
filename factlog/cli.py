@@ -21,7 +21,8 @@ from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
 from factlog import config as factlog_config
-from factlog.common import _atomic_write_text
+from factlog.common import FACT_HEADER, _atomic_write_text
+from factlog.review_sections import OPEN_QUESTIONS_SCAFFOLD
 
 MIN_PYTHON = (3, 11)
 MIN_PYREWIRE = (1, 0, 3)  # bundles wirelog v0.52.0 with \" escape support (wirelog#924)
@@ -724,6 +725,14 @@ explanation of its purpose.
 ## 확인 필요
 {{REVIEW}}
 """,
+    # The two files validate.py requires of every KB and `init` used not to write,
+    # so a freshly scaffolded KB could not reach rc=0 down the normal path (#495).
+    # Both are the empty shape, not an example: the csv is its header row alone, and
+    # the open-questions sections carry no placeholder bullet (see
+    # factlog.review_sections). `_init_kb` only writes what is absent, so re-running
+    # `init`/`setup` on an existing KB still touches neither.
+    "facts/candidates.csv": ",".join(FACT_HEADER) + "\n",
+    "decisions/open-questions.md": OPEN_QUESTIONS_SCAFFOLD,
 }
 
 

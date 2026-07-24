@@ -26,6 +26,7 @@ from factlog.front_matter_scan import (  # noqa: E402
 from factlog.integrations.common.source_writer import (  # noqa: E402
     IDENTITY_KEYS_BY_SOURCE,
 )
+from factlog.review_sections import missing_review_sections  # noqa: E402
 
 # An unregistered status is an *error* here, not a warning — so this set drifting
 # from the vocabulary is worse than the #208 warning bug. Derive, never restate.
@@ -303,9 +304,12 @@ def validate(root: Path) -> list[str]:
         decision_text = ""
     else:
         decision_text = read(decisions)
-        for section in ["중복", "모호", "출처", "충돌"]:
-            if section not in decision_text:
-                errors.append(f"decisions/open-questions.md should keep a {section!r} review section")
+        # Heading-based, off the same list the producer and `init` read (#495). The
+        # old test was `keyword not in decision_text` over the whole document, which
+        # any bullet mentioning the word answered — a file could lose the section
+        # itself and still pass.
+        for section in missing_review_sections(decision_text):
+            errors.append(f"decisions/open-questions.md should keep a {section!r} review section")
         decision_bullets = [line for line in decision_text.splitlines() if line.lstrip().startswith("- ")]
         if any(row.get("status") == "needs_review" for row in rows) and not decision_bullets:
             errors.append("needs_review facts exist but decisions/open-questions.md has no review bullets")

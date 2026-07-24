@@ -97,6 +97,11 @@ from common import (  # noqa: E402
     sync_ignore_patterns,
 )
 from factlog import literal_types  # noqa: E402
+from factlog.review_sections import (  # noqa: E402
+    OPEN_QUESTIONS_SCAFFOLD,
+    ensure_review_sections,
+    section_for,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -624,14 +629,22 @@ def write_pages(root: Path, rows: list[dict[str, str]]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def decision_section(row: dict[str, str]) -> str:
+    """Which review *category* the row belongs to, as a review_sections keyword.
+
+    A keyword, not a heading: the heading is whatever the target file already calls
+    that category, which only :func:`section_for` can say (#495). Returning a fixed
+    heading here is what opened a second "## 모호한 관계명" in a KB that already had
+    a "## 모호 (...)" section — the bullets went to the new one and the section a
+    human reads stayed empty.
+    """
     text = " ".join(row.get(key, "") for key in ["subject", "relation", "object", "note"]).lower()
     if any(word in text for word in ["duplicate", "same_concept", "same_as", "동일", "중복"]):
-        return "## 중복 개념 후보"
+        return "중복"
     if any(word in text for word in ["source", "evidence", "출처"]):
-        return "## 출처 부족"
+        return "출처"
     if any(word in text for word in ["conflict", "충돌"]):
-        return "## 기존 내용과 충돌할 수 있는 항목"
-    return "## 모호한 관계명"
+        return "충돌"
+    return "모호"
 
 
 def insert_bullet(text: str, section: str, bullet: str) -> str:
@@ -661,7 +674,11 @@ def insert_bullet(text: str, section: str, bullet: str) -> str:
 def write_decisions(root: Path, rows: list[dict[str, str]]) -> list[str]:
     decisions = root / "decisions" / "open-questions.md"
     decisions.parent.mkdir(parents=True, exist_ok=True)
-    text = decisions.read_text(encoding="utf-8") if decisions.exists() else "# Open Questions\n"
+    text = decisions.read_text(encoding="utf-8") if decisions.exists() else OPEN_QUESTIONS_SCAFFOLD
+    # The four sections are an invariant of the file, not a side effect of having
+    # had something to review: a KB that has never produced a needs_review row still
+    # has to validate (#495). Only categories with no heading at all are added.
+    text = ensure_review_sections(text)
     added: list[str] = []
     for row in rows:
         if row["status"] not in REVIEW_STATUSES:
@@ -671,7 +688,7 @@ def write_decisions(root: Path, rows: list[dict[str, str]]) -> list[str]:
             f"{row['object']} ({row['source']}, confidence={row['confidence']}) - {row['note']}"
         )
         before = text
-        text = insert_bullet(text, decision_section(row), bullet)
+        text = insert_bullet(text, section_for(text, decision_section(row)), bullet)
         if text != before:
             added.append(bullet)
     decisions.write_text(text, encoding="utf-8")
@@ -694,7 +711,8 @@ def existing_source_refs(path: Path) -> list[str]:
 def record_stale_page_refs(root: Path) -> list[str]:
     known_sources = source_file_refs(root)
     decisions = root / "decisions" / "open-questions.md"
-    text = decisions.read_text(encoding="utf-8") if decisions.exists() else "# Open Questions\n"
+    text = decisions.read_text(encoding="utf-8") if decisions.exists() else OPEN_QUESTIONS_SCAFFOLD
+    text = ensure_review_sections(text)
     added: list[str] = []
     for page in sorted((root / "pages").glob("*.md")):
         for ref in existing_source_refs(page):
@@ -703,7 +721,7 @@ def record_stale_page_refs(root: Path) -> list[str]:
                 continue
             bullet = f"- stale_source: {page.relative_to(root).as_posix()} references removed source {ref}"
             before = text
-            text = insert_bullet(text, "## 출처 부족", bullet)
+            text = insert_bullet(text, section_for(text, "출처"), bullet)
             if text != before:
                 added.append(bullet)
     decisions.write_text(text, encoding="utf-8")

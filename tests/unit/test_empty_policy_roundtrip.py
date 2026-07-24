@@ -110,10 +110,10 @@ def kb(tmp_path):
 def test_a_freshly_initialized_kb_validates_without_a_policy_dl(kb):
     """(1) The issue's first reproduction: `init` then validate, no .dl complaint.
 
-    The other scaffold gaps `init` leaves (facts/candidates.csv, decisions/open-questions.md)
-    are a separate matter and still reported, so this asserts on the policy lines only
-    rather than on rc — pinning rc=0 here would silently make this test the owner of an
-    unrelated fix.
+    Asserts on the policy lines only, not on rc. The other scaffold gaps `init` used to
+    leave (facts/candidates.csv, decisions/open-questions.md) were a separate matter,
+    closed since by #495; pinning rc=0 here would quietly make this test the owner of
+    that fix, which tests/unit/test_open_questions_contract.py holds.
     """
     assert not (kb / "policy" / "logic-policy.dl").exists()
     assert _policy_lines(_validate(kb)) == []
