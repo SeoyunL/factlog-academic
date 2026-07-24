@@ -11,6 +11,10 @@
 #   - rules-in-.md but absent .dl      -> still fails loud (do not drop the policy)
 #   - none of the three loader errors point at `init --target <kb> --force`
 #
+# This harness needs pyrewire and SKIPs without it, so the same equivalence on the
+# compile/validate side — which needs no engine — is pinned in
+# tests/unit/test_empty_policy_roundtrip.py (#491) and runs in CI unconditionally.
+#
 # Usage: bash tests/test_check_empty_policy.sh  -> 0 if all pass, 1 otherwise.
 
 set -uo pipefail

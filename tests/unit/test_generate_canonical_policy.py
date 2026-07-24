@@ -74,12 +74,19 @@ def test_prose_mid_sentence_marker_is_not_canonical() -> None:
     assert 'relation(X, "결론", _)' in program
 
 
-def test_canonical_prefix_with_zero_relations_is_rejected() -> None:
+def test_canonical_prefix_with_zero_relations_is_rejected(capsys) -> None:
     """(4) A {canonical} prefix but no backtick relation is rejected exactly like
-    a non-canonical no-relation bullet (SystemExit, same rejected path)."""
-    with pytest.raises(SystemExit) as excinfo:
-        g.fixture_policy_json(_md("- [empty] {canonical} 아무 관계도 없다."))
-    assert "at least one backtick relation name" in str(excinfo.value)
+    a non-canonical no-relation bullet (same rejected path, no rule emitted).
+
+    Since #491 that path no longer exits — a policy whose bullets all fail to yield a
+    relation compiles to zero rules, which is a valid empty policy — so the rejection
+    shows up as the bullet's absence from the draft plus the same diagnostic on stderr.
+    The property under test is unchanged: a canonical prefix buys the bullet no
+    special treatment when it names no relation.
+    """
+    draft = g.fixture_policy_json(_md("- [empty] {canonical} 아무 관계도 없다."))
+    assert draft == {"rules": []}
+    assert "at least one backtick relation name" in capsys.readouterr().err
 
 
 def test_normalized_rules_rejects_unknown_key_and_non_bool_canonical() -> None:

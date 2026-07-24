@@ -82,14 +82,17 @@ class TestRelationNameControlChars:
         assert draft["rules"][0]["conditions"] == [{"relation": "결론"}]
 
     @pytest.mark.parametrize("ch", ["\u0085", "\u2028", "\u2029"])
-    def test_line_separators_are_not_rejected(self, ch):
+    def test_line_separators_are_not_rejected(self, ch, capsys):
         # These round-trip through the engine (#255) and must never be swept up by the gate.
         # str.splitlines() breaks the bullet at them, so the item stops parsing as a rule and
-        # the run ends in the ordinary "no compilable policies" exit, not a control-char error.
+        # the policy compiles to zero rules — a valid empty policy since #491, where this
+        # used to be the "no compilable policies" exit. What the case pins either way is
+        # that the three separators leave by the ordinary no-relation route and never
+        # produce a control-char rejection.
         md = _md(f"- [retracted] 문서가 `cites{ch}evil` 이면 철회.")
-        with pytest.raises(SystemExit) as exc:
-            g.fixture_policy_json(md)
-        assert "control character" not in str(exc.value), str(exc.value)
+        draft = g.fixture_policy_json(md)
+        assert draft == {"rules": []}
+        assert "control character" not in capsys.readouterr().err
 
 
 def test_no_c0_character_survives_the_bullet_tag_regex():

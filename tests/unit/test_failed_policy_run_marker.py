@@ -47,9 +47,12 @@ PROMPT = "natural-language-to-policy-prompt.md"
 RESPONSE = "natural-language-to-policy-response.json"
 TRACE = "natural-language-to-policy-trace.md"
 
-# `factlog init` ships a logic-policy.md with no compilable bullets, so every run
-# against a bare KB fails ("no supported policy bullets"). The success cases need a real
-# rule; this is sample-kb's first bullet.
+# `factlog init` ships a logic-policy.md with no compilable bullets. Since #491 a run
+# against a bare KB SUCCEEDS with zero rules and writes the empty-policy .dl; it used to
+# fail with "no supported policy bullets". The cases below still install a real rule, no
+# longer to make the run get anywhere but because a rule-bearing policy is what the
+# failure modes need in order to reach the steps past PROMPT_OUT. This is sample-kb's
+# first bullet.
 GOOD_MD = (
     "# Logic policy\n\n## Rules\n\n"
     "- [bidirectional_check] Facts with the `develops` relation require review when a "
@@ -287,9 +290,6 @@ def test_an_unclearable_marker_is_reported_rather_than_left_lying(kb):
     assert "policy rules:" in proc.stdout, proc.stdout
 
 
-NO_BULLET_MD = "# Logic policy\n\n## Rules\n\n- nothing compilable here.\n"
-
-
 def _block_with_a_directory(kb, relative):
     """Make the next write to `relative` raise OSError, standing in for a full disk."""
     path = kb / relative
@@ -303,21 +303,30 @@ def _replacing_the_policy(text):
 
 
 # Modes reachable after PROMPT_OUT, in the order main()'s try block runs the steps that
-# raise them: fixture_policy_json (both its "no compilable policies" exit and its #359
-# control-char gate), the RESPONSE_OUT write, the canonical clash in normalized_rules,
-# the write_trace call, and the two separate steps of the .dl swap — tmp.write_text and
-# tmp.replace, which fail on different paths ('.dl.tmp' alone versus '.dl.tmp' -> '.dl')
-# and so exercise the one-filename and two-filename shapes of the rebuild. Listed against
-# the code rather than sampled, because the axis #381 broke stayed invisible while the
-# only sample was the #359 gate, whose message carries no absolute path.
+# raise them: fixture_policy_json's #359 control-char gate, the RESPONSE_OUT write, the
+# canonical clash in normalized_rules, the write_trace call, and the two separate steps
+# of the .dl swap — tmp.write_text and tmp.replace, which fail on different paths
+# ('.dl.tmp' alone versus '.dl.tmp' -> '.dl') and so exercise the one-filename and
+# two-filename shapes of the rebuild. Listed against the code rather than sampled,
+# because the axis #381 broke stayed invisible while the only sample was the #359 gate,
+# whose message carries no absolute path.
+#
+# A "no compilable bullets" mode stood first in this list until #491 made zero rules a
+# successful run: that policy text now compiles to the empty-policy .dl and raises
+# nothing, so the mode was removed rather than rewritten. It carried the list's only
+# SystemExit, and no step past PROMPT_OUT raises one any more — render_prompt still can,
+# but it runs BEFORE that write, so `written` is empty and main() writes no marker at
+# all. The SystemExit RENDERING is not lost with it: failure_marker is exercised on
+# arbitrary exception types directly, below.
 #
 # Not one mode per raising step, and the gaps are named rather than dropped: compile_policy
 # raises on no input known here; smoke_compile has two, the pyrewire ParseError, which
 # this harness has no way to provoke from policy text, and require_pyrewire_version's
-# version gate, which needs a pyrewire older than the pinned floor. None of the three was
-# measured, so reaching them would each need a separate reachability finding.
+# version gate, which needs a pyrewire older than the pinned floor. #491's
+# _reject_dropped_policy is a fourth: it fires only when a draft returns zero rules for a
+# rule-bearing .md, which the deterministic path this harness drives cannot produce.
+# None was measured, so reaching them would each need a separate reachability finding.
 FAILURE_MODES = (
-    ("no_compilable_bullets", _replacing_the_policy(NO_BULLET_MD), "SystemExit"),
     ("response_out_unwritable", lambda kb: _block_with_a_directory(kb, f"runs/{RESPONSE}"), "IsADirectoryError"),
     ("control_char_gate", _replacing_the_policy(CONTROL_CHAR_MD), "FactlogError"),
     ("canonical_clash", _replacing_the_policy(CANONICAL_CLASH_MD), "ValueError"),

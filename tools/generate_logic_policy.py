@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from common import (
+    EMPTY_POLICY_DL,
     POLICY_DIR,
     PROMPTS_DIR,
     ROOT,
@@ -23,6 +24,7 @@ from common import (
     dl_string,
     ensure_dirs,
     logic_policy_md_relations,
+    logic_policy_text_has_rules,
     markdown_policy_items,
     require_pyrewire_version,
     wirelog_undecodable_chars,
@@ -185,8 +187,22 @@ def fixture_policy_json(policy_text: str) -> dict[str, Any]:
             rule["canonical"] = True
         rules.append(rule)
     if not rules:
-        detail = "; ".join(rejected) if rejected else "no supported policy bullets"
-        raise SystemExit(f"policy/logic-policy.md has no compilable policies: {detail}")
+        # Zero rules is a VALID policy, not a failure (#491). A freshly `init`ed KB ships a
+        # logic-policy.md that is prose only, and refusing to compile it left the KB with no
+        # .dl at all — which `factlog check`, tools/validate.py and finalize each had to work
+        # around. The empty-rules condition here is exactly common.logic_policy_text_has_rules
+        # being False (same two parsers), so "compiles to nothing" and "defines no rules"
+        # cannot disagree, and #190's loud path stays keyed on the .md having rules.
+        #
+        # Rejected bullets are still reported, on stderr and non-fatally: a bullet that
+        # LOOKS like a rule but yields no relation is worth telling the author about, and
+        # silence there would be the silent-drop this repo refuses. It is not fatal because
+        # the same diagnosis fires for prose that merely starts with an [id] tag.
+        for detail in rejected:
+            print(
+                f"generate_logic_policy: ignored policy/logic-policy.md {detail}",
+                file=sys.stderr,
+            )
     return {"rules": rules}
 
 
@@ -292,8 +308,12 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         seen.add(key)
         rules.append({"predicate": predicate, "reason": reason, "relations": relations, "canonical": canonical})
-    if not rules:
-        raise ValueError("policy JSON has no rules")
+    # An empty rules list is accepted (#491): {"rules": []} is what fixture_policy_json
+    # returns for a prose-only logic-policy.md, and compile_policy turns it into the
+    # empty-policy .dl. The guard that a real policy is never silently dropped does NOT
+    # live here — an empty list is indistinguishable at this level from a draft that lost
+    # its rules — it lives in main(), where the source .md is in hand (see
+    # _reject_dropped_policy).
     # A (predicate, reason, relations) tuple appearing both canonical and
     # non-canonical is an authoring error, not two distinct rules — reject it
     # rather than silently emitting both a relation- and a canonical-bodied rule.
@@ -309,6 +329,12 @@ def normalized_rules(value: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def compile_policy(rules: list[dict[str, Any]]) -> str:
+    if not rules:
+        # The one output shape this function does NOT give a "// generated from ..."
+        # header. See common.EMPTY_POLICY_DL for why these exact bytes: finalize has
+        # written them for ruleless KBs since #194, so every empty KB on disk already
+        # matches and needs no regeneration to stop reading as stale.
+        return EMPTY_POLICY_DL
     lines = [
         "// generated from policy/logic-policy.md",
         "// run tools/generate_logic_policy.py to regenerate",
@@ -562,6 +588,32 @@ def failure_marker(exc: BaseException, written: list[Path]) -> str:
     return "\n".join(lines)
 
 
+def _reject_dropped_policy(rules: list[dict[str, Any]], policy_text: str) -> None:
+    """Refuse to emit an EMPTY policy for a .md that DOES define rules (#190, #491).
+
+    Since #491 zero rules is a normal outcome, so the compiler can now write an
+    empty-policy .dl — and an empty .dl over a rule-bearing .md is precisely the silent
+    drop #190 exists to prevent: `check` would pass with a policy nobody is applying.
+    The deterministic path cannot reach this state (fixture_policy_json returns no rules
+    only when no bullet yields a relation, the same predicate as
+    logic_policy_text_has_rules), which is exactly why the guard is cheap to keep. The
+    LLM-draft path can: a draft that answers {"rules": []} to a real policy used to be
+    caught by normalized_rules' "policy JSON has no rules" ValueError, and that gate has
+    just been removed.
+
+    Compares against the text main() already compiled from, not a re-read of the file, so
+    a concurrent edit cannot make the verdict describe different bytes.
+    """
+    if rules or not logic_policy_text_has_rules(policy_text):
+        return
+    raise FactlogError(
+        "policy/logic-policy.md defines rules but the policy draft compiled to zero "
+        "rules, which would write an empty policy/logic-policy.dl and silently stop "
+        "applying the policy (#190). Refusing to write it. Re-run the draft step, or "
+        "fix the bullets in policy/logic-policy.md if they no longer parse."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate policy/logic-policy.dl from controlled natural-language policy text.")
     parser.add_argument("--dry-run", action="store_true", help="render and validate, but do not write policy/logic-policy.dl")
@@ -576,9 +628,19 @@ def main() -> int:
     if args.check:
         draft = fixture_policy_json(policy_text)
         rules = normalized_rules(draft)
+        _reject_dropped_policy(rules, policy_text)
         program = compile_policy(rules)
         smoke_compile(program)
         if not OUTPUT_DL.is_file():
+            if not rules:
+                # Absent == empty policy when the .md defines no rules (#491), the same
+                # equivalence common._load_logic_policy_from applies: a freshly `init`ed
+                # KB has no .dl and nothing to compile into one, and calling that a
+                # failure made `factlog check` and tools/validate.py red out of the box.
+                # With rules present this still exits non-zero below — the .md-has-rules
+                # asymmetry is #190's loud path and is unchanged.
+                print(f"checked: {OUTPUT_DL} (absent; policy/logic-policy.md defines no rules)")
+                return 0
             raise SystemExit("missing policy/logic-policy.dl; run tools/generate_logic_policy.py")
         if OUTPUT_DL.read_text(encoding="utf-8") != program:
             raise SystemExit("policy/logic-policy.dl is stale; run tools/generate_logic_policy.py")
@@ -592,9 +654,12 @@ def main() -> int:
     # earlier run created. Absence therefore means "the last run that wrote anything into
     # runs/ finished". A --check run writes nothing under runs/ and touches neither.
     #
-    # BaseException, not Exception: render_prompt (via read_required on the prompt
-    # template) and fixture_policy_json both raise SystemExit from inside this try, and a
-    # run cut short by one leaves the same half-written directory as any other failure.
+    # BaseException, not Exception: render_prompt (directly, and via read_required on the
+    # prompt template) raises SystemExit from inside this try, and a run cut short by one
+    # leaves the same half-written directory as any other failure. fixture_policy_json
+    # used to be a second such site; since #491 it no longer exits on zero rules, but the
+    # broader catch is what makes the marker's accounting independent of which exception
+    # type each gate happens to use.
     written: list[Path] = []
     try:
         prompt = render_prompt(policy_text)
@@ -608,6 +673,7 @@ def main() -> int:
         written.append(RESPONSE_OUT)
 
         rules = normalized_rules(draft)
+        _reject_dropped_policy(rules, policy_text)
         program = compile_policy(rules)
         smoke_compile(program)
 

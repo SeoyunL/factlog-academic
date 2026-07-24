@@ -31,14 +31,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import logic_policy_md_has_rules
+from common import EMPTY_POLICY_DL, logic_policy_md_has_rules
 
 _TOOLS = Path(__file__).parent
 
 # Exact content of the empty-policy stub finalize writes for a benign no-rules KB.
 # Matched byte-for-byte to recognise (and self-heal) a stub left by a pre-#194
-# finalize that wrote it OVER an uncompilable policy.
-POLICY_STUB = "// no policy rules\n"
+# finalize that wrote it OVER an uncompilable policy. Aliased to the shared constant
+# (factlog/common.py) since #491: generate_logic_policy now emits the same bytes for a
+# ruleless .md, so a literal here could drift from what the compiler writes and turn
+# every finalize into a "stale" verdict on its own output.
+POLICY_STUB = EMPTY_POLICY_DL
 
 
 # Defensive upper bound so a wedged child (e.g. an engine call that never returns)

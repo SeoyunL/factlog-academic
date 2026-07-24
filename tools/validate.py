@@ -258,10 +258,18 @@ def validate(root: Path) -> list[str]:
         errors.append("policy/prompts/natural_language_to_policy.md must contain {{POLICY_TEXT}} exactly once")
 
     logic_policy = root / "policy" / "logic-policy.dl"
-    if not logic_policy.is_file() or not read(logic_policy).strip():
-        errors.append("missing or empty policy/logic-policy.dl")
-    elif policy_source.is_file() and policy_prompt.is_file():
+    if policy_source.is_file() and policy_prompt.is_file():
+        # Whether an absent .dl is a fault depends on whether logic-policy.md defines
+        # rules, and generate_logic_policy --check is the one place that decides (#491):
+        # absent + no rules is a freshly `init`ed KB and passes, absent + rules is #190's
+        # loud path and still fails. Validating .dl EXISTENCE here first made every fresh
+        # KB fail validation before the compiler was ever consulted. A 0-byte .dl is not
+        # special-cased either — --check reports it as stale, which names the fix.
         errors.extend(validate_logic_policy(root))
+    elif not logic_policy.is_file() or not read(logic_policy).strip():
+        # No .md (or no prompt) to judge the .dl against, so --check cannot run and its
+        # own "missing or empty policy/logic-policy.md" error is already queued above.
+        errors.append("missing or empty policy/logic-policy.dl")
 
     facts = root / "facts" / "candidates.csv"
     if not facts.is_file():
