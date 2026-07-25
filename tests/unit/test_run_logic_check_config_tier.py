@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -70,6 +71,31 @@ def _resolved_root(cwd: Path, *args: str, **env_kwargs) -> Path:
         cwd=cwd, capture_output=True, text=True, check=True, env=_env(**env_kwargs),
     )
     return Path(proc.stdout.strip())
+
+
+def _run_check(cwd: Path, *args: str, **env_kwargs) -> subprocess.CompletedProcess:
+    """Run the script itself (not the import probe), so argparse gets a say.
+
+    ``_resolved_root`` only imports the module, which exercises the pre-pass; the
+    strict parse sits in the ``__main__`` guard and is reachable only by executing
+    the script, which is also why an in-process ``main()`` never sees these flags.
+    """
+    return subprocess.run(
+        [sys.executable, str(CHECK), *args],
+        cwd=cwd, capture_output=True, text=True, env=_env(**env_kwargs),
+    )
+
+
+def _advertised_root_flags(tmp_path: Path) -> list[str]:
+    """The long options ``--help`` advertises, less ``--help`` itself.
+
+    Read out of the parser's own output rather than copied from a literal list, so
+    a flag added to one tier and not the other surfaces here instead of in a user's
+    silently-retargeted run.
+    """
+    proc = _run_check(tmp_path, "--help")
+    assert proc.returncode == 0, proc.stderr
+    return sorted(set(re.findall(r"--[a-z][a-z0-9-]*", proc.stdout)) - {"--help"})
 
 
 def _init_kb(kb: Path, config_home: Path) -> Path:
@@ -230,3 +256,120 @@ class TestReportUnchanged:
         assert proc.returncode == 1
         report = (kb / "facts" / "logic_report.txt").read_text(encoding="utf-8")
         assert "Errors:" in report
+
+
+class TestArgumentParsing:
+    """The strict parse of the command line, and its agreement with the pre-pass.
+
+    The pre-pass has to run before ``common`` is imported, so it can only ever be a
+    ``parse_known_args`` peek — it cannot reject anything. With nothing else parsing
+    the command line, ``--targt /intended-kb`` was dropped without a word and the
+    check ran against the config's active KB while the operator read the output as
+    a verdict on the KB they had named. Engine-free: argument handling is settled
+    before pyrewire is consulted, so these run where the end-to-end class skips.
+    """
+
+    def test_a_misspelled_root_flag_is_rejected(self, tmp_path, config_home):
+        """The #528 repro: a typo must exit 2, not retarget the run in silence."""
+        cfg_kb = tmp_path / "config-kb"
+        cfg_kb.mkdir()
+        _write_config(config_home, cfg_kb)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        proc = _run_check(
+            elsewhere, "--targt", str(tmp_path / "intended-kb"), config_home=config_home
+        )
+
+        assert proc.returncode == 2, proc.stdout
+        assert "unrecognized arguments: --targt" in proc.stderr
+        # The give-away of the old behaviour: it got far enough to touch a KB.
+        assert not (cfg_kb / "facts").exists()
+
+    def test_an_unsupported_flag_is_rejected(self, tmp_path, config_home):
+        """Not only near-misses: anything the tool does not implement exits 2."""
+        proc = _run_check(tmp_path, "--strict", config_home=config_home)
+
+        assert proc.returncode == 2
+        assert "unrecognized arguments: --strict" in proc.stderr
+
+    def test_help_lists_the_root_flag(self, tmp_path, config_home):
+        proc = _run_check(tmp_path, "--help", config_home=config_home)
+
+        assert proc.returncode == 0, proc.stderr
+        assert "--target" in proc.stdout
+        assert "run_logic_check" in proc.stdout
+
+    def test_the_advertised_flags_are_exactly_the_pair_the_prepass_reads(self, tmp_path):
+        """Pin the set on both sides at once.
+
+        ``--target`` is canonical (ask_router and the CLI subcommands spell it that
+        way); ``--wiki`` is the alias the sibling engine scripts use. Adding a third
+        spelling to the parser without teaching the pre-pass would leave it accepted
+        and ignored, so the set is pinned rather than merely non-empty.
+        """
+        assert _advertised_root_flags(tmp_path) == ["--target", "--wiki"]
+
+    @pytest.mark.parametrize("flag", ["--target", "--wiki"])
+    def test_every_advertised_flag_actually_moves_the_root(self, flag, tmp_path, config_home):
+        """The parser tier and the pre-pass tier land on the same KB.
+
+        Accepted-by-argparse is not the property that matters: what matters is that
+        the root ``common`` binds is the one the operator named, from the tier that
+        runs first.
+        """
+        flag_kb = tmp_path / "flag-kb"
+        flag_kb.mkdir()
+        cfg_kb = tmp_path / "config-kb"
+        cfg_kb.mkdir()
+        _write_config(config_home, cfg_kb)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        # pre-pass tier: the root bound into common is the flag's, not the config's.
+        assert _resolved_root(
+            elsewhere, flag, str(flag_kb), config_home=config_home
+        ) == flag_kb.resolve()
+        # strict tier: the same spelling survives main()'s parser.
+        proc = _run_check(elsewhere, flag, str(flag_kb), config_home=config_home)
+        assert proc.returncode != 2, proc.stderr
+        assert "unrecognized" not in proc.stderr
+
+    def test_the_no_argument_form_the_gate_mandates_still_parses(self, tmp_path, config_home):
+        """SKILL.md's determinism gate runs this script bare — argparse must not object.
+
+        rc 1 here is the missing-accepted.dl failure from an empty directory, i.e. the
+        run got past argument handling and into the check. rc 2 would mean the strict
+        parse had broken the one invocation the gate mandates.
+        """
+        proc = _run_check(tmp_path, config_home=config_home)
+
+        assert proc.returncode != 2, proc.stderr
+        assert "unrecognized" not in proc.stderr
+
+    def test_an_in_process_main_does_not_parse_the_hosts_argv(self, tmp_path, config_home):
+        """``main()`` is a callable, not an entry point — the argv is not its to reject.
+
+        Several suites call ``run_logic_check.main()`` inside another process (pytest,
+        `python -c` harnesses) whose ``sys.argv`` carries that host's own arguments.
+        Parsing strictly from inside ``main()`` turned every one of those into exit 2,
+        so the strict parse lives in the ``__main__`` guard instead. The error here
+        must be the missing engine input, never an argparse rejection.
+        """
+        code = (
+            "import sys; sys.argv = ['pytest', 'tests/unit', '-q']\n"
+            "import run_logic_check as rlc\n"
+            "try:\n"
+            "    rlc.main()\n"
+            "except SystemExit as exc:\n"
+            "    print('SYSTEMEXIT', exc.code)\n"
+            "except Exception as exc:\n"  # FactlogError: no accepted.dl in an empty dir
+            "    print('RAISED', type(exc).__name__)\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True,
+            env=_env(config_home=config_home),
+        )
+
+        assert "SYSTEMEXIT" not in proc.stdout, proc.stdout
+        assert "RAISED FactlogError" in proc.stdout, proc.stdout + proc.stderr
