@@ -7,7 +7,9 @@ The deterministic scripts the skill calls live here (migrated in plan T1).
 
 Not an inventory — `ls tools/*.py` is (the directory has grown well past the eight
 rows below, and the old "Scripts (8 files)" heading had been wrong for some time).
-These are the ones the skill invokes by name.
+These eight are the long-standing core set, which is not the same list as "what the
+skill calls": `SKILL.md` also invokes `ask_router.py`, `corroboration.py`,
+`entity_audit.py`, `finalize.py` and `source_coverage.py` by name.
 
 | Script | Purpose |
 |---|---|
@@ -49,17 +51,23 @@ python3 /path/to/checkout/tools/run_logic_check.py
 
 ### `FACTLOG_PREFER_INSTALLED=1`
 
-Set it and the four wrappers **append** their root instead of prepending it, so an
-installed `factlog` package wins:
+Set it and the four wrappers check whether a `factlog` package is already importable.
+If one is, they leave `sys.path` untouched and it wins:
 
 ```bash
 FACTLOG_PREFER_INSTALLED=1 "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"
 ```
 
-Append rather than skip, so the opt-out cannot break anything: with no package
-installed anywhere, the bundled root is still on the path (last) and the run works
-exactly as before. Only the literal value `1` opts in — unset, `0`, `""` and `true`
-all leave the default behaviour untouched.
+**Why a check and not just "append instead of prepend".** `pip install -e .` on this
+project makes setuptools emit a `_TopLevelFinder`: the checkout is reachable only
+through a finder appended to `sys.meta_path`, *behind* the builtin `PathFinder`.
+Appending the bundle root still leaves it on `sys.path`, so `PathFinder` answers with
+the bundle and the editable finder never gets asked — the opt-out would do nothing at
+all, silently, in the shape most contributors actually have.
+
+If nothing is installed anywhere, the wrappers fall back to appending their own root,
+so a bare checkout still runs exactly as before. Only the literal value `1` opts in —
+unset, `0`, `""` and `true` all leave the default behaviour untouched.
 
 **Its limit, which matters as much as what it does:** `FACTLOG_PREFER_INSTALLED=1`
 guarantees only that **the `factlog` package comes from the installed tree**. It does
@@ -67,11 +75,32 @@ guarantees only that **the `factlog` package comes from the installed tree**. It
 is still the bundled file, at the bundle's version. If you need the script too, run
 the checkout's `tools/` directly or use `python3 -m factlog`.
 
+A concrete way that limit shows up: bundled scripts now run against a package of a
+different version, so an import the bundle expects may not exist —
+`ModuleNotFoundError: No module named 'factlog.runtime'` when the installed tree
+predates that module. **That is the documented limit doing what it says, not a new
+bug.** Match the two trees, or run the checkout's `tools/`.
+
 When the script tree and the package tree differ, `run_logic_check.py`,
 `merge_candidates.py`, `source_coverage.py` and `compile_facts.py` print a warning to
 **stderr** naming both paths. It is stderr on purpose: stdout's first two lines are a
 positional contract (`factlog: …` then `<tool>: target KB …`), pinned by
 `tests/unit/test_report_factlog_provenance.py`.
+
+### When the warning does *not* fire
+
+Two silent states, both by construction:
+
+* **Variable unset.** The wrapper prepends the bundle root, so the script tree and the
+  package tree are the same tree and the check returns nothing. A user on the default
+  configuration — precisely the situation that produced #208/#491/#527/#547 — gets no
+  warning from this. What identifies the running code there is #554's `factlog:` line
+  in `logic_report.txt` and on stdout, not this warning.
+* **`=1` with the bundle root already on `sys.path`.** `export
+  PYTHONPATH="${CLAUDE_PLUGIN_ROOT}"` is enough. The wrappers only act when their root
+  is *not* already on `sys.path`, so the whole block — probe included — is skipped, the
+  bundle wins on `sys.path` order, and no warning is printed. The opt-out is a silent
+  no-op in that environment (measured).
 
 **One thing this cannot fix:** a released bundle's `tools/` is a release artifact, so
 an already-installed plugin keeps the old bootstrap until the next release. Until

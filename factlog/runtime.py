@@ -140,6 +140,22 @@ def script_tree_split(script_file: str, imported_file: str | None = None) -> str
     ``factlog.__file__`` but can be supplied so every state is pinned by a unit test
     instead of by a venv dance.
 
+    **Assumption, and it is a real constraint on callers:** *script_file* must sit
+    exactly one directory below its distribution root, because it is reduced with the
+    same ``parent.parent`` that :func:`_package_parent` applies to a package
+    ``__init__.py`` — a helper whose docstring is written about that narrower job. Every
+    caller today satisfies it (``tools/<script>.py``, ``factlog/<module>.py``). A script
+    moved to ``tools/sub/x.py`` would reduce to ``/repo/tools`` against a package tree of
+    ``/repo`` and warn about a split that does not exist — the cry-wolf failure
+    :func:`_same_dir` and :func:`installed_factlog_dist` already guard against elsewhere.
+    Move a caller and this is the line to re-check.
+
+    Note what it does NOT cover, because the gap is easy to misread: with the variable
+    unset the wrappers put the bundle root at ``sys.path[0]``, so script tree and package
+    tree agree by construction and this returns ``None``. The default-configuration user
+    — the one whose reports caused the four misdiagnoses — sees no warning. Attribution
+    in that state comes from #554's ``factlog:`` line, not from here.
+
     Returns the warning text, or ``None`` when the two trees agree (or when either
     path is unreadable — a diagnostic must not invent a discrepancy out of a missing
     measurement). Callers print it to **stderr**: stdout's first lines are positional

@@ -8,12 +8,22 @@ installed — they verify a change against code that does not contain it. Four a
 closed defects (#208, #491, #527, #547) were re-diagnosed as live bugs from exactly
 that shape.
 
-``FACTLOG_PREFER_INSTALLED=1`` makes the wrappers **append** their root instead of
-prepending it. Append rather than skip, deliberately: skipping would make a bare
-checkout with nothing installed raise ``ImportError``, i.e. the opt-out would invent a
-new failure mode. Appending means an installed package wins when one exists and the
-bundle still wins when none does, so turning it on cannot break a working setup —
-which case 4 below measures rather than asserts.
+``FACTLOG_PREFER_INSTALLED=1`` makes the wrappers **probe** for an installed ``factlog``
+and leave ``sys.path`` alone when they find one, falling back to **appending** their own
+root when they do not.
+
+Both halves are load-bearing, and each was measured rather than reasoned:
+
+* **Probe, not append-only.** ``pip install -e .`` on this project emits a setuptools
+  ``_TopLevelFinder`` — the checkout is reachable only through a finder appended to
+  ``sys.meta_path``, *behind* the builtin ``PathFinder``. Appending ``_ROOT`` still
+  leaves it on ``sys.path``, so ``PathFinder`` answers with the bundle and the editable
+  finder is never asked. An append-only opt-out is a silent no-op in that shape, and it
+  takes the split warning down with it (both trees agree once the bundle wins twice).
+  ``TestInstallForms`` pins all three shapes.
+* **Append, not skip.** Skipping the insertion outright would make a bare checkout with
+  nothing installed raise ``ImportError`` — the opt-out would invent a new failure mode.
+  The ``none`` form pins that it does not.
 
 Everything runs in a **subprocess**. The question is literally "which package did this
 process import", and an in-process assertion could only ever describe the test runner's
@@ -121,7 +131,7 @@ def _compile(
     *,
     package_root: Path | None = None,
     prefer: str | None = None,
-    isolated: bool = False,
+    python: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``<script_root>/tools/compile_facts.py`` and hand back its streams.
 
@@ -129,16 +139,11 @@ def _compile(
     stdout line and needs no engine, so the answer to "which package did this process
     import" is the first thing it says.
 
-    ``isolated`` adds ``-S``, which drops ``site-packages`` from ``sys.path`` entirely.
-    That is how case 4 makes "no other factlog is reachable" true on a developer machine
-    that has one editably installed, instead of merely hoping for it.
+    *python* selects the interpreter, which is how ``TestInstallForms`` puts a
+    purpose-built venv — and only that venv's ``site-packages`` — behind the run.
     """
-    argv = [sys.executable]
-    if isolated:
-        argv.append("-S")
-    argv.append(str(script_root / "tools" / "compile_facts.py"))
     return subprocess.run(
-        argv,
+        [str(python or sys.executable), str(script_root / "tools" / "compile_facts.py")],
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -223,24 +228,176 @@ class TestWhichTreeWins:
         assert line == _measure(bundle, cwd)
         assert "9.9.9+" in line
 
-    def test_one_still_runs_when_no_other_factlog_is_reachable(self, tmp_path):
+
+def _installed_tree(tmp_path: Path) -> Path:
+    """The contributor's own tree, at a version neither the repo nor the bundle uses.
+
+    Three distinct versions are in play in ``TestInstallForms`` — repo ``0.7.0``, bundle
+    ``9.9.9+``, installed ``8.8.8+`` — so "the installed one won" can never be satisfied
+    by accident by the interpreter finding the repo through some path nobody named.
+    """
+    root = tmp_path / "installed"
+    shutil.copytree(REPO_ROOT / "factlog", root / "factlog")
+    init = root / "factlog" / "__init__.py"
+    init.write_text(
+        init.read_text(encoding="utf-8").replace('__version__ = "', '__version__ = "8.8.8+'),
+        encoding="utf-8",
+    )
+    return root
+
+
+# The finder setuptools>=64 writes for an editable install, reduced to the part that
+# decides this test: a MetaPathFinder APPENDED to ``sys.meta_path``, therefore consulted
+# only after the builtin ``PathFinder`` has failed. Reproduced rather than imported so
+# the shape under test is visible in the file that tests it.
+_EDITABLE_FINDER = '''
+import sys
+from importlib.machinery import PathFinder
+from importlib.util import spec_from_file_location
+from pathlib import Path
+
+MAPPING = {{"factlog": r"{package}"}}
+
+
+class _EditableFinder:
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        if fullname in MAPPING:
+            init = Path(MAPPING[fullname]) / "__init__.py"
+            if init.exists():
+                return spec_from_file_location(
+                    fullname, init, submodule_search_locations=[MAPPING[fullname]]
+                )
+            return None
+        parent, _, _child = fullname.rpartition(".")
+        if parent and parent in MAPPING:
+            return PathFinder.find_spec(fullname, path=[MAPPING[parent]])
+        return None
+
+
+def install():
+    if not any(f is _EditableFinder for f in sys.meta_path):
+        sys.meta_path.append(_EditableFinder)
+'''
+
+
+@pytest.mark.skipif(os.name == "nt", reason="venv layout probing here is posix-shaped")
+class TestInstallForms:
+    """The issue's own verification: a plugin bundle and an install, side by side.
+
+    #553 says to "check that the opt-out path runs the working tree in an environment
+    where the plugin install and an editable install coexist". Four coexistences are
+    built here from scratch — no pip, no network, ~2s each — because *how* the install
+    was recorded changes the answer, and only one of the four was ever reasoned about:
+
+    * ``wheel``    — the package copied into ``site-packages`` (a plain ``pip install .``)
+    * ``pth``      — a ``.pth`` naming the checkout (pre-PEP-660 ``setup.py develop``)
+    * ``metapath`` — a ``sys.meta_path`` finder (``pip install -e .``, setuptools>=64,
+      **measured to be what this project's own pyproject produces**)
+    * ``none``     — nothing installed at all (a bare checkout)
+
+    ``metapath`` is the one that broke an append-only implementation, and it is the
+    shape a contributor actually gets today, so a passing ``wheel`` proved nothing about
+    the case the issue was filed for.
+    """
+
+    def _venv(self, tmp_path: Path, form: str) -> tuple[Path, Path]:
+        root = tmp_path / f"venv_{form}"
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(root)],
+            check=True,
+            capture_output=True,
+        )
+        (site_packages,) = (root / "lib").glob("python3.*/site-packages")
+        return root / "bin" / "python", site_packages
+
+    def _install(self, site_packages: Path, form: str, installed: Path) -> Path:
+        """Install *installed* into *site_packages* in the given shape.
+
+        Returns the ``__init__.py`` the run must end up importing. It differs by form
+        and that is the point: ``wheel`` COPIES the code into site-packages, so a test
+        asserting the checkout path would be asserting something only editable installs
+        can satisfy — and would quietly stop testing ``wheel`` at all.
+        """
+        if form == "wheel":
+            shutil.copytree(installed / "factlog", site_packages / "factlog")
+            return site_packages / "factlog" / "__init__.py"
+        if form == "pth":
+            (site_packages / "factlog.pth").write_text(f"{installed}\n", encoding="utf-8")
+        elif form == "metapath":
+            (site_packages / "_editable_probe_finder.py").write_text(
+                _EDITABLE_FINDER.format(package=installed / "factlog"), encoding="utf-8"
+            )
+            (site_packages / "__editable__.probe.pth").write_text(
+                "import _editable_probe_finder; _editable_probe_finder.install()\n",
+                encoding="utf-8",
+            )
+        elif form != "none":  # pragma: no cover - guards a typo'd parametrisation
+            raise AssertionError(form)
+        return installed / "factlog" / "__init__.py"
+
+    @pytest.mark.parametrize("form", ["wheel", "pth", "metapath", "none"])
+    def test_unset_keeps_the_bundle_winning_in_every_install_form(self, tmp_path, form):
+        """The default is the default no matter how the other tree got installed."""
+        bundle = _bundle(tmp_path)
+        installed = _installed_tree(tmp_path)
+        kb = _new_kb(tmp_path, f"kb_{form}_default")
+        cwd = _neutral_cwd(tmp_path)
+        python, site_packages = self._venv(tmp_path, form)
+        self._install(site_packages, form, installed)
+
+        result = _compile(bundle, kb, cwd, python=python)
+
+        assert "9.9.9+" in _factlog_line(result)
+        assert "warning:" not in result.stderr
+
+    @pytest.mark.parametrize("form", ["wheel", "pth", "metapath"])
+    def test_one_hands_the_run_to_the_installed_tree_in_every_install_form(self, tmp_path, form):
+        """The claim the issue asks to verify, in all three shapes an install can take.
+
+        Before the probe, ``metapath`` failed here *and said nothing*: the bundle won
+        both the import and the split comparison, so the run looked exactly like a
+        healthy one. That is the same unattributable state #553 exists to remove, which
+        is why the warning is asserted alongside the version.
+        """
+        bundle = _bundle(tmp_path)
+        installed = _installed_tree(tmp_path)
+        kb = _new_kb(tmp_path, f"kb_{form}_prefer")
+        cwd = _neutral_cwd(tmp_path)
+        python, site_packages = self._venv(tmp_path, form)
+        expected = self._install(site_packages, form, installed)
+
+        result = _compile(bundle, kb, cwd, prefer="1", python=python)
+
+        line = _factlog_line(result)
+        assert "8.8.8+" in line, f"{form}: the installed tree did not win"
+        assert "9.9.9+" not in line
+        assert str(expected) in line
+        # Both trees are named, and the warning fires: a split that the opt-out CREATED
+        # is exactly the split a reader has to be told about.
+        assert "warning:" in result.stderr
+        assert str(bundle / "tools" / "compile_facts.py") in result.stderr
+
+    def test_one_still_runs_when_nothing_is_installed_anywhere(self, tmp_path):
         """Append, not skip: the opt-out must not be able to break a bare checkout.
 
-        With ``-S`` there is no site-packages and no ``PYTHONPATH``, so the bundle's own
-        appended root is the only ``factlog`` in existence. A "skip the insertion"
-        implementation raises ``ImportError`` here; appending exits 0 and names the
-        bundle. This is the case that decides between the two designs.
+        An empty venv means the bundle's own appended root is the only ``factlog`` in
+        existence. An implementation that merely *skips* the insertion raises
+        ``ImportError`` here; appending exits 0 and names the bundle. This is the case
+        that keeps the fallback in the design.
         """
         bundle = _bundle(tmp_path)
         kb = _new_kb(tmp_path, "kb_fallback")
         cwd = _neutral_cwd(tmp_path)
+        python, _ = self._venv(tmp_path, "none")
 
-        result = _compile(bundle, kb, cwd, prefer="1", isolated=True)
+        result = _compile(bundle, kb, cwd, prefer="1", python=python)
 
         assert result.returncode == 0, result.stdout + result.stderr
         line = _factlog_line(result)
         assert "9.9.9+" in line
         assert str(bundle / "factlog" / "__init__.py") in line
+        assert "warning:" not in result.stderr
 
 
 class TestSplitTreeWarning:
@@ -303,12 +460,20 @@ class TestScriptTreeSplit:
 
         assert script_tree_split("/repo/tools/run_logic_check.py", "/repo/factlog/__init__.py") is None
 
-    def test_a_wrapper_inside_the_package_compares_the_tree_with_itself(self):
-        """Why ``tools/compile_facts.py`` carries the check and ``factlog/compile_facts.py`` does not.
+    def test_a_package_file_compares_its_tree_with_itself(self):
+        """Records WHY ``tools/compile_facts.py`` carries the check — it does not enforce it.
 
         Inside the package ``__file__`` IS the package file, so the comparison is the
-        package tree against itself and can never fire. Pinned here so nobody "tidies"
-        the check back into ``main()`` where it would be silently dead.
+        package tree against itself and can never fire; moving the call into
+        ``factlog.compile_facts.main()`` would make it silently dead code. That reasoning
+        is worth keeping next to the function, which is all this test does.
+
+        It is explicitly NOT the guard on the placement: this assertion holds no matter
+        where the call lives, so it survives a mutant that moves it. The placement is
+        pinned by ``test_a_split_warns_on_stderr_and_leaves_stdout_positions_alone``,
+        which runs a real bundled ``tools/compile_facts.py`` and dies when the check is
+        moved into the package. No source-scanning guard is added here on purpose —
+        enforcing one behaviour twice only manufactures equivalent mutants.
         """
         from factlog.runtime import script_tree_split
 
@@ -373,8 +538,13 @@ class TestTheFourBootstrapsDoNotDrift:
         The other ``tools/`` scripts insert ``_TOOLS_DIR`` — their own directory, to
         resolve sibling ``tools`` modules. That is a different mechanism and is out of
         scope; they reach the bundled package transitively through ``factlog_config``,
-        which is one of these four. If a fifth script ever inserts a distribution root,
-        this fails and the fix has a hole.
+        which is one of these four.
+
+        Scope, stated so the guarantee is not read as wider than it is: this matches one
+        **literal line**. A fifth script that reached the distribution root by another
+        spelling — ``Path(__file__).parents[1]``, a helper, a relative walk — would pass
+        this test while opening exactly the hole it is here to catch. It defends against
+        copy-paste, which is how the existing four arrived, and not against invention.
         """
         inserting = {
             path.name

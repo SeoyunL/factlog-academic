@@ -28,13 +28,34 @@ gate is also backed by a plugin hook (`hooks/hooks.json`).
 > the release, not the change. To exercise a working tree, run that checkout's own
 > `tools/<script>.py`, or `python3 -m factlog <subcommand>`.
 >
-> `FACTLOG_PREFER_INSTALLED=1` makes the bundled wrappers *append* their root
-> instead of prepending it, so an installed package wins. Its limit is exact and
-> load-bearing: it only guarantees **the `factlog` package comes from the installed
-> tree**. It does **not** guarantee **your working tree is what runs** — the script
-> body is still the bundled file. Only the literal value `1` opts in (unset, `0`,
-> `""` and `true` all leave the default). When the two trees differ, the
-> deterministic steps print a warning to **stderr** naming both; stdout is unchanged.
+> `FACTLOG_PREFER_INSTALLED=1` makes the bundled wrappers leave `sys.path` alone
+> when an installed `factlog` is importable, so the installed package wins. Its limit
+> is exact and load-bearing: it only guarantees **the `factlog` package comes from
+> the installed tree**. It does **not** guarantee **your working tree is what runs**
+> — the script body is still the bundled file. Only the literal value `1` opts in
+> (unset, `0`, `""` and `true` all leave the default).
+>
+> Because the bundled scripts then run against a *different* package version, an
+> import the bundle expects can be missing — e.g. `ModuleNotFoundError: No module
+> named 'factlog.runtime'` when the installed tree predates that module. That is the
+> limit above showing itself, not a bug: match the two trees, or run the checkout's
+> `tools/` directly.
+>
+> Two things this does **not** do, both worth knowing before reading a report:
+>
+> * **With the variable unset there is no warning, ever.** The wrapper puts the
+>   bundle root first, so the script tree and the package tree agree by construction
+>   and the split check stays silent. A user on the default configuration — the
+>   situation behind #208/#491/#527/#547 — is told which factlog ran by the
+>   `factlog:` line (#554), not by a warning.
+> * **Even with `=1`, it goes quiet if the bundle root is already on `sys.path`** —
+>   `export PYTHONPATH="${CLAUDE_PLUGIN_ROOT}"` is enough. The wrappers only act when
+>   their root is *not* already on `sys.path`, so the opt-out is skipped entirely, the
+>   bundle wins and no warning fires.
+>
+> Finally: a bundled `tools/` is a **release artifact**, so an already-installed
+> plugin keeps its old bootstrap until the next release ships. Until then the working
+> answer is to run the checkout's `tools/` or `python3 -m factlog`.
 
 ## Deterministic gate (do not skip)
 
