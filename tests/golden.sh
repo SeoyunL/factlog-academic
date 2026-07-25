@@ -33,8 +33,17 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GOLDEN_DIR="$SCRIPT_DIR/golden"
 
 # FACTLOG_ROOT must be set by the caller; resolve to absolute path.
+# The remedy names a COPY, not examples/sample-kb itself. This message is the first
+# thing a new caller reads — ahead of the header comment — so it is where the
+# in-place hazard actually has to be headed off: the run rewrites
+# <KB>/facts/logic_report.txt, which since #554 carries the absolute path of the
+# factlog that produced it. In place, that is a developer's home directory landing
+# in a tracked fixture. (Before #554 an in-place run was a byte-identical no-op,
+# which is why the old message could get away with it.)
 if [ -z "${FACTLOG_ROOT:-}" ]; then
-  echo "FATAL: FACTLOG_ROOT is not set. Run as: FACTLOG_ROOT=examples/sample-kb bash tests/golden.sh" >&2
+  echo "FATAL: FACTLOG_ROOT is not set. Run against a throwaway copy, e.g.:" >&2
+  echo '  KB="$(mktemp -d)/sample-kb" && cp -R examples/sample-kb "$KB" && \' >&2
+  echo '    FACTLOG_ROOT="$KB" bash tests/golden.sh' >&2
   exit 1
 fi
 # Resolve relative to cwd if not absolute.

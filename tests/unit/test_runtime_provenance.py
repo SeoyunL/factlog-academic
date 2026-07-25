@@ -27,6 +27,7 @@ import pytest
 import factlog
 from factlog.runtime import (
     UNKNOWN,
+    file_url_to_path,
     installation_skew,
     installed_factlog_dist,
     provenance_line,
@@ -40,18 +41,35 @@ class TestRunningFactlog:
         assert version == factlog.__version__
         assert path == factlog.__file__
 
-    def test_path_is_not_resolved(self):
-        """``__file__`` verbatim, symlinks and worktrees intact.
+    def test_path_is_returned_verbatim_not_normalised(self, monkeypatch):
+        """``__file__`` verbatim — no ``resolve``, ``realpath``, ``normpath``, ``abspath``.
 
-        A resolved path stops matching ``python -c "import factlog;
-        print(factlog.__file__)"`` — the one command a reader runs to check the
-        line, and the command #553's reproduction uses. Pinned by identity with
-        ``__file__``, since resolving only differs when a link is in play and the
-        test machine may have none.
+        This is the single design decision the module docstring spends twelve lines
+        on, and pinning it needs an input a normalising call would visibly change.
+        ``assert path == factlog.__file__`` cannot do that on its own: with no
+        symlink in play every one of those calls is the identity function, so the
+        assertion holds for the mutant too. Measured — replacing ``str(path)`` with
+        ``os.path.realpath(str(path))`` left the entire file green.
+
+        A path carrying ``.`` and ``..`` segments needs no symlink and no filesystem:
+        every normaliser collapses it to ``/a/factlog/__init__.py``, and this fails.
+
+        Why verbatim matters: a resolved path stops matching
+        ``python -c "import factlog; print(factlog.__file__)"`` — the one command a
+        reader runs to check the line, and the command #553's reproduction uses. A
+        path that disagrees with the reader's own measurement is worse than none.
         """
+        unnormalised = "/a/./b/../factlog/__init__.py"
+        monkeypatch.setattr(factlog, "__file__", unnormalised)
+        _, path = running_factlog()
+        assert path == unnormalised
+        # Through the rendered line too, so a normaliser cannot be reintroduced one
+        # layer up instead.
+        assert provenance_line() == f"factlog: {factlog.__version__} ({unnormalised})"
+
+    def test_path_is_the_module_file_not_the_package_directory(self):
         _, path = running_factlog()
         assert path == factlog.__file__
-        # And it is the module file, not the package directory.
         assert Path(path).name == "__init__.py"
 
     def test_missing_attributes_degrade_instead_of_raising(self, monkeypatch):
@@ -187,6 +205,74 @@ class TestInstallationSkewDegradations:
         assert installation_skew(
             "factlog-academic", "0.7.0", IMPORTED_ROOT + "/", "0.7.0", IMPORTED
         ) is None
+
+
+class TestFileUrlToPath:
+    """``file://`` URL → path, pinned for platforms this CI cannot run.
+
+    All three CI jobs are ``ubuntu-latest``, so a Windows-only defect is invisible
+    to every gate the project has. Keeping the conversion a pure string transform
+    is what makes the Windows input assertable from Linux — which is the whole
+    reason it is not ``urllib.request.url2pathname``, whose Windows branch cannot
+    be entered here at all.
+    """
+
+    def test_posix_path_is_unchanged(self):
+        assert file_url_to_path("file:///Users/me/factlog") == "/Users/me/factlog"
+
+    def test_windows_drive_letter_loses_the_url_leading_slash(self):
+        """THE bug this helper exists for.
+
+        ``urlparse`` hands back ``/C:/Users/me/factlog``. That leading slash is URL
+        grammar, not path: with it, ``ntpath.normpath`` renders the dist root
+        ``\\c:\\users\\me\\factlog`` while the imported package is
+        ``c:\\users\\me\\factlog`` — unequal by construction, unrescuable by the
+        realpath fallback, and therefore a permanent WARN on every Windows editable
+        install.
+        """
+        assert file_url_to_path("file:///C:/Users/me/factlog") == "C:/Users/me/factlog"
+
+    def test_windows_root_of_drive(self):
+        assert file_url_to_path("file:///D:/") == "D:/"
+
+    def test_a_single_letter_directory_is_not_mistaken_for_a_drive(self):
+        # The drive test keys on the colon, so a posix ``/c/...`` stays whole.
+        assert file_url_to_path("file:///c/Users/me") == "/c/Users/me"
+
+    def test_percent_encoding_is_decoded(self):
+        assert file_url_to_path("file:///Users/me/my%20tree") == "/Users/me/my tree"
+        assert file_url_to_path("file:///C:/my%20tree") == "C:/my tree"
+
+    def test_localhost_authority_is_treated_as_local(self):
+        assert file_url_to_path("file://localhost/Users/me/factlog") == "/Users/me/factlog"
+
+    def test_unc_authority_is_preserved(self):
+        assert file_url_to_path("file://server/share/factlog") == "//server/share/factlog"
+
+    @pytest.mark.parametrize("url", ["", "file://", "https://example.com/x", "not a url"])
+    def test_unusable_urls_return_none(self, url):
+        # None, not a guess: the caller falls back to locate_file, and a guessed
+        # root is exactly what would produce the false WARN.
+        assert file_url_to_path(url) is None
+
+    def test_a_windows_editable_install_does_not_warn(self):
+        """End-to-end over the judgement, not just the string.
+
+        The dist root arrives from the URL and the imported path arrives from
+        ``__file__``; this is the pair that used to disagree. Compared with forward
+        slashes so the assertion holds on the posix CI that must catch it — on
+        Windows ``normpath`` folds the separators as well.
+        """
+        dist = _Dist(
+            "factlog-academic",
+            "0.7.0",
+            f"{_SITE}/factlog_academic-0.7.0.dist-info",
+            direct_url='{"dir_info": {"editable": true}, "url": "file:///C:/Users/me/factlog"}',
+            located=_SITE,
+        )
+        found = installed_factlog_dist(lambda: [dist])
+        assert found == ("factlog-academic", "0.7.0", "C:/Users/me/factlog")
+        assert installation_skew(*found, "0.7.0", "C:/Users/me/factlog/factlog/__init__.py") is None
 
 
 class _Dist:

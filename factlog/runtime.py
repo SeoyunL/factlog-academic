@@ -189,6 +189,52 @@ def installation_skew(
     return None
 
 
+def file_url_to_path(url: str) -> str | None:
+    """A PEP 610 ``file://`` URL as a filesystem path — on any platform, from any.
+
+    A pure string transform, deliberately, and NOT ``urllib.request.url2pathname``:
+    that function dispatches on the *running* platform, so its Windows branch can
+    neither execute nor be tested here — all three CI jobs are ``ubuntu-latest``
+    (.github/workflows/ci.yml), and neither Windows nor macOS runs. Fixing a
+    Windows-only defect with a call no CI can enter would leave the defect exactly
+    as unobservable as it was. As a string function, the Windows input is a unit
+    test that runs on Linux.
+
+    The transform that matters: ``urlparse`` gives ``file:///C:/Users/me/factlog``
+    the path ``/C:/Users/me/factlog``, and that leading slash belongs to the URL
+    grammar, not to any Windows path. Left in, it makes the comparison in
+    :func:`_same_dir` unsatisfiable —
+
+        ntpath.normcase(ntpath.normpath("/C:/Users/me/factlog"))  -> "\\\\c:\\\\users\\\\me\\\\factlog"
+        ntpath.normcase(ntpath.normpath(r"C:\\Users\\me\\factlog")) -> "c:\\\\users\\\\me\\\\factlog"
+
+    — and no realpath second chance can rescue it, so EVERY Windows editable
+    install would carry a permanent WARN. That is precisely the cry-wolf failure
+    this module's docstring names as the thing to avoid, and it would have been a
+    false positive introduced by the fix rather than found by it.
+
+    Returns None for anything that is not a usable ``file://`` URL, so the caller
+    falls back to ``locate_file`` rather than comparing against a guess.
+    """
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme != "file":
+        return None
+    path = unquote(parsed.path)
+    if not path:
+        return None
+    host = parsed.netloc
+    if host and host.lower() != "localhost":
+        # file://server/share — a UNC location. Preserved rather than dropped so
+        # such an install at least compares as itself instead of as its share path.
+        return f"//{host}{path}"
+    if len(path) > 2 and path[0] == "/" and path[1].isalpha() and path[2] == ":":
+        # "/C:/Users/me" -> "C:/Users/me". A drive letter, not a root directory.
+        return path[1:]
+    return path
+
+
 def _dist_root(dist) -> str | None:
     """Where a distribution's code lives, editable installs included.
 
@@ -212,10 +258,12 @@ def _dist_root(dist) -> str | None:
         try:
             record = json.loads(raw)
             url = record.get("url") or ""
-            if record.get("dir_info", {}).get("editable") and url.startswith("file://"):
-                from urllib.parse import unquote, urlparse
-
-                return unquote(urlparse(url).path) or None
+            if record.get("dir_info", {}).get("editable"):
+                # None (not a usable file:// URL) falls through to locate_file rather
+                # than being compared: a guessed root is what produces a false WARN.
+                converted = file_url_to_path(url)
+                if converted:
+                    return converted
         except (ValueError, AttributeError, TypeError):
             pass
     try:

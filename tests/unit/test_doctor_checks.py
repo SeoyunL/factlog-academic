@@ -26,22 +26,25 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _VersionInfo = collections.namedtuple("_VersionInfo", "major minor micro releaselevel serial")
 
 
-def _by_title(checks, needle):
-    """Return the first check whose title contains *needle* (or None)."""
-    for c in checks:
-        if needle in c.title:
-            return c
-    return None
-
-
 def _by_prefix(checks, prefix):
     """Return the first check whose title *starts with* *prefix* (or None).
 
-    Needed for rows whose token also occurs inside another row's path. Since #554
-    the factlog row carries an absolute path and sits above the git row, so on a
-    checkout kept under e.g. ``~/git/factlog`` a substring search for ``git``
-    would return the factlog row — a test that passes or fails depending on where
-    the developer keeps their code.
+    The ONLY row lookup in this file, and a prefix match rather than a substring
+    one, because doctor rows carry absolute paths and a substring search happily
+    matches a *different* row's path.
+
+    Measured, not theorised: with the checkout reached through a directory named
+    ``git-home`` (the shape of every ``~/git/…`` or ``~/github/…`` clone), the
+    #554 factlog row — which sits ABOVE the git row and carries
+    ``…/git-home/factlog/__init__.py`` — was returned for ``"git"``, and
+    ``test_git_fail_blocks_doctor_but_not_setup`` failed on ``'OK' == 'FAIL'``.
+    Not a quiet false negative: a red suite for anyone who keeps code under a
+    path containing the token.
+
+    The substring helper this replaced is deleted rather than kept for the other
+    rows. ``"Python"`` and ``"FACTLOG_PYTHON"`` were safe only by accident — list
+    order and the improbability of those literals appearing in a path — and the
+    accident stops holding the moment another path-bearing row is added.
     """
     for c in checks:
         if c.title.startswith(prefix):
@@ -73,7 +76,7 @@ class TestFactlogPython:
     def test_unset_is_info(self, monkeypatch):
         monkeypatch.delenv("FACTLOG_PYTHON", raising=False)
         checks = cli._collect_doctor_checks()
-        row = _by_title(checks, "FACTLOG_PYTHON")
+        row = _by_prefix(checks, "FACTLOG_PYTHON")
         assert row is not None
         assert row.severity == "INFO"
 
@@ -82,7 +85,7 @@ class TestFactlogPython:
         target.write_text("#!/bin/sh\n")
         monkeypatch.setenv("FACTLOG_PYTHON", str(target))
         checks = cli._collect_doctor_checks()
-        row = _by_title(checks, "FACTLOG_PYTHON")
+        row = _by_prefix(checks, "FACTLOG_PYTHON")
         assert row is not None
         assert row.severity == "OK"
 
@@ -90,7 +93,7 @@ class TestFactlogPython:
         missing = tmp_path / "nope" / "python3"
         monkeypatch.setenv("FACTLOG_PYTHON", str(missing))
         checks = cli._collect_doctor_checks()
-        row = _by_title(checks, "FACTLOG_PYTHON")
+        row = _by_prefix(checks, "FACTLOG_PYTHON")
         assert row is not None
         assert row.severity == "WARN"
 
@@ -125,7 +128,7 @@ class TestShadowFolder:
 class TestPythonSurface:
     def test_python_token_and_interpreter_path_present(self):
         checks = cli._collect_doctor_checks()
-        row = _by_title(checks, "Python")
+        row = _by_prefix(checks, "Python")
         assert row is not None
         # The interpreter path is surfaced in the title (issue #180 diag 2).
         assert cli.sys.executable in row.title
@@ -133,7 +136,7 @@ class TestPythonSurface:
     def test_python_below_floor_is_fail(self, monkeypatch):
         monkeypatch.setattr(cli.sys, "version_info", _VersionInfo(3, 10, 0, "final", 0))
         checks = cli._collect_doctor_checks()
-        row = _by_title(checks, "Python")
+        row = _by_prefix(checks, "Python")
         assert row is not None
         assert row.severity == "FAIL"
         # And this FAIL *does* gate setup (default), unlike git.
@@ -148,7 +151,7 @@ class TestPythonSurface:
             r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\python.exe",
         )
         checks = cli._collect_doctor_checks()
-        row = _by_title(checks, "Python")
+        row = _by_prefix(checks, "Python")
         assert row is not None
         assert row.severity == "WARN"
 
@@ -183,7 +186,7 @@ class TestSetupGateDecoupledFromGit:
         monkeypatch.chdir(tmp_path)
         checks = cli._collect_doctor_checks()
 
-        git = _by_title(checks, "git")
+        git = _by_prefix(checks, "git")
         assert git is not None and git.severity == "FAIL"
 
         # doctor gate (all FAIL) → blocked.

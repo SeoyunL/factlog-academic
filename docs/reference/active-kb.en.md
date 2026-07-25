@@ -88,8 +88,10 @@ take `--target`. A flag applies only to the **single command** it was given to, 
 > that KB rather than refusing.
 
 > **`compile_facts.py`/`run_logic_check.py` take a rank-3 root with no flag, and
-> both name the target first.** Each prints `<tool>: target KB <root> (from
-> <source>)` before doing anything — the same line the mutating tools print. Both
+> both name themselves and then the target, before doing anything.** Each prints
+> `factlog: <version> (<path to factlog/__init__.py>)` first, naming the code that
+> is running (#554), then `<tool>: target KB <root> (from <source>)` — the target
+> line being the same one the mutating tools print. Both
 > re-derive that KB's own artifacts, so an unaimed run writes what an aimed one
 > would; the line is there because what is left is a *reading* hazard: believing you
 > checked KB A while reading a report from KB B.
