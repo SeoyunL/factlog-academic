@@ -265,8 +265,32 @@ def test_the_issue_reproduction_now_passes(kb):
     Those bytes were chosen as the canonical empty policy BECAUSE a user (and finalize
     since #194) already writes them, so the reproduction passing is the point rather than
     a side effect.
+
+    #557 was filed with this same reproduction, read off a 0.6.0 plugin cache that
+    predates #491; against this tree it passes here exactly as it did for #491. What
+    #557 actually closed is below — the two non-drift failures validate still misreported.
     """
     (kb / "policy" / "logic-policy.dl").write_text("// no policy rules\n", encoding="utf-8")
     assert _policy_lines(_validate(kb)) == []
     checked = _generate(kb, "--check")
     assert checked.returncode == 0, checked.stdout + checked.stderr
+
+
+def test_a_hand_written_dl_over_a_ruleless_md_is_stale_through_validate(kb):
+    """(8) A regression pin, not a fix: this already passes before #557.
+
+    It fences the half of the delegation #557 narrows. Handing --check a .md it cannot
+    judge is the bug; handing it one it CAN judge is the whole point of #491, and the
+    scaffolded prose-only .md is judgeable. Written by hand, `requires_review` rules over
+    a .md that defines none are stale, and validate has to say so — the mutant this kills
+    is a narrowing that stops delegating for a .md with real content.
+
+    Asserted on "stale", a token the child owns, deliberately: validate's own prefix
+    around it changes later in #557 and this pin must survive that.
+    """
+    (kb / "policy" / "logic-policy.dl").write_text(
+        "requires_review(F) :- fact(F, \"develops\").\n", encoding="utf-8"
+    )
+    lines = _policy_lines(_validate(kb))
+    assert lines, _validate(kb).stdout + _validate(kb).stderr
+    assert any("stale" in line for line in lines), lines
