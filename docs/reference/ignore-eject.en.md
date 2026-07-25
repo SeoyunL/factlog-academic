@@ -113,17 +113,24 @@ The report says which of the two each source is, so follow the line it prints.
 **(1) The row is still in `candidates.csv`.** A row a human has ruled on
 (`confirmed`/`accepted`/`needs_review`) makes the
 [#218](https://github.com/SeoyunL/factlog-academic/issues/218) ratchet refuse the
-rebuild, so the ghost row stays in the table — and `factlog eject --orphans` sees
-that source and retires it in one command.
+rebuild, so the ghost row stays in the table; a `superseded` ghost is always in
+this class too, being retained for audit. `factlog eject --orphans` sees that
+source and retires it in one command.
 
 ```
   RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/doomed.md
   run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`
 ```
 
-**(2) The row is already gone.** An unruled (`candidate`) row is rebuilt away
-silently. `eject` builds its cited set from `facts/candidates.csv`, so it cannot
-see that source either and ends with "no orphaned sources found".
+**(2) The row is already gone.** An unruled (`candidate`) row is usually rebuilt
+away silently. `eject` builds its cited set from `facts/candidates.csv`, so it
+cannot see that source either and ends with "no orphaned sources found".
+
+> What decides the class is whether the ROW SURVIVED, not the status itself. The
+> ratchet refuses the WHOLE rebuild rather than a row, so one ruled-on ghost in
+> the same merge keeps the unruled ghosts too, and they are reported as (1). The
+> report judges each source by its actual state — follow the line it prints
+> instead of predicting it from the status.
 
 ```
   RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md

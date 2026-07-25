@@ -198,6 +198,14 @@ printf '%s' "$rout" | grep -qF "RUN ROWS cite a missing source (dropped at merge
 # would leave a dead end where there is a tracked fix (#559).
 printf '%s' "$rout" | grep -qF 'run rows cite 2 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)' \
   && ok "remedy hint is truthful and names the tracked eject fix" || bad "remedy hint missing/wrong: $rout"
+# ...and the OTHER class's hint must be ABSENT. Asserting only what is printed
+# left `if kept:` unguarded: breaking it added
+# `run rows cite 0 missing source(s) ... retire them with eject --orphans` to this
+# very KB, where that command does nothing — the false remedy this change removed,
+# back as a second line nobody was checking for.
+printf '%s' "$rout" | grep -qF "candidates.csv still carries" \
+  && bad "printed the eject remedy on a KB where nothing is ejectable: $rout" \
+  || ok "no eject remedy line when no ref is ejectable"
 [ "$rrc" -eq 0 ] && ok "run orphans alone do not fail the default run" || bad "run orphans caused exit $rrc"
 # The new axis is informational: --strict's contract is text gaps, nothing else.
 set +e; "$PYTHON" "$COV" --wiki "$RUNKB" --strict >/dev/null 2>&1; srrc=$?; set -e
@@ -246,6 +254,29 @@ printf '%s' "$mout" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) tota
 printf '%s' "$mout" | grep -qF "1 orphan citation(s), 3 run-cited source(s) missing" \
   && ok "orphan citation count and meaning unchanged" || bad "orphan count changed: $mout"
 [ "$mrc" -eq 0 ] && ok "mixed KB still exits 0" || bad "mixed KB exit $mrc"
+
+# --- a run row citing an ingest CONVERSION on disk is not a missing source -----
+# "On disk" spans BOTH source roots (common.source_file_refs walks sources/ and
+# runs/sources/). Restricting it to sources/ passed every other assertion here
+# while reporting every ingest conversion in the KB — runs/sources/report.pdf.md
+# and friends, the normal shape of any KB with a binary original — as a source
+# that is missing. The positive case had no coverage at all on this axis.
+CONVKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$CONVKB" >/dev/null
+printf '\x00\x01bin\x00' > "$CONVKB/sources/report.pdf"
+mkdir -p "$CONVKB/runs/sources"
+printf 'converted text\n' > "$CONVKB/runs/sources/report.pdf.md"
+printf '%s\n%s\n' "$HEADER" \
+  '갑봇,통합,을서비스,runs/sources/report.pdf.md,accepted,0.9,' > "$CONVKB/facts/candidates.csv"
+printf '%s' '[{"subject":"갑봇","relation":"통합","object":"을서비스","source":"runs/sources/report.pdf.md","status":"accepted","confidence":"0.9","note":""}]' > "$CONVKB/runs/2026-01-01-conv.json"
+set +e; cout2="$("$PYTHON" "$COV" --wiki "$CONVKB" 2>&1)"; cout2_rc=$?; set -e
+printf '%s' "$cout2" | grep -qF "RUN ROWS cite" \
+  && bad "a runs/sources conversion that EXISTS was reported as missing: $cout2" \
+  || ok "a run row citing an on-disk runs/sources conversion is not a run orphan"
+printf '%s' "$cout2" | grep -qF "run-cited source(s) missing" \
+  && bad "summary counted an existing conversion as missing: $cout2" \
+  || ok "an existing conversion is absent from the summary field too"
+[ "$cout2_rc" -eq 0 ] && ok "conversion-citing KB exits 0" || bad "conversion KB exit $cout2_rc"
 
 # --- an unreadable run file is skipped, but SAID so ---------------------------
 # Skipping keeps the report alive (merge itself exits 1 here); skipping in

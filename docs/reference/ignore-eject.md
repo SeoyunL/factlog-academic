@@ -111,17 +111,23 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 
 **(1) 행이 `candidates.csv` 에 남아 있는 경우** — 사람이 판정한 행
 (`confirmed`/`accepted`/`needs_review`)은 [#218](https://github.com/SeoyunL/factlog-academic/issues/218)
-래칫이 rebuild 를 거부하므로 유령 행이 표에 그대로 남습니다. 이때는
-`factlog eject --orphans` 가 그 소스를 인식하고 한 번에 정리합니다.
+래칫이 rebuild 를 거부하므로 유령 행이 표에 그대로 남습니다. `superseded` 유령도
+감사 목적으로 보존되므로 늘 이 부류입니다. 이때는 `factlog eject --orphans` 가 그
+소스를 인식하고 한 번에 정리합니다.
 
 ```
   RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/doomed.md
   run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`
 ```
 
-**(2) 행이 이미 사라진 경우** — 미판정(`candidate`) 행은 조용히 rebuild 되어 표에서
-사라집니다. `eject` 는 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에 이
-소스를 보지 못하고 `no orphaned sources found` 로 끝납니다.
+**(2) 행이 이미 사라진 경우** — 미판정(`candidate`) 행은 보통 조용히 rebuild 되어
+표에서 사라집니다. `eject` 는 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에
+이 소스를 보지 못하고 `no orphaned sources found` 로 끝납니다.
+
+> 부류를 정하는 것은 status 자체가 아니라 **그 행이 표에 남았는지**입니다. 래칫은
+> 행 단위가 아니라 rebuild **전체**를 거부하므로, 같은 merge 에 판정된 유령이 하나라도
+> 있으면 미판정 유령도 함께 남아 (1) 로 출력됩니다. 리포트는 소스별로 실제 상태를
+> 보고 판정하니, status 로 추측하지 말고 출력된 줄을 따르십시오.
 
 ```
   RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md

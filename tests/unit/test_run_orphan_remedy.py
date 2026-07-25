@@ -20,10 +20,16 @@ hint on `orphans` would have kept the same lie for that status.
 """
 from __future__ import annotations
 
+import json
 import unicodedata
 
 import pytest
-from source_coverage import eject_visible_refs, report_run_orphans, report_unreadable_runs
+from source_coverage import (
+    eject_visible_refs,
+    report_run_orphans,
+    report_unreadable_runs,
+    run_orphan_sources,
+)
 
 _HEADER = "subject,relation,object,source,status,confidence,note\n"
 
@@ -128,6 +134,68 @@ class TestRemedyBranches:
         """The 0-case contract: no line at all, not a line reading '0 missing'."""
         report_run_orphans([], {"sources/ghost.md"})
         assert stderr_lines(capsys) == []
+
+    def test_one_class_alone_never_prints_the_other_at_zero(self, capsys):
+        """Each `if` guards the state where only the OTHER class exists — the
+        ordinary state of a KB. Break one and the summary of an empty class is
+        printed at zero, which for `kept` is the false remedy this module removed:
+        "retire them with eject --orphans" on a KB where it retires nothing."""
+        report_run_orphans([("sources/blind.md", 1)], set())
+        assert "candidates.csv still carries" not in "\n".join(stderr_lines(capsys))
+        report_run_orphans([("sources/kept.md", 1)], {"sources/kept.md"})
+        assert "inspect runs/*.json" not in "\n".join(stderr_lines(capsys))
+
+
+class TestDeterministicOrder:
+    """Two ghosts is where order starts to exist, and the docstring promises it is
+    by path. Nothing enforced that: the two `sorted()` calls behind this could both
+    be deleted with every other test still green, leaving the stderr block of a
+    multi-ghost KB in whatever order the filesystem yielded — so two runs of the
+    same report on the same KB could differ, and a diff of them would show noise
+    rather than a change.
+    """
+
+    def build(self, tmp_path, refs_per_file):
+        (tmp_path / "runs").mkdir()
+        for name, refs in refs_per_file.items():
+            rows = [
+                {
+                    "subject": "갑봇",
+                    "relation": "통합",
+                    "object": f"을서비스{i}",
+                    "source": ref,
+                    "status": "candidate",
+                    "confidence": "0.9",
+                    "note": "",
+                }
+                for i, ref in enumerate(refs)
+            ]
+            (tmp_path / "runs" / name).write_text(
+                json.dumps(rows, ensure_ascii=False), encoding="utf-8"
+            )
+        return tmp_path
+
+    def test_run_orphans_come_back_sorted_by_path(self, tmp_path):
+        """File order and within-file row order both run against the answer, so a
+        version that preserved either would be caught."""
+        self.build(
+            tmp_path,
+            {
+                "z-second.json": ["sources/m.md", "sources/a.md"],
+                "a-first.json": ["sources/z.md"],
+            },
+        )
+        assert run_orphan_sources(tmp_path) == [
+            ("sources/a.md", 1),
+            ("sources/m.md", 1),
+            ("sources/z.md", 1),
+        ]
+
+    def test_the_printed_block_follows_that_order(self, capsys):
+        report_run_orphans([("sources/a.md", 1), ("sources/m.md", 2)], set())
+        lines = stderr_lines(capsys)
+        assert "sources/a.md" in lines[0]
+        assert "sources/m.md" in lines[1]
 
 
 class TestUnreadableRunReport:

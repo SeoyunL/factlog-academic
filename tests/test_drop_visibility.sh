@@ -182,8 +182,13 @@ printf '%s' "$rcov" | grep -qF "RUN ROWS cite a missing source (1 row(s); candid
   && ok "the line does not claim the row was dropped at merge" || bad "wording wrong: $rcov"
 printf '%s' "$rcov" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`' \
   && ok "the remedy names the command that actually works" || bad "eject remedy missing: $rcov"
-printf '%s' "$rcov" | grep -qF "does not cover these" \
-  && bad "printed the #559 hint for a ref eject --orphans DOES clean" \
+# Both halves of the blind-spot hint must be absent here — its claim AND the
+# manual step it sends the reader to. Either one printed on this KB is the false
+# remedy in the other direction: hand-editing runs/*.json for a source one
+# command retires. Matched on the two fragments rather than the whole line so a
+# reworded hint cannot slip past by no longer matching verbatim.
+printf '%s' "$rcov" | grep -qE "does not cover these|inspect runs/\*\.json" \
+  && bad "printed the #559 hint for a ref eject --orphans DOES clean: $rcov" \
   || ok "no false 'does not cover these' claim for an ejectable ref"
 printf '%s' "$rcov" | grep -qF "1 orphan citation(s), 1 run-cited source(s) missing" \
   && ok "both axes fire, each counting its own" || bad "summary wrong: $rcov"

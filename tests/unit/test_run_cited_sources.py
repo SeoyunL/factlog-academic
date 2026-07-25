@@ -160,13 +160,19 @@ class TestUnreadableOutParameter:
         assert common.run_cited_sources(tmp_path, unreadable=skipped) == {"sources/a.md": 1}
         assert skipped == ["bad.json"]
 
-    def test_undecodable_and_unreadable_are_named(self, tmp_path):
+    def test_undecodable_and_unreadable_are_named_in_path_order(self, tmp_path):
+        """Created in reverse, reported in path order. The run files are walked
+        `sorted()`, and this list is the ONLY place that ordering is observable —
+        the counts are order-independent, so without this assertion the walk could
+        stop being sorted and the report's lines would reorder between two runs
+        over one unchanged KB, turning a diff of two reports into noise.
+        """
         (tmp_path / "runs").mkdir()
         (tmp_path / "runs" / "bytes.json").write_bytes(b"\xff\xfe\x00binary")
         (tmp_path / "runs" / "adir.json").mkdir()
         skipped: list[str] = []
         common.run_cited_sources(tmp_path, unreadable=skipped)
-        assert sorted(skipped) == ["adir.json", "bytes.json"]
+        assert skipped == ["adir.json", "bytes.json"]
 
     def test_non_array_json_is_not_named(self, tmp_path):
         """Not a candidate file at all — other tools write objects under runs/ on

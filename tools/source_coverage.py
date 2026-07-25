@@ -330,12 +330,20 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: set[str]) 
     """
     if not run_orphans:
         return
-    # "Nothing to report prints nothing" is guarded THREE times over: this early
-    # return and the `if dropped:` / `if kept:` below. Deleting any ONE of them
-    # changes no output — a mutation run will report the early return as a
-    # survivor, and it is an equivalent mutant, not a hole. Destroy all three and
-    # a clean KB starts printing `run rows cite 0 missing source(s)`, which
-    # tests/test_coverage.sh does fail on.
+    # The early return above is the ONLY redundant guard here, and calling the
+    # three of them one defence would be a costly misreading. With an empty
+    # *run_orphans* both lists below are empty, so both loops and both `if` bodies
+    # are no-ops: deleting the early return changes the output for no input at
+    # all. A mutation run reports it as a survivor; it is an equivalent mutant.
+    #
+    # `if dropped:` and `if kept:` are NOT that. Neither is redundant with the
+    # early return nor with the other: each one guards the case where only the
+    # OTHER class is present, which is the ordinary state of a KB. Break either
+    # and a report carrying one class starts printing the other class's summary at
+    # zero — `run rows cite 0 missing source(s) ... retire them with
+    # `factlog eject --orphans`` on a KB where that command does nothing, i.e. the
+    # false remedy this function exists to prevent. Both directions are pinned, in
+    # tests/test_coverage.sh and tests/test_drop_visibility.sh.
     kept = [(ref, n) for ref, n in run_orphans if ref in ejectable]
     dropped = [(ref, n) for ref, n in run_orphans if ref not in ejectable]
     for ref, count in dropped:
