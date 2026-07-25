@@ -1,12 +1,70 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Compile confirmed factlog facts into a Datalog-like fact file."""
+"""Compile confirmed factlog facts into a Datalog-like fact file.
+
+Usage:
+    python3 -m factlog.compile_facts [--target /path/to/kb]
+    python3 tools/compile_facts.py   [--target /path/to/kb]
+
+    --target    KB root ("--wiki" is an accepted alias). Overrides both
+                $FACTLOG_ROOT and the active-KB config; with no flag the root
+                follows the precedence documented on the prepass below.
+"""
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Pre-pass: resolve the KB root BEFORE importing common, whose module-level path
+# globals (ROOT/FACTS_DIR/...) capture FACTLOG_ROOT at import time.
+#
+# The config tier of the precedence `factlog where` documents — --flag >
+# $FACTLOG_ROOT > config > cwd — lived only in the tools that run this prepass
+# (merge_candidates, source_coverage, check_conflicts, ...), and compile_facts
+# was not one of them. So a bare run from outside a KB took cwd as the root and
+# died with "not a factlog KB root" even with an active KB configured — and it
+# had no root flag either, leaving a hand-set FACTLOG_ROOT= as the only way out.
+# SKILL.md's `/factlog check` Step 1 invokes this script with no arguments, so
+# following the documentation failed outside the KB directory (#527).
+# ---------------------------------------------------------------------------
+
+import argparse
+import os
 import sys
 
-from factlog.common import (
+from factlog import config as factlog_config
+
+# --target is the canonical spelling (the `factlog` CLI subcommands use it);
+# --wiki is accepted as an alias because the sibling engine scripts spell it
+# that way. Both share one dest, so a run passing both settles on argparse's
+# last-wins rule and the prepass can never disagree with main()'s parser.
+_ROOT_FLAGS = ("--target", "--wiki")
+
+
+def _peek_root_flag(argv: list[str] | None = None) -> str | None:
+    """Return the KB root given on the command line, or None.
+
+    ``parse_known_args`` because this runs at import time, before main()'s real
+    parser exists: the peek must not reject an argument it is not responsible
+    for, and it leaves the strict parse to main().
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument(*_ROOT_FLAGS, dest="target", default=None)
+    known, _ = pre.parse_known_args(sys.argv[1:] if argv is None else argv)
+    return known.target
+
+
+def resolve_root(argv: list[str] | None = None) -> str:
+    """This run's KB root: flag > $FACTLOG_ROOT > active-KB config > cwd."""
+    return factlog_config.resolve_root(_peek_root_flag(argv))[0]
+
+
+os.environ["FACTLOG_ROOT"] = resolve_root()
+
+# ---------------------------------------------------------------------------
+# Now it is safe to import common (ROOT is already set correctly above).
+# ---------------------------------------------------------------------------
+
+from factlog.common import (  # noqa: E402
     _atomic_write_text,
     FACTS_DIR,
     FactlogError,
@@ -153,7 +211,37 @@ def _reject_undecodable_canonical_names(aliases: dict[str, str]) -> None:
         )
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Strict parse of the command line, for --help and for typo rejection.
+
+    The root flag itself was already consumed by the prepass above — parsing it
+    again here is what makes ``--help`` list it and, more importantly, what makes
+    a misspelled ``--targt /path`` exit 2 instead of being silently ignored and
+    compiling into whatever the config/cwd tier resolved to.
+    """
+    parser = argparse.ArgumentParser(
+        prog="compile_facts",
+        description=(
+            "Compile the confirmed/accepted rows of facts/candidates.csv into "
+            "facts/accepted.dl (the engine's input)."
+        ),
+    )
+    parser.add_argument(
+        *_ROOT_FLAGS,
+        dest="target",
+        default=None,
+        metavar="PATH",
+        help=(
+            "KB root (--wiki is an alias). Overrides $FACTLOG_ROOT and the "
+            "active-KB config; without it the root is resolved as "
+            "$FACTLOG_ROOT > active-KB config > cwd."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    _parse_args()
     ensure_dirs()
     facts = load_facts()
     # Gate BEFORE any write: a contradiction must never reach accepted.dl, the engine's
