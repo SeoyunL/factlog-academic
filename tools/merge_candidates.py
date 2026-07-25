@@ -78,6 +78,7 @@ from datetime import datetime, timezone  # noqa: E402
 
 from common import (  # noqa: E402
     FACT_HEADER,
+    candidates_csv_writer,
     ENGINE_STATUSES,
     KNOWN_STATUSES,
     REVIEW_STATUSES,
@@ -463,7 +464,7 @@ def write_facts(root: Path, rows: list[dict[str, str]]) -> None:
     out = root / "facts" / "candidates.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FACT_HEADER)
+        writer = candidates_csv_writer(f, FACT_HEADER)
         writer.writeheader()
         writer.writerows(rows)
 
