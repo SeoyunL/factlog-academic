@@ -56,6 +56,18 @@ tools use (`factlog/config.py` `resolve_root`):
 Exporting once turns the hook↔tool agreement from a "same-env assumption" into an
 enforced invariant: every later command and the gate hook read this exact root.
 
+Exporting is also what keeps the **mutating** engine steps runnable from anywhere.
+`finalize.py` and `merge_candidates.py` resolve by the precedence above but then
+**refuse** a root that came *only* from the active-KB config while the current
+directory is outside that KB — they rewrite `facts/candidates.csv`, `pages/` and
+`decisions/open-questions.md`, so they act only on a KB this command actually
+aimed at: named by `--target`/`--wiki`, named by `$FACTLOG_ROOT`, or the KB you
+are standing in. The refusal prints the resolved path and both ways to aim it, and
+exits `1`. The steps that only rewrite their own engine outputs
+(`compile_facts.py`, `run_logic_check.py`) take a config-tier root with no flag —
+which is why the examples below pass `--target`/`--wiki "$FACTLOG_ROOT"` to the
+first group and nothing to the second.
+
 For diagnostics, the plain `factlog where` (no flag) additionally prints where the
 root was resolved from and the config file path — use it to debug, but always
 machine-read the root via `--porcelain`.

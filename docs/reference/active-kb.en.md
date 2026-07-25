@@ -47,6 +47,17 @@ take `--target`. A flag applies only to the **single command** it was given to, 
 > rather than falling through to the next rank — otherwise one unset variable
 > silently changes the target.
 
+> **The two mutating tools refuse a rank-3 root.** `tools/finalize.py` and
+> `tools/merge_candidates.py` resolve by the table above, but then **refuse** a KB
+> that was named only by rank 3 (the active-KB config) while the current directory
+> is outside that KB (exit 1). Both rewrite `facts/candidates.csv`, `pages/` and
+> `decisions/open-questions.md`, so the refusal stops a run nobody aimed from
+> silently overwriting the active KB and invalidating its logic report. There are
+> three ways to aim one: name it with `--target`/`--wiki`, name it with
+> `$FACTLOG_ROOT`, or run from inside it. The refusal prints the resolved path and
+> both ways to name it. `compile_facts.py`/`run_logic_check.py`, which only rewrite
+> their own engine outputs, take a rank-3 root with no flag.
+
 Whichever way a path arrives, it goes through `~` expansion and absolute-path
 normalization. If the config file is missing, its JSON is corrupt, or its `root`
 field is empty, resolution **falls through to the next rank instead of crashing** —

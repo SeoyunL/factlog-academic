@@ -55,6 +55,16 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 > 자리에서 거부됩니다(종료 코드 1) — 안 그러면 미설정 변수 하나가 조용히 대상을
 > 바꿔 버립니다.
 
+> **손대 쓰는 두 도구는 3순위로 해석된 KB를 거부합니다.** `tools/finalize.py` 와
+> `tools/merge_candidates.py` 는 위 표대로 해석은 하지만, 3순위(활성 KB 설정)로만
+> 정해진 KB를 **현재 디렉터리가 그 KB 밖일 때** 거부합니다(종료 코드 1). 이 둘은
+> `facts/candidates.csv`, `pages/`, `decisions/open-questions.md` 를 다시 쓰므로,
+> 아무도 겨냥하지 않은 실행이 활성 KB를 조용히 덮어쓰고 그 KB의 로직 리포트를
+> 무효화하는 일을 막습니다. 겨냥하는 방법은 세 가지입니다 — `--target`/`--wiki`
+> 로 이름 대기, `$FACTLOG_ROOT` 로 이름 대기, 그 KB 안에서 실행하기. 거부 메시지가
+> 해석된 경로와 두 가지 지정 방법을 함께 찍어 줍니다. 자기 엔진 출력만 다시 쓰는
+> `compile_facts.py`/`run_logic_check.py` 는 플래그 없이 3순위 KB를 그대로 씁니다.
+
 경로는 어느 경로로 들어오든 `~` 확장과 절대경로 정규화를 거칩니다. 설정 파일이
 없거나, JSON이 깨졌거나, `root` 필드가 비어 있으면 **크래시하지 않고 다음 순위로
 떨어집니다** — 최종적으로는 현재 디렉터리입니다.
