@@ -104,6 +104,31 @@ TEXT_TO_DATALOG_PROMPT = PROMPTS_DIR / "text_to_datalog.md"
 QUESTIONS_MD = POLICY_DIR / "questions.md"
 
 FACT_HEADER = ["subject", "relation", "object", "source", "status", "confidence", "note"]
+# candidates.csv is written by four producers (write_facts, cli._atomic_write_csv,
+# migrate-unicode/priority, review_candidates). csv.DictWriter's default excel
+# dialect terminates every row with CRLF, but `factlog init` scaffolds the header
+# as `",".join(FACT_HEADER) + "\n"` (LF) and the committed sample-kb fixture is
+# LF-only. Left at the default, a sync (write_facts) writes LF while accept/amend/
+# priority rewrite the whole file as CRLF, flip-flopping the byte content (#503).
+# Pin every producer to LF via the single helper below so the header (and every
+# data row) is byte-identical to the init scaffold no matter which writer ran.
+CANDIDATES_CSV_LINETERMINATOR = "\n"
+
+
+def candidates_csv_writer(f, fieldnames, *, extrasaction: str = "raise"):
+    """Return a ``csv.DictWriter`` for candidates.csv with the LF line terminator.
+
+    The single seam every candidates.csv producer routes through so the on-disk
+    line ending can never drift back to the excel-default CRLF (#503). Callers
+    keep their own ``extrasaction`` (write_facts/review raise on extra keys; the
+    cli writers pass ``"ignore"``) — only the dialect is centralised here.
+    """
+    return csv.DictWriter(
+        f,
+        fieldnames=fieldnames,
+        extrasaction=extrasaction,
+        lineterminator=CANDIDATES_CSV_LINETERMINATOR,
+    )
 ENGINE_STATUSES = frozenset({"confirmed", "accepted"})
 REVIEW_STATUSES = frozenset({"needs_review", "candidate"})
 # A row a human (or a resolution step) has marked as replaced by a newer fact.

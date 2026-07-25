@@ -10,7 +10,15 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from common import CANDIDATES_CSV, DECISIONS_DIR, FACT_HEADER, ROOT, ensure_dirs, normalize_confidence
+from common import (
+    CANDIDATES_CSV,
+    DECISIONS_DIR,
+    FACT_HEADER,
+    ROOT,
+    candidates_csv_writer,
+    ensure_dirs,
+    normalize_confidence,
+)
 
 
 REVIEW_STATUSES = {"needs_review", "candidate"}
@@ -39,7 +47,7 @@ def read_candidate_rows() -> list[dict[str, str]]:
 def write_candidate_rows(rows: list[dict[str, str]]) -> None:
     CANDIDATES_CSV.parent.mkdir(parents=True, exist_ok=True)
     with CANDIDATES_CSV.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FACT_HEADER)
+        writer = candidates_csv_writer(f, FACT_HEADER)
         writer.writeheader()
         writer.writerows(rows)
 

@@ -21,7 +21,7 @@ from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
 from factlog import config as factlog_config
-from factlog.common import FACT_HEADER, _atomic_write_text
+from factlog.common import FACT_HEADER, _atomic_write_text, candidates_csv_writer
 from factlog.review_sections import OPEN_QUESTIONS_SCAFFOLD
 
 MIN_PYTHON = (3, 11)
@@ -53,12 +53,11 @@ def _atomic_write_csv(csv_path, rows, fieldnames) -> None:
     Uses extrasaction="ignore" so extra row keys are dropped, matching what every
     candidates.csv writer relied on. Mirrors _atomic_write_text for run-file JSON.
     """
-    import csv
     import os
 
     tmp = csv_path.with_name(csv_path.name + ".tmp")
     with tmp.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer = candidates_csv_writer(f, fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
     os.replace(tmp, csv_path)
@@ -1894,7 +1893,7 @@ def cmd_migrate_unicode(args: argparse.Namespace) -> int:
 
     out_fields = fieldnames or list(FACT_HEADER)
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=out_fields, extrasaction="ignore")
+    writer = candidates_csv_writer(buf, out_fields, extrasaction="ignore")
     writer.writeheader()
     for r in kept_rows:
         writer.writerow({k: (r.get(k) or "") for k in out_fields})
