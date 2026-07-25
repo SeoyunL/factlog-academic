@@ -62,7 +62,18 @@ if str(_TOOLS_DIR) not in sys.path:
 # its module-level paths from FACTLOG_ROOT at import time.
 import factlog_config  # noqa: E402
 
-os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
+# The same prepass ``factlog_config.resolve_root_from_argv('--wiki')`` performs,
+# spelled out so the resolver's SECOND answer — where the root came from — is kept
+# too. The write guard in main() turns on that provenance (#532), and it cannot be
+# recovered later: the export below overwrites $FACTLOG_ROOT with the resolved
+# path, after which --wiki's argparse default (os.environ['FACTLOG_ROOT']) reads
+# back the same value whether or not the caller passed the flag.
+_PRE = argparse.ArgumentParser(add_help=False)
+_PRE.add_argument("--wiki", default=None)
+_KNOWN, _ = _PRE.parse_known_args()
+TARGET_ROOT, TARGET_SOURCE = factlog_config.resolve_root(_KNOWN.wiki)
+
+os.environ["FACTLOG_ROOT"] = TARGET_ROOT
 
 # ---------------------------------------------------------------------------
 # Now it is safe to import common (ROOT is already set correctly above).
@@ -1018,6 +1029,50 @@ def existing_review_keys(root: Path) -> set[tuple[str, str, str, str]]:
     return keys
 
 
+def implicit_target_refusal(root: Path, source: str, cwd: Path) -> str | None:
+    """Why this run may not write to *root*, or None if it may (#532).
+
+    ``source`` is ``factlog_config.resolve_root``'s second answer: 'flag', 'env',
+    'config' or 'cwd'. Only 'config' is a target nobody named — neither the command
+    line nor the environment nor the directory the caller is standing in — and it is
+    the one that made a merge run from ``/tmp`` rewrite the configured KB's
+    candidates.csv and pages/, flipping its logic report to STALE with exit 0.
+
+    The sibling write steps all exit 1 in exactly that situation, and not by a guard
+    of their own: ``compile_facts.py`` / ``run_logic_check.py`` / ``finalize.py``
+    never consult the active-KB config at all, so a bare run outside a KB resolves to
+    the cwd and ``ensure_wiki_root`` (or finalize's own sources/ check) rejects it.
+    This script is the only writer that reaches past the cwd, so it is the only one
+    that needs to say no in code.
+
+    Announcing the target instead of refusing was the other option on the issue, and
+    main() does announce it — but announcing alone cannot be the whole fix here,
+    because this script ALREADY printed ``wiki=<root>`` before every write and the
+    incident happened anyway. A line on stdout is a fine way to make an intended
+    write auditable; it is not a way to stop an unintended one.
+
+    'cwd' needs no refusal: the root IS the cwd, so a non-KB there is caught by
+    ``ensure_dirs`` exactly as it is for the siblings. And a config root the caller
+    is standing inside is not implicit — running the merge from the KB (or a
+    subdirectory of it) with no flag is the documented workflow, and the shell
+    harness's ``--wiki``/``FACTLOG_ROOT`` calls are 'flag'/'env'.
+    """
+    if source != "config":
+        return None
+    if cwd == root or root in cwd.parents:
+        return None
+    return (
+        f"merge_candidates: REFUSING to write to {root} — that KB comes from the active-KB "
+        f"config, not from this command, and the current directory ({cwd}) is not inside it.\n"
+        f"  This script writes facts/candidates.csv, pages/ and decisions/open-questions.md, "
+        f"which invalidates the KB's logic report. compile_facts.py, run_logic_check.py and "
+        f"finalize.py all refuse here; a write step must be at least as conservative (#532).\n"
+        f"  Name the target explicitly:\n"
+        f"    python3 tools/merge_candidates.py --wiki {root}\n"
+        f"  or export FACTLOG_ROOT={root}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -1064,6 +1119,17 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(args.wiki).expanduser().resolve()
+
+    # Name the KB about to be written and where that choice came from, before
+    # anything is read or written — the same line `factlog ingest`/`pubmed-*` print
+    # (cli.py: "target KB {target} (from {source})"). The run_id line below already
+    # showed `wiki=`, but not the provenance, which is the part that tells a reader
+    # this run picked the KB up from config rather than from their command.
+    print(f"merge_candidates: target KB {root} (from {TARGET_SOURCE})")
+    refusal = implicit_target_refusal(root, TARGET_SOURCE, Path.cwd().resolve())
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 1
 
     # Derive the default --input glob from common.RUNS_DIR so the runs/ location
     # is single-sourced from common.py.
