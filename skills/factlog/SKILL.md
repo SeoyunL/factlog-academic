@@ -794,9 +794,24 @@ it is correctly reported as a gap, not "covered":
   ingest *output*, which should already be text).
 - **orphan citation** — a fact cites a source path with no file on disk (a
   stale or typo'd reference); surfaced on stderr.
+- **run-cited source missing** — `runs/*.json` rows cite a source that is not on
+  disk. Orphan citations are read off `facts/candidates.csv`, which is the state
+  *after* merge dropped exactly those rows, so a source deleted without
+  `factlog eject` stops being reported there the moment merge rebuilds the CSV.
+  This category reads the run files directly and surfaces the path with its row
+  count on stderr (`RUN ROWS cite a missing source (dropped at merge, N
+  row(s)): ...`), plus one summary field that is omitted entirely when the count
+  is 0. The remedy printed with it depends on the source: a ghost row a human has
+  ruled on survives in `candidates.csv` (the #218 ratchet refuses the rebuild), so
+  `factlog eject --orphans` retires it and the hint names that command; an unruled
+  row is rebuilt away, so that command cannot see it either and the hint says so
+  (tracked as #559). A run file that cannot be read is left out of the counts and
+  named on stderr rather than skipped in silence. See
+  `docs/reference/ignore-eject.md`.
 
 The script is the **deterministic half** (per-source fact counts, unreferenced
-sources, orphan citations); it always exits 0 so it never blocks the pipeline —
+sources, orphan citations, run rows citing a missing source); it always exits 0
+so it never blocks the pipeline —
 including on a brand-new KB with no `candidates.csv` yet. Pass `--strict` to exit
 non-zero when any *text* source is uncovered (useful in automation).
 Judging **semantic** gaps — an entity mentioned in a source but with no relation

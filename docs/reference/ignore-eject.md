@@ -81,3 +81,68 @@ source 모드는 상호 배타적이며, `--delete-original` 은 `--fact` 와 �
 폐기입니다. **텍스트** 원본을 `sources/` 아래 그대로 두면 다음 `/factlog sync` 가
 그 사실을 다시 추출·주장하므로, 소스를 영구히 제거하려면 `--purge` 와/또는
 `--delete-original` 을 넘기십시오.
+
+### `eject` 를 거치지 않고 소스 파일을 직접 지웠다면
+
+파일 관리자나 `rm` 으로 `sources/` 아래 파일을 지우면 그 소스를 인용하던 행은
+`runs/*.json` 에 그대로 남습니다. 이후 merge 는 그 행을 `facts/candidates.csv` 에
+쓰기 전에 드롭하고 stderr 로 알립니다.
+
+```
+  skip row: source 'sources/doomed.md' not found in sources/ ... (3 rows)
+```
+
+그 경고는 터미널이 스크롤되면 사라지고, `facts/candidates.csv` 는 이미 드롭된
+**이후** 상태이므로 orphan citation(디스크에 없는 파일을 인용하는 사실)으로도 잡히지
+않습니다. 그래서 커버리지 리포트는 `runs/*.json` 을 직접 읽어 이 상태를 별도로
+보고합니다.
+
+```
+coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 0 orphan citation(s), 1 run-cited source(s) missing
+  RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md
+```
+
+이 필드는 해당 상태가 없으면 요약 줄에 출력되지 않으며, 종료 코드에도 영향을 주지
+않습니다(`--strict` 는 여전히 텍스트 누락에만 반응합니다).
+
+#### 정리 방법은 행이 `candidates.csv` 에 남았는지에 달려 있습니다
+
+리포트가 소스별로 둘 중 하나를 알려주므로 출력 문구를 그대로 따르면 됩니다.
+
+**(1) 행이 `candidates.csv` 에 남아 있는 경우** — 사람이 판정한 행
+(`confirmed`/`accepted`/`needs_review`)은 [#218](https://github.com/SeoyunL/factlog-academic/issues/218)
+래칫이 rebuild 를 거부하므로 유령 행이 표에 그대로 남습니다. `superseded` 유령도
+감사 목적으로 보존되므로 늘 이 부류입니다. 이때는 `factlog eject --orphans` 가 그
+소스를 인식하고 한 번에 정리합니다.
+
+```
+  RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/doomed.md
+  run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`
+```
+
+**(2) 행이 이미 사라진 경우** — 미판정(`candidate`) 행은 보통 조용히 rebuild 되어
+표에서 사라집니다. `eject` 는 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에
+이 소스를 보지 못하고 `no orphaned sources found` 로 끝납니다.
+
+> 부류를 정하는 것은 status 자체가 아니라 **그 행이 표에 남았는지**입니다. 래칫은
+> 행 단위가 아니라 rebuild **전체**를 거부하므로, 같은 merge 에 판정된 유령이 하나라도
+> 있으면 미판정 유령도 함께 남아 (1) 로 출력됩니다. 리포트는 소스별로 실제 상태를
+> 보고 판정하니, status 로 추측하지 말고 출력된 줄을 따르십시오.
+
+```
+  RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md
+  run rows cite 1 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)
+```
+
+> **(2) 는 `factlog eject --orphans` 로 정리되지 않습니다**(수정은
+> [#559](https://github.com/SeoyunL/factlog-academic/issues/559) 에서 별도로
+> 다룹니다). `runs/*.json` 을 직접 확인하거나, 지운 파일을 `sources/` 에 되돌린 뒤
+> merge 를 다시 돌리고 `factlog eject <source> --purge --delete-original` 로 정식
+> 제거하십시오.
+
+읽을 수 없는 `runs/*.json` 이 있으면 그 파일은 집계에서 빠지며, 빠졌다는 사실을
+stderr 에 한 줄로 알립니다(merge 역시 그 파일을 읽지 못합니다).
+
+```
+  skipped unreadable runs/2026-01-02-r.json — its rows are NOT in the counts above (merge cannot read it either)
+```
