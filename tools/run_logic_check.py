@@ -636,6 +636,47 @@ def evaluate_queries(
     return results
 
 
+def query_summary_line(items: list[str]) -> str:
+    """The ``queries:`` header tally over the ``Query evaluation:`` section below it.
+
+    The header counted policy findings and never counted queries, so a KB whose
+    declared questions had ALL routed to a human read ``errors: 0 / warnings: 0``
+    above six ``review_required`` lines -- six questions, zero answers, and no
+    number anywhere saying so (#535). This is a COUNT of the items printed below,
+    in the same slot and with the same standing as ``policy findings:``. It is not
+    a new failure condition: ``errors``/``warnings`` keep their meaning and the
+    exit code still turns on errors alone, because "the engine could not answer
+    this question" is a normal KB state, not a broken check.
+
+    Classification is :func:`factlog.cli._classify_query_results` -- the very
+    function ``factlog status`` reads this section with (#536). A second
+    classifier here would agree today and drift the moment
+    :func:`evaluate_queries` grows a branch, and then the header and ``status``
+    would report different numbers for the same file: the confusion #535 removes,
+    reintroduced one line up. ANSWERABLE is a whitelist there, so an item shape
+    neither side recognises lands in ``unclassified`` and is shown, never folded
+    into the headline count.
+    """
+    # Imported here, not at module scope: the header is the only thing in this
+    # script that needs the CLI, and the deterministic steps above must not depend
+    # on it being importable.
+    from factlog.cli import _classify_query_results
+
+    counts = _classify_query_results(items)
+    notes = [f"evaluated: {counts['answerable']}"] + [
+        f"{label}: {n}"
+        for label, n in (
+            ("review_required", counts["review_required"]),
+            ("unverified", counts["unverified"]),
+            ("malformed", counts["malformed"]),
+            ("unknown predicate", counts["unknown_predicate"]),
+            ("unclassified", counts["unclassified"]),
+        )
+        if n
+    ]
+    return f"queries: {len(items)} ({', '.join(notes)})"
+
+
 def engine_relation_gap(
     facts: list[dict[str, str]],
     inferred: dict[str, set[tuple[str, ...]]],
@@ -806,6 +847,11 @@ def main() -> int | None:
         # that survives validate_query is a genuinely unaccepted constant.
         warnings.extend(query_warnings)
 
+    # Evaluated once, here: the header counts these items and the section below prints
+    # them, and two calls would let a header disagree with the list it is counting.
+    # After the validate_query loop above so the evaluation order is unchanged.
+    query_results = evaluate_queries(facts, inferred, policy_query_predicates, value_hierarchy())
+
     report = [
         "Logic Check Report",
         "==================",
@@ -815,6 +861,7 @@ def main() -> int | None:
         f"engine facts: {len(facts)}",
         f"review facts outside engine input: {len(review_facts(candidates))}",
         f"policy findings: {len(policy_findings)}",
+        query_summary_line(query_results),
         f"errors: {len(errors)}",
         f"warnings: {len(warnings)}",
         "",
@@ -835,10 +882,7 @@ def main() -> int | None:
     )
     report.append("")
     report.append("Query evaluation:")
-    query_items = [
-        f"- {item}"
-        for item in evaluate_queries(facts, inferred, policy_query_predicates, value_hierarchy())
-    ]
+    query_items = [f"- {item}" for item in query_results]
     if query_items:
         report.extend(query_items)
     elif not (FACTS_DIR / "query.dl").is_file():

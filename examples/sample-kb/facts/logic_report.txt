@@ -6,6 +6,7 @@ policy: policy/logic-policy.dl
 engine facts: 7
 review facts outside engine input: 1
 policy findings: 1
+queries: 7 (evaluated: 5, review_required: 1, unverified: 1)
 errors: 0
 warnings: 1
 
