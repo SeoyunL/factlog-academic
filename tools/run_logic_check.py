@@ -1,12 +1,37 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Run deterministic logic checks over facts and query drafts."""
+"""Run deterministic logic checks over facts and query drafts.
+
+Usage:
+    python3 run_logic_check.py [--target <kb>]
+
+--target overrides $FACTLOG_ROOT, which overrides the active-KB config, which
+overrides cwd. The skill's determinism gate names this script with no arguments,
+so the config tier is what lets that documented form run from outside a KB (#528).
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
+import sys
+from pathlib import Path
 
-from common import (
+# Ensure tools/ is importable when run directly, and resolve the KB root BEFORE
+# importing common (whose module-level ROOT captures FACTLOG_ROOT at import).
+_TOOLS_DIR = Path(__file__).parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common, which binds
+# its module-level paths from FACTLOG_ROOT at import time.
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--target")
+
+from collections.abc import Callable  # noqa: E402
+
+from common import (  # noqa: E402
     attribute_relation_forms,
     FACTS_DIR,
     KNOWN_STATUSES,
