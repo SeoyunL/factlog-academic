@@ -11,15 +11,18 @@
 ## 실행
 
 ```bash
-python3 tools/value_audit.py --wiki ~/wiki                  # 보고 (기본은 항상 exit 0)
-python3 tools/value_audit.py --wiki ~/wiki --strict         # 확실한 질의 누수가 있으면 non-zero
-python3 tools/value_audit.py --wiki ~/wiki --all-statuses   # 엔진 입력이 아닌 후보 행까지 전부
+python3 tools/value_audit.py --target ~/wiki                  # 보고 (기본은 항상 exit 0)
+python3 tools/value_audit.py --target ~/wiki --strict         # 확실한 질의 누수가 있으면 non-zero
+python3 tools/value_audit.py --target ~/wiki --all-statuses   # 엔진 입력이 아닌 후보 행까지 전부
 ```
 
-- `--wiki` 는 KB 루트입니다. 생략하면 `$FACTLOG_ROOT` → **활성 KB 설정**(`factlog use`
-  로 지정) → 현재 디렉터리 순으로 폴백합니다. 활성 KB가 설정돼 있으면 아무 디렉터리에서
-  실행해도 **현재 디렉터리가 아니라 활성 KB**가 대상입니다 — `--strict` 결과를 CI 판정에
-  쓴다면 `factlog where` 로 대상 KB를 먼저 확인하거나 `--wiki` 를 명시하십시오.
+- `--target` 이 KB 루트입니다(`--wiki` 는 별칭). 생략하면 `$FACTLOG_ROOT` → **활성 KB
+  설정**(`factlog use` 로 지정) → 현재 디렉터리 순으로 폴백합니다. 활성 KB가 설정돼
+  있으면 아무 디렉터리에서 실행해도 **현재 디렉터리가 아니라 활성 KB**가 대상입니다 —
+  `--strict` 결과를 CI 판정에 쓴다면 `factlog where` 로 대상 KB를 먼저 확인하거나
+  `--target` 을 명시하십시오. 빈 값(`--target ""` — export하지 않은
+  `$FACTLOG_ROOT` 를 그대로 넘겼을 때의 형태)은 다음 순위로 떨어지지 않고 종료 코드 1로
+  거부됩니다.
 - 기본 감사 대상은 **엔진 입력**(`confirmed`/`accepted`) 행뿐입니다. `--all-statuses` 를
   주면 아직 승인되지 않은 후보까지 포함해 훨씬 시끄러워집니다.
 - `candidates.csv` 가 아직 없는 새 KB에서는 `value_audit: no candidate facts` 를 출력하고

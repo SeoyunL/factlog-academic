@@ -28,7 +28,7 @@ wins. Which one won is printed on `factlog where`'s `resolved from:` line.
 
 | Rank | Source | How to set it | `resolved from:` in `factlog where` |
 |------|--------|---------------|-------------------------------------|
-| 1 | command-line flag | `--target <path>` (`--wiki <path>` on some tools) | (not shown — see below) |
+| 1 | command-line flag | `--target <path>` (`--wiki <path>` is an accepted alias everywhere) | (not shown — see below) |
 | 2 | environment variable | `export FACTLOG_ROOT=<path>` | `env ($FACTLOG_ROOT)` |
 | 3 | active-KB config | `factlog use <path>` (or recorded automatically by `factlog init`/`setup`) | `config file` |
 | 4 | current directory | (the fallback when nothing else is set) | `current directory` |
@@ -36,6 +36,16 @@ wins. Which one won is printed on `factlog where`'s `resolved from:` line.
 Rank 1 never appears in `factlog where`'s output because `where` itself does not
 take `--target`. A flag applies only to the **single command** it was given to, so
 `where` always reports a result resolved from ranks 2–4.
+
+> **One flag surface across `tools/`.** Every bundled script that names a KB takes
+> `--target`, with `--wiki` accepted as an alias of it — they are one option sharing
+> one destination, so passing both is not an error and the spelling that comes last
+> on the command line wins (#533). A misspelled flag (`--targt <path>`) exits 2
+> instead of being ignored, which matters because an ignored KB flag does not fail:
+> it runs against whatever rank 2–4 resolved to. The only `tools/` scripts without
+> the flag are the two that name no KB at all — `refresh_arxiv_categories.py`
+> (fetches the published arXiv taxonomy and diffs it against the source tree) and
+> `spike_fallback_precision.py` (a measurement over cached API responses).
 
 > **Tools that take a positional root have one extra rank.** `tools/validate.py`
 > also accepts the KB path as a positional argument (`validate.py <path>`), and that
@@ -47,9 +57,8 @@ take `--target`. A flag applies only to the **single command** it was given to, 
 > rather than falling through to the next rank — otherwise one unset variable
 > silently changes the target.
 
-> **The two mutating tools refuse a rank-3 root.** `tools/finalize.py`
-> (`--target`, alias `--wiki`) and `tools/merge_candidates.py` (`--wiki` — it does
-> not accept `--target`) resolve by the table above, but then **refuse** a KB
+> **The two mutating tools refuse a rank-3 root.** `tools/finalize.py` and
+> `tools/merge_candidates.py` resolve by the table above, but then **refuse** a KB
 > that was named only by rank 3 (the active-KB config) while the current directory
 > is outside that KB (exit 1). `merge_candidates` rewrites `facts/candidates.csv`,
 > `pages/` and `decisions/open-questions.md`; `finalize` writes none of those
@@ -61,27 +70,55 @@ take `--target`. A flag applies only to the **single command** it was given to, 
 > `export FACTLOG_ROOT`) — running from inside is an aim, but not one the message
 > mentions.
 
-> **Known exception: an empty flag value does not go through that table.** With
-> `--wiki ""`/`--target ""` — the form you get from passing an unexported
-> `$FACTLOG_ROOT` — the two tools diverge. `finalize.py --target ""` still resolves
-> to the config KB and refuses it (exit 1). `merge_candidates.py --wiki ""` resolves
-> the root **twice**: the guard sees the config tier while the write path re-reads
-> the empty argument and falls to the **current directory**, so it writes to the
-> current directory with no refusal, labels the provenance `(from config)` anyway,
-> and exits 0.
+> **An empty flag value does not go through that table — it is refused.** With
+> `--target ""`/`--wiki ""` — the form you get from passing an unexported
+> `$FACTLOG_ROOT` — every script #533 unified exits 1 with *the KB-root flag
+> (--target/--wiki) was empty* before reading or writing anything, and `validate.py`
+> answers with its own `--target was empty`. A blank value is a caller bug either
+> way, and falling through would target the configured KB while the caller believes
+> they named one.
+>
+> `merge_candidates.py --wiki ""` used to be the sharp case: it resolved the root
+> **twice** — the guard saw the config tier while the write path re-read the empty
+> argument and fell to the **current directory** — so it wrote to the current
+> directory with no refusal, labelled the provenance `(from config)` anyway, and
+> exited 0 (#546). One resolution now feeds the guard, the announcement and the
+> write. `finalize.py --target ""` is the remaining divergence: it still resolves a
+> blank value on to the next rank, so from *inside* the configured KB it finalizes
+> that KB rather than refusing.
 
-> **`compile_facts.py`/`run_logic_check.py`, which only rewrite their own engine
-> outputs, take a rank-3 root with no flag.** That means the *file set* they touch
-> is bounded to their own engine output — not that an unaimed run is harmless. Run
-> from outside the KB with no aim, `compile_facts.py` **deletes** the active KB's
-> `facts/accepted.dl` when it finds a single-valued contradiction (exit 1), so that
-> KB is left with no engine input until the conflict is resolved. Their exemption
-> from the guard is provisional rather than settled (`merge_candidates`' guard
-> docstring leaves the two "to a follow-up"). And some scripts do not consult the
-> config tier **at all**: `tools/generate_logic_policy.py` takes no KB flag and sees
-> only `$FACTLOG_ROOT` and the current directory, so with just the config set and a
-> cwd outside the KB it exits 1 with `not a factlog KB root: …` (unifying the flag
-> surface is #533).
+> **`compile_facts.py`/`run_logic_check.py` take a rank-3 root with no flag, and
+> both name the target first.** Each prints `<tool>: target KB <root> (from
+> <source>)` before doing anything — the same line the mutating tools print. Both
+> re-derive that KB's own artifacts, so an unaimed run writes what an aimed one
+> would; the line is there because what is left is a *reading* hazard: believing you
+> checked KB A while reading a report from KB B.
+>
+> **They are guarded differently, on purpose**, sized to what each can destroy.
+> `compile_facts.py` has one destructive step — on a single-valued contradiction the
+> gate deletes `facts/accepted.dl` so no reader trusts the engine input of a KB whose
+> confirmed rows contradict each other (#212/#327). On a run nobody aimed (rank 3
+> while the current directory is outside that KB) it **refuses that deletion** and
+> keeps the file, still exiting 1 and compiling nothing (#547). An **aimed** run
+> (`--target`, `$FACTLOG_ROOT`, or standing inside the KB) deletes as before, so the
+> #212 invariant is unchanged for every documented flow. `run_logic_check.py` refuses
+> nothing: it destroys nothing (its only write, `facts/logic_report.txt`, *is* the
+> check being run, so it cannot make a stale report look fresh), and it is the
+> command `hooks/gate_check.sh` prescribes in its own DENIED message — that hook
+> resolves the KB it guards through the same rank-3 tier, so refusing here would make
+> the gate's own remedy unrunnable.
+>
+> The trade in that refusal, stated plainly: the KB keeps its **pre-contradiction
+> snapshot** of `accepted.dl`, so `/factlog ask` goes on answering from it until an
+> aimed run resolves the conflict. Exit code 1 and the message say so. A stale KB is
+> healed by the next aimed run; a KB nobody aimed at, left with no engine input at
+> all, is not.
+
+> No script is outside the config tier
+> any more: `tools/generate_logic_policy.py` — which the skill and `finalize` both
+> call with no arguments — used to see only `$FACTLOG_ROOT` and the current
+> directory and exited 1 with `not a factlog KB root: …` whenever only the config
+> was set, and now follows the same four ranks as its siblings (#533).
 
 Whichever way a path arrives, it goes through `~` expansion and absolute-path
 normalization. If the config file is missing, its JSON is corrupt, or its `root`

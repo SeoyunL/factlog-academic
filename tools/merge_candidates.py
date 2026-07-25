@@ -28,10 +28,12 @@ What this script does NOT do:
     - SyncReport / print_sync_report (subprocess orchestration)
 
 Usage:
-    python3 tools/merge_candidates.py --wiki /path/to/kb
+    python3 tools/merge_candidates.py --target /path/to/kb
 
-    --wiki      KB root (overrides FACTLOG_ROOT; this flag is authoritative and
-                does NOT require FACTLOG_ROOT to be set in the environment).
+    --target    KB root ("--wiki" is an accepted alias). Overrides $FACTLOG_ROOT,
+                which overrides the active-KB config, which overrides cwd; this
+                flag is authoritative and does NOT require FACTLOG_ROOT to be set
+                in the environment.
     --input     Glob pattern relative to KB root for input JSON files.
                 Default: runs/*.json  (sourced from common.RUNS_DIR)
     --strict    Exit non-zero if any input row is rejected during normalisation
@@ -41,7 +43,7 @@ Usage:
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# Pre-pass: resolve --wiki BEFORE importing common.py so the module-level
+# Pre-pass: resolve the KB-root flag BEFORE importing common.py so the module-level
 # ROOT global captures the correct KB root regardless of the caller's cwd or
 # whether FACTLOG_ROOT is set in the environment.
 # ---------------------------------------------------------------------------
@@ -62,16 +64,26 @@ if str(_TOOLS_DIR) not in sys.path:
 # its module-level paths from FACTLOG_ROOT at import time.
 import factlog_config  # noqa: E402
 
-# The same prepass ``factlog_config.resolve_root_from_argv('--wiki')`` performs,
-# spelled out so the resolver's SECOND answer — where the root came from — is kept
-# too. The write guard in main() turns on that provenance (#532), and it cannot be
-# recovered later: the export below overwrites $FACTLOG_ROOT with the resolved
-# path, after which --wiki's argparse default (os.environ['FACTLOG_ROOT']) reads
-# back the same value whether or not the caller passed the flag.
+# --target is the canonical spelling across the toolchain (the `factlog` CLI, the
+# engine steps and finalize all take it); --wiki stays as an alias because SKILL.md
+# and tests/*.sh spell it that way (#533). ONE tuple feeds BOTH this pre-pass and
+# main()'s strict parser: a spelling only one of the two knew would be either
+# read-but-unadvertised or accepted-but-ignored, and an ignored KB flag silently
+# rewrites whatever the config/cwd tier resolved to.
+_ROOT_FLAGS = ("--target", "--wiki")
+
+# The resolver's SECOND answer — where the root came from — is kept too. The write
+# guard in main() turns on that provenance (#532), and it cannot be recovered later:
+# the export below overwrites $FACTLOG_ROOT with the resolved path, after which the
+# environment reads back the same value whether or not the caller passed the flag.
 _PRE = argparse.ArgumentParser(add_help=False)
-_PRE.add_argument("--wiki", default=None)
+_PRE.add_argument(*_ROOT_FLAGS, dest="target", default=None)
 _KNOWN, _ = _PRE.parse_known_args()
-TARGET_ROOT, TARGET_SOURCE = factlog_config.resolve_root(_KNOWN.wiki)
+# The flag value exactly as it arrived, kept alongside the resolution so main() can
+# refuse a blank one. Resolution cannot carry that: ``resolve_root`` tests the value
+# for truth, so "" and "not given" are the same input to it (#546).
+TARGET_FLAG_VALUE = _KNOWN.target
+TARGET_ROOT, TARGET_SOURCE = factlog_config.resolve_root(TARGET_FLAG_VALUE)
 
 os.environ["FACTLOG_ROOT"] = TARGET_ROOT
 
@@ -1479,7 +1491,7 @@ def implicit_target_refusal(root: Path, source: str, cwd: Path) -> str | None:
         f"  This run would rewrite facts/candidates.csv, pages/ and "
         f"decisions/open-questions.md there, invalidating that KB's logic report (#532).\n"
         f"  Name the target explicitly:\n"
-        f"    python3 tools/merge_candidates.py --wiki {root}\n"
+        f"    python3 tools/merge_candidates.py --wiki {root}   (--target is the same flag)\n"
         f"  or export FACTLOG_ROOT={root}"
     )
 
@@ -1501,10 +1513,24 @@ def main() -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # The root flag was already consumed by the pre-pass above; declaring it again
+    # here is what puts it in --help and what makes a misspelled `--targt /path`
+    # exit 2 instead of being silently ignored and rewriting whatever the config/cwd
+    # tier resolved to. No argparse `default=`: the default is not a constant but a
+    # resolution over env → config → cwd, and the old
+    # `os.environ.get("FACTLOG_ROOT", ".")` described a rule this tool has not
+    # followed since the pre-pass landed (#531).
     parser.add_argument(
-        "--wiki",
-        default=os.environ.get("FACTLOG_ROOT", "."),
-        help="KB root (authoritative; sets FACTLOG_ROOT; default: $FACTLOG_ROOT or '.')",
+        *_ROOT_FLAGS,
+        dest="target",
+        default=None,
+        metavar="PATH",
+        help=(
+            "KB root (--wiki is an alias; authoritative, and sets FACTLOG_ROOT for "
+            "the delegated steps). Overrides $FACTLOG_ROOT and the active-KB "
+            "config; without it the root is resolved as $FACTLOG_ROOT > active-KB "
+            "config > cwd."
+        ),
     )
     parser.add_argument(
         "--input",
@@ -1529,7 +1555,27 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    root = Path(args.wiki).expanduser().resolve()
+    # An empty flag value is refused rather than dropped to the next tier (#546).
+    # SKILL.md recommends `merge_candidates.py --wiki "$FACTLOG_ROOT"`, which in a
+    # shell that never exported the variable is exactly `--wiki ""` — so this is a
+    # shape the documentation produces, not a hypothetical. Refusing here is the
+    # same answer tools/validate.py gives a blank target (#530).
+    if args.target is not None and not args.target.strip():
+        print(
+            "merge_candidates: the KB-root flag (--target/--wiki) was empty; pass a KB path, "
+            "or pass no flag at all to use the active KB.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # TARGET_ROOT, not a second resolution of args.target. The root was resolved once,
+    # in the pre-pass, and that is the value common's path globals were bound to and
+    # the value TARGET_SOURCE describes. Re-deriving it here from argv is what made a
+    # blank flag land on cwd while the guard below judged the config tier and the
+    # announcement printed "(from config)" over a cwd path — the write went through,
+    # unrefused, under a false provenance (#546). One resolution, one target, one
+    # label.
+    root = Path(TARGET_ROOT)
 
     # Name the KB about to be written and where that choice came from, before
     # anything is read or written — the same line `factlog ingest`/`pubmed-*` print
