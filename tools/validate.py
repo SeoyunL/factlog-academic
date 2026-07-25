@@ -235,7 +235,16 @@ def validate_logic_policy(root: Path) -> list[str]:
     if completed.returncode == 0:
         return []
     detail = (completed.stderr or completed.stdout).strip()
-    return [f"policy/logic-policy.dl does not match policy/logic-policy.md: {detail}"]
+    # "check failed", not "does not match" (#557): --check exits non-zero for reasons that
+    # are not drift — an unparseable marker in the .md is an authoring error whose fix is
+    # in the .md, and the old prefix sent the reader to regenerate the .dl instead. Nothing
+    # here measured the two files against each other, so nothing here can assert it; the
+    # child already says which of the two is wrong and that detail is relayed verbatim.
+    # The logic-policy.dl token stays in the prefix: it is what identifies these lines to
+    # readers and to tests/unit/test_empty_policy_roundtrip.py's _policy_lines. Branching
+    # on the detail text to pick a prefix would put the child's verdict in two places
+    # again, which is the duplication #491 removed.
+    return [f"policy/logic-policy.dl check failed: {detail}"]
 
 
 def validate(root: Path) -> list[str]:
@@ -281,7 +290,12 @@ def validate(root: Path) -> list[str]:
             errors.append(f"policy/prompts/self_correct.md contains unknown placeholder(s): {', '.join(unknown)}")
 
     policy_source = root / "policy" / "logic-policy.md"
-    if not policy_source.is_file() or not read(policy_source).strip():
+    # Computed once and reused as the delegation condition below (#557). Asking the same
+    # question twice in two shapes is how the .dl verdict came to be decided in two
+    # places, which is what #491 removed; a second spelling here would be the same
+    # duplication in miniature, and a mutant that breaks one copy would survive.
+    policy_source_usable = policy_source.is_file() and bool(read(policy_source).strip())
+    if not policy_source_usable:
         errors.append("missing or empty policy/logic-policy.md")
 
     policy_prompt = root / "policy" / "prompts" / "natural_language_to_policy.md"
@@ -291,17 +305,25 @@ def validate(root: Path) -> list[str]:
         errors.append("policy/prompts/natural_language_to_policy.md must contain {{POLICY_TEXT}} exactly once")
 
     logic_policy = root / "policy" / "logic-policy.dl"
-    if policy_source.is_file() and policy_prompt.is_file():
+    if policy_source_usable:
         # Whether an absent .dl is a fault depends on whether logic-policy.md defines
         # rules, and generate_logic_policy --check is the one place that decides (#491):
         # absent + no rules is a freshly `init`ed KB and passes, absent + rules is #190's
         # loud path and still fails. Validating .dl EXISTENCE here first made every fresh
         # KB fail validation before the compiler was ever consulted. A 0-byte .dl is not
         # special-cased either — --check reports it as stale, which names the fix.
+        #
+        # The condition is the .md alone. It was also gated on natural_language_to_policy.md
+        # until #557, which --check never reads (it compiles policy_text and never renders
+        # a prompt), so deleting that one file silenced every stale .dl here while the
+        # compiler still reported it.
         errors.extend(validate_logic_policy(root))
     elif not logic_policy.is_file() or not read(logic_policy).strip():
-        # No .md (or no prompt) to judge the .dl against, so --check cannot run and its
-        # own "missing or empty policy/logic-policy.md" error is already queued above.
+        # An unusable .md is one --check cannot judge the .dl against, so it is not asked:
+        # it would only re-emit the "missing or empty policy/logic-policy.md" error already
+        # queued above, once more under a prefix claiming the .dl had been compared (#557).
+        # A whitespace-only .md is that case and used to report it twice; deleting the same
+        # file reported it once, so identical states differed by whether the file existed.
         errors.append("missing or empty policy/logic-policy.dl")
 
     facts = root / "facts" / "candidates.csv"

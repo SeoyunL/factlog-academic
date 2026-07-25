@@ -102,6 +102,19 @@ def _policy_lines(proc: subprocess.CompletedProcess[str]) -> list[str]:
     ]
 
 
+def _logic_policy_lines(proc: subprocess.CompletedProcess[str]) -> list[str]:
+    """Every validate.py complaint naming either half of the policy pair.
+
+    Wider than _policy_lines on purpose: #557's defect A is a state reported once as the
+    .md and a second time as the .dl, so counting only .dl lines cannot see the pair.
+    """
+    return [
+        line
+        for line in (proc.stdout + proc.stderr).splitlines()
+        if "logic-policy" in line
+    ]
+
+
 @pytest.fixture
 def kb(tmp_path):
     return _init_kb(tmp_path / "kb")
@@ -265,8 +278,169 @@ def test_the_issue_reproduction_now_passes(kb):
     Those bytes were chosen as the canonical empty policy BECAUSE a user (and finalize
     since #194) already writes them, so the reproduction passing is the point rather than
     a side effect.
+
+    #557 was filed with this same reproduction, read off a 0.6.0 plugin cache that
+    predates #491; against this tree it passes here exactly as it did for #491. What
+    #557 actually closed is below — the two non-drift failures validate still misreported.
     """
     (kb / "policy" / "logic-policy.dl").write_text("// no policy rules\n", encoding="utf-8")
     assert _policy_lines(_validate(kb)) == []
     checked = _generate(kb, "--check")
     assert checked.returncode == 0, checked.stdout + checked.stderr
+
+
+def test_a_hand_written_dl_over_a_ruleless_md_is_stale_through_validate(kb):
+    """(8) A regression pin, not a fix: this already passes before #557.
+
+    It fences the half of the delegation #557 narrows. Handing --check a .md it cannot
+    judge is the bug; handing it one it CAN judge is the whole point of #491, and the
+    scaffolded prose-only .md is judgeable. Written by hand, `requires_review` rules over
+    a .md that defines none are stale, and validate has to say so — the mutant this kills
+    is a narrowing that stops delegating for a .md with real content.
+
+    Asserted on "stale", a token the child owns, deliberately: validate's own prefix
+    around it changes later in #557 and this pin must survive that.
+    """
+    (kb / "policy" / "logic-policy.dl").write_text(
+        "requires_review(F) :- fact(F, \"develops\").\n", encoding="utf-8"
+    )
+    lines = _policy_lines(_validate(kb))
+    assert lines, _validate(kb).stdout + _validate(kb).stderr
+    assert any("stale" in line for line in lines), lines
+
+
+def test_a_whitespace_only_policy_md_is_not_also_reported_as_dl_drift(kb):
+    """(9) #557 defect A: an unjudgeable .md must be reported as itself, once.
+
+    A .md holding only newlines cannot say whether the .dl beside it is right, and
+    --check, handed it, answers with the .md complaint validate has already queued. The
+    second copy arrived under a prefix asserting the two files had been compared, so the
+    same fact was stated twice and the louder statement was false.
+
+    Kills the mutant that drops `.strip()` from policy_source_usable: the file exists, so
+    without it delegation resumes and the duplicate line comes straight back.
+    """
+    (kb / "policy" / "logic-policy.dl").write_text(
+        fcommon.EMPTY_POLICY_DL, encoding="utf-8"
+    )
+    (kb / "policy" / "logic-policy.md").write_text("\n\n", encoding="utf-8")
+
+    lines = _logic_policy_lines(_validate(kb))
+    assert len(lines) == 1, lines
+    assert "missing or empty policy/logic-policy.md" in lines[0], lines
+    assert _policy_lines(_validate(kb)) == []
+
+
+def test_a_whitespace_only_policy_md_reports_the_same_as_a_deleted_one(kb):
+    """(10) #557 defect A, the other half: no policy is no policy, however it is spelt.
+
+    Emptying the file and removing it leave the KB in the same state, so they have to
+    read the same. Before the fix the blank one produced an extra .dl line the deleted
+    one did not, which made "does the file exist?" — a question neither the compiler nor
+    the loader asks — visible in the report.
+
+    Kills any fix that special-cases only one of the two spellings.
+
+    Both axes of the pair are walked. Routing a blank .md to the elif branch widened that
+    branch's reach, so "no .dl either" is a square whose output this change moved and the
+    symmetry alone cannot see it: with the branch dead both spellings lose the same line
+    and still agree. The .dl complaint is therefore asserted outright, which is what kills
+    a branch mutated to unreachable.
+
+    The .dl is walked in all three of its spellings for the same reason the .md is. Absent
+    and 0-byte have to report alike — the emptiness test on the .dl survived every suite
+    on this branch and on the one before it, because nothing reached the elif branch
+    holding a .dl that existed and said nothing.
+    """
+    dl = kb / "policy" / "logic-policy.dl"
+    md = kb / "policy" / "logic-policy.md"
+    dl.write_text(fcommon.EMPTY_POLICY_DL, encoding="utf-8")
+
+    md.write_text("   \n\t\n", encoding="utf-8")
+    blank = _logic_policy_lines(_validate(kb))
+
+    md.unlink()
+    deleted = _logic_policy_lines(_validate(kb))
+
+    assert blank == deleted, (blank, deleted)
+
+    dl.unlink()
+    md.write_text("   \n\t\n", encoding="utf-8")
+    blank_without_dl = _logic_policy_lines(_validate(kb))
+
+    md.unlink()
+    deleted_without_dl = _logic_policy_lines(_validate(kb))
+
+    assert blank_without_dl == deleted_without_dl, (blank_without_dl, deleted_without_dl)
+    assert any(
+        "missing or empty policy/logic-policy.dl" in line for line in blank_without_dl
+    ), blank_without_dl
+
+    dl.write_text("", encoding="utf-8")
+    md.write_text("   \n\t\n", encoding="utf-8")
+    blank_with_empty_dl = _logic_policy_lines(_validate(kb))
+
+    md.unlink()
+    deleted_with_empty_dl = _logic_policy_lines(_validate(kb))
+
+    assert blank_with_empty_dl == deleted_with_empty_dl, (
+        blank_with_empty_dl,
+        deleted_with_empty_dl,
+    )
+    assert blank_with_empty_dl == blank_without_dl, (
+        blank_with_empty_dl,
+        blank_without_dl,
+    )
+
+
+def test_a_missing_policy_prompt_does_not_silence_a_stale_dl(kb):
+    """(11) #557: the delegation gate is the .md, and only the .md.
+
+    natural_language_to_policy.md is the template for the LLM drafting step. --check does
+    not take that step — it compiles the .md and compares bytes, never calling
+    render_prompt — so gating delegation on the prompt let one deleted file turn every
+    stale .dl in the KB silent while `generate_logic_policy.py --check` on the very same
+    KB still exited non-zero and named it. Reproduced on origin/main before the fix.
+
+    Kills the mutant that restores `and policy_prompt.is_file()`. The prompt's own
+    "missing or empty" complaint is asserted alongside so that a fix which merely stopped
+    checking the prompt at all would not pass.
+    """
+    (kb / "policy" / "logic-policy.md").write_text(RULES_MD, encoding="utf-8")
+    assert _generate(kb).returncode == 0
+    (kb / "policy" / "logic-policy.md").write_text(PROSE_ONLY_MD, encoding="utf-8")
+    (kb / "policy" / "prompts" / "natural_language_to_policy.md").unlink()
+
+    proc = _validate(kb)
+    combined = proc.stdout + proc.stderr
+    assert "missing or empty policy/prompts/natural_language_to_policy.md" in combined, combined
+    lines = _policy_lines(proc)
+    assert any("stale" in line for line in lines), combined
+
+
+def test_an_md_authoring_error_is_not_reported_as_dl_drift(kb):
+    """(12) #557 defect B: validate does not assert a comparison it never made.
+
+    --check exits non-zero for two different kinds of reason. A marker the policy grammar
+    rejects is an authoring error in the .md — the .dl may not even exist yet — and
+    "does not match policy/logic-policy.md" pointed the reader at regenerating the .dl,
+    which cannot fix it. On real drift the same words were a duplicate of the child's own
+    "is stale". validate compares nothing here, so it claims nothing; the child's detail
+    is relayed and it already names the file to edit.
+
+    Kills the mutant that restores the "does not match" wording. The {Canonical} marker
+    has to lead the sentence — anywhere else _strip_canonical_prefix accepts it as prose
+    and the bullet compiles quietly.
+    """
+    md = kb / "policy" / "logic-policy.md"
+    md.write_text(
+        md.read_text(encoding="utf-8")
+        + "\n- [canon] {Canonical} The `develops` relation names the canonical form.\n",
+        encoding="utf-8",
+    )
+
+    lines = _policy_lines(_validate(kb))
+    assert len(lines) == 1, lines
+    assert "unrecognized leading marker" in lines[0], lines
+    assert "logic-policy.dl" in lines[0], lines
+    assert "does not match" not in lines[0], lines
