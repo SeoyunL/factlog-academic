@@ -24,6 +24,7 @@ from factlog.front_matter_scan import (  # noqa: E402
     front_matter_absence,
     front_matter_body,
 )
+from factlog.config import resolve_root  # noqa: E402
 from factlog.integrations.common.source_writer import (  # noqa: E402
     IDENTITY_KEYS_BY_SOURCE,
 )
@@ -510,6 +511,44 @@ def front_matter_warnings(root: Path) -> list[tuple[str, str]]:
     return warnings
 
 
+# Where a resolved target came from, phrased for the operator. The rejection below
+# names it because the whole point of #530 is that the *target* was wrong, not the
+# KB: "the current directory" and "the active-KB config" send a reader to different
+# fixes. 'flag' and 'argument' are kept apart so the message quotes the surface the
+# caller actually used.
+TARGET_ORIGINS = {
+    "flag": "the --target option",
+    "argument": "the command-line argument",
+    "env": "$FACTLOG_ROOT",
+    "config": "the active KB (factlog use)",
+    "cwd": "the current directory",
+}
+
+
+def resolve_target(target: str | None = None, root_arg: str | None = None) -> tuple[Path, str]:
+    """The KB to validate and where it came from: flag > argument > env > config > cwd.
+
+    The env/config/cwd tail is ``factlog.config.resolve_root``, so this tool follows
+    the same active-KB tiers as its siblings instead of assuming cwd (#530). The
+    positional ``root`` sits between the flag and the environment: it is the surface
+    every existing caller uses (the shell harness, merge_candidates' delegate), so it
+    has to keep out-ranking a stale $FACTLOG_ROOT the way it always has.
+
+    Unlike the sibling tools this resolves inside ``main`` rather than exporting
+    FACTLOG_ROOT before importing ``common``: nothing here reads common's import-time
+    path globals — every helper takes *root* as a parameter and the one child process
+    (validate_logic_policy) is handed FACTLOG_ROOT explicitly — and a pre-import
+    prepass cannot see the positional argument, so it would resolve one target while
+    validating another.
+    """
+    if target:
+        return Path(resolve_root(target)[0]), "flag"
+    if root_arg:
+        return Path(root_arg).expanduser().resolve(), "argument"
+    resolved, origin = resolve_root(None)
+    return Path(resolved), origin
+
+
 def main() -> int:
     # Windows console defaults to the legacy code page (cp949); force UTF-8 so
     # Korean output isn't mangled. No-op elsewhere. Files are always UTF-8.
@@ -520,9 +559,26 @@ def main() -> int:
             except (AttributeError, ValueError, OSError):
                 pass
     parser = argparse.ArgumentParser(description="Validate factlog KB outputs.")
-    parser.add_argument("root", nargs="?", default=".")
+    # ``--target`` is the name the sibling tools take; ``--wiki`` is the older spelling
+    # merge_candidates still uses. The positional stays for the callers that predate
+    # both (tests/*.sh, merge_candidates' subprocess delegate).
+    parser.add_argument("--target", "--wiki", dest="target", default=None, help="KB root")
+    parser.add_argument("root", nargs="?", default=None)
     args = parser.parse_args()
-    root = Path(args.root).expanduser().resolve()
+    root, origin = resolve_target(args.target, args.root)
+    if not (root / "sources").is_dir():
+        # Refuse rather than report. Validating a non-KB used to print the ordinary
+        # failure list ("missing directory: sources/ ...") for whatever directory the
+        # caller happened to stand in, which reads as *the operator's KB is broken*
+        # (#530). Same bar as finalize/compile_facts: say the target is not a KB, and
+        # say where the target came from, since that is what has to change.
+        print(f"validate: {root} is not a factlog KB (no sources/).", file=sys.stderr)
+        print(
+            f"validate: the target came from {TARGET_ORIGINS[origin]}; "
+            "pass --target <kb> or set the active KB with 'factlog use <kb>'.",
+            file=sys.stderr,
+        )
+        return 1
     errors = validate(root)
     # Printed on both outcomes and ahead of the verdict, so a failing run does not
     # swallow them and a passing one does not bury them under its own last line.
