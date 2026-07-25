@@ -346,6 +346,11 @@ def test_a_whitespace_only_policy_md_reports_the_same_as_a_deleted_one(kb):
     symmetry alone cannot see it: with the branch dead both spellings lose the same line
     and still agree. The .dl complaint is therefore asserted outright, which is what kills
     a branch mutated to unreachable.
+
+    The .dl is walked in all three of its spellings for the same reason the .md is. Absent
+    and 0-byte have to report alike — the emptiness test on the .dl survived every suite
+    on this branch and on the one before it, because nothing reached the elif branch
+    holding a .dl that existed and said nothing.
     """
     dl = kb / "policy" / "logic-policy.dl"
     md = kb / "policy" / "logic-policy.md"
@@ -370,6 +375,22 @@ def test_a_whitespace_only_policy_md_reports_the_same_as_a_deleted_one(kb):
     assert any(
         "missing or empty policy/logic-policy.dl" in line for line in blank_without_dl
     ), blank_without_dl
+
+    dl.write_text("", encoding="utf-8")
+    md.write_text("   \n\t\n", encoding="utf-8")
+    blank_with_empty_dl = _logic_policy_lines(_validate(kb))
+
+    md.unlink()
+    deleted_with_empty_dl = _logic_policy_lines(_validate(kb))
+
+    assert blank_with_empty_dl == deleted_with_empty_dl, (
+        blank_with_empty_dl,
+        deleted_with_empty_dl,
+    )
+    assert blank_with_empty_dl == blank_without_dl, (
+        blank_with_empty_dl,
+        blank_without_dl,
+    )
 
 
 def test_a_missing_policy_prompt_does_not_silence_a_stale_dl(kb):
