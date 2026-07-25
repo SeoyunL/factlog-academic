@@ -65,6 +65,7 @@ from common import (  # noqa: E402
     FACTS_DIR,
     KNOWN_STATUSES,
     QueryVocabulary,
+    classify_query_results,
     is_valid_arg,
     is_variable,
     relation_aliases,
@@ -465,6 +466,19 @@ def evaluate_queries(
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
+            # The guard the path (L476), relation (L544) and count (L593) branches
+            # already had, and the last branch to get it. validate_query's policy
+            # branch (L269, L278) raises a HARD ERROR on either shape, yet this branch
+            # went straight to policy_result_line, which filters `inferred[predicate]`
+            # with a matcher that reads a bare token as a WILDCARD -- so the report
+            # rendered `<pred> results: N rows` for a line it had just errored on, and
+            # #535's new header then counted that line as `evaluated`. The same trap
+            # this branch's siblings were fixed for (#284/#319/#321), reappearing one
+            # level up as an inflated headline number.
+            args = query_args(line)
+            if len(args) != 2 or not all(is_valid_arg(a) for a in args):
+                results.append(f"{predicate} query malformed — see Errors above")
+                continue
             results.append(policy_result_line(predicate, line, inferred, vocab))
         elif predicate == "path":
             # Constants AND variables. The old branch only handled two quoted
@@ -648,7 +662,7 @@ def query_summary_line(items: list[str]) -> str:
     exit code still turns on errors alone, because "the engine could not answer
     this question" is a normal KB state, not a broken check.
 
-    Classification is :func:`factlog.cli._classify_query_results` -- the very
+    Classification is :func:`factlog.common.classify_query_results` -- the very
     function ``factlog status`` reads this section with (#536). A second
     classifier here would agree today and drift the moment
     :func:`evaluate_queries` grows a branch, and then the header and ``status``
@@ -656,13 +670,16 @@ def query_summary_line(items: list[str]) -> str:
     reintroduced one line up. ANSWERABLE is a whitelist there, so an item shape
     neither side recognises lands in ``unclassified`` and is shown, never folded
     into the headline count.
-    """
-    # Imported here, not at module scope: the header is the only thing in this
-    # script that needs the CLI, and the deterministic steps above must not depend
-    # on it being importable.
-    from factlog.cli import _classify_query_results
 
-    counts = _classify_query_results(items)
+    It is imported from ``factlog.common``, not from ``factlog.cli``: this script
+    is a bundled DETERMINISTIC step, and every factlog module the tools/* layer
+    reaches for (``common``/``config``/``literal_types``/``md_lines``/
+    ``review_sections``) is a shared-vocabulary module. Reaching into the CLI --
+    a presentation layer, through a ``_``-prefixed name carrying no stability
+    contract -- would have made a deterministic step depend on the layer above it
+    (#535 review).
+    """
+    counts = classify_query_results(items)
     notes = [f"evaluated: {counts['answerable']}"] + [
         f"{label}: {n}"
         for label, n in (
