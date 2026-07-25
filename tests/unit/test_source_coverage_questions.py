@@ -660,6 +660,28 @@ class TestDegradedInputs:
         assert "questions: 0 declared (" in out.stdout
         assert "codec can't decode" in out.stdout
 
+    def test_a_non_utf8_questions_file_on_a_kb_with_no_sources(self, tmp_path):
+        # `main` reports an empty KB down a SEPARATE early-return branch, and that
+        # is the branch the regression was reported on ("coverage: no source files"
+        # printed, then the traceback). Both branches run the question axis, so both
+        # get a pin.
+        kb = _kb(tmp_path, questions=None, source=None,
+                 raw={"questions.md": b"\xff\xfe- [q1] hi\n"})
+        out = _run(kb)
+        assert out.returncode == 0, out.stderr
+        assert "coverage: no source files" in out.stdout
+        assert "questions: 0 declared (" in out.stdout
+        assert "codec can't decode" in out.stdout
+
+    @pytest.mark.parametrize("flag", ["--strict", "--strict-questions"])
+    def test_a_non_utf8_questions_file_never_gates(self, tmp_path, flag):
+        # An unreadable file is not a finding either axis may fail a build on.
+        kb = _kb(tmp_path, questions=None, accepted='relation("A", "b", "C").\n',
+                 candidates=['A,b,C,sources/a.md,accepted,0.9,'],
+                 raw={"questions.md": b"\xff\xfe- [q1] hi\n"})
+        out = _run(kb, flag)
+        assert out.returncode == 0, out.stderr
+
     def test_a_non_utf8_relation_policy_file_does_not_take_the_tool_down(self, tmp_path):
         kb = _kb(tmp_path, questions="- [q1] 총 문항 수는?\n",
                  accepted='relation("A", "b", "C").\n',
@@ -669,6 +691,13 @@ class TestDegradedInputs:
         assert out.returncode == 0, out.stderr
         assert "coverage: 1 source(s); 1 covered" in out.stdout
         assert "questions: 1 declared; vocabulary unreadable" in out.stdout
+
+    def test_a_non_utf8_relation_policy_file_never_gates(self, tmp_path):
+        kb = _kb(tmp_path, questions="- [q1] 총 문항 수는?\n",
+                 accepted='relation("A", "b", "C").\n',
+                 candidates=['A,b,C,sources/a.md,accepted,0.9,'],
+                 raw={"attribute-relations.md": b"\xff\xfe\xc3\xd1_\xb9\xae\xc7\xd7_\xbc\xf6\n"})
+        assert _run(kb, "--strict-questions").returncode == 0
 
     def test_a_relation_declared_only_in_single_valued_md_is_still_named(self, tmp_path):
         # A relation declared in single-valued.md (or typed-relations.md) and then
