@@ -20,6 +20,22 @@ Bundled scripts live under `${CLAUDE_PLUGIN_ROOT}/tools/`; criteria documents
 under `${CLAUDE_PLUGIN_ROOT}/skills/factlog/references/`. The deterministic
 gate is also backed by a plugin hook (`hooks/hooks.json`).
 
+> **Which tree actually runs (#553).** `${CLAUDE_PLUGIN_ROOT}/tools/` is the
+> **bundled copy** shipped with the plugin release, and its wrappers put their own
+> root first on `sys.path` — so a bundled run imports the *bundled* `factlog`
+> package even when a newer working tree is installed. That is right for users and
+> wrong for contributors: verifying a change through the plugin's `tools/` measures
+> the release, not the change. To exercise a working tree, run that checkout's own
+> `tools/<script>.py`, or `python3 -m factlog <subcommand>`.
+>
+> `FACTLOG_PREFER_INSTALLED=1` makes the bundled wrappers *append* their root
+> instead of prepending it, so an installed package wins. Its limit is exact and
+> load-bearing: it only guarantees **the `factlog` package comes from the installed
+> tree**. It does **not** guarantee **your working tree is what runs** — the script
+> body is still the bundled file. Only the literal value `1` opts in (unset, `0`,
+> `""` and `true` all leave the default). When the two trees differ, the
+> deterministic steps print a warning to **stderr** naming both; stdout is unchanged.
+
 ## Deterministic gate (do not skip)
 
 1. Treat every fact/query you generate as `candidate`/draft — never promote it

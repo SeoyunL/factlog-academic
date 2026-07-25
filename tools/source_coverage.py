@@ -122,7 +122,7 @@ from common import (  # noqa: E402
 )
 # Below the `from common import (...)` block, never in the sys.path bootstrap at the
 # top of this file: that block is #553's conflict surface and must stay untouched.
-from factlog.runtime import provenance_line  # noqa: E402
+from factlog.runtime import provenance_line, script_tree_split  # noqa: E402
 
 # Two things the text-estimate fallback needs, both already defined in ask_router:
 #
@@ -680,6 +680,15 @@ def main(argv: list[str] | None = None) -> int:
     # output with no execution context in stdout
     # (tests/unit/test_unaimed_engine_step_guard.py pins that contract).
     print(provenance_line())
+    # ...and whether that package came from the same tree as this script (#553): a
+    # bundled tools/ driving a working-tree factlog (or the reverse) is the state that
+    # made four closed defects look live. Printed to STDERR on purpose — the first two
+    # stdout lines are positional contract
+    # (tests/unit/test_report_factlog_provenance.py pins out[0]/out[1]), and a warning
+    # that fires only in a split installation must not renumber them.
+    _tree_split = script_tree_split(__file__)
+    if _tree_split:
+        print(_tree_split, file=sys.stderr)
     # An empty flag value is refused rather than dropped to the next tier (#546):
     # `--target "$FACTLOG_ROOT"` in a shell that never exported the variable is
     # exactly this shape, and falling through would target the configured KB while

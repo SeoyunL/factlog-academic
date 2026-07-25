@@ -3,7 +3,11 @@
 The deterministic scripts the skill calls live here (migrated in plan T1).
 **Python 3.11+ required** (the engine dependency `pyrewire` needs 3.11+; see `requires-python` in `pyproject.toml`).
 
-## Scripts (8 files)
+## Main entry points
+
+Not an inventory — `ls tools/*.py` is (the directory has grown well past the eight
+rows below, and the old "Scripts (8 files)" heading had been wrong for some time).
+These are the ones the skill invokes by name.
 
 | Script | Purpose |
 |---|---|
@@ -18,6 +22,60 @@ The deterministic scripts the skill calls live here (migrated in plan T1).
 
 The skill invokes these via `${CLAUDE_PLUGIN_ROOT}/tools/<script>.py`. They are the
 verifiable anchor — never replaced by model judgment.
+
+## Which tree are you actually running? (#553)
+
+`${CLAUDE_PLUGIN_ROOT}/tools/` is the **bundled copy** that ships with a plugin
+release. Four files here — `compile_facts.py`, `common.py`, `literal_types.py`,
+`factlog_config.py` — put their own distribution root at `sys.path[0]` before any
+`factlog` import can happen, and every other script in this directory reaches the
+package through one of them. So a bundled run imports the **bundled** `factlog`
+package even when a contributor has a newer working tree installed.
+
+That is the right default for a user: a release must be self-contained. It is the
+wrong default for a contributor, and it has cost real time — #208, #491, #527 and
+#547 were each re-diagnosed as live bugs from reports produced by code that did not
+contain the fix.
+
+### Verifying a working tree
+
+Run the checkout's own entry points. This is the only form that puts **both** the
+script and the package under your control:
+
+```bash
+python3 -m factlog check                     # active/installed factlog package
+python3 /path/to/checkout/tools/run_logic_check.py
+```
+
+### `FACTLOG_PREFER_INSTALLED=1`
+
+Set it and the four wrappers **append** their root instead of prepending it, so an
+installed `factlog` package wins:
+
+```bash
+FACTLOG_PREFER_INSTALLED=1 "${CLAUDE_PLUGIN_ROOT}/tools/run_logic_check.py"
+```
+
+Append rather than skip, so the opt-out cannot break anything: with no package
+installed anywhere, the bundled root is still on the path (last) and the run works
+exactly as before. Only the literal value `1` opts in — unset, `0`, `""` and `true`
+all leave the default behaviour untouched.
+
+**Its limit, which matters as much as what it does:** `FACTLOG_PREFER_INSTALLED=1`
+guarantees only that **the `factlog` package comes from the installed tree**. It does
+**not** guarantee that **your working tree is what runs** — the script body executing
+is still the bundled file, at the bundle's version. If you need the script too, run
+the checkout's `tools/` directly or use `python3 -m factlog`.
+
+When the script tree and the package tree differ, `run_logic_check.py`,
+`merge_candidates.py`, `source_coverage.py` and `compile_facts.py` print a warning to
+**stderr** naming both paths. It is stderr on purpose: stdout's first two lines are a
+positional contract (`factlog: …` then `<tool>: target KB …`), pinned by
+`tests/unit/test_report_factlog_provenance.py`.
+
+**One thing this cannot fix:** a released bundle's `tools/` is a release artifact, so
+an already-installed plugin keeps the old bootstrap until the next release. Until
+then, running the repo's `tools/` (or `python3 -m factlog`) is the working answer.
 
 ## Intentionally absent scripts
 
