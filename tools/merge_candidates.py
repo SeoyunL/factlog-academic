@@ -123,8 +123,10 @@ from common import (  # noqa: E402
 # facts/logic_report.txt cannot disagree about which questions the engine can answer.
 from source_coverage import (  # noqa: E402
     estimated_verdict,
+    mentioned_relations,
     query_drafts,
     question_rows,
+    relation_argument,
     relation_vocabulary,
 )
 from factlog import literal_types  # noqa: E402
@@ -600,15 +602,29 @@ def counterfactual_status(
     from candidates.csv. Without that, a KB whose accepted rows all lost their source
     would measure as "nothing left engine input", and the report would say nothing.
 
-    The precedence mirrors ``main``'s passes exactly, in their order: a superseded
-    tombstone wins outright; otherwise a recorded engine status is restored; a
-    deliberate re-review then holds an engine status back at needs_review (and
-    leaves a 'candidate' alone, as the hold there does).
+    The precedence reimplements ``main``'s passes, in their order: a superseded
+    tombstone wins outright; a row the run itself already retired is left retired;
+    otherwise a recorded engine status is restored; a deliberate re-review then holds
+    an engine status back at needs_review (and leaves a 'candidate' alone, as the hold
+    there does).
+
+    THIS IS THE ONE PLACE THOSE PASSES ARE WRITTEN TWICE. Keep it in step with them
+    (``main``, from the superseded preservation down to the needs_review hold) — when
+    the two drift, this reports a loss that never happened. The engine-restore guard
+    below is exactly that bug once: without ``status not in SUPERSEDED_STATUSES`` a
+    row the run retired is promoted back to accepted here, is counted as engine input
+    it would never have reached, and the report announces a relation "gone" that was
+    already gone before the drop.
     """
     key = fact_key(row["subject"], row["relation"], row["object"], row["source"])
     if key in superseded_keys:
         return "superseded"
-    status = engine_keys.get(key, row["status"])
+    status = row["status"]
+    # main: `if want and row["status"] not in SUPERSEDED_STATUSES` — a later rejection
+    # wins over an earlier acceptance, so a retired row is not restored from
+    # candidates.csv.
+    if status not in SUPERSEDED_STATUSES:
+        status = engine_keys.get(key, status)
     if key in review_keys and status in ENGINE_STATUSES:
         return "needs_review"
     return status
@@ -632,6 +648,40 @@ def lost_relations(
         for atom in engine_atoms(dropped)
         if (canonical := resolve_relation(atom["relation"], aliases)) not in survivors
     })
+
+
+def relations_behind(
+    question: str,
+    drafts: list[str],
+    lost: list[str],
+    aliases: dict[str, str],
+) -> list[str]:
+    """Which of *lost* the question actually leans on, in *lost*'s order, or [].
+
+    The gate's own reason does not point at the drop. ``common.classify_query`` checks
+    the SUBJECT before the relation, so a triple whose every row is gone comes back as
+    `entity_not_accepted` — true, and about the wrong thing: the entity stopped being
+    accepted BECAUSE the relation lost its rows. Naming the lost relation on the
+    question's line puts the cause next to the effect, which is the shape #538 asked
+    for.
+
+    Attribution, so it is deliberately conservative — only a relation this report has
+    already established as lost can appear, and if none of them is one the question
+    names, nothing is claimed and the gate's reason stands alone. Read off the draft
+    BY POSITION (``relation_argument``, the same probe source_coverage judges with),
+    falling back for a draft-less question to source_coverage's own text probe over
+    the lost names.
+    """
+    if not lost:
+        return []
+    named = {resolve_relation(relation_argument(line), aliases) for line in drafts}
+    hits = [name for name in lost if name in named]
+    if hits:
+        return hits
+    # No draft (or a draft naming nothing lost, e.g. a review_required(...) line):
+    # ask the question text, the same fallback the reported verdict itself used.
+    mentioned = set(mentioned_relations(question, set(lost)))
+    return [name for name in lost if name in mentioned]
 
 
 def question_states(
@@ -754,6 +804,12 @@ def _report_drop_impact(
             f"input: {', '.join(relations)}",
             file=sys.stderr,
         )
+    # The relation half is reported on every path, including the ones that return
+    # early below: "no relation left engine input" is half the finding, and dropping it
+    # whenever policy/questions.md happens to be unreadable leaves the reader with a
+    # bare error where a result belongs. Folded into whichever line comes next rather
+    # than printed on its own, so the harmless case stays one line.
+    lead = "" if relations else "no relation left engine input; "
 
     try:
         questions = load_questions()
@@ -767,14 +823,23 @@ def _report_drop_impact(
         # EUC-KR raises UnicodeDecodeError instead (the surprise that made #537's axis a
         # regression rather than a missing feature).
         detail = " ".join(str(exc).split())
-        print(f"  drop impact: no declared questions to check ({detail})", file=sys.stderr)
+        print(
+            f"  drop impact: {lead}no declared questions to check ({detail})",
+            file=sys.stderr,
+        )
         return
 
     query_dl = root / "facts" / "query.dl"
     if query_dl.is_file():
-        drafts = query_drafts(
-            query_dl.read_text(encoding="utf-8"), {q["id"] for q in questions}
-        )
+        try:
+            text = query_dl.read_text(encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            # Named, because the outer guard prints the exception alone and a bare
+            # "'utf-8' codec can't decode byte 0xba" does not say WHICH of the files
+            # this report reads was the bad one (a Korean query.dl stored EUC-KR is
+            # the same surprise policy/questions.md already reports by name above).
+            raise RuntimeError(f"reading facts/query.dl: {' '.join(str(exc).split())}") from exc
+        drafts = query_drafts(text, {q["id"] for q in questions})
     else:
         # facts/query.dl is written by the LLM `/factlog query` step, so its absence is
         # a normal state rather than a loss. Every question then falls back to
@@ -793,7 +858,6 @@ def _report_drop_impact(
         # Stated even when a relation WAS lost: "some vocabulary is gone" and "an
         # answer is gone" are different findings, and a relation nothing asks about is
         # the case where the merge is allowed to look clean.
-        lead = "" if relations else "no relation left engine input; "
         print(
             f"  drop impact: {lead}no declared question changed answerability",
             file=sys.stderr,
@@ -806,7 +870,11 @@ def _report_drop_impact(
         file=sys.stderr,
     )
     for qid, question, reason in unanswerable:
-        print(f"    - [{qid}] {question}  ({reason})", file=sys.stderr)
+        behind = relations_behind(question, drafts.get(qid, []), relations, aliases)
+        # "; " and not " — ": the gate's own reason already carries an em dash, and two
+        # of them in one line stop reading as one clause after another.
+        cause = f"lost relation {', '.join(behind)}; " if behind else ""
+        print(f"    - [{qid}] {question}  ({cause}{reason})", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1606,6 +1674,28 @@ def main() -> int:
         if restored:
             print(f"  preserved {restored} human-accepted row(s) from candidates.csv")
 
+    # Respect a deliberate human re-review: a row the human pulled back to
+    # needs_review in candidates.csv must not be silently re-promoted by a stale
+    # engine status carried in runs/*.json (e.g. left from an earlier accept).
+    # Only engine statuses are overridden — a re-asserted 'candidate' is untouched
+    # — and superseded (handled above) still wins.
+    #
+    # Ordered BEFORE the ratchet so `rows` carries its final statuses on both sides of
+    # it: the ratchet may return, and the drop-impact report it prints there has to
+    # measure against the same engine input the success path would (#538). The ratchet
+    # itself only reads KEYS (present_keys, and engine/review keys off disk), so
+    # nothing it decides depends on the statuses this pass rewrites.
+    review_keys = existing_review_keys(root)
+    if review_keys:
+        held = 0
+        for row in rows:
+            key = fact_key(row["subject"], row["relation"], row["object"], row["source"])
+            if key in review_keys and row["status"] in ENGINE_STATUSES:
+                row["status"] = "needs_review"
+                held += 1
+        if held:
+            print(f"  held {held} human-reviewed row(s) at needs_review (re-review respected)")
+
     # --- the ratchet (#218) -------------------------------------------------
     # A row a human has ruled on may only leave candidates.csv through a human
     # gate: `factlog eject --fact` retires it as a tombstone (carried over above).
@@ -1624,7 +1714,7 @@ def main() -> int:
     # one but not the other gave the absurd split of refusing a total loss while
     # silently accepting a partial one. One definition, both guards.
     protected = dict(engine_keys)
-    protected.update(dict.fromkeys(existing_review_keys(root), "needs_review"))
+    protected.update(dict.fromkeys(review_keys, "needs_review"))
     destroyed = sorted(key for key in protected if key not in present_keys)
     if destroyed and not args.allow_delete:
         print(
@@ -1647,23 +1737,13 @@ def main() -> int:
             f"    python3 tools/merge_candidates.py --wiki {root} --allow-delete",
             file=sys.stderr,
         )
+        # The refusal lists the facts at stake; it does not say what ANSWERS are at
+        # stake, and the reader standing here has to decide whether to pass
+        # --allow-delete. This is the path where the loss is largest — every destroyed
+        # key is a row a human ruled on — so it is the last path that should be quiet
+        # about which declared questions the deletion would cost (#538).
+        report_drop_impact(root, rows, dropped_rows, superseded_keys, engine_keys, review_keys)
         return 1
-
-    # Respect a deliberate human re-review: a row the human pulled back to
-    # needs_review in candidates.csv must not be silently re-promoted by a stale
-    # engine status carried in runs/*.json (e.g. left from an earlier accept).
-    # Only engine statuses are overridden — a re-asserted 'candidate' is untouched
-    # — and superseded (handled above) still wins.
-    review_keys = existing_review_keys(root)
-    if review_keys:
-        held = 0
-        for row in rows:
-            key = fact_key(row["subject"], row["relation"], row["object"], row["source"])
-            if key in review_keys and row["status"] in ENGINE_STATUSES:
-                row["status"] = "needs_review"
-                held += 1
-        if held:
-            print(f"  held {held} human-reviewed row(s) at needs_review (re-review respected)")
 
     # `rows` is now exactly what candidates.csv will hold, so the projection
     # engine_atoms() makes is the engine input this merge produces — the only basis
