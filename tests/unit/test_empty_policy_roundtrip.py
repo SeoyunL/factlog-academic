@@ -340,6 +340,12 @@ def test_a_whitespace_only_policy_md_reports_the_same_as_a_deleted_one(kb):
     the loader asks — visible in the report.
 
     Kills any fix that special-cases only one of the two spellings.
+
+    Both axes of the pair are walked. Routing a blank .md to the elif branch widened that
+    branch's reach, so "no .dl either" is a square whose output this change moved and the
+    symmetry alone cannot see it: with the branch dead both spellings lose the same line
+    and still agree. The .dl complaint is therefore asserted outright, which is what kills
+    a branch mutated to unreachable.
     """
     dl = kb / "policy" / "logic-policy.dl"
     md = kb / "policy" / "logic-policy.md"
@@ -352,6 +358,18 @@ def test_a_whitespace_only_policy_md_reports_the_same_as_a_deleted_one(kb):
     deleted = _logic_policy_lines(_validate(kb))
 
     assert blank == deleted, (blank, deleted)
+
+    dl.unlink()
+    md.write_text("   \n\t\n", encoding="utf-8")
+    blank_without_dl = _logic_policy_lines(_validate(kb))
+
+    md.unlink()
+    deleted_without_dl = _logic_policy_lines(_validate(kb))
+
+    assert blank_without_dl == deleted_without_dl, (blank_without_dl, deleted_without_dl)
+    assert any(
+        "missing or empty policy/logic-policy.dl" in line for line in blank_without_dl
+    ), blank_without_dl
 
 
 def test_a_missing_policy_prompt_does_not_silence_a_stale_dl(kb):
