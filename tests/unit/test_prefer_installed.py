@@ -8,11 +8,11 @@ installed — they verify a change against code that does not contain it. Four a
 closed defects (#208, #491, #527, #547) were re-diagnosed as live bugs from exactly
 that shape.
 
-``FACTLOG_PREFER_INSTALLED=1`` makes the wrappers **probe** for an installed ``factlog``
-and leave ``sys.path`` alone when they find one, falling back to **appending** their own
-root when they do not.
+``FACTLOG_PREFER_INSTALLED=1`` makes the wrappers **look up** whether an installed
+``factlog`` exists and leave ``sys.path`` alone when one does, falling back to
+**appending** their own root when none does.
 
-Both halves are load-bearing, and each was measured rather than reasoned:
+All three halves are load-bearing, and each was measured rather than reasoned:
 
 * **Probe, not append-only.** ``pip install -e .`` on this project emits a setuptools
   ``_TopLevelFinder`` — the checkout is reachable only through a finder appended to
@@ -24,6 +24,11 @@ Both halves are load-bearing, and each was measured rather than reasoned:
 * **Append, not skip.** Skipping the insertion outright would make a bare checkout with
   nothing installed raise ``ImportError`` — the opt-out would invent a new failure mode.
   The ``none`` form pins that it does not.
+* **Look up, not import.** ``except ImportError`` is wider than "there is no factlog":
+  an installed package whose ``__init__`` imports a missing dependency raises
+  ``ModuleNotFoundError``, the fallback swallows it, and the bundle wins with ``=1`` set
+  and nothing printed — the no-signal state rebuilt inside the fix.
+  ``test_a_broken_install_is_not_silently_routed_around`` pins that.
 
 Everything runs in a **subprocess**. The question is literally "which package did this
 process import", and an in-process assertion could only ever describe the test runner's
@@ -399,6 +404,39 @@ class TestInstallForms:
         assert str(bundle / "factlog" / "__init__.py") in line
         assert "warning:" not in result.stderr
 
+    def test_a_broken_install_is_not_silently_routed_around(self, tmp_path):
+        """The fallback must not rebuild the no-signal state it exists to remove.
+
+        ``try: import factlog / except ImportError`` passes every other test in this
+        class. It also swallows ``ModuleNotFoundError`` — an ``ImportError`` subclass —
+        raised by an installed package whose ``__init__`` imports something missing. The
+        fallback then appends, the bundle wins, and the run prints a clean report with
+        ``FACTLOG_PREFER_INSTALLED=1`` set and no warning: precisely the unattributable
+        state #553 was filed about, reconstructed inside #553's own fix.
+
+        Asking ``find_spec`` instead answers "a factlog exists here" without executing
+        it, so a broken install fails on its own terms. What is asserted is therefore
+        not "it succeeds" but "it does not quietly become a bundle run" — the failure is
+        the correct outcome, and the traceback names the real cause.
+        """
+        bundle = _bundle(tmp_path)
+        installed = _installed_tree(tmp_path)
+        (installed / "factlog" / "__init__.py").write_text(
+            (installed / "factlog" / "__init__.py").read_text(encoding="utf-8")
+            + "\nimport factlog_missing_dep_xyz  # noqa: F401\n",
+            encoding="utf-8",
+        )
+        kb = _new_kb(tmp_path, "kb_broken")
+        cwd = _neutral_cwd(tmp_path)
+        python, site_packages = self._venv(tmp_path, "metapath")
+        self._install(site_packages, "metapath", installed)
+
+        result = _compile(bundle, kb, cwd, prefer="1", python=python)
+
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert "9.9.9+" not in result.stdout, "the bundle silently took over the run"
+        assert "factlog_missing_dep_xyz" in result.stderr
+
 
 class TestSplitTreeWarning:
     """A split installation is announced, and announced somewhere that cannot break stdout."""
@@ -527,6 +565,12 @@ class TestTheFourBootstrapsDoNotDrift:
         assert 'os.environ.get("FACTLOG_PREFER_INSTALLED") == "1"' in block
         assert "sys.path.append(str(_ROOT))" in block
         assert "sys.path.insert(0, str(_ROOT))" in block
+        # A LOOKUP, not an execution. ``try: import factlog / except ImportError`` passes
+        # every install-form test above and then swallows the ``ModuleNotFoundError`` of
+        # an installed package with a missing dependency — handing the run back to the
+        # bundle with ``=1`` set and nothing printed. See
+        # ``test_a_broken_install_is_not_silently_routed_around``.
+        assert 'importlib.util.find_spec("factlog") is None' in block
         # The membership guard is what keeps ``test_two_trees_produce_two_different_lines``
         # working: that test fronts a tree on PYTHONPATH that already lists _ROOT, and
         # without this line the insertion below would overtake it.

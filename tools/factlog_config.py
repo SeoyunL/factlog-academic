@@ -16,17 +16,26 @@ from pathlib import Path
 # Exactly "1" opts in; unset / 0 / "" / "true" stay on the default — no truthiness
 # dialect to guess at.
 #
-# The opt-out PROBES instead of merely appending, and that is the whole difference
-# between working and not. `pip install -e .` on this pyproject makes setuptools emit
-# a _TopLevelFinder: the checkout is reachable only through a finder appended to
-# sys.meta_path, BEHIND the builtin PathFinder (measured — the shape this repo's own
-# editable installs actually take). Appending _ROOT to sys.path still leaves it on
-# sys.path, so PathFinder answers with the bundle and the editable finder is never
-# consulted; the opt-out would be a silent no-op, and the split warning would go quiet
-# too because both trees then agree. Leaving sys.path untouched when an installed
-# factlog is importable is what lets the finder win. The append survives for the case
-# it was chosen for: a bare checkout with nothing installed anywhere still imports this
-# tree instead of raising ImportError, so the opt-out cannot break a working setup.
+# The opt-out ASKS whether an installed factlog exists instead of merely appending,
+# and that is the whole difference between working and not. `pip install -e .` on this
+# pyproject makes setuptools emit a _TopLevelFinder: the checkout is reachable only
+# through a finder appended to sys.meta_path, BEHIND the builtin PathFinder (measured —
+# the shape this repo's own editable installs actually take). Appending _ROOT to
+# sys.path still leaves it on sys.path, so PathFinder answers with the bundle and the
+# editable finder is never consulted; the opt-out would be a silent no-op, and the split
+# warning would go quiet too because both trees then agree. Leaving sys.path untouched
+# when an installed factlog is findable is what lets the finder win. The append survives
+# for the case it was chosen for: a bare checkout with nothing installed anywhere still
+# imports this tree instead of raising ImportError, so the opt-out cannot break a
+# working setup.
+#
+# find_spec, NOT `try: import factlog / except ImportError`. ImportError is wider than
+# "there is no factlog": an installed package whose __init__ imports a missing
+# dependency raises ModuleNotFoundError (an ImportError subclass), the fallback would
+# swallow it, and the bundle would win with =1 set and NOTHING printed — the exact
+# no-signal state this issue exists to remove, rebuilt inside its own fallback. A
+# lookup also answers without executing the package, so a broken install fails later,
+# loudly, on its own terms instead of being silently routed around.
 #
 # The `not in sys.path` guard is load-bearing, not defensive: tests/unit/
 # test_report_factlog_provenance.py::test_two_trees_produce_two_different_lines fronts
@@ -35,9 +44,9 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     if os.environ.get("FACTLOG_PREFER_INSTALLED") == "1":
-        try:
-            import factlog as _probe  # noqa: F401
-        except ImportError:
+        import importlib.util
+
+        if importlib.util.find_spec("factlog") is None:
             sys.path.append(str(_ROOT))
     else:
         sys.path.insert(0, str(_ROOT))

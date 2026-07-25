@@ -22,8 +22,11 @@ skill calls": `SKILL.md` also invokes `ask_router.py`, `corroboration.py`,
 | `resolve_stale_refs.py` | stale-reference resolution |
 | `common.py` | shared helpers, `decode_wirelog_value`, `validate_candidate_query` |
 
-The skill invokes these via `${CLAUDE_PLUGIN_ROOT}/tools/<script>.py`. They are the
-verifiable anchor — never replaced by model judgment.
+When the skill calls one of these it does so as
+`${CLAUDE_PLUGIN_ROOT}/tools/<script>.py`. Not all of them have a caller in `SKILL.md`:
+`validate.py` is delegated to by `merge_candidates.py`, and `review_candidates.py` and
+`resolve_stale_refs.py` are run directly by a human. Whoever the caller is, each one is
+the verifiable anchor for its step — never replaced by model judgment.
 
 ## Which tree are you actually running? (#553)
 
