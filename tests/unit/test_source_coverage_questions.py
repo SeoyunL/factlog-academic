@@ -8,6 +8,17 @@ definition, correct. Meanwhile the questions the KB was built to answer have no
 vocabulary left in engine input. A guard named "silent-omission" that reports a
 clean line in that state is the omission.
 
+Since #558 the source axis reports one more figure, read off runs/*.json rather
+than candidates.csv: the sources run rows cite that are not on disk. That covers
+the row-level cause of SOME losses of this shape (the source file was deleted), so
+the source line is no longer unconditionally clean in a "relation dropped at
+merge" state. It is still clean in the state THIS file measures, and that is a
+property of the fixtures rather than an accident: `_kb` writes no runs/*.json at
+all, so the new figure is 0 and omitted. The #537 premise holds wherever a
+relation was lost for a reason OTHER than its source disappearing — a policy
+change, a rewritten extraction, a row edited by hand. A fixture that starts
+writing run files must re-read the summary assertion below rather than assume it.
+
 Where a question HAS a draft in `facts/query.dl`, the mapping is READ, not
 inferred: each draft is anchored by a `// q3: ...` comment carrying the id
 policy/questions.md declares, and the verdict is `common.classify_query` — the
@@ -546,6 +557,11 @@ class TestQuestionAxisOutput:
     def test_the_source_axis_alone_reports_nothing_wrong(self, tmp_path):
         # The premise of #537: the source line is clean in exactly this state, and
         # its wording is untouched by this axis (tests/test_coverage.sh greps it).
+        # "This state" is the narrower one #558 leaves: the relation's rows are
+        # gone but its SOURCE FILE is still on disk and no run file cites a missing
+        # one, so the run-cited figure is 0 and omitted from the line. A KB that
+        # lost the relation BY deleting the source now DOES get a line — from the
+        # source axis, not this one — which is #558's point, not a dent in #537's.
         out = _run(_kb(tmp_path, **_LOST))
         assert (
             "coverage: 1 source(s); 1 covered, 0 text gap(s), 0 binary needing conversion, "

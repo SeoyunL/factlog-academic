@@ -15,6 +15,12 @@ conversion when it has no conversion at all.
 It also surfaces orphan citations: a fact citing a source file that no longer
 exists on disk (a stale/typo'd reference).
 
+Orphans are read off facts/candidates.csv, which is the state AFTER merge, so a
+row citing a deleted source disappears from that axis the moment merge rebuilds
+the CSV without it -- and the KB keeps carrying those run rows with nothing left
+to say so (#558). A THIRD figure therefore reads runs/*.json directly: the
+sources run rows cite that are not on disk, and how many rows each carries.
+
 Counts use engine facts only: a source backed solely by superseded or
 needs_review rows contributes nothing to accepted.dl, so it is correctly a gap.
 
@@ -36,7 +42,9 @@ differently.
 Always exits 0 by default (informational, never blocks the pipeline). With
 --strict, exit non-zero when any TEXT source is uncovered; with
 --strict-questions, when any declared question has no engine-input vocabulary --
-so automation can surface either kind of silent gap.
+so automation can surface either kind of silent gap. The run-cited-missing-source
+figure gates NOTHING: it reports a state many KBs have carried for a long time,
+and hanging it on --strict would fail pipelines that never opted in.
 
 Usage:
     python3 source_coverage.py [--target <kb>] [--strict] [--strict-questions]
@@ -114,7 +122,9 @@ from common import (  # noqa: E402
     query_args,
     relation_aliases,
     resolve_relation,
+    run_cited_sources,
     single_valued_relations,
+    source_file_refs,
     source_files,
     source_rel_key,
     sync_ignore_patterns,
@@ -204,6 +214,55 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
 
     orphans = sorted(set(cited) - on_disk)
     return rows, orphans
+
+
+def run_orphan_sources(root: Path) -> list[tuple[str, int]]:
+    """(source ref, row count) for every source runs/*.json cites that is missing.
+
+    The blind spot the orphan axis above cannot see (#558). `cited` there comes
+    from facts/candidates.csv, and merge drops a row whose source is not on disk
+    BEFORE writing that file — so the rows stay in runs/*.json, get dropped and
+    warned about on every merge, and the status query reports 0 forever. Reading
+    the run files is the only input that still holds them.
+
+    Deliberately NOT folded into ``coverage_rows``: its two-tuple return is a
+    pinned signature (tests/unit/test_hidden_sources.py unpacks it), and the two
+    figures answer different questions anyway — one is "a fact in engine input
+    points at nothing", this one is "input rows will be dropped again next merge".
+
+    Both sides come from common: the refs from ``run_cited_sources`` (keyed by
+    merge's own rule) and the disk state from ``source_file_refs`` (the very set
+    merge compares against), so this report cannot disagree with the merge whose
+    drops it is reporting. Sorted by path, so the output is order-independent.
+    """
+    on_disk = source_file_refs(root)
+    return sorted(
+        (ref, count) for ref, count in run_cited_sources(root).items() if ref not in on_disk
+    )
+
+
+def report_run_orphans(run_orphans: list[tuple[str, int]]) -> None:
+    """Print the run-cited-missing-source lines to stderr. No-op when empty.
+
+    The remedy hint states what is TRUE today: `factlog eject --orphans` builds
+    its cited set from candidates.csv exactly as the orphan axis does, so it
+    reports "no orphaned sources found" on precisely this state. Pointing a
+    reader at it would send them to a command that does nothing — the loop this
+    report exists to break. Fixing eject is tracked separately.
+    """
+    if not run_orphans:
+        return
+    for ref, count in run_orphans:
+        print(
+            f"  RUN ROWS cite a missing source (dropped at merge, {count} row(s)): {ref}",
+            file=sys.stderr,
+        )
+    total = sum(count for _ref, count in run_orphans)
+    print(
+        f"  run rows cite {len(run_orphans)} missing source(s) ({total} row(s) total); "
+        "inspect runs/*.json — `factlog eject --orphans` does not cover these",
+        file=sys.stderr,
+    )
 
 
 # --- question axis (#537) ----------------------------------------------------
@@ -703,7 +762,13 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_dirs()
     facts = load_facts() if CANDIDATES_CSV.is_file() else []
-    rows, orphans = coverage_rows(Path(os.environ["FACTLOG_ROOT"]), facts)
+    root = Path(os.environ["FACTLOG_ROOT"])
+    rows, orphans = coverage_rows(root, facts)
+    # Read straight off runs/*.json, so it survives what candidates.csv cannot
+    # carry (#558). NOT gated by --strict: that flag's contract is "a text source
+    # has no facts", and widening it would start failing every pipeline already
+    # wired to it, on a state that has always been present.
+    run_orphans = run_orphan_sources(root)
 
     def question_axis() -> int:
         """Report the question axis and return its exit code contribution."""
@@ -718,11 +783,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not rows:
+        # THE worst case of #558 and the one this branch used to say nothing
+        # about: every source deleted, so there are no rows to report and every
+        # run row is now citing a missing source.
         print("coverage: no source files")
         rc = question_axis()
         if orphans:
             for ref in orphans:
                 print(f"  ORPHAN citation (source file missing): {ref}", file=sys.stderr)
+        report_run_orphans(run_orphans)
         return rc
 
     # A binary original is "covered via conversion" when its runs/sources/<stem>
@@ -742,10 +811,16 @@ def main(argv: list[str] | None = None) -> int:
     n_covered = len(covered_direct) + len(covered_via_conv)
     via_note = f" ({len(covered_via_conv)} via conversion)" if covered_via_conv else ""
     excluded_note = f", {len(excluded)} excluded (sync-ignored)" if excluded else ""
+    # Omitted entirely at 0, so the summary line of a KB with no run orphans is
+    # byte-identical to what it has always been (#558) — this figure is news, not
+    # a new column every reader and every grep has to absorb.
+    run_orphan_note = (
+        f", {len(run_orphans)} run-cited source(s) missing" if run_orphans else ""
+    )
     print(
         f"coverage: {len(rows)} source(s); {n_covered} covered{via_note}, "
         f"{len(text_gaps)} text gap(s), {len(binary_gaps)} binary needing conversion, "
-        f"{len(orphans)} orphan citation(s){excluded_note}"
+        f"{len(orphans)} orphan citation(s){run_orphan_note}{excluded_note}"
     )
     for r in rows:
         if r["ignored"]:
@@ -767,6 +842,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  GAP (binary, run factlog ingest): {r['file']}", file=sys.stderr)
     for ref in orphans:
         print(f"  ORPHAN citation (source file missing): {ref}", file=sys.stderr)
+    report_run_orphans(run_orphans)
 
     if args.strict and text_gaps:
         print(f"--strict: {len(text_gaps)} text source(s) with no extracted facts", file=sys.stderr)

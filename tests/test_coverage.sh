@@ -159,6 +159,49 @@ nout="$("$PYTHON" "$COV" --wiki "$NFCKB" 2>&1)"
 printf '%s' "$nout" | grep -qE "1 fact\(s\): sources/각노트.md" && ok "NFD-named source cited NFC is covered (not 0)" || bad "NFD source shows 0 facts"
 printf '%s' "$nout" | grep -qF "ORPHAN" && bad "NFD source falsely reported as orphan" || ok "no orphan false-positive for NFD-named source"
 
+# --- run rows citing a deleted source, with candidates.csv already clean (#558)
+# The state a KB settles into after the first merge past a source deletion: the
+# rows are gone from candidates.csv (so the orphan axis is silent) but still sit
+# in runs/*.json, dropped and warned about on every merge from now on.
+RUNKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$RUNKB" >/dev/null
+printf 'live\n' > "$RUNKB/sources/live.md"
+printf '%s\n%s\n' "$HEADER" \
+  '갑봇,통합,을서비스,sources/live.md,accepted,0.9,' > "$RUNKB/facts/candidates.csv"
+runjson() { printf '%s' "$1" > "$RUNKB/runs/$2"; }
+# One run file citing only the live source: the baseline this KB reports today.
+runjson '[{"subject":"갑봇","relation":"통합","object":"을서비스","source":"sources/live.md","status":"accepted","confidence":"0.9","note":""}]' "2026-01-01-live.json"
+set +e; rout="$("$PYTHON" "$COV" --wiki "$RUNKB" 2>&1)"; rrc=$?; set -e
+# BYTE-identical to the pre-#558 summary line: the new field is omitted at 0, so
+# no existing reader or grep sees a changed line on a KB with nothing to report.
+printf '%s' "$rout" | grep -qF "coverage: 1 source(s); 1 covered, 0 text gap(s), 0 binary needing conversion, 0 orphan citation(s)" \
+  && ok "no run orphans: summary line unchanged" || bad "summary line changed with 0 run orphans: $rout"
+printf '%s' "$rout" | grep -qF "run-cited source(s) missing" && bad "run-orphan field printed at 0" || ok "run-orphan field omitted at 0"
+printf '%s' "$rout" | grep -qF "RUN ROWS cite" && bad "run-orphan line printed at 0" || ok "no run-orphan stderr line at 0"
+[ "$rrc" -eq 0 ] && ok "clean run files exit 0" || bad "clean run files exit $rrc"
+
+# Now three rows citing sources that are NOT on disk (one via an #anchor), while
+# candidates.csv stays clean — exactly what merge leaves behind.
+runjson '[{"subject":"유령","relation":"참조","object":"대상","source":"sources/ghost.md","status":"candidate","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"둘","source":"sources/ghost.md#sec","status":"candidate","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"셋","source":"sources/gone.md","status":"candidate","confidence":"0.9","note":""}]' "2026-01-02-ghost.json"
+set +e; rout="$("$PYTHON" "$COV" --wiki "$RUNKB" 2>&1)"; rrc=$?; set -e
+printf '%s' "$rout" | grep -qF "0 orphan citation(s), 2 run-cited source(s) missing" && ok "run-cited missing sources counted in summary" || bad "run-orphan summary field missing: $rout"
+printf '%s' "$rout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 2 row(s)): sources/ghost.md" && ok "per-source line carries the row count (anchor folded)" || bad "ghost.md run-orphan line missing"
+printf '%s' "$rout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/gone.md" && ok "second missing source reported on its own line" || bad "gone.md run-orphan line missing"
+printf '%s' "$rout" | grep -qF 'eject --orphans` does not cover these' && ok "remedy hint states eject does not cover this" || bad "remedy hint missing/wrong"
+[ "$rrc" -eq 0 ] && ok "run orphans alone do not fail the default run" || bad "run orphans caused exit $rrc"
+# The new axis is informational: --strict's contract is text gaps, nothing else.
+set +e; "$PYTHON" "$COV" --wiki "$RUNKB" --strict >/dev/null 2>&1; srrc=$?; set -e
+[ "$srrc" -eq 0 ] && ok "--strict does not gate on run orphans" || bad "--strict failed on run orphans (exit $srrc)"
+
+# The worst case: every source deleted, so coverage takes the "no source files"
+# early return — the branch that used to say nothing at all about these rows.
+rm -f "$RUNKB/sources/live.md"
+printf '%s\n' "$HEADER" > "$RUNKB/facts/candidates.csv"
+set +e; eout="$("$PYTHON" "$COV" --wiki "$RUNKB" 2>&1)"; erc=$?; set -e
+printf '%s' "$eout" | grep -qF "coverage: no source files" && ok "empty-sources KB still takes the early return" || bad "early-return line missing"
+printf '%s' "$eout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/live.md" && ok "early return reports run orphans too" || bad "early return silent about run orphans: $eout"
+[ "$erc" -eq 0 ] && ok "early return with run orphans exits 0" || bad "early return exit $erc"
+
 echo ""
 echo "========================================"
 echo "test_coverage: $pass passed, $fail failed"
