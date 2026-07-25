@@ -2366,20 +2366,90 @@ def _classify_query_results(items: list[str]) -> dict[str, int]:
     found nothing" apart from "the engine never got to check" (#347/#350/#362), and
     collapsing the two in status would undo that distinction one line lower.
 
-    The rest are the questions the engine could not answer, by the report's own
-    wording: ``review_required:`` (routed to a human, not expressible as a query),
-    ``unverified`` (a constant its position does not accept), and ``malformed``.
+    ANSWERABLE IS A WHITELIST, and the default is `unclassified`, not `answerable`.
+    The first cut fell through to answerable whenever no reason-substring matched, so
+    every new branch in run_logic_check's `evaluate_queries` silently tilted the
+    default towards "the engine answered this" — and `unknown query predicate`, an
+    item validate_query raises a HARD ERROR for, was already counted as answered
+    (0 answerable read as 2 answerable). An item whose shape this function does not
+    recognise is not evidence of an answer; it is counted `unclassified` and shown on
+    the line, so the drift is visible instead of inflating the headline number.
+
+    Matching reads the HEAD of an item only — the part before the first `;`, and,
+    where a form allows it, an exact tail. `relation results: N rows; …` and
+    `path A -> B: …` append ENGINE FACT VALUES verbatim
+    (tools/run_logic_check.py:522-530), and `unverified` is ordinary factlog domain
+    vocabulary ("unverified preprint"), so a substring test against the whole item
+    flips two answered questions to "unverified" on real data. The route form is
+    accepted only when its first and last node are the queried endpoints, compared
+    through ``canonical_value`` the way dependency_path resolved them.
+
+    The reasons a question is not answerable, by the report's own wording:
+    ``review_required: `` (routed to a human; the colon is REQUIRED — a policy may
+    ``.decl`` a predicate named ``review_required_manual``, whose ordinary
+    ``… results: 3 rows`` findings are answers), ``unverified`` (a constant its
+    position does not accept), ``malformed``, and ``unknown query predicate``.
     """
-    counts = {"answerable": 0, "review_required": 0, "unverified": 0, "malformed": 0}
+    import re
+
+    from factlog.common import canonical_value
+
+    pred = r"[A-Za-z_][A-Za-z0-9_]*"
+    unverified_tail = " is not accepted vocabulary (see Warnings above)"
+    malformed = {
+        f"{p} query malformed — see Errors above" for p in ("path", "relation", "count")
+    }
+
+    def classify(item: str) -> str:
+        # Values are appended after "; " — judge on the head, never the payload.
+        head = item.split(";", 1)[0]
+        if item == "unknown query predicate — see Errors above":
+            # validate_query raises `query unknown predicate` as a hard ERROR for this
+            # line (tools/run_logic_check.py:203-205): the question is confirmed
+            # unanswerable, not answered.
+            return "unknown_predicate"
+        if item.startswith("review_required: "):
+            return "review_required"
+        if item in malformed:
+            return "malformed"
+        if re.fullmatch(rf"{pred} results: unverified — .*", item) and item.endswith(unverified_tail):
+            return "unverified"
+        if re.fullmatch(rf"{pred} results: \d+ rows", head):
+            return "answerable"
+        if re.fullmatch(r"count results: \d+ \(distinct objects\)", head):
+            return "answerable"
+        # `path <start> -> <target>: <value>`, the two-constant form. Non-greedy so the
+        # split takes the FIRST " -> " / ": "; an endpoint carrying either separator
+        # mis-splits and lands in `unclassified`, which is the safe direction.
+        pinned = re.fullmatch(r"path (?P<start>.+?) -> (?P<target>.+?): (?P<value>.+)", item)
+        if pinned:
+            value = pinned["value"]
+            if value == "(not found)":
+                return "answerable"  # the verified negative this branch exists for
+            if value == "reachable (engine); no route through the accepted facts":
+                return "answerable"
+            if value.startswith("unverified — ") and value.endswith(unverified_tail):
+                return "unverified"
+            route = value.split(" -> ")
+            if canonical_value(route[0]) == canonical_value(pinned["start"]) and canonical_value(
+                route[-1]
+            ) == canonical_value(pinned["target"]):
+                # dependency_path renders the STORED spelling of each endpoint, which
+                # may differ from the query constant by normalisation form; compare
+                # through the same canonicalisation it resolved them with.
+                return "answerable"
+        return "unclassified"
+
+    counts = {
+        "answerable": 0,
+        "review_required": 0,
+        "unverified": 0,
+        "malformed": 0,
+        "unknown_predicate": 0,
+        "unclassified": 0,
+    }
     for item in items:
-        if item.startswith("review_required"):
-            counts["review_required"] += 1
-        elif "malformed" in item:
-            counts["malformed"] += 1
-        elif "unverified" in item:
-            counts["unverified"] += 1
-        else:
-            counts["answerable"] += 1
+        counts[classify(item)] += 1
     return counts
 
 
@@ -2585,6 +2655,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                 ("review_required", counts["review_required"]),
                 ("unverified", counts["unverified"]),
                 ("malformed", counts["malformed"]),
+                ("unknown predicate", counts["unknown_predicate"]),
+                # An item shape _classify_query_results does not recognise. Shown
+                # rather than folded into answerable: if run_logic_check grows a
+                # result form this function has not learned, that shows up here as an
+                # unexplained bucket instead of silently inflating "N answerable".
+                ("unclassified", counts["unclassified"]),
                 # Declared questions the report has no result line for — no query drafted
                 # in facts/query.dl, or a query whose predicate produced nothing at all.
                 ("without a result", max(0, declared - len(items))),

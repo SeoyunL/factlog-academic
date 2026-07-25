@@ -123,7 +123,9 @@ class TestAnswerableCounting:
                 "relation results: unverified — 'develops' is not accepted vocabulary (see Warnings above)",
                 "path query malformed — see Errors above",
                 "review_required: c?",
-                "count results: 2",
+                # The emitter's real wording (tools/run_logic_check.py:565) — a count
+                # answer is never a bare "count results: N".
+                "count results: 2 (distinct objects)",
             ],
         )
         assert _questions_line(kb, capsys) == (
@@ -264,4 +266,175 @@ class TestQuestionCountingFollowsLoadQuestions:
         kb = _kb(tmp_path / "kb", questions=["a?"], query_results=["relation results: 0 rows"])
         assert _questions_line(kb, capsys) == (
             "  questions:  1 declared, 1 answerable — see facts/query.dl"
+        )
+
+
+class TestUnknownPredicateIsNotAnswerable:
+    """`unknown query predicate` is the item run_logic_check emits for a line
+    validate_query raises a HARD ERROR for (`query unknown predicate`,
+    tools/run_logic_check.py:203-205). Counting it as answered reproduced the very
+    illusion #536 set out to remove, with the sign flipped: a report saying
+    `errors=2` printed `2 answerable`."""
+
+    def test_it_is_not_counted_as_an_answer(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            questions=["a?", "b?"],
+            query_results=["unknown query predicate — see Errors above"] * 2,
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, 0 answerable (2 unknown predicate) — see facts/query.dl"
+        )
+
+
+class TestValuesAreNotMatched:
+    """`relation results: N rows; …` and `path A -> B: …` append ENGINE FACT VALUES
+    verbatim (tools/run_logic_check.py:522-530). "unverified" and "malformed" are
+    ordinary factlog domain vocabulary — an unverified preprint, a malformed
+    randomisation — so a substring test against the whole item turns answered
+    questions into unanswerable ones."""
+
+    def test_a_row_value_saying_unverified_is_still_an_answer(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            questions=["a?", "b?"],
+            query_results=[
+                "relation results: 1 rows; Study X, evidence_status, unverified preprint",
+                "relation results: 1 rows; Study Y, protocol_status, malformed randomisation",
+            ],
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, 2 answerable — see facts/query.dl"
+        )
+
+    def test_a_route_through_such_a_node_is_still_an_answer(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            questions=["a?"],
+            query_results=["path Study X -> Anthropic: Study X -> unverified preprint -> Anthropic"],
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  1 declared, 1 answerable — see facts/query.dl"
+        )
+
+    def test_a_path_row_listing_such_a_node_is_still_an_answer(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            questions=["a?"],
+            query_results=["path results: 2 rows; A -> unverified preprint; B -> malformed randomisation"],
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  1 declared, 1 answerable — see facts/query.dl"
+        )
+
+    def test_the_unverified_verdict_itself_is_still_caught(self, tmp_path, capsys):
+        """Reading the head must not cost the real verdict: the emitter's own
+        `<pred> results: unverified — …` still classifies."""
+        kb = _kb(
+            tmp_path,
+            questions=["a?", "b?"],
+            query_results=[
+                "relation results: unverified — 'develops' is not accepted vocabulary (see Warnings above)",
+                "path A -> B: unverified — 'B' is not accepted vocabulary (see Warnings above)",
+            ],
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, 0 answerable (2 unverified) — see facts/query.dl"
+        )
+
+
+class TestReviewRequiredNeedsItsColon:
+    """The policy predicate names come from `.decl` in policy/logic-policy.dl and are
+    free-form (factlog/common.py:1038-1060), so a KB may declare
+    `review_required_manual` — whose findings are emitted through policy_result_line
+    as ordinary `… results: N rows` ANSWERS. The review_required item the emitter
+    actually writes is always `review_required: <question>`
+    (tools/run_logic_check.py:568-570)."""
+
+    def test_a_policy_predicate_with_the_same_prefix_is_answerable(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            questions=["a?"],
+            query_results=["review_required_manual results: 3 rows; A, r1; B, r2; C, r3"],
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  1 declared, 1 answerable — see facts/query.dl"
+        )
+
+    def test_the_real_review_required_item_still_classifies(self, tmp_path, capsys):
+        kb = _kb(tmp_path, questions=["a?"], query_results=["review_required: a?"])
+        assert _questions_line(kb, capsys) == (
+            "  questions:  1 declared, 0 answerable (1 review_required) — see facts/query.dl"
+        )
+
+
+class TestAnswerableIsAWhitelist:
+    """Nothing falls through TO answerable. An item shape this classifier has not
+    learned is `unclassified` and shown on the line — otherwise every new branch in
+    `evaluate_queries` would silently tilt the default towards "the engine answered
+    this"."""
+
+    @pytest.mark.parametrize("item, expected", [
+        # answerable — every shape evaluate_queries/policy_result_line can emit as one
+        ("requires_review results: 1 rows; factlog, capability_check", "answerable"),
+        ("requires_review results: 0 rows", "answerable"),
+        ("relation results: 2 rows; A, r, B; C, r, D", "answerable"),
+        ("relation results: 0 rows", "answerable"),
+        ("count results: 0 (distinct objects)", "answerable"),
+        ("count results: 12 (distinct objects)", "answerable"),
+        ("path results: 0 rows", "answerable"),
+        ("path results: 1 rows; A -> B", "answerable"),
+        ("path A -> B: (not found)", "answerable"),
+        ("path A -> C: A -> B -> C", "answerable"),
+        ("path A -> B: reachable (engine); no route through the accepted facts", "answerable"),
+        # not answerable
+        ("relation results: unverified — 'x' is not accepted vocabulary (see Warnings above)",
+         "1 unverified"),
+        ("count results: unverified — 'x' is not accepted vocabulary (see Warnings above)",
+         "1 unverified"),
+        ("path results: unverified — 'x' is not accepted vocabulary (see Warnings above)",
+         "1 unverified"),
+        ("requires_review results: unverified — 'x' is not accepted vocabulary (see Warnings above)",
+         "1 unverified"),
+        ("path A -> B: unverified — 'B' is not accepted vocabulary (see Warnings above)",
+         "1 unverified"),
+        ("path query malformed — see Errors above", "1 malformed"),
+        ("relation query malformed — see Errors above", "1 malformed"),
+        ("count query malformed — see Errors above", "1 malformed"),
+        ("review_required: a?", "1 review_required"),
+        ("unknown query predicate — see Errors above", "1 unknown predicate"),
+        # a shape the classifier does not know
+        ("something the report has not emitted before", "1 unclassified"),
+        ("relation results: some rows", "1 unclassified"),
+        ("path A -> B: X -> Y", "1 unclassified"),
+    ])
+    def test_each_emitted_item_shape(self, tmp_path, capsys, item, expected):
+        kb = _kb(tmp_path, questions=["a?"], query_results=[item])
+        line = _questions_line(kb, capsys)
+        if expected == "answerable":
+            assert line == "  questions:  1 declared, 1 answerable — see facts/query.dl"
+        else:
+            assert line == f"  questions:  1 declared, 0 answerable ({expected}) — see facts/query.dl"
+
+
+class TestTheGoldenReportContract:
+    """Every other test here hand-writes its `Query evaluation:` section, so all of
+    them would keep passing if the classifier and the emitter drifted apart. This one
+    feeds the checked-in report run_logic_check actually produced."""
+
+    def test_the_golden_report_classifies(self, tmp_path, capsys):
+        from pathlib import Path
+
+        golden = Path(__file__).resolve().parents[1] / "golden" / "logic_report.txt"
+        section = golden.read_text(encoding="utf-8").split("Query evaluation:\n", 1)[1]
+        items = [ln.removeprefix("- ") for ln in section.splitlines() if ln.startswith("- ")]
+        assert len(items) == 7, items  # guard: the golden file still has its queries
+
+        kb = _kb(tmp_path, questions=[f"q{i}?" for i in range(1, 8)])
+        (kb / "facts" / "logic_report.txt").write_text(
+            golden.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  7 declared, 5 answerable (1 review_required, 1 unverified)"
+            " — see facts/query.dl"
         )
