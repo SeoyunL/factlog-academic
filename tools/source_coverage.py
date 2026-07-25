@@ -248,7 +248,10 @@ def report_run_orphans(run_orphans: list[tuple[str, int]]) -> None:
     its cited set from candidates.csv exactly as the orphan axis does, so it
     reports "no orphaned sources found" on precisely this state. Pointing a
     reader at it would send them to a command that does nothing — the loop this
-    report exists to break. Fixing eject is tracked separately.
+    report exists to break. Fixing eject is tracked separately (#559), and the
+    hint names that issue: a reader who has just been told the obvious command
+    does not apply should be able to see that the gap is known, rather than
+    conclude they are holding the tool wrong.
     """
     if not run_orphans:
         return
@@ -260,7 +263,7 @@ def report_run_orphans(run_orphans: list[tuple[str, int]]) -> None:
     total = sum(count for _ref, count in run_orphans)
     print(
         f"  run rows cite {len(run_orphans)} missing source(s) ({total} row(s) total); "
-        "inspect runs/*.json — `factlog eject --orphans` does not cover these",
+        "inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)",
         file=sys.stderr,
     )
 

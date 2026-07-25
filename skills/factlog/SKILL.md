@@ -802,7 +802,8 @@ it is correctly reported as a gap, not "covered":
   count on stderr (`RUN ROWS cite a missing source (dropped at merge, N
   row(s)): ...`), plus one summary field that is omitted entirely when the count
   is 0. `factlog eject --orphans` does **not** clean this state — it builds its
-  cited set from `candidates.csv` too; see `docs/reference/ignore-eject.md`.
+  cited set from `candidates.csv` too (tracked as #559), which is why the hint
+  says so instead of pointing at it; see `docs/reference/ignore-eject.md`.
 
 The script is the **deterministic half** (per-source fact counts, unreferenced
 sources, orphan citations, run rows citing a missing source); it always exits 0

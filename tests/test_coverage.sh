@@ -187,7 +187,12 @@ set +e; rout="$("$PYTHON" "$COV" --wiki "$RUNKB" 2>&1)"; rrc=$?; set -e
 printf '%s' "$rout" | grep -qF "0 orphan citation(s), 2 run-cited source(s) missing" && ok "run-cited missing sources counted in summary" || bad "run-orphan summary field missing: $rout"
 printf '%s' "$rout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 2 row(s)): sources/ghost.md" && ok "per-source line carries the row count (anchor folded)" || bad "ghost.md run-orphan line missing"
 printf '%s' "$rout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/gone.md" && ok "second missing source reported on its own line" || bad "gone.md run-orphan line missing"
-printf '%s' "$rout" | grep -qF 'eject --orphans` does not cover these' && ok "remedy hint states eject does not cover this" || bad "remedy hint missing/wrong"
+# The hint must stay TRUTHFUL: `eject --orphans` reads the same candidates.csv,
+# so naming it as the remedy would send the reader to a command that reports
+# nothing to do. The issue reference is pinned with it — dropping the number
+# would leave a dead end where there is a tracked fix (#559).
+printf '%s' "$rout" | grep -qF 'run rows cite 2 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)' \
+  && ok "remedy hint is truthful and names the tracked eject fix" || bad "remedy hint missing/wrong: $rout"
 [ "$rrc" -eq 0 ] && ok "run orphans alone do not fail the default run" || bad "run orphans caused exit $rrc"
 # The new axis is informational: --strict's contract is text gaps, nothing else.
 set +e; "$PYTHON" "$COV" --wiki "$RUNKB" --strict >/dev/null 2>&1; srrc=$?; set -e

@@ -106,9 +106,11 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 The field is omitted from the summary line when there is nothing to report, and
 it never affects the exit code (`--strict` still fires on text gaps only).
 
-> **`factlog eject --orphans` does not currently clean this state.** It builds
-> its cited set from `facts/candidates.csv`, so the dropped rows are invisible to
-> it too (it ends with "no orphaned sources found"). To clean up, inspect
+> **`factlog eject --orphans` does not currently clean this state** (fixing it is
+> tracked separately in
+> [#559](https://github.com/SeoyunL/factlog-academic/issues/559)). It builds its
+> cited set from `facts/candidates.csv`, so the dropped rows are invisible to it
+> too (it ends with "no orphaned sources found"). To clean up, inspect
 > `runs/*.json` directly — or restore the deleted file under `sources/`, re-run
 > the merge, and remove it properly with
 > `factlog eject <source> --purge --delete-original`.

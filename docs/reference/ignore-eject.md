@@ -105,8 +105,10 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 이 필드는 해당 상태가 없으면 요약 줄에 출력되지 않으며, 종료 코드에도 영향을 주지
 않습니다(`--strict` 는 여전히 텍스트 누락에만 반응합니다).
 
-> **`factlog eject --orphans` 는 현재 이 상태를 정리하지 못합니다.** 인용 집합을
-> `facts/candidates.csv` 에서 만들기 때문에, 드롭된 행은 그 명령에도 보이지
-> 않습니다(`no orphaned sources found` 로 끝납니다). 정리하려면 `runs/*.json` 을
+> **`factlog eject --orphans` 는 현재 이 상태를 정리하지 못합니다**(수정은
+> [#559](https://github.com/SeoyunL/factlog-academic/issues/559) 에서 별도로
+> 다룹니다). 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에, 드롭된 행은
+> 그 명령에도 보이지 않습니다(`no orphaned sources found` 로 끝납니다).
+> 정리하려면 `runs/*.json` 을
 > 직접 확인하거나, 지운 파일을 `sources/` 에 되돌린 뒤 merge 를 다시 돌리고
 > `factlog eject <source> --purge --delete-original` 로 정식 제거하십시오.
