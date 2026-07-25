@@ -27,7 +27,7 @@ from factlog.front_matter_scan import (  # noqa: E402
 from factlog.integrations.common.source_writer import (  # noqa: E402
     IDENTITY_KEYS_BY_SOURCE,
 )
-from factlog.md_lines import bullets, headings, unclosed_fence_line  # noqa: E402
+from factlog.md_lines import bullets, ends_inside_fence, headings, unclosed_fence_line  # noqa: E402
 from factlog.review_sections import (  # noqa: E402
     missing_review_sections,
     split_review_sections,
@@ -339,8 +339,23 @@ def validate(root: Path) -> list[str]:
         # review queue: measured, the producer skipped the one real row as a duplicate
         # of that example and this check called the result complete.
         decision_bullets = bullets(decision_text)
-        if any(row.get("status") == "needs_review" for row in rows) and not decision_bullets:
+        has_needs_review = any(row.get("status") == "needs_review" for row in rows)
+        if has_needs_review and not decision_bullets:
             errors.append("needs_review facts exist but decisions/open-questions.md has no review bullets")
+        # A fence left open at the end of the file is not just a reading hazard (see
+        # the warning) — with needs_review rows waiting, it is proof the mirror is
+        # stalled. The writer refuses to append to a file that `ends_inside_fence`
+        # (merge_candidates.refuse_unclosed_fence), so those rows never reach
+        # open-questions.md while this holds, yet a bullet above the fence keeps the
+        # check above quiet. Re-derive the writer's own predicate here, off the file,
+        # so the gate reports what the writer already decided. Independent of
+        # decision_bullets: the escaping case has bullets above the fence.
+        if has_needs_review and ends_inside_fence(decision_text):
+            errors.append(
+                "needs_review facts exist but decisions/open-questions.md ends inside an "
+                f"unclosed code fence on line {unclosed_fence_line(decision_text)} — the writer "
+                "refused to file the pending needs_review rows; close the fence and re-run merge"
+            )
 
     stale_pages = []
     pages = sorted((root / "pages").glob("*.md"))
@@ -388,12 +403,15 @@ def review_section_warnings(root: Path) -> list[tuple[str, str]]:
     errors above can say a review section is missing while the operator is looking
     straight at it. Nothing writes to such a file either — see merge_candidates.
 
-    Whether the exit code moves depends on *where* the fence opens: below the four
-    headings it hides nothing any check requires, and the run passes with only this
-    warning to show for it. So the message says what the fence does, not what the
-    errors say — it used to claim it was "why sections you can see are reported
-    missing", which is false in exactly that case, the common one where someone
-    pasted a fragment onto the end of the file.
+    Whether the exit code moves depends on *where* the fence opens and on whether any
+    needs_review rows are waiting. Below the four headings the fence hides nothing any
+    structural check requires, so with no needs_review rows queued the run passes with
+    only this warning. But a fence there while needs_review rows wait is proof the
+    mirror is stalled — the writer refused to file them — and ``validate`` raises
+    that to an error off the same `ends_inside_fence` predicate the writer uses (#512).
+    So the message says what the fence does, not what the errors say — it used to claim
+    it was "why sections you can see are reported missing", which is false in exactly
+    that case, the common one where someone pasted a fragment onto the end of the file.
 
     ``split_review_section`` is not an error at all: a split file is structurally
     complete and every check above passes on it. The earlier section reads
