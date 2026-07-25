@@ -71,7 +71,11 @@ import factlog_config  # noqa: E402
 _PRE = argparse.ArgumentParser(add_help=False)
 _PRE.add_argument("--wiki", default=None)
 _KNOWN, _ = _PRE.parse_known_args()
-TARGET_ROOT, TARGET_SOURCE = factlog_config.resolve_root(_KNOWN.wiki)
+# The flag value exactly as it arrived, kept alongside the resolution so main() can
+# refuse a blank one. Resolution cannot carry that: ``resolve_root`` tests the value
+# for truth, so "" and "not given" are the same input to it (#546).
+TARGET_FLAG_VALUE = _KNOWN.wiki
+TARGET_ROOT, TARGET_SOURCE = factlog_config.resolve_root(TARGET_FLAG_VALUE)
 
 os.environ["FACTLOG_ROOT"] = TARGET_ROOT
 
@@ -1529,7 +1533,27 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    root = Path(args.wiki).expanduser().resolve()
+    # An empty flag value is refused rather than dropped to the next tier (#546).
+    # SKILL.md recommends `merge_candidates.py --wiki "$FACTLOG_ROOT"`, which in a
+    # shell that never exported the variable is exactly `--wiki ""` — so this is a
+    # shape the documentation produces, not a hypothetical. Refusing here is the
+    # same answer tools/validate.py gives a blank target (#530).
+    if args.wiki is not None and not args.wiki.strip():
+        print(
+            "merge_candidates: the KB-root flag (--wiki) was empty; pass a KB path, "
+            "or pass no flag at all to use the active KB.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # TARGET_ROOT, not a second resolution of args.wiki. The root was resolved once,
+    # in the pre-pass, and that is the value common's path globals were bound to and
+    # the value TARGET_SOURCE describes. Re-deriving it here from argv is what made a
+    # blank flag land on cwd while the guard below judged the config tier and the
+    # announcement printed "(from config)" over a cwd path — the write went through,
+    # unrefused, under a false provenance (#546). One resolution, one target, one
+    # label.
+    root = Path(TARGET_ROOT)
 
     # Name the KB about to be written and where that choice came from, before
     # anything is read or written — the same line `factlog ingest`/`pubmed-*` print
