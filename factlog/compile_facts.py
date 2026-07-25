@@ -9,6 +9,11 @@ Usage:
     --target    KB root ("--wiki" is an accepted alias). Overrides both
                 $FACTLOG_ROOT and the active-KB config; with no flag the root
                 follows the precedence documented on the prepass below.
+
+Every run names the KB it is about to compile and where that choice came from. A run
+whose root came ONLY from the active-KB config, started outside that KB, still compiles
+(#527) but will NOT delete an existing facts/accepted.dl when it finds a contradiction —
+see :func:`unaimed_removal_refusal` (#547).
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from factlog import config as factlog_config
 
@@ -53,12 +59,26 @@ def _peek_root_flag(argv: list[str] | None = None) -> str | None:
     return known.target
 
 
-def resolve_root(argv: list[str] | None = None) -> str:
-    """This run's KB root: flag > $FACTLOG_ROOT > active-KB config > cwd."""
-    return factlog_config.resolve_root(_peek_root_flag(argv))[0]
+def resolve_root(argv: list[str] | None = None) -> tuple[str, str]:
+    """This run's KB root **and where it came from** (#547).
+
+    Precedence: flag > $FACTLOG_ROOT > active-KB config > cwd. The second answer —
+    'flag' | 'env' | 'config' | 'cwd' — used to be dropped here, which is exactly
+    what left this script out of the sibling write guards (#532/#529): consulting
+    the config tier is what makes an *unaimed* run possible, and only the provenance
+    tells one apart from an aimed one. It is what :func:`unaimed_removal_refusal`
+    decides on and what ``main`` announces; nothing downstream can recover it, since
+    FACTLOG_ROOT is exported below and every later reader would answer 'env'.
+    """
+    return factlog_config.resolve_root(_peek_root_flag(argv))
 
 
-os.environ["FACTLOG_ROOT"] = resolve_root()
+# Module level, bound once at import, for the same reason the export below is:
+# common's path globals capture FACTLOG_ROOT at import, so the root the guard
+# judges must be the very one those globals were derived from.
+TARGET_ROOT, TARGET_SOURCE = resolve_root()
+
+os.environ["FACTLOG_ROOT"] = TARGET_ROOT
 
 # ---------------------------------------------------------------------------
 # Now it is safe to import common (ROOT is already set correctly above).
@@ -82,6 +102,63 @@ from factlog.common import (  # noqa: E402
     typed_relations,
     wirelog_undecodable_chars,
 )
+
+
+def unaimed_removal_refusal(root: Path, source: str, cwd: Path) -> str | None:
+    """Why this run may not DELETE *root*'s accepted.dl, or None if it may (#547).
+
+    ``source`` is ``factlog_config.resolve_root``'s second answer. Only 'config' names
+    a target nobody chose — not the command line, not the environment, not the directory
+    the caller is standing in. The criterion is the siblings' verbatim (#532
+    merge_candidates, #529 finalize): 'flag' and 'env' are aimed by definition, 'cwd' IS
+    the directory the caller stands in, and a config root the caller is standing inside
+    (or at) is the documented no-flag workflow.
+
+    What differs is the SCOPE, and deliberately. The siblings refuse the whole run; this
+    one refuses one operation — the ``out.unlink`` in :func:`_reject_on_conflict`. The
+    guard is sized to the damage:
+
+    * Compiling accepted.dl RE-DERIVES that KB's own confirmed rows. An unaimed compile
+      writes the same bytes an aimed one would and destroys nothing, which is why #527
+      let the config tier reach this script at all and pinned that behaviour
+      (test_compile_facts_config_tier.py). Refusing the whole run would reverse those
+      pins, not extend them.
+    * Deleting accepted.dl destroys state no re-run can rebuild: the KB has no engine
+      input, so ``/factlog ask`` answers nothing, until a human resolves the
+      contradiction. That is strictly worse than the silent overwrite #532 exists for,
+      and it is the measured symptom on #547 — a run from an unrelated directory left
+      the configured KB unanswerable.
+
+    So an unaimed run may still refuse to compile (it always exits non-zero on a
+    contradiction) but may not take the KB's existing engine input away with it. The
+    #212/#327 invariant — a contradictory KB must not keep a stale accepted.dl for
+    readers to trust — is unchanged for every AIMED run, which is every documented
+    flow: SKILL.md exports FACTLOG_ROOT before the no-flag call ('env'), finalize and
+    `factlog amend/eject` hand the child an explicit FACTLOG_ROOT ('env'), and a run
+    from inside the KB passes. The withheld case is reachable only from a run nobody
+    aimed, where the alternative is disarming a KB the caller never named.
+
+    Announcing the target (main does that too) is not a substitute: merge_candidates
+    already printed its root before every write and #532 happened anyway. A line on
+    stdout makes an intended write auditable; it does not stop an unintended one.
+    """
+    if source != "config":
+        return None
+    if cwd == root or root in cwd.parents:
+        return None
+    return (
+        f"compile_facts: REFUSING to remove {root}/facts/accepted.dl — that KB comes from "
+        f"the active-KB config, not from this command, and the current directory ({cwd}) is "
+        f"not inside it.\n"
+        f"  The contradiction gate removes facts/accepted.dl so no reader trusts the engine "
+        f"input of a KB whose confirmed rows contradict each other (#212/#327). On a run "
+        f"nobody aimed, that leaves the configured KB with no engine input at all — "
+        f"/factlog ask returns nothing — until a human resolves the conflict (#547), so the "
+        f"file is left as it is and this run compiles nothing.\n"
+        f"  Name the target explicitly to let the gate heal that KB:\n"
+        f"    python3 tools/compile_facts.py --target {root}\n"
+        f"  or export FACTLOG_ROOT={root}"
+    )
 
 
 def _reject_on_conflict(facts: list[dict[str, str]]) -> None:
@@ -115,12 +192,22 @@ def _reject_on_conflict(facts: list[dict[str, str]]) -> None:
             file=sys.stderr,
         )
     out = FACTS_DIR / "accepted.dl"
-    removed = out.is_file()
-    try:
-        out.unlink(missing_ok=True)
-    except OSError as exc:  # never crash on a cleanup failure
-        print(f"compile_facts: could not remove facts/accepted.dl ({exc}).", file=sys.stderr)
+    # The one destructive step in this script, and the only one the #547 guard covers:
+    # a run nobody aimed may refuse to compile, but may not take the configured KB's
+    # existing engine input away with it.
+    withheld = unaimed_removal_refusal(Path(TARGET_ROOT), TARGET_SOURCE, Path.cwd().resolve())
+    if withheld is not None and out.is_file():
+        print(withheld, file=sys.stderr)
         removed = False
+    else:
+        # Nothing on disk to protect (or an aimed run): the #212/#327 gate applies
+        # unchanged.
+        removed = out.is_file()
+        try:
+            out.unlink(missing_ok=True)
+        except OSError as exc:  # never crash on a cleanup failure
+            print(f"compile_facts: could not remove facts/accepted.dl ({exc}).", file=sys.stderr)
+            removed = False
     raise FactlogError(
         "CONTRADICTIONS were found (see CONFLICT lines above); facts were NOT compiled to "
         "facts/accepted.dl"
@@ -128,6 +215,13 @@ def _reject_on_conflict(facts: list[dict[str, str]]) -> None:
             " and the existing facts/accepted.dl was removed, so /factlog ask returns "
             "nothing until the conflict is resolved"
             if removed
+            else ""
+        )
+        + (
+            " and the existing facts/accepted.dl was KEPT because this run did not aim at "
+            "that KB (see the REFUSING line above), so /factlog ask still answers from the "
+            "pre-contradiction snapshot until an aimed run resolves this"
+            if withheld is not None and out.is_file()
             else ""
         )
         + ". Resolve them through the human gate — factlog eject --fact SUBJECT RELATION "
@@ -242,6 +336,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     _parse_args()
+    # Name the KB about to be compiled and where that choice came from, before anything
+    # is read or written — the same line `factlog ingest`/`status`, merge_candidates and
+    # finalize print ("target KB {root} (from {source})"). The provenance is the part
+    # that tells a reader this run picked the KB up from config rather than from their
+    # command; the log below only ever showed the file it wrote (#547).
+    print(f"compile_facts: target KB {TARGET_ROOT} (from {TARGET_SOURCE})")
     ensure_dirs()
     facts = load_facts()
     # Gate BEFORE any write: a contradiction must never reach accepted.dl, the engine's
