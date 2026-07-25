@@ -9,6 +9,10 @@ Usage:
 the active-KB config, which overrides cwd. The skill's determinism gate names this
 script with no arguments, so the config tier is what lets that documented form run
 from outside a KB (#528).
+
+Run as a script, it names the KB it is about to check and where that choice came from.
+It does not refuse an unaimed config-tier root the way the write steps do — see
+:func:`announce_target` for the measurement behind that (#547).
 """
 
 from __future__ import annotations
@@ -51,12 +55,25 @@ def _peek_root_flag(argv: list[str] | None = None) -> str | None:
     return known.target
 
 
-def resolve_root(argv: list[str] | None = None) -> str:
-    """This run's KB root: flag > $FACTLOG_ROOT > active-KB config > cwd."""
-    return factlog_config.resolve_root(_peek_root_flag(argv))[0]
+def resolve_root(argv: list[str] | None = None) -> tuple[str, str]:
+    """This run's KB root **and where it came from** (#547).
+
+    Precedence: flag > $FACTLOG_ROOT > active-KB config > cwd. The second answer —
+    'flag' | 'env' | 'config' | 'cwd' — used to be dropped. It is kept because
+    consulting the config tier is what lets a run target a KB nobody named, and only
+    the provenance tells such a run apart from an aimed one; the ``__main__`` guard
+    announces it. Nothing downstream can recover it, since FACTLOG_ROOT is exported
+    below and every later reader would answer 'env'.
+    """
+    return factlog_config.resolve_root(_peek_root_flag(argv))
 
 
-os.environ["FACTLOG_ROOT"] = resolve_root()
+# Module level, bound once at import, for the same reason the export below is: common's
+# path globals capture FACTLOG_ROOT at import, so the announced root must be the very
+# one those globals were derived from.
+TARGET_ROOT, TARGET_SOURCE = resolve_root()
+
+os.environ["FACTLOG_ROOT"] = TARGET_ROOT
 
 from collections.abc import Callable  # noqa: E402
 
@@ -937,10 +954,45 @@ def main() -> int | None:
     return None
 
 
+def announce_target() -> str:
+    """The ``target KB <root> (from <source>)`` line, and why this tool only announces.
+
+    The sibling write steps REFUSE a root that came only from the active-KB config while
+    cwd is outside it (#532 merge_candidates, #529 finalize), and compile_facts refuses
+    the one thing it does that destroys state — deleting accepted.dl (#547). This script
+    announces and nothing more, for two measured reasons:
+
+    1. It destroys nothing. Its only write is ``facts/logic_report.txt``, RE-DERIVED from
+       that KB's own accepted.dl/query.dl/policy: an unaimed run writes what an aimed run
+       would write, and it cannot make a stale report look fresh, because producing the
+       report IS running the check. Nothing on disk is worth less afterwards.
+    2. It is the one command the determinism gate mandates by name — "Always run
+       tools/run_logic_check.py and show the resulting facts/logic_report.txt verbatim"
+       (SKILL.md) — with no flag, and it is the remedy hooks/gate_check.sh names in its
+       own DENIED message. That hook resolves the KB it guards through the SAME config
+       tier (``factlog.config.resolve_root(None)``), so refusing a config-tier root here
+       would make the prescribed remedy unrunnable in exactly the situation the gate
+       resolved that way itself. A guard that can turn the deterministic gate off is a
+       worse trade than the hazard it removes.
+
+    What is left for an unaimed run is a READING hazard — believing you checked KB A when
+    you read a report from KB B — and that is precisely what naming the target and its
+    provenance answers. The line is the siblings' verbatim so all four tools read alike.
+
+    Lives in the ``__main__`` guard, next to :func:`_parse_args`, for that function's
+    reason: ``main()`` is also called in-process by suites and ``python -c`` harnesses,
+    where the choice of KB was made by the host, not by this entry point.
+    """
+    return f"run_logic_check: target KB {TARGET_ROOT} (from {TARGET_SOURCE})"
+
+
 if __name__ == "__main__":
     from common import run_cli
 
     # Before run_cli, so --help and a rejected argument exit without ensure_dirs
     # having created a facts/ tree under whatever the pre-pass resolved (#528).
     _parse_args()
+    # After the strict parse, so --help/exit-2 stay pure argparse output, and before
+    # run_cli, so the KB is named before the report is read, written or printed (#547).
+    print(announce_target())
     raise SystemExit(run_cli(main))
