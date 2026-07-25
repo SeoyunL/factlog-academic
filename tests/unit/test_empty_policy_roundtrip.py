@@ -102,6 +102,19 @@ def _policy_lines(proc: subprocess.CompletedProcess[str]) -> list[str]:
     ]
 
 
+def _logic_policy_lines(proc: subprocess.CompletedProcess[str]) -> list[str]:
+    """Every validate.py complaint naming either half of the policy pair.
+
+    Wider than _policy_lines on purpose: #557's defect A is a state reported once as the
+    .md and a second time as the .dl, so counting only .dl lines cannot see the pair.
+    """
+    return [
+        line
+        for line in (proc.stdout + proc.stderr).splitlines()
+        if "logic-policy" in line
+    ]
+
+
 @pytest.fixture
 def kb(tmp_path):
     return _init_kb(tmp_path / "kb")
@@ -294,3 +307,73 @@ def test_a_hand_written_dl_over_a_ruleless_md_is_stale_through_validate(kb):
     lines = _policy_lines(_validate(kb))
     assert lines, _validate(kb).stdout + _validate(kb).stderr
     assert any("stale" in line for line in lines), lines
+
+
+def test_a_whitespace_only_policy_md_is_not_also_reported_as_dl_drift(kb):
+    """(9) #557 defect A: an unjudgeable .md must be reported as itself, once.
+
+    A .md holding only newlines cannot say whether the .dl beside it is right, and
+    --check, handed it, answers with the .md complaint validate has already queued. The
+    second copy arrived under a prefix asserting the two files had been compared, so the
+    same fact was stated twice and the louder statement was false.
+
+    Kills the mutant that drops `.strip()` from policy_source_usable: the file exists, so
+    without it delegation resumes and the duplicate line comes straight back.
+    """
+    (kb / "policy" / "logic-policy.dl").write_text(
+        fcommon.EMPTY_POLICY_DL, encoding="utf-8"
+    )
+    (kb / "policy" / "logic-policy.md").write_text("\n\n", encoding="utf-8")
+
+    lines = _logic_policy_lines(_validate(kb))
+    assert len(lines) == 1, lines
+    assert "missing or empty policy/logic-policy.md" in lines[0], lines
+    assert _policy_lines(_validate(kb)) == []
+
+
+def test_a_whitespace_only_policy_md_reports_the_same_as_a_deleted_one(kb):
+    """(10) #557 defect A, the other half: no policy is no policy, however it is spelt.
+
+    Emptying the file and removing it leave the KB in the same state, so they have to
+    read the same. Before the fix the blank one produced an extra .dl line the deleted
+    one did not, which made "does the file exist?" — a question neither the compiler nor
+    the loader asks — visible in the report.
+
+    Kills any fix that special-cases only one of the two spellings.
+    """
+    dl = kb / "policy" / "logic-policy.dl"
+    md = kb / "policy" / "logic-policy.md"
+    dl.write_text(fcommon.EMPTY_POLICY_DL, encoding="utf-8")
+
+    md.write_text("   \n\t\n", encoding="utf-8")
+    blank = _logic_policy_lines(_validate(kb))
+
+    md.unlink()
+    deleted = _logic_policy_lines(_validate(kb))
+
+    assert blank == deleted, (blank, deleted)
+
+
+def test_a_missing_policy_prompt_does_not_silence_a_stale_dl(kb):
+    """(11) #557: the delegation gate is the .md, and only the .md.
+
+    natural_language_to_policy.md is the template for the LLM drafting step. --check does
+    not take that step — it compiles the .md and compares bytes, never calling
+    render_prompt — so gating delegation on the prompt let one deleted file turn every
+    stale .dl in the KB silent while `generate_logic_policy.py --check` on the very same
+    KB still exited non-zero and named it. Reproduced on origin/main before the fix.
+
+    Kills the mutant that restores `and policy_prompt.is_file()`. The prompt's own
+    "missing or empty" complaint is asserted alongside so that a fix which merely stopped
+    checking the prompt at all would not pass.
+    """
+    (kb / "policy" / "logic-policy.md").write_text(RULES_MD, encoding="utf-8")
+    assert _generate(kb).returncode == 0
+    (kb / "policy" / "logic-policy.md").write_text(PROSE_ONLY_MD, encoding="utf-8")
+    (kb / "policy" / "prompts" / "natural_language_to_policy.md").unlink()
+
+    proc = _validate(kb)
+    combined = proc.stdout + proc.stderr
+    assert "missing or empty policy/prompts/natural_language_to_policy.md" in combined, combined
+    lines = _policy_lines(proc)
+    assert any("stale" in line for line in lines), combined
