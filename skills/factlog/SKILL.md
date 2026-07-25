@@ -51,14 +51,19 @@ path, no label) — parse-free and stable, so do not scrape the human-readable
 `factlog where` output. Both use the exact same precedence the engine and CLI
 tools use (`factlog/config.py` `resolve_root`):
 
-> **`--wiki`/`--target` flag  >  `$FACTLOG_ROOT`  >  active-KB config file  >  cwd**
+> **`--target` flag (alias `--wiki`)  >  `$FACTLOG_ROOT`  >  active-KB config file  >  cwd**
 
 Exporting once turns the hook↔tool agreement from a "same-env assumption" into an
 enforced invariant: every later command and the gate hook read this exact root.
 
+Every `tools/` script that names a KB takes `--target`, with `--wiki` accepted as
+an alias of it (#533) — one surface, so you never have to check `--help` to find
+out which spelling a given script wants. A misspelled flag (`--targt`) exits `2`
+rather than being ignored, and an **empty** value (`--target ""`) exits `1` rather
+than falling through to the next tier; see the note below.
+
 Exporting is also what keeps the **mutating** engine steps runnable from anywhere.
-`finalize.py` (`--target`, alias `--wiki`) and `merge_candidates.py` (`--wiki` —
-it does *not* accept `--target`) resolve by the precedence above but then
+`finalize.py` and `merge_candidates.py` resolve by the precedence above but then
 **refuse** a root that came *only* from the active-KB config while the current
 directory is outside that KB. `merge_candidates` rewrites `facts/candidates.csv`,
 `pages/` and `decisions/open-questions.md`; `finalize` writes none of those itself
@@ -68,15 +73,23 @@ named by `$FACTLOG_ROOT`, or the KB you are standing in. The refusal prints the
 resolved path and both ways to *name* it — the flag and `export FACTLOG_ROOT`;
 standing in the KB is an aim too but the message does not list it — and exits `1`.
 
-**Known exception — an empty flag value does not go through that table**, and the
-two tools diverge there. `--wiki ""` / `--target ""` is exactly what
-`--wiki "$FACTLOG_ROOT"` becomes in a shell that skipped the export step above.
-`finalize.py --target ""` still resolves to the config-tier KB and refuses it
-(exit `1`). `merge_candidates.py --wiki ""` does not: it resolves the root twice —
-the guard sees the config tier, while the write path re-reads the empty argv and
-falls to the **current directory** — so it writes to cwd, prints `(from config)`
-for a path that did not come from config, and exits `0`. Run the export step above
-*before* any of the `--wiki "$FACTLOG_ROOT"` calls below.
+**An empty flag value does not go through that table — it is refused.**
+`--target ""` / `--wiki ""` is exactly what `--target "$FACTLOG_ROOT"` becomes in a
+shell that skipped the export step above, so this is a shape the examples below can
+produce. Every script `#533` unified exits `1` with *the KB-root flag
+(--target/--wiki) was empty* before reading or writing anything, and `validate.py`
+answers with its own `--target was empty`. Passing a blank value is a caller bug
+either way; falling through would target the configured KB while you believe you
+named one.
+
+`merge_candidates.py --wiki ""` used to be the sharp case: it resolved the root
+**twice** — the guard saw the config tier while the write path re-read the empty
+argv and fell to the **current directory** — so it wrote to cwd, printed
+`(from config)` for a path that did not come from config, and exited `0` (#546).
+One resolution now feeds both. `finalize.py --target ""` is the remaining
+divergence: it still resolves a blank value on to the next tier, so from *inside*
+the configured KB it finalizes that KB rather than refusing. Run the export step
+above before any `"$FACTLOG_ROOT"` call below.
 
 The steps that only rewrite their own engine outputs (`compile_facts.py`,
 `run_logic_check.py`) take a config-tier root with no flag. That bounds the *file
@@ -87,18 +100,20 @@ is harmless. `compile_facts.py` run from outside the KB against a config-tier ro
 conflict is resolved. Their exemption from the guard is provisional, not a settled
 rule — `merge_candidates`' guard docstring leaves the two "to a follow-up".
 
-A third group is still outside the precedence entirely: some `tools/` scripts take
-no KB flag and never consult the active-KB config, so they see only `$FACTLOG_ROOT`
-and cwd — `generate_logic_policy.py` is one, and from outside a KB with only the
-config set it exits `1` with `not a factlog KB root: …`. Unifying that surface is
-#533's job; until then the export above is what makes those scripts work from
-anywhere.
+There is no longer a third group outside the precedence. `generate_logic_policy.py`
+took no KB flag and never consulted the config, so the bare call this skill makes
+below exited `1` with `not a factlog KB root: …` for anyone who had run
+`factlog use` and stepped out of the KB; it now follows the same four tiers as its
+siblings (#533). The only `tools/` scripts with no KB flag are the ones that name
+no KB at all — `refresh_arxiv_categories.py` reads the published arXiv taxonomy and
+diffs it against the source tree, and `spike_fallback_precision.py` is a
+measurement over cached API responses.
 
-If you followed the export step, the first group passes its guard as `env` with no
-flag at all, so the `--target`/`--wiki "$FACTLOG_ROOT"` spelled out in the examples
-below is defence in depth rather than a requirement. It is defence only while the
-export actually happened: without it the flag degrades to the empty value above,
-which for `merge_candidates` is *weaker* than passing nothing. Export first.
+If you followed the export step, the mutating steps pass their guard as `env` with
+no flag at all, so the `--target "$FACTLOG_ROOT"` spelled out in the examples below
+is defence in depth rather than a requirement. It is defence only while the export
+actually happened: without it the flag degrades to the empty value above, which is
+now a loud `1` rather than a silent wrong target. Export first.
 
 For diagnostics, the plain `factlog where` (no flag) additionally prints where the
 root was resolved from and the config file path — use it to debug, but always
@@ -544,7 +559,7 @@ Run merge_candidates.py to normalise, deduplicate, write `facts/candidates.csv`,
 regenerate `pages/`, and update `decisions/open-questions.md`:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/merge_candidates.py" --wiki "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/merge_candidates.py" --target "$FACTLOG_ROOT"
 ```
 
 The script reads all `runs/*.json` files (see `--input` for a custom glob).
@@ -693,7 +708,7 @@ A free-text wiki cannot tell you what it *failed* to capture. Run the coverage
 critic to surface sources the KB has not extracted any facts from:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/source_coverage.py" --wiki "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/source_coverage.py" --target "$FACTLOG_ROOT"
 ```
 
 It reports, per source file under `sources/` and `runs/sources/`, how many

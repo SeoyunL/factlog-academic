@@ -37,7 +37,7 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 
 | 순위 | 출처 | 지정 방법 | `factlog where` 의 `resolved from:` 표기 |
 |------|------|-----------|------------------------------------------|
-| 1 | 명령줄 플래그 | `--target <경로>` (도구에 따라 `--wiki <경로>`) | (표시되지 않음 — 아래 참고) |
+| 1 | 명령줄 플래그 | `--target <경로>` (`--wiki <경로>` 는 어디서나 통하는 별칭) | (표시되지 않음 — 아래 참고) |
 | 2 | 환경 변수 | `export FACTLOG_ROOT=<경로>` | `env ($FACTLOG_ROOT)` |
 | 3 | 활성 KB 설정 | `factlog use <경로>` (또는 `factlog init`/`setup` 이 자동 기록) | `config file` |
 | 4 | 현재 디렉터리 | (아무것도 지정하지 않았을 때의 폴백) | `current directory` |
@@ -45,6 +45,15 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 1순위가 `factlog where` 출력에 나타나지 않는 이유는, `where` 자신이 `--target` 을
 받지 않기 때문입니다. 플래그는 그 플래그를 준 **명령 하나에만** 적용되므로,
 `where` 는 언제나 2~4순위 중 하나로 해석된 결과를 보고합니다.
+
+> **`tools/` 의 플래그 표면은 하나입니다.** KB를 지정하는 번들 스크립트는 모두
+> `--target` 을 받고, `--wiki` 는 그 별칭으로 받습니다 — 같은 dest를 공유하는 한
+> 개의 옵션이므로 둘을 함께 넘겨도 오류가 아니고 **명령줄에서 뒤에 온 철자가**
+> 이깁니다(#533). 오타 플래그(`--targt <경로>`)는 무시되지 않고 종료 코드 2로
+> 거부됩니다. 무시하면 실패하지 않고 2~4순위로 해석된 KB를 대상으로 그냥 실행되기
+> 때문입니다. 플래그가 없는 `tools/` 스크립트는 애초에 KB를 다루지 않는 둘뿐입니다
+> — `refresh_arxiv_categories.py`(공개된 arXiv 분류 체계를 받아 소스 트리와 비교)와
+> `spike_fallback_precision.py`(캐시된 API 응답에 대한 측정).
 
 > **positional 경로를 받는 도구는 한 순위가 더 있습니다.** `tools/validate.py` 는
 > KB 경로를 위치 인자로도 받는데(`validate.py <경로>`), 이 인자는 **1순위와 2순위
@@ -55,9 +64,8 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 > 자리에서 거부됩니다(종료 코드 1) — 안 그러면 미설정 변수 하나가 조용히 대상을
 > 바꿔 버립니다.
 
-> **손대 쓰는 두 도구는 3순위로 해석된 KB를 거부합니다.** `tools/finalize.py`
-> (`--target`, 별칭 `--wiki`)와 `tools/merge_candidates.py`(`--wiki` — 이쪽은
-> `--target` 을 받지 않습니다)는 위 표대로 해석은 하지만, 3순위(활성 KB 설정)로만
+> **손대 쓰는 두 도구는 3순위로 해석된 KB를 거부합니다.** `tools/finalize.py` 와
+> `tools/merge_candidates.py` 는 위 표대로 해석은 하지만, 3순위(활성 KB 설정)로만
 > 정해진 KB를 **현재 디렉터리가 그 KB 밖일 때** 거부합니다(종료 코드 1).
 > `merge_candidates` 가 `facts/candidates.csv`, `pages/`,
 > `decisions/open-questions.md` 를 다시 쓰고, `finalize` 는 그것들을 직접 쓰지 않고
@@ -68,13 +76,21 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 > 해석된 경로와 두 가지 지정 방법(플래그, `export FACTLOG_ROOT`)을 함께 찍어 줍니다
 > — "그 KB 안에서 실행하기"는 겨냥 방법이긴 하지만 메시지에는 나오지 않습니다.
 
-> **알려진 예외: 빈 플래그값은 이 표를 타지 않습니다.** `--wiki ""`/`--target ""`
-> — export하지 않은 `$FACTLOG_ROOT` 를 그대로 넘겼을 때 생기는 형태입니다 — 에서
-> 두 도구의 동작이 갈립니다. `finalize.py --target ""` 는 여전히 설정 KB로 해석해
-> 거부하지만(종료 코드 1), `merge_candidates.py --wiki ""` 는 루트를 **두 번**
-> 해석합니다. 가드는 3순위를 보는데 실제 쓰기 경로는 빈 인자를 다시 읽어 **현재
-> 디렉터리**로 떨어지므로, 거부 없이 현재 디렉터리에 쓰면서 출처는 `(from config)`
-> 로 찍고 종료 코드 0으로 끝납니다.
+> **빈 플래그값은 이 표를 타지 않고 거부됩니다.** `--target ""`/`--wiki ""` —
+> export하지 않은 `$FACTLOG_ROOT` 를 그대로 넘겼을 때 생기는 형태입니다 — 에 대해
+> #533이 통일한 스크립트는 모두 아무것도 읽거나 쓰기 전에 *the KB-root flag
+> (--target/--wiki) was empty* 로 종료 코드 1을 냅니다. `validate.py` 는 자기
+> 문구인 `--target was empty` 로 답합니다. 빈 값은 어느 쪽이든 호출자의 버그이고,
+> 다음 순위로 떨어뜨리면 호출자는 KB를 지정했다고 믿는데 실제로는 설정 KB가
+> 대상이 됩니다.
+>
+> `merge_candidates.py --wiki ""` 가 그중 가장 날카로운 사례였습니다. 루트를 **두
+> 번** 해석해서, 가드는 3순위를 보는데 실제 쓰기 경로는 빈 인자를 다시 읽어 **현재
+> 디렉터리**로 떨어졌고, 그래서 거부 없이 현재 디렉터리에 쓰면서 출처는
+> `(from config)` 로 찍고 종료 코드 0으로 끝났습니다(#546). 이제는 한 번의 해석이
+> 가드·안내 줄·쓰기 경로를 모두 먹입니다. 남은 차이는 `finalize.py --target ""`
+> 입니다. 이쪽은 빈 값을 여전히 다음 순위로 흘려보내므로, 설정 KB **안에서**
+> 실행하면 거부하지 않고 그 KB를 finalize 합니다.
 
 > **자기 엔진 출력만 다시 쓰는 `compile_facts.py`/`run_logic_check.py` 는 플래그
 > 없이 3순위 KB를 그대로 씁니다.** 다만 이것은 "위험이 없다"는 뜻이 아니라 **건드리는
@@ -83,10 +99,11 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 > **삭제**하고 종료 코드 1로 끝나므로, 충돌이 풀릴 때까지 그 KB는 엔진 입력을
 > 잃습니다. 두 도구가 가드에서 빠져 있는 것은 확정된 규칙이 아니라 잠정 상태입니다
 > (`merge_candidates` 의 가드 docstring이 이 둘을 "follow-up으로 남긴다"고 적고
-> 있습니다). 그리고 아직 **설정 티어를 아예 보지 않는** 스크립트도 남아 있습니다 —
-> `tools/generate_logic_policy.py` 는 KB 플래그가 없고 `$FACTLOG_ROOT` 와 현재
-> 디렉터리만 보므로, 설정만 해 둔 채 KB 밖에서 실행하면 `not a factlog KB root: …`
-> 로 종료 코드 1이 됩니다(플래그 표면 통일은 #533 소관).
+> 있습니다). 설정 티어를 아예 보지 않는 스크립트는 이제 없습니다 —
+> 스킬과 `finalize` 가 둘 다 무인자로 부르는 `tools/generate_logic_policy.py` 는
+> `$FACTLOG_ROOT` 와 현재 디렉터리만 보느라 설정만 해 둔 상태에서
+> `not a factlog KB root: …` 로 종료 코드 1이 됐지만, 이제 형제들과 같은 네 순위를
+> 따릅니다(#533).
 
 경로는 어느 경로로 들어오든 `~` 확장과 절대경로 정규화를 거칩니다. 설정 파일이
 없거나, JSON이 깨졌거나, `root` 필드가 비어 있으면 **크래시하지 않고 다음 순위로

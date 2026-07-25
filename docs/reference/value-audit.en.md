@@ -12,16 +12,18 @@ exists to prevent.
 ## Running it
 
 ```bash
-python3 tools/value_audit.py --wiki ~/wiki                  # report (exits 0 by default)
-python3 tools/value_audit.py --wiki ~/wiki --strict         # non-zero on a provable query leak
-python3 tools/value_audit.py --wiki ~/wiki --all-statuses   # every candidate row, not just engine input
+python3 tools/value_audit.py --target ~/wiki                  # report (exits 0 by default)
+python3 tools/value_audit.py --target ~/wiki --strict         # non-zero on a provable query leak
+python3 tools/value_audit.py --target ~/wiki --all-statuses   # every candidate row, not just engine input
 ```
 
-- `--wiki` is the KB root. Omitted, it falls back to `$FACTLOG_ROOT`, then the **active KB**
-  (set by `factlog use`), then the current directory. If an active KB is set, running from
-  any directory audits **the active KB, not the one you are standing in** — so if you feed
-  `--strict` to a CI gate, confirm the target with `factlog where` or pass `--wiki`
-  explicitly.
+- `--target` is the KB root (`--wiki` is an accepted alias). Omitted, it falls back to
+  `$FACTLOG_ROOT`, then the **active KB** (set by `factlog use`), then the current
+  directory. If an active KB is set, running from any directory audits **the active KB,
+  not the one you are standing in** — so if you feed `--strict` to a CI gate, confirm the
+  target with `factlog where` or pass `--target` explicitly. Passing it *empty*
+  (`--target ""`, what `--target "$FACTLOG_ROOT"` becomes in a shell that never exported
+  the variable) is refused with exit 1 rather than falling through to the active KB.
 - By default only **engine input** rows (`confirmed`/`accepted`) are audited.
   `--all-statuses` includes candidates that no human has approved yet, and is much noisier.
 - On a fresh KB with no `candidates.csv` it prints `value_audit: no candidate facts` and
