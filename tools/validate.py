@@ -22,11 +22,12 @@ from factlog.front_matter_scan import (  # noqa: E402
     FRONT_MATTER_UNCLOSED,
     FRONT_MATTER_UNSCANNED,
     front_matter_absence,
+    front_matter_body,
 )
 from factlog.integrations.common.source_writer import (  # noqa: E402
     IDENTITY_KEYS_BY_SOURCE,
 )
-from factlog.md_lines import bullets, unclosed_fence_line  # noqa: E402
+from factlog.md_lines import bullets, headings, unclosed_fence_line  # noqa: E402
 from factlog.review_sections import (  # noqa: E402
     missing_review_sections,
     split_review_sections,
@@ -126,16 +127,32 @@ def slugify_heading(heading: str) -> str:
 def heading_slugs(text: str) -> set[str]:
     """Every anchor a markdown body exposes.
 
+    Which lines *are* headings is :mod:`factlog.md_lines`'s question, not this
+    function's: it walks the document fence-aware, so a ``## Fake Anchor`` written
+    as an example inside a code fence is not a heading and yields no anchor — the
+    line scan this replaced answered ``startswith("#")`` and invented one, letting a
+    ``sources/x.md#fake-anchor`` ref no renderer honours pass (#521, the same defect
+    #504 fixed four times in open-questions.md, a different file). What stays here is
+    the slug machinery — how a heading's *title* becomes anchors.
+
+    md_lines gives the title a renderer shows (an ATX closing sequence like
+    ``## foo ##`` reads as ``foo``; a spaceless ``#plan-v2`` is a paragraph, not a
+    heading), so the anchors follow the renderer too.
+
     Headings that slugify identically are GitHub duplicate-suffixed (foo, foo-1,
     foo-2, ...). The legacy naive slug (spaces -> hyphens only) is also included
     so refs authored against the pre-fix convention keep validating.
+
+    ``text`` must be a body with any YAML front matter already stripped: md_lines
+    does not read front matter, and its closing ``---`` has the shape of a Setext
+    underline it would otherwise read as a level-2 heading. Callers pass
+    :func:`factlog.front_matter_scan.front_matter_body` (the boundary owner), not
+    raw source text.
     """
     seen: dict[str, int] = {}
     slugs: set[str] = set()
-    for line in text.splitlines():
-        if not line.startswith("#"):
-            continue
-        title = line.lstrip("#").strip()
+    for heading in headings(text):
+        title = heading.title
         base = slugify_heading(title)
         n = seen.get(base, 0)
         seen[base] = n + 1
@@ -150,7 +167,9 @@ def validate_source_ref(root: Path, source_ref: str) -> str | None:
     if not path.is_file():
         return f"source file does not exist: {source_ref}"
     if section:
-        if section.lower() not in heading_slugs(read(path)):
+        # Strip front matter before asking md_lines for headings: its closing ``---``
+        # is a Setext-underline shape and would otherwise anchor the whole block.
+        if section.lower() not in heading_slugs(front_matter_body(path)):
             return f"source section does not exist: {source_ref}"
     return None
 
@@ -396,11 +415,11 @@ def review_section_warnings(root: Path) -> list[tuple[str, str]]:
             f"not sections and bullets there are not filed, and nothing is written to "
             f"this file while that holds. Close the fence.",
         ))
-    for keyword, headings in split_review_sections(read(decisions)):
+    for keyword, section_headings in split_review_sections(read(decisions)):
         warnings.append((
             "split_review_section",
-            f"decisions/open-questions.md has {len(headings)} {keyword!r} sections "
-            f"({', '.join(repr(h.title) for h in headings)}); new bullets go to the "
+            f"decisions/open-questions.md has {len(section_headings)} {keyword!r} sections "
+            f"({', '.join(repr(h.title) for h in section_headings)}); new bullets go to the "
             f"first, so the others keep whatever they already hold — merge them by hand",
         ))
     return warnings
