@@ -1,12 +1,66 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Run deterministic logic checks over facts and query drafts."""
+"""Run deterministic logic checks over facts and query drafts.
+
+Usage:
+    python3 run_logic_check.py [--target <kb>]
+
+--target ("--wiki" is an accepted alias) overrides $FACTLOG_ROOT, which overrides
+the active-KB config, which overrides cwd. The skill's determinism gate names this
+script with no arguments, so the config tier is what lets that documented form run
+from outside a KB (#528).
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import argparse
+import os
+import sys
+from pathlib import Path
 
-from common import (
+# Ensure tools/ is importable when run directly, and resolve the KB root BEFORE
+# importing common (whose module-level ROOT captures FACTLOG_ROOT at import).
+_TOOLS_DIR = Path(__file__).parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common, which binds
+# its module-level paths from FACTLOG_ROOT at import time.
+import factlog_config  # noqa: E402
+
+# --target is the canonical spelling (ask_router and the `factlog` CLI subcommands
+# use it); --wiki is accepted as an alias because the sibling engine scripts spell
+# it that way. Both share one dest, so a run passing both settles on argparse's
+# last-wins rule. This one tuple feeds BOTH the pre-pass below and _parse_args in
+# main(): a flag only one tier knew would be either read-but-unadvertised or
+# accepted-but-ignored, which is the silent drop #528 closes, not one to reopen.
+_ROOT_FLAGS = ("--target", "--wiki")
+
+
+def _peek_root_flag(argv: list[str] | None = None) -> str | None:
+    """Return the KB root given on the command line, or None.
+
+    ``parse_known_args`` because this runs at import time, before main()'s real
+    parser exists: the peek must not reject an argument it is not responsible
+    for. Rejecting a typo is main()'s job, once, through :func:`_parse_args`.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument(*_ROOT_FLAGS, dest="target", default=None)
+    known, _ = pre.parse_known_args(sys.argv[1:] if argv is None else argv)
+    return known.target
+
+
+def resolve_root(argv: list[str] | None = None) -> str:
+    """This run's KB root: flag > $FACTLOG_ROOT > active-KB config > cwd."""
+    return factlog_config.resolve_root(_peek_root_flag(argv))[0]
+
+
+os.environ["FACTLOG_ROOT"] = resolve_root()
+
+from collections.abc import Callable  # noqa: E402
+
+from common import (  # noqa: E402
     attribute_relation_forms,
     FACTS_DIR,
     KNOWN_STATUSES,
@@ -655,6 +709,43 @@ def engine_input_drift(
     )
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Strict parse of the command line, for --help and for typo rejection.
+
+    The root flag itself was already consumed by the pre-pass at import — parsing
+    it again here is what makes ``--help`` list it and, more importantly, what
+    makes a misspelled ``--targt /path`` exit 2 instead of being silently dropped
+    and the check running against whatever the env/config/cwd tier resolved to.
+    The gate's documented no-argument form parses to an empty namespace, so the
+    determinism gate is untouched (#528).
+
+    Called from the ``__main__`` guard rather than from :func:`main`, because
+    ``main()`` is also called in-process (tests, `python -c` harnesses) where the
+    ambient ``sys.argv`` belongs to the host and is not this tool's to reject.
+    Argument handling is the executed-as-a-script concern; ``main()`` stays the
+    engine-free-callable check itself.
+    """
+    parser = argparse.ArgumentParser(
+        prog="run_logic_check",
+        description=(
+            "Run the wirelog/pyrewire logic check over facts/accepted.dl and "
+            "facts/query.dl, writing facts/logic_report.txt."
+        ),
+    )
+    parser.add_argument(
+        *_ROOT_FLAGS,
+        dest="target",
+        default=None,
+        metavar="PATH",
+        help=(
+            "KB root (--wiki is an alias). Overrides $FACTLOG_ROOT and the "
+            "active-KB config; without it the root is resolved as "
+            "$FACTLOG_ROOT > active-KB config > cwd."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> int | None:
     ensure_dirs()
     facts = load_accepted_facts()
@@ -788,4 +879,7 @@ def main() -> int | None:
 if __name__ == "__main__":
     from common import run_cli
 
+    # Before run_cli, so --help and a rejected argument exit without ensure_dirs
+    # having created a facts/ tree under whatever the pre-pass resolved (#528).
+    _parse_args()
     raise SystemExit(run_cli(main))
