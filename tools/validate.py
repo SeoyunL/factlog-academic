@@ -38,6 +38,10 @@ from factlog.review_sections import (  # noqa: E402
 # from the vocabulary is worse than the #208 warning bug. Derive, never restate.
 VALID_STATUSES = KNOWN_STATUSES
 
+# The directory that decides whether a path is a KB at all, named once so the guard in
+# main() and the checks in validate() cannot disagree about what "not a KB" means.
+KB_MARKER_DIR = "sources"
+
 # The absence reasons worth telling an operator about. Not every ``None`` from the
 # reader is one: a file with no opening fence is the normal shape of an ingest
 # conversion, which carries an HTML provenance comment instead of YAML, and an
@@ -236,7 +240,11 @@ def validate_logic_policy(root: Path) -> list[str]:
 
 def validate(root: Path) -> list[str]:
     errors: list[str] = []
-    for dirname in ["sources", "pages", "facts", "decisions", "policy"]:
+    # ``sources`` is missing from this list on purpose: it is KB_MARKER_DIR, and main()
+    # refuses a target without it before any check runs, so a "missing directory:
+    # sources/" line here is unreachable. Were it reachable it would be the very
+    # behaviour #530 removed — reporting on a non-KB instead of refusing it.
+    for dirname in ["pages", "facts", "decisions", "policy"]:
         if not (root / dirname).is_dir():
             errors.append(f"missing directory: {dirname}/")
 
@@ -511,11 +519,13 @@ def front_matter_warnings(root: Path) -> list[tuple[str, str]]:
     return warnings
 
 
-# Where a resolved target came from, phrased for the operator. The rejection below
-# names it because the whole point of #530 is that the *target* was wrong, not the
-# KB: "the current directory" and "the active-KB config" send a reader to different
-# fixes. 'flag' and 'argument' are kept apart so the message quotes the surface the
-# caller actually used.
+# Where a resolved target came from, phrased for the operator. Both the refusal and
+# the failure report below name it, because the whole point of #530 is that the
+# *target* was wrong, not the KB: "the current directory" and "the active-KB config"
+# send a reader to different fixes. 'flag' and 'argument' are kept apart because they
+# are different surfaces; which *spelling* of the flag was used is not recoverable
+# from the origin alone (``--target`` and ``--wiki`` share one dest), so the entry
+# here is only the fallback wording and ``origin_phrase`` takes the real spelling.
 TARGET_ORIGINS = {
     "flag": "the --target option",
     "argument": "the command-line argument",
@@ -524,8 +534,39 @@ TARGET_ORIGINS = {
     "cwd": "the current directory",
 }
 
+# The origins the caller named on this command line. Everything else — env, config,
+# cwd — put a KB in front of the tool that the caller never typed, which is why the
+# report has to say which one it looked at.
+CALLER_NAMED_ORIGINS = frozenset({"flag", "argument"})
 
-def resolve_target(target: str | None = None, root_arg: str | None = None) -> tuple[Path, str]:
+
+def origin_phrase(origin: str, flag_spelling: str | None = None) -> str:
+    """How to name *origin* to the operator.
+
+    ``.get`` rather than ``[]``: every caller is already on a path that has something
+    to say about the target, and an origin string this map has not met yet must not
+    turn that message into a KeyError traceback. *flag_spelling* is the option string
+    argparse actually matched, so a caller who typed ``--wiki`` is not sent looking at
+    a ``--target`` they never passed.
+    """
+    if origin == "flag" and flag_spelling:
+        return f"the {flag_spelling} option"
+    return TARGET_ORIGINS.get(origin, origin)
+
+
+class BlankTarget(ValueError):
+    """A target surface was given, but with an empty value. Carries the surface."""
+
+    def __init__(self, surface: str) -> None:
+        super().__init__(f"{surface} was empty")
+        self.surface = surface
+
+
+def resolve_target(
+    target: str | None = None,
+    root_arg: str | None = None,
+    flag_spelling: str | None = None,
+) -> tuple[Path, str]:
     """The KB to validate and where it came from: flag > argument > env > config > cwd.
 
     The env/config/cwd tail is ``factlog.config.resolve_root``, so this tool follows
@@ -534,6 +575,15 @@ def resolve_target(target: str | None = None, root_arg: str | None = None) -> tu
     every existing caller uses (the shell harness, merge_candidates' delegate), so it
     has to keep out-ranking a stale $FACTLOG_ROOT the way it always has.
 
+    Presence is tested with ``is not None``, not truthiness, and a blank value raises
+    ``BlankTarget`` instead of falling through. Truthiness let an empty string skip
+    its own tier and land on the config one, and this tool is the one place that is
+    dangerous: the sibling tools take no positional, but the shell harnesses call
+    ``validate.py "$KB"`` — so an unset ``$KB`` used to validate the sandbox cwd and
+    would now silently validate the developer's real active KB. Refuse instead; the
+    empty value is a caller bug either way. (The global contract for a blank value in
+    ``factlog.config.resolve_root`` is a separate question, deliberately left alone.)
+
     Unlike the sibling tools this resolves inside ``main`` rather than exporting
     FACTLOG_ROOT before importing ``common``: nothing here reads common's import-time
     path globals — every helper takes *root* as a parameter and the one child process
@@ -541,12 +591,29 @@ def resolve_target(target: str | None = None, root_arg: str | None = None) -> tu
     prepass cannot see the positional argument, so it would resolve one target while
     validating another.
     """
-    if target:
+    if target is not None:
+        if not target.strip():
+            raise BlankTarget(flag_spelling or "--target")
         return Path(resolve_root(target)[0]), "flag"
-    if root_arg:
+    if root_arg is not None:
+        if not root_arg.strip():
+            raise BlankTarget("the root argument")
         return Path(root_arg).expanduser().resolve(), "argument"
     resolved, origin = resolve_root(None)
     return Path(resolved), origin
+
+
+class RecordFlagSpelling(argparse.Action):
+    """Store the value and the option string the caller actually typed.
+
+    ``--target`` and ``--wiki`` share one dest, so the origin alone cannot tell them
+    apart and every message said "the --target option" even to a caller who passed
+    ``--wiki``. argparse hands an action the option string it matched, so keep it.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, f"{self.dest}_spelling", option_string)
 
 
 def main() -> int:
@@ -562,22 +629,37 @@ def main() -> int:
     # ``--target`` is the name the sibling tools take; ``--wiki`` is the older spelling
     # merge_candidates still uses. The positional stays for the callers that predate
     # both (tests/*.sh, merge_candidates' subprocess delegate).
-    parser.add_argument("--target", "--wiki", dest="target", default=None, help="KB root")
+    parser.add_argument(
+        "--target", "--wiki", dest="target", default=None,
+        action=RecordFlagSpelling, help="KB root",
+    )
     parser.add_argument("root", nargs="?", default=None)
     args = parser.parse_args()
-    root, origin = resolve_target(args.target, args.root)
-    if not (root / "sources").is_dir():
+    spelling = getattr(args, "target_spelling", None)
+    try:
+        root, origin = resolve_target(args.target, args.root, flag_spelling=spelling)
+    except BlankTarget as blank:
+        print(
+            f"validate: {blank.surface} was empty; pass a KB path, or pass no target "
+            "at all to use the active KB.",
+            file=sys.stderr,
+        )
+        return 1
+    # One sentence, reused: it is the same thing to say whether the target is not a KB
+    # or is a KB that failed. Only the stream differs — refusal is stderr, the failure
+    # report is stdout, and the note has to travel with whichever the reader is seeing.
+    origin_note = (
+        f"validate: the target came from {origin_phrase(origin, spelling)}; "
+        "pass --target <kb> or set the active KB with 'factlog use <kb>'."
+    )
+    if not (root / KB_MARKER_DIR).is_dir():
         # Refuse rather than report. Validating a non-KB used to print the ordinary
         # failure list ("missing directory: sources/ ...") for whatever directory the
         # caller happened to stand in, which reads as *the operator's KB is broken*
         # (#530). Same bar as finalize/compile_facts: say the target is not a KB, and
         # say where the target came from, since that is what has to change.
-        print(f"validate: {root} is not a factlog KB (no sources/).", file=sys.stderr)
-        print(
-            f"validate: the target came from {TARGET_ORIGINS[origin]}; "
-            "pass --target <kb> or set the active KB with 'factlog use <kb>'.",
-            file=sys.stderr,
-        )
+        print(f"validate: {root} is not a factlog KB (no {KB_MARKER_DIR}/).", file=sys.stderr)
+        print(origin_note, file=sys.stderr)
         return 1
     errors = validate(root)
     # Printed on both outcomes and ahead of the verdict, so a failing run does not
@@ -592,7 +674,14 @@ def main() -> int:
         # category is a state a human can have arrived at deliberately.
         print(f"warning: {tag}: {warning}")
     if errors:
-        print("Fact sync validation failed:")
+        # Name the KB, and — when the caller did not name the target themselves — say
+        # where it came from. A bare "failed:" reads as a verdict on wherever the
+        # reader is standing, which is the #530 misreading in its remaining form: the
+        # config points at KB-B, the operator is standing in KB-A, and B's failure
+        # list looks like A's. The passing line has named the root all along.
+        print(f"Fact sync validation failed: {root}")
+        if origin not in CALLER_NAMED_ORIGINS:
+            print(origin_note)
         for error in errors:
             print(f"- {error}")
         return 1

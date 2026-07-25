@@ -37,6 +37,16 @@ Rank 1 never appears in `factlog where`'s output because `where` itself does not
 take `--target`. A flag applies only to the **single command** it was given to, so
 `where` always reports a result resolved from ranks 2–4.
 
+> **Tools that take a positional root have one extra rank.** `tools/validate.py`
+> also accepts the KB path as a positional argument (`validate.py <path>`), and that
+> argument sits **between ranks 1 and 2**: `--target`/`--wiki` > positional >
+> `$FACTLOG_ROOT` > active-KB config > current directory. The shell harnesses
+> (`tests/*.sh`) and `merge_candidates`' delegate pass the KB in that position, so
+> ranking it below the config would **validate the active KB instead of the KB the
+> caller named**. An empty value (`validate.py ""`) is refused on the spot (exit 1)
+> rather than falling through to the next rank — otherwise one unset variable
+> silently changes the target.
+
 Whichever way a path arrives, it goes through `~` expansion and absolute-path
 normalization. If the config file is missing, its JSON is corrupt, or its `root`
 field is empty, resolution **falls through to the next rank instead of crashing** —
