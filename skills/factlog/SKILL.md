@@ -1118,8 +1118,9 @@ so none of them produce verified answers on their own — `/factlog check` and
 ```
 
 - `factlog status` — one-screen KB summary: engine version, fact counts,
-  vocabulary sizes, source counts, conflicts, and whether `logic_report.txt` is
-  present. Run this first when you need to orient in an unfamiliar KB.
+  vocabulary sizes, source counts, conflicts, how many declared questions the
+  last check could answer, and whether `logic_report.txt` is present. Run this
+  first when you need to orient in an unfamiliar KB.
 - `factlog sources` — every registered source with its original, its conversion
   (if any), and its fact count. **This is where source slugs come from** for
   `openalex-cite --for` and `pubmed-mesh --for`.

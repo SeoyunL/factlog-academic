@@ -2285,9 +2285,189 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     return 0
 
 
+def _declared_question_count(questions_md: _Path) -> int:
+    """How many questions ``policy/questions.md`` declares, at an EXPLICIT path.
+
+    Counts the same lines ``common.load_questions`` parses (a bullet or numbered
+    item that carries text; blanks and '#' headings skipped), and nothing else.
+
+    Not ``common.load_questions()`` itself: that reads the module-level
+    ``QUESTIONS_MD`` of the ambient ``FACTLOG_ROOT``, while ``cmd_status`` reads a
+    KbContext that may point at a different KB — under ``--target`` (or an active
+    KB that is not the cwd) it would count another KB's questions, or raise
+    "missing policy/questions.md" about a file the target KB has (#226's failure
+    mode). status also only needs the COUNT, so it skips the id/duplicate
+    validation that makes load_questions raise: a malformed questions.md is a
+    finding for `factlog check` to report, not a reason for status to die.
+
+    Not :func:`factlog.md_lines.bullets` either, deliberately: that answers "which
+    lines render as a markdown list item" (``- `` only, code fences excluded), while
+    load_questions is what actually decides what a question IS — it takes ``*`` and
+    ``1.`` items too and knows nothing of fences. Counting with the renderer's rule
+    would make status disagree with the parser every other surface obeys, which is
+    the drift this whole line exists to expose.
+    """
+    import re
+
+    if not questions_md.is_file():
+        return 0
+    count = 0
+    for line in questions_md.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not re.match(r"^(?:[-*]|\d+\.)", stripped):
+            continue
+        text = re.sub(r"^[-*]\s+", "", stripped)
+        text = re.sub(r"^\d+\.\s+", "", text)
+        if text.strip():
+            count += 1
+    return count
+
+
+def _query_evaluation_section(report_text: str) -> tuple[bool, list[str]]:
+    """``(does the report have a ``Query evaluation:`` header, its result items)``.
+
+    The header flag is reported SEPARATELY from the items because an empty item list
+    means two different things and status has to say two different things about them.
+    A report that HAS the section and evaluated nothing is evidence of zero answers;
+    a report with no section at all (truncated mid-write, or produced by something
+    other than run_logic_check) is no evidence either way. Collapsing the two made
+    status assert "0 answerable" from a report that never spoke on the subject — the
+    illusion #536 exists to remove, and a contradiction with the `report_text is None`
+    branch of :func:`cmd_status`, which calls exactly that absence of evidence unknown.
+
+    run_logic_check emits one ``- <item>`` line per query line in facts/query.dl,
+    then a blank line/EOF. Its three "nothing to report" placeholders (no query.dl,
+    an empty query.dl, lines that produced no result) describe the FILE rather than
+    any one query, so they are dropped here — they are not results, and counting
+    them as such would let an absent query.dl read as an evaluated question. They do
+    NOT clear the header flag: the section WAS written, it just carries no result.
+
+    The ``- `` read here is run_logic_check's own item marker in a *generated plain-text
+    report*, not markdown list structure, so it deliberately does not route through
+    :mod:`factlog.md_lines` (the SSOT that ``tests/unit/test_markdown_scan_contract.py``
+    protects): that module reads a document as markdown, and a stray backtick run in a
+    question string echoed into ``review_required: …`` would open a "code fence" that
+    swallowed the rest of the section.
+    """
+    placeholders = ("no facts/query.dl found", "facts/query.dl is empty", "facts/query.dl has ")
+    items: list[str] = []
+    seen_header = False
+    in_section = False
+    for line in report_text.splitlines():
+        if line.startswith("Query evaluation:"):
+            seen_header = True
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        item = line.removeprefix("- ")
+        if item == line:
+            break  # a blank line (or the next section header) ends the section
+        item = item.strip()
+        if not item.startswith(placeholders):
+            items.append(item)
+    return seen_header, items
+
+
+def _classify_query_results(items: list[str]) -> dict[str, int]:
+    """Split ``Query evaluation:`` items into answerable vs the reasons they are not.
+
+    ANSWERABLE means the engine returned a verified answer for the question — rows,
+    or a verified zero ("0 rows" / "(not found)"). A verified negative IS an answer
+    here, deliberately: run_logic_check works hard to keep "the engine checked and
+    found nothing" apart from "the engine never got to check" (#347/#350/#362), and
+    collapsing the two in status would undo that distinction one line lower.
+
+    ANSWERABLE IS A WHITELIST, and the default is `unclassified`, not `answerable`.
+    The first cut fell through to answerable whenever no reason-substring matched, so
+    every new branch in run_logic_check's `evaluate_queries` silently tilted the
+    default towards "the engine answered this" — and `unknown query predicate`, an
+    item validate_query raises a HARD ERROR for, was already counted as answered
+    (0 answerable read as 2 answerable). An item whose shape this function does not
+    recognise is not evidence of an answer; it is counted `unclassified` and shown on
+    the line, so the drift is visible instead of inflating the headline number.
+
+    Matching reads the HEAD of an item only — the part before the first `;`, and,
+    where a form allows it, an exact tail. `relation results: N rows; …` and
+    `path A -> B: …` append ENGINE FACT VALUES verbatim
+    (tools/run_logic_check.py:522-530), and `unverified` is ordinary factlog domain
+    vocabulary ("unverified preprint"), so a substring test against the whole item
+    flips two answered questions to "unverified" on real data. The route form is
+    accepted only when its first and last node are the queried endpoints, compared
+    through ``canonical_value`` the way dependency_path resolved them.
+
+    The reasons a question is not answerable, by the report's own wording:
+    ``review_required: `` (routed to a human; the colon is REQUIRED — a policy may
+    ``.decl`` a predicate named ``review_required_manual``, whose ordinary
+    ``… results: 3 rows`` findings are answers), ``unverified`` (a constant its
+    position does not accept), ``malformed``, and ``unknown query predicate``.
+    """
+    import re
+
+    from factlog.common import canonical_value
+
+    pred = r"[A-Za-z_][A-Za-z0-9_]*"
+    unverified_tail = " is not accepted vocabulary (see Warnings above)"
+    malformed = {
+        f"{p} query malformed — see Errors above" for p in ("path", "relation", "count")
+    }
+
+    def classify(item: str) -> str:
+        # Values are appended after "; " — judge on the head, never the payload.
+        head = item.split(";", 1)[0]
+        if item == "unknown query predicate — see Errors above":
+            # validate_query raises `query unknown predicate` as a hard ERROR for this
+            # line (tools/run_logic_check.py:203-205): the question is confirmed
+            # unanswerable, not answered.
+            return "unknown_predicate"
+        if item.startswith("review_required: "):
+            return "review_required"
+        if item in malformed:
+            return "malformed"
+        if re.fullmatch(rf"{pred} results: unverified — .*", item) and item.endswith(unverified_tail):
+            return "unverified"
+        if re.fullmatch(rf"{pred} results: \d+ rows", head):
+            return "answerable"
+        if re.fullmatch(r"count results: \d+ \(distinct objects\)", head):
+            return "answerable"
+        # `path <start> -> <target>: <value>`, the two-constant form. Non-greedy so the
+        # split takes the FIRST " -> " / ": "; an endpoint carrying either separator
+        # mis-splits and lands in `unclassified`, which is the safe direction.
+        pinned = re.fullmatch(r"path (?P<start>.+?) -> (?P<target>.+?): (?P<value>.+)", item)
+        if pinned:
+            value = pinned["value"]
+            if value == "(not found)":
+                return "answerable"  # the verified negative this branch exists for
+            if value == "reachable (engine); no route through the accepted facts":
+                return "answerable"
+            if value.startswith("unverified — ") and value.endswith(unverified_tail):
+                return "unverified"
+            route = value.split(" -> ")
+            if canonical_value(route[0]) == canonical_value(pinned["start"]) and canonical_value(
+                route[-1]
+            ) == canonical_value(pinned["target"]):
+                # dependency_path renders the STORED spelling of each endpoint, which
+                # may differ from the query constant by normalisation form; compare
+                # through the same canonicalisation it resolved them with.
+                return "answerable"
+        return "unclassified"
+
+    counts = {
+        "answerable": 0,
+        "review_required": 0,
+        "unverified": 0,
+        "malformed": 0,
+        "unknown_predicate": 0,
+        "unclassified": 0,
+    }
+    for item in items:
+        counts[classify(item)] += 1
+    return counts
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Summarise the active KB's state: sources, facts by status, vocabulary,
-    conflicts, logic-report freshness, and engine availability."""
+    conflicts, question/query state, logic-report freshness, and engine availability."""
     import unicodedata
     from collections import Counter
     from pathlib import Path
@@ -2419,8 +2599,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Logic report freshness
     report = ctx.facts_dir / "logic_report.txt"
+    # Kept for the questions line below: the report is the ONLY record of how each
+    # query evaluated, and whether that record is current.
+    report_text: str | None = None
+    report_stale = False
     if report.is_file():
         text = report.read_text(encoding="utf-8", errors="ignore")
+        report_text = text
         # Lower-case `errors:`/`warnings:` are the summary lines in
         # run_logic_check's report (the `Errors:`/`Warnings:` headers are capitalised).
         errors = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("errors:")), "?")
@@ -2439,6 +2624,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             if p.is_file()
         ]
         stale = any(p.stat().st_mtime > rep_mtime for p in inputs)
+        report_stale = stale
         fresh = "STALE (inputs changed since last check — run /factlog check)" if stale else "fresh"
         line = f"  logic:      report {fresh}; errors={errors}, warnings={warnings}"
         # status prints two engine-fact counts — its own (from candidates.csv, above) and
@@ -2457,6 +2643,67 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(line)
     else:
         print("  logic:      no logic_report.txt yet (run /factlog check)")
+
+    # Questions (declared in policy/questions.md, answered — or not — by the report's
+    # `Query evaluation:` section). status had no query axis at all, so a KB whose every
+    # declared question had lost its supporting facts and routed to review_required read
+    # as perfectly healthy: facts, vocabulary, conflicts and logic all looked fine and the
+    # one thing that had stopped working was the one thing status never mentioned (#536).
+    declared = _declared_question_count(ctx.questions_md)
+    seen_query_section, items = _query_evaluation_section(report_text or "")
+    if not declared:
+        # Same `n/a` convention as the conflicts line: nothing is wrong, there is
+        # simply nothing declared to report on.
+        print("  questions:  n/a (none declared in policy/questions.md)")
+    elif report_text is None:
+        # No report is not zero answerable questions — it is an unknown, and saying
+        # "0 answerable" about an unchecked KB would be the mirror of the bug above.
+        print(f"  questions:  {declared} declared, answerable unknown (no logic_report.txt yet — run /factlog check)")
+    elif not seen_query_section:
+        # A report that never wrote the section (truncated mid-write, or written by
+        # something other than run_logic_check) is the same absence of evidence as no
+        # report at all, so it gets the same verdict and the same wording. Distinct
+        # from a section that is present and empty, one branch down: THAT report did
+        # evaluate the queries and found no result, which is a zero we can state.
+        print(
+            f"  questions:  {declared} declared, answerable unknown "
+            "(logic_report.txt has no Query evaluation section — run /factlog check)"
+        )
+    else:
+        counts = _classify_query_results(items)
+        notes = [
+            f"{n} {label}"
+            for label, n in (
+                ("review_required", counts["review_required"]),
+                ("unverified", counts["unverified"]),
+                ("malformed", counts["malformed"]),
+                ("unknown predicate", counts["unknown_predicate"]),
+                # An item shape _classify_query_results does not recognise. Shown
+                # rather than folded into answerable: if run_logic_check grows a
+                # result form this function has not learned, that shows up here as an
+                # unexplained bucket instead of silently inflating "N answerable".
+                ("unclassified", counts["unclassified"]),
+                # Declared questions the report has no result line for — no query drafted
+                # in facts/query.dl, or a query whose predicate produced nothing at all.
+                ("without a result", max(0, declared - len(items))),
+            )
+            if n
+        ]
+        detail = f" ({', '.join(notes)})" if notes else ""
+        # A stale report's verdicts describe the PREVIOUS inputs; the logic line one row
+        # up already says STALE, so point at the fix rather than at query.dl.
+        pointer = " — from a STALE report; run /factlog check" if report_stale else " — see facts/query.dl"
+        qline = f"  questions:  {declared} declared, {counts['answerable']} answerable{detail}{pointer}"
+        if len(items) > declared:
+            # query.dl is drafted 1:1 from questions.md; more evaluated queries than
+            # declared questions means the two drifted, and every count on this line is
+            # then measuring two different populations. Same slot/indent as the
+            # engine-input mismatch warning above.
+            qline += (
+                f"\n              ⚠ the report evaluated {len(items)} query line(s) for {declared} "
+                "declared question(s) — facts/query.dl and policy/questions.md are no longer 1:1"
+            )
+        print(qline)
     return 0
 
 

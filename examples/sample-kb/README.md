@@ -81,7 +81,7 @@ factlog where                             # 출력된 활성 KB 절대경로가 
 
 ```bash
 factlog review     # 대기 큐(candidate + needs_review) 나열
-factlog status     # KB 상태 요약: 상태별 사실 수, 어휘, 엔진, 리포트 신선도
+factlog status     # KB 상태 요약: 상태별 사실 수, 어휘, 질문, 엔진, 리포트 신선도
 ```
 
 `factlog review` 는 대기 중인 한 줄을 보여 줍니다.
