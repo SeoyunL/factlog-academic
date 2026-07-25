@@ -19,7 +19,7 @@ check is skipped with a clear note (facts are still merged and compiled) so the
 command degrades gracefully rather than hard-failing.
 
 Usage:
-    python3 finalize.py [--target <kb>]
+    python3 finalize.py [--target|--wiki <kb>]
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import factlog_config
 from common import (
     EMPTY_POLICY_DL,
     logic_policy_md_has_rejected_items,
@@ -78,6 +79,84 @@ def _run(script: str, *args: str, env: dict[str, str]) -> subprocess.CompletedPr
         return subprocess.CompletedProcess(exc.cmd, returncode=124, stdout=stdout, stderr=stderr)
 
 
+def resolve_kb_root(cli_value: str | None) -> tuple[Path, str]:
+    """The KB root finalize operates on **and where that choice came from** (#529).
+
+    Precedence is the documented one (factlog/config.py):
+
+        --target/--wiki  >  $FACTLOG_ROOT  >  active-KB config  >  cwd
+
+    The flag default used to be ``os.environ.get("FACTLOG_ROOT", ".")``, which skipped
+    the config tier entirely: run outside a KB with neither the flag nor the env var —
+    the normal shape for a user who set an active KB once with `factlog use` — finalize
+    resolved to cwd and refused with "is not a factlog KB (no sources/)" instead of
+    finalizing the KB every other command was already targeting.
+
+    The second answer — 'flag' | 'env' | 'config' | 'cwd' — is returned rather than
+    dropped because consulting the config tier is exactly what makes an *unaimed* run
+    possible, and only the provenance can tell one apart from an aimed one. It is what
+    ``implicit_target_refusal`` decides on and what ``main`` announces; nothing
+    downstream can recover it, since every chained step is handed an explicit
+    ``FACTLOG_ROOT`` and would report 'env' for a root that came from anywhere.
+
+    Sibling tools (tools/merge_candidates.py and friends) do this as a pre-pass that
+    exports FACTLOG_ROOT *before* importing common, because common binds its path
+    globals at import time. finalize does not need that: it imports only a constant and
+    two path-taking predicates from common, and hands every chained step an explicit
+    FACTLOG_ROOT in ``env``. Resolving here instead keeps the root a function of
+    ``main``'s argv rather than of module import order. That holds only while finalize
+    imports nothing ROOT-bound from common — adding such an import means moving this
+    to a pre-pass.
+    """
+    root, source = factlog_config.resolve_root(cli_value)
+    return Path(root), source
+
+
+def implicit_target_refusal(root: Path, source: str, cwd: Path) -> str | None:
+    """Why this run may not finalize *root*, or None if it may (#529/#532).
+
+    ``source`` is ``factlog_config.resolve_root``'s second answer. Only 'config' names a
+    target nobody chose — not the command line, not the environment, not the directory
+    the caller is standing in. Before the config tier was consulted here, a bare
+    ``finalize.py`` outside a KB resolved to cwd and the ``sources/`` gate below turned
+    it away; with the tier consulted it instead chains merge_candidates against the
+    configured KB, rewriting facts/candidates.csv, pages/ and
+    decisions/open-questions.md and recompiling facts/accepted.dl. Measured: a run from
+    an unrelated directory rewrote the active KB's candidate table.
+
+    Same criterion as tools/merge_candidates.py's guard for the same accident (#532),
+    and finalize needs its own copy rather than inheriting that one: it hands the child
+    ``--wiki <root>``, so the child's resolver answers 'flag' and its guard passes. A
+    guard one caller can turn off by being explicit on the child's behalf is not a
+    guard for that caller — finalize would be the way around #532 rather than a step
+    covered by it.
+
+    Announcing the target (main does that too) is not a substitute: merge_candidates
+    already printed ``wiki=<root>`` before every write and the incident happened anyway.
+    A line on stdout makes an intended write auditable; it does not stop an unintended
+    one.
+
+    'flag' and 'env' are aimed by definition. 'cwd' needs no refusal either: the root IS
+    the cwd, so the ``sources/`` gate catches a non-KB there exactly as before. And a
+    config root the caller is standing inside (or at) is not implicit — running finalize
+    from the KB with no flag is the documented workflow.
+    """
+    if source != "config":
+        return None
+    if cwd == root or root in cwd.parents:
+        return None
+    return (
+        f"finalize: REFUSING to finalize {root} — that KB comes from the active-KB config, "
+        f"not from this command, and the current directory ({cwd}) is not inside it.\n"
+        f"  finalize chains merge_candidates, which rewrites facts/candidates.csv, pages/ and "
+        f"decisions/open-questions.md, and then recompiles facts/accepted.dl — so a run nobody "
+        f"aimed would silently rewrite the configured KB and invalidate its logic report (#532).\n"
+        f"  Name the target explicitly:\n"
+        f"    python3 tools/finalize.py --target {root}\n"
+        f"  or export FACTLOG_ROOT={root}"
+    )
+
+
 def _pyrewire_ok() -> bool:
     try:
         import pyrewire  # type: ignore
@@ -100,7 +179,28 @@ def main(argv: list[str] | None = None) -> int:
             except (AttributeError, ValueError, OSError):
                 pass
     parser = argparse.ArgumentParser(prog="finalize", description="deterministic /factlog add finalize chain")
-    parser.add_argument("--target", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
+    # `--wiki` is accepted as an alias of `--target` so the KB-root flag is spelled the
+    # same way everywhere in the toolchain (merge_candidates/check_conflicts take
+    # `--wiki`, ask_router takes `--target`); both land in the same dest.
+    #
+    # One dest, so passing BOTH is not an error and not a conflict argparse resolves in
+    # any special way: each occurrence overwrites the dest, so the spelling that comes
+    # LAST on the command line wins. Said in the help because a caller that builds argv
+    # by appending (a wrapper adding `--wiki` after a user's `--target`) otherwise has
+    # no way to know which of the two it is actually finalizing.
+    #
+    # No argparse `default=` here: the default is not a constant but a resolution over
+    # env → config → cwd, and computing it in resolve_kb_root keeps the help text and
+    # the behaviour describing one rule instead of two (#529).
+    parser.add_argument(
+        "--target",
+        "--wiki",
+        dest="target",
+        default=None,
+        help="KB root (authoritative; sets FACTLOG_ROOT for the chained steps; "
+        "default: $FACTLOG_ROOT, then the active KB from `factlog use`, then '.'). "
+        "--target and --wiki are one option: given both, the last one wins.",
+    )
     parser.add_argument(
         "--allow-unverified",
         action="store_true",
@@ -114,9 +214,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    root = Path(args.target).expanduser().resolve()
+    root, root_source = resolve_kb_root(args.target)
+    # Name the KB about to be finalized and where that choice came from, before anything
+    # is read, written or chained — the same line `factlog ingest`/`status` print
+    # (cli.py: "target KB {target} (from {source})"). The provenance is the part that
+    # tells a reader this run picked the KB up from config rather than from their
+    # command.
+    print(f"finalize: target KB {root} (from {root_source})")
     if not (root / "sources").is_dir():
         print(f"finalize: {root} is not a factlog KB (no sources/).", file=sys.stderr)
+        return 1
+    # After the KB gate, not before: a root with no sources/ is refused either way and
+    # nothing is written on that path, so the reader gets the more specific diagnosis of
+    # the two. Before every write, which is what the guard is for.
+    refusal = implicit_target_refusal(root, root_source, Path.cwd().resolve())
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 1
     env = {**os.environ, "FACTLOG_ROOT": str(root)}
 
