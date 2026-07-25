@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from factlog.md_lines import fence_flags, headings
+from factlog.md_lines import fence_flags, headings, unclosed_fence_line
 from factlog.review_sections import REVIEW_CATEGORIES, REVIEW_KEYWORDS
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -317,15 +317,16 @@ class TestCodeFencesEndToEnd:
         assert "line 5" in out, out
 
     def test_a_fence_opened_after_the_headings_warns_without_failing(self, tmp_path):
-        """Where the fence opens decides the exit code; the warning does not.
+        """Where the fence opens decides the exit code — *when nothing waits* (#512).
 
         A fragment pasted onto the end of a complete file hides nothing any check
-        requires, so the run passes with only the warning to show for it. The docs
-        and the issue comment both said "rc=1" flatly, which is false in exactly this
-        shape — the common one. Pinned here so the claim cannot drift back.
+        requires, so with no needs_review rows queued the run passes with only the
+        warning to show for it. The docs and the issue comment both said "rc=1"
+        flatly, which is false in exactly this shape — the common one. Pinned here so
+        the claim cannot drift back. The other half — the same paste *while* a row is
+        queued — escalates to an error, pinned in the sibling test below.
         """
         kb = _init(tmp_path / "kb", tmp_path)
-        _seed_needs_review(kb)
         assert _merge(kb, tmp_path).returncode == 0
         with (kb / "decisions" / "open-questions.md").open("a", encoding="utf-8") as f:
             f.write("\n```\n붙여넣다 만 조각\n")
@@ -336,11 +337,102 @@ class TestCodeFencesEndToEnd:
         # and the message does not blame errors that were never reported
         assert "reported missing" not in out, out
 
+    def test_a_fence_pasted_after_a_mirrored_row_escalates_to_error(self, tmp_path):
+        """The queued sibling of the case above: same paste, but a row waits (#512).
+
+        #504 pinned "a fragment pasted onto the end of a complete file → warning only".
+        #512 escalates the subset where needs_review rows are still queued to an error,
+        because the *next* merge would refuse to file into a file ending inside a fence.
+        Restored explicitly here — the seed was once dropped to keep the sibling green,
+        which silently un-pinned this boundary — so the escalation is a stated contract.
+
+        And the message is future-tense on purpose: an earlier merge already mirrored
+        the row (asserted below), so nothing has "refused" it — what is true is that
+        filing stalls until the fence is closed. The `not in` guard keeps the false
+        past-tense wording from creeping back.
+        """
+        kb = _init(tmp_path / "kb", tmp_path)
+        _seed_needs_review(kb)
+        assert _merge(kb, tmp_path).returncode == 0
+        assert _review_lines(_open_questions(kb)), "the row was not mirrored"
+        with (kb / "decisions" / "open-questions.md").open("a", encoding="utf-8") as f:
+            f.write("\n```\n붙여넣다 만 조각\n")
+        proc = _validate(kb, tmp_path)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 1, out
+        fence_line = unclosed_fence_line(_open_questions(kb))
+        assert f"unclosed code fence on line {fence_line}" in out, out
+        assert "merge will refuse to file the pending needs_review rows" in out, out
+        # the row is mirrored, so a past-tense "refused" claim would be a lie
+        assert "refused to file" not in out, out
+
     def test_a_fence_opened_before_the_headings_does_fail(self, tmp_path):
         """The other half of the same rule, so the pair states the whole contract."""
         kb = self._fenced_kb(tmp_path, self.UNCLOSED)
         proc = _validate(kb, tmp_path)
         assert proc.returncode == 1, proc.stdout + proc.stderr
+
+    # A complete four-section file with a real review bullet, then a fragment pasted
+    # onto the end that opens a fence and never closes it. The bullet above keeps the
+    # "needs_review rows but no review bullets" error quiet — this is the exact
+    # combination that used to escape with only a warning (#512).
+    STALLED = (
+        "# Open Questions\n\n"
+        "## 중복 개념 후보\n\n"
+        "## 모호한 관계명\n\n"
+        "- needs_review: 기존 항목 (sources/old.md, confidence=0.30) - 이전 큐\n\n"
+        "## 출처 부족\n\n"
+        "## 기존 내용과 충돌할 수 있는 항목\n\n"
+        "```\n붙여넣다 만 조각\n"
+    )
+
+    def test_a_fence_after_the_headings_with_rows_waiting_fails(self, tmp_path):
+        """A fence after the headings is an error *when* needs_review rows wait (#512).
+
+        The writer refuses to file into a file ending inside a fence, so those rows
+        never reach the mirror — yet a bullet above the fence keeps the missing-bullet
+        error quiet and the fence is below every heading a section check needs, so the
+        run used to pass with only a warning. validate re-derives the writer's own
+        `ends_inside_fence` decision off the file and gates on it.
+        """
+        kb = self._fenced_kb(tmp_path, self.STALLED)
+        # The writer refuses this file, so the pending row is never mirrored.
+        assert _merge(kb, tmp_path).returncode == 0
+        assert _open_questions(kb) == self.STALLED, "the writer wrote into the fence"
+        proc = _validate(kb, tmp_path)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 1, out
+        # Action-guiding: names the fence line the writer choked on.
+        fence_line = unclosed_fence_line(self.STALLED)
+        assert f"unclosed code fence on line {fence_line}" in out, out
+        assert "merge will refuse to file the pending needs_review rows" in out, out
+
+    def test_a_pending_row_with_no_fence_is_not_gated(self, tmp_path):
+        """No-regression: needs_review rows in a normally-mirrored file stay rc=0.
+
+        The new error is the fence, not the pending row — a merged KB whose queue is
+        filed the ordinary way must not start failing.
+        """
+        kb = _init(tmp_path / "kb", tmp_path)
+        _seed_needs_review(kb)
+        assert _merge(kb, tmp_path).returncode == 0
+        assert _review_lines(_open_questions(kb)), "the row was not mirrored"
+        proc = _validate(kb, tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    def test_the_fence_gate_is_independent_of_the_needs_review_row(self, tmp_path):
+        """No-regression: the same file with the row cleared only warns (#512).
+
+        Same STALLED document, but nothing waits in candidates.csv, so the mirror is
+        not proven stalled — the fence is a warning again, exactly the (iii) case the
+        docstring now promises. `and`-mutating the gate to `or` would fail here.
+        """
+        kb = _init(tmp_path / "kb", tmp_path)
+        (kb / "decisions" / "open-questions.md").write_text(self.STALLED, encoding="utf-8")
+        proc = _validate(kb, tmp_path)
+        out = proc.stdout + proc.stderr
+        assert "warning: unclosed_fence:" in out, out
+        assert proc.returncode == 0, out
 
     def test_a_tilde_block_quoting_backticks_is_written_to_normally(self, tmp_path):
         """The shape the reference recommends must not hit the hard stop.
