@@ -113,7 +113,7 @@ from common import (  # noqa: E402
 
 # Below the `from common import (...)` block, never in the sys.path bootstrap at the
 # top of this file: that block is #553's conflict surface and must stay untouched.
-from factlog.runtime import provenance_line  # noqa: E402
+from factlog.runtime import provenance_line, script_tree_split  # noqa: E402
 
 
 def _kb_relative(path) -> str:
@@ -1009,6 +1009,15 @@ if __name__ == "__main__":
     # disagree with a reader's expectations, it is nearly always this one that explains
     # why (#554).
     print(provenance_line())
+    # ...and whether that package came from the same tree as this script (#553): a
+    # bundled tools/ driving a working-tree factlog (or the reverse) is the state that
+    # made four closed defects look live. Printed to STDERR on purpose — the first two
+    # stdout lines are positional contract
+    # (tests/unit/test_report_factlog_provenance.py pins out[0]/out[1]), and a warning
+    # that fires only in a split installation must not renumber them.
+    _tree_split = script_tree_split(__file__)
+    if _tree_split:
+        print(_tree_split, file=sys.stderr)
     # After the strict parse, so --help/exit-2 stay pure argparse output, and before
     # run_cli, so the KB is named before the report is read, written or printed (#547).
     print(announce_target())

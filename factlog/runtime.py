@@ -119,6 +119,64 @@ def _same_dir(left: Path | str | None, right: Path | str | None) -> bool:
     return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
 
+def script_tree_split(script_file: str, imported_file: str | None = None) -> str | None:
+    """Is the running *script* from a different tree than the imported *package*? (#553)
+
+    ``running_factlog`` answers "which factlog package produced this", which was
+    enough for #554's report line. It is not enough for the shape that produced the
+    confusion: a plugin ships its own ``tools/``, so the file being executed can come
+    from the bundled 0.6.0 while the ``factlog`` package comes from the working tree
+    (or the reverse). Both halves have to be named before "I ran my change" is a
+    checkable claim rather than an assumption.
+
+    Deliberately NOT a version comparison ("warn when the installed one is newer").
+    That needs a parsing convention factlog does not have, and it reads local dev tags
+    (``0.7.0+dirty``, ``9.9.9+…``) as regressions. "The script tree is not the package
+    tree" is a *fact*, not a judgement — and it is exactly the state that got #208,
+    #491, #527 and #547 re-diagnosed as live bugs.
+
+    Pure and argument-injected, the shape :func:`installation_skew` uses: *script_file*
+    is the caller's ``__file__``, and *imported_file* defaults to the real
+    ``factlog.__file__`` but can be supplied so every state is pinned by a unit test
+    instead of by a venv dance.
+
+    **Assumption, and it is a real constraint on callers:** *script_file* must sit
+    exactly one directory below its distribution root, because it is reduced with the
+    same ``parent.parent`` that :func:`_package_parent` applies to a package
+    ``__init__.py`` — a helper whose docstring is written about that narrower job. Every
+    caller today satisfies it (``tools/<script>.py``, ``factlog/<module>.py``). A script
+    moved to ``tools/sub/x.py`` would reduce to ``/repo/tools`` against a package tree of
+    ``/repo`` and warn about a split that does not exist — the cry-wolf failure
+    :func:`_same_dir` and :func:`installed_factlog_dist` already guard against elsewhere.
+    Move a caller and this is the line to re-check.
+
+    Note what it does NOT cover, because the gap is easy to misread: with the variable
+    unset the wrappers put the bundle root at ``sys.path[0]``, so script tree and package
+    tree agree by construction and this returns ``None``. The default-configuration user
+    — the one whose reports caused the four misdiagnoses — sees no warning. Attribution
+    in that state comes from #554's ``factlog:`` line, not from here.
+
+    Returns the warning text, or ``None`` when the two trees agree (or when either
+    path is unreadable — a diagnostic must not invent a discrepancy out of a missing
+    measurement). Callers print it to **stderr**: stdout's first lines are positional
+    contract (``tests/unit/test_report_factlog_provenance.py``), and a warning that
+    fires only in odd installations must not shift them.
+    """
+    if imported_file is None:
+        _, imported_file = running_factlog()
+    script_root = _package_parent(script_file)
+    package_root = _package_parent(imported_file)
+    if script_root is None or package_root is None:
+        return None
+    if _same_dir(script_root, package_root):
+        return None
+    return (
+        f"warning: 실행 중인 스크립트({script_file})와 import된 factlog 패키지"
+        f"({imported_file})가 서로 다른 트리에 있습니다 — "
+        f"스크립트 {script_root} / 패키지 {package_root}"
+    )
+
+
 def installation_skew(
     dist_name: str | None,
     dist_version: str | None,

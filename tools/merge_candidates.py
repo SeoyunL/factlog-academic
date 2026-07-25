@@ -142,7 +142,7 @@ from source_coverage import (  # noqa: E402
     relation_vocabulary,
 )
 from factlog import literal_types  # noqa: E402
-from factlog.runtime import provenance_line  # noqa: E402
+from factlog.runtime import provenance_line, script_tree_split  # noqa: E402
 # No `Heading` here on purpose: this module never holds a heading's coordinates
 # across a write. `insert_bullet` resolves them from the text it is editing and
 # drops them again, which is what keeps a stale one from being expressible.
@@ -1588,6 +1588,15 @@ def main() -> int:
     # above, so --help and a rejected argument stay pure argparse output with no
     # execution context in stdout.
     print(provenance_line())
+    # ...and whether that package came from the same tree as this script (#553): a
+    # bundled tools/ driving a working-tree factlog (or the reverse) is the state that
+    # made four closed defects look live. Printed to STDERR on purpose — the first two
+    # stdout lines are positional contract
+    # (tests/unit/test_report_factlog_provenance.py pins out[0]/out[1]), and a warning
+    # that fires only in a split installation must not renumber them.
+    _tree_split = script_tree_split(__file__)
+    if _tree_split:
+        print(_tree_split, file=sys.stderr)
     print(f"merge_candidates: target KB {root} (from {TARGET_SOURCE})")
     refusal = implicit_target_refusal(root, TARGET_SOURCE, Path.cwd().resolve())
     if refusal is not None:
