@@ -81,3 +81,32 @@ source 모드는 상호 배타적이며, `--delete-original` 은 `--fact` 와 �
 폐기입니다. **텍스트** 원본을 `sources/` 아래 그대로 두면 다음 `/factlog sync` 가
 그 사실을 다시 추출·주장하므로, 소스를 영구히 제거하려면 `--purge` 와/또는
 `--delete-original` 을 넘기십시오.
+
+### `eject` 를 거치지 않고 소스 파일을 직접 지웠다면
+
+파일 관리자나 `rm` 으로 `sources/` 아래 파일을 지우면 그 소스를 인용하던 행은
+`runs/*.json` 에 그대로 남습니다. 이후 merge 는 그 행을 `facts/candidates.csv` 에
+쓰기 전에 드롭하고 stderr 로 알립니다.
+
+```
+  skip row: source 'sources/doomed.md' not found in sources/ ... (3 rows)
+```
+
+그 경고는 터미널이 스크롤되면 사라지고, `facts/candidates.csv` 는 이미 드롭된
+**이후** 상태이므로 orphan citation(디스크에 없는 파일을 인용하는 사실)으로도 잡히지
+않습니다. 그래서 커버리지 리포트는 `runs/*.json` 을 직접 읽어 이 상태를 별도로
+보고합니다.
+
+```
+coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 0 orphan citation(s), 1 run-cited source(s) missing
+  RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md
+```
+
+이 필드는 해당 상태가 없으면 요약 줄에 출력되지 않으며, 종료 코드에도 영향을 주지
+않습니다(`--strict` 는 여전히 텍스트 누락에만 반응합니다).
+
+> **`factlog eject --orphans` 는 현재 이 상태를 정리하지 못합니다.** 인용 집합을
+> `facts/candidates.csv` 에서 만들기 때문에, 드롭된 행은 그 명령에도 보이지
+> 않습니다(`no orphaned sources found` 로 끝납니다). 정리하려면 `runs/*.json` 을
+> 직접 확인하거나, 지운 파일을 `sources/` 에 되돌린 뒤 merge 를 다시 돌리고
+> `factlog eject <source> --purge --delete-original` 로 정식 제거하십시오.
