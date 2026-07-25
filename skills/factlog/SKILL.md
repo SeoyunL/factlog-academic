@@ -801,9 +801,13 @@ it is correctly reported as a gap, not "covered":
   This category reads the run files directly and surfaces the path with its row
   count on stderr (`RUN ROWS cite a missing source (dropped at merge, N
   row(s)): ...`), plus one summary field that is omitted entirely when the count
-  is 0. `factlog eject --orphans` does **not** clean this state — it builds its
-  cited set from `candidates.csv` too (tracked as #559), which is why the hint
-  says so instead of pointing at it; see `docs/reference/ignore-eject.md`.
+  is 0. The remedy printed with it depends on the source: a ghost row a human has
+  ruled on survives in `candidates.csv` (the #218 ratchet refuses the rebuild), so
+  `factlog eject --orphans` retires it and the hint names that command; an unruled
+  row is rebuilt away, so that command cannot see it either and the hint says so
+  (tracked as #559). A run file that cannot be read is left out of the counts and
+  named on stderr rather than skipped in silence. See
+  `docs/reference/ignore-eject.md`.
 
 The script is the **deterministic half** (per-source fact counts, unreferenced
 sources, orphan citations, run rows citing a missing source); it always exits 0

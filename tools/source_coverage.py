@@ -120,6 +120,7 @@ from common import (  # noqa: E402
     load_questions,
     paired_conversion,
     query_args,
+    read_csv,
     relation_aliases,
     resolve_relation,
     run_cited_sources,
@@ -216,7 +217,39 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
     return rows, orphans
 
 
-def run_orphan_sources(root: Path) -> list[tuple[str, int]]:
+def eject_visible_refs(candidates_csv: Path) -> set[str]:
+    """The source refs `factlog eject --orphans` is able to act on.
+
+    Which decides whether naming that command is a REMEDY or a wild goose chase,
+    so it is derived from cmd_eject's own rule rather than guessed at:
+
+    * its cited set is every candidates.csv row's source, `nfc(...)` then
+      everything before the first '#', at ANY status (factlog/cli.py:3612-3618);
+    * its orphan scan then matches a cited ref that is not on disk, and only
+      under the two source roots (factlog/cli.py:3467-3470).
+
+    Note "at ANY status". The obvious shortcut — reuse the `orphans` list
+    coverage already computes — is WRONG, and measurably so: that list is built
+    from `engine_facts` (confirmed/accepted only), while eject reads the raw CSV.
+    Measured on a KB whose ghost row is `needs_review` (the #218 ratchet refuses
+    the rebuild, so the row survives): coverage prints `0 orphan citation(s)` and
+    `eject --orphans` still retires the row and strips it from runs/*.json. A hint
+    keyed on `orphans` would have called that command useless while it worked.
+
+    Read RAW (`read_csv`, not `load_facts`) for the same reason: `load_facts`
+    strips every field, and eject does not, so a hand-edited row whose source
+    carries a leading space is a ref eject cannot match. Stripping here would
+    promise a cleanup that command would not perform.
+    """
+    refs: set[str] = set()
+    for row in read_csv(candidates_csv):
+        ref = unicodedata.normalize("NFC", (row.get("source") or "").partition("#")[0])
+        if ref.startswith(("sources/", "runs/sources/")):
+            refs.add(ref)
+    return refs
+
+
+def run_orphan_sources(root: Path, unreadable: list[str] | None = None) -> list[tuple[str, int]]:
     """(source ref, row count) for every source runs/*.json cites that is missing.
 
     The blind spot the orphan axis above cannot see (#558). `cited` there comes
@@ -234,38 +267,91 @@ def run_orphan_sources(root: Path) -> list[tuple[str, int]]:
     merge's own rule) and the disk state from ``source_file_refs`` (the very set
     merge compares against), so this report cannot disagree with the merge whose
     drops it is reporting. Sorted by path, so the output is order-independent.
+
+    *unreadable*, when given, is EXTENDED with the name of every run file that
+    could not be read, so the caller can report what this count does not include.
     """
     on_disk = source_file_refs(root)
-    return sorted(
-        (ref, count) for ref, count in run_cited_sources(root).items() if ref not in on_disk
-    )
+    cited = run_cited_sources(root, unreadable=unreadable)
+    return sorted((ref, count) for ref, count in cited.items() if ref not in on_disk)
 
 
-def report_run_orphans(run_orphans: list[tuple[str, int]]) -> None:
+def report_unreadable_runs(names: list[str]) -> None:
+    """Say which run files were skipped, and that they are not in the counts.
+
+    Reading runs/*.json must not die on one bad file (see run_cited_sources), but
+    skipping in SILENCE would make this report commit the exact fault it exists to
+    fix: a corrupt run file can hold a hundred rows citing a deleted source, and a
+    silent skip would leave that state reported by nobody while the summary reads
+    clean. Merge does not paper over it either — it exits 1 on a parse failure —
+    so a KB in this state cannot even reach the drop this report describes.
+    """
+    for name in names:
+        print(
+            f"  skipped unreadable runs/{name} — its rows are NOT in the counts above "
+            "(merge cannot read it either)",
+            file=sys.stderr,
+        )
+
+
+def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: set[str]) -> None:
     """Print the run-cited-missing-source lines to stderr. No-op when empty.
 
-    The remedy hint states what is TRUE today: `factlog eject --orphans` builds
-    its cited set from candidates.csv exactly as the orphan axis does, so it
-    reports "no orphaned sources found" on precisely this state. Pointing a
-    reader at it would send them to a command that does nothing — the loop this
-    report exists to break. Fixing eject is tracked separately (#559), and the
-    hint names that issue: a reader who has just been told the obvious command
-    does not apply should be able to see that the gap is known, rather than
-    conclude they are holding the tool wrong.
+    *ejectable* is ``eject_visible_refs``: the refs `factlog eject --orphans`
+    can actually retire. The remedy DEPENDS on it, and printing one hint for both
+    cases made the report lie in a state that is easy to reach — a ghost row a
+    human has ruled on (`confirmed`/`accepted`/`needs_review`) survives in
+    candidates.csv because the #218 ratchet refuses the rebuild, and then
+    `eject --orphans` retires it in one command. Measured: the hint said "does not
+    cover these" while that very command cleaned the KB to `0 orphan citation(s)`,
+    sending the reader to hand-edit runs/*.json for nothing.
+
+    So the two classes are separated and each gets the true remedy:
+
+    * still in candidates.csv -> `factlog eject --orphans` retires it. Its rows
+      were NOT "dropped at merge" either: the rebuild was refused, so the wording
+      says what happened instead.
+    * gone from candidates.csv -> the #558 blind spot. eject builds its cited set
+      from that same file, so it reports nothing to do; #559 tracks the fix.
+
+    A KB can hold both at once (a `confirmed` ghost and a `candidate` ghost), which
+    is why the split is per-ref rather than a single verdict for the report.
     """
     if not run_orphans:
         return
-    for ref, count in run_orphans:
+    # "Nothing to report prints nothing" is guarded THREE times over: this early
+    # return and the `if dropped:` / `if kept:` below. Deleting any ONE of them
+    # changes no output — a mutation run will report the early return as a
+    # survivor, and it is an equivalent mutant, not a hole. Destroy all three and
+    # a clean KB starts printing `run rows cite 0 missing source(s)`, which
+    # tests/test_coverage.sh does fail on.
+    kept = [(ref, n) for ref, n in run_orphans if ref in ejectable]
+    dropped = [(ref, n) for ref, n in run_orphans if ref not in ejectable]
+    for ref, count in dropped:
         print(
             f"  RUN ROWS cite a missing source (dropped at merge, {count} row(s)): {ref}",
             file=sys.stderr,
         )
-    total = sum(count for _ref, count in run_orphans)
-    print(
-        f"  run rows cite {len(run_orphans)} missing source(s) ({total} row(s) total); "
-        "inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)",
-        file=sys.stderr,
-    )
+    for ref, count in kept:
+        print(
+            f"  RUN ROWS cite a missing source ({count} row(s); candidates.csv still "
+            f"carries rows for it): {ref}",
+            file=sys.stderr,
+        )
+    if dropped:
+        total = sum(count for _ref, count in dropped)
+        print(
+            f"  run rows cite {len(dropped)} missing source(s) ({total} row(s) total); "
+            "inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)",
+            file=sys.stderr,
+        )
+    if kept:
+        total = sum(count for _ref, count in kept)
+        print(
+            f"  run rows cite {len(kept)} missing source(s) ({total} row(s) total) that "
+            "candidates.csv still carries; retire them with `factlog eject --orphans`",
+            file=sys.stderr,
+        )
 
 
 # --- question axis (#537) ----------------------------------------------------
@@ -771,7 +857,12 @@ def main(argv: list[str] | None = None) -> int:
     # carry (#558). NOT gated by --strict: that flag's contract is "a text source
     # has no facts", and widening it would start failing every pipeline already
     # wired to it, on a state that has always been present.
-    run_orphans = run_orphan_sources(root)
+    unreadable_runs: list[str] = []
+    run_orphans = run_orphan_sources(root, unreadable_runs)
+    # What `factlog eject --orphans` can actually retire, which decides which
+    # remedy the report is allowed to print for each ref. Raw CSV, any status —
+    # see eject_visible_refs for why coverage's own `orphans` list is not it.
+    ejectable = eject_visible_refs(CANDIDATES_CSV) if CANDIDATES_CSV.is_file() else set()
 
     def question_axis() -> int:
         """Report the question axis and return its exit code contribution."""
@@ -794,7 +885,8 @@ def main(argv: list[str] | None = None) -> int:
         if orphans:
             for ref in orphans:
                 print(f"  ORPHAN citation (source file missing): {ref}", file=sys.stderr)
-        report_run_orphans(run_orphans)
+        report_run_orphans(run_orphans, ejectable)
+        report_unreadable_runs(unreadable_runs)
         return rc
 
     # A binary original is "covered via conversion" when its runs/sources/<stem>
@@ -845,7 +937,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  GAP (binary, run factlog ingest): {r['file']}", file=sys.stderr)
     for ref in orphans:
         print(f"  ORPHAN citation (source file missing): {ref}", file=sys.stderr)
-    report_run_orphans(run_orphans)
+    report_run_orphans(run_orphans, ejectable)
+    report_unreadable_runs(unreadable_runs)
 
     if args.strict and text_gaps:
         print(f"--strict: {len(text_gaps)} text source(s) with no extracted facts", file=sys.stderr)

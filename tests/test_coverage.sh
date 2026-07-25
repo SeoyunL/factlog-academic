@@ -178,6 +178,11 @@ printf '%s' "$rout" | grep -qF "coverage: 1 source(s); 1 covered, 0 text gap(s),
   && ok "no run orphans: summary line unchanged" || bad "summary line changed with 0 run orphans: $rout"
 printf '%s' "$rout" | grep -qF "run-cited source(s) missing" && bad "run-orphan field printed at 0" || ok "run-orphan field omitted at 0"
 printf '%s' "$rout" | grep -qF "RUN ROWS cite" && bad "run-orphan line printed at 0" || ok "no run-orphan stderr line at 0"
+# The OTHER half of "omitted at 0": the summary hint. Asserting only the per-source
+# lines left the early return in report_run_orphans unpinned — deleting it still
+# passed while the tool printed `run rows cite 0 missing source(s) (0 row(s) total)`
+# on every clean KB.
+printf '%s' "$rout" | grep -qF "run rows cite" && bad "remedy hint printed at 0" || ok "remedy hint omitted at 0"
 [ "$rrc" -eq 0 ] && ok "clean run files exit 0" || bad "clean run files exit $rrc"
 
 # Now three rows citing sources that are NOT on disk (one via an #anchor), while
@@ -206,6 +211,51 @@ set +e; eout="$("$PYTHON" "$COV" --wiki "$RUNKB" 2>&1)"; erc=$?; set -e
 printf '%s' "$eout" | grep -qF "coverage: no source files" && ok "empty-sources KB still takes the early return" || bad "early-return line missing"
 printf '%s' "$eout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/live.md" && ok "early return reports run orphans too" || bad "early return silent about run orphans: $eout"
 [ "$erc" -eq 0 ] && ok "early return with run orphans exits 0" || bad "early return exit $erc"
+
+# --- the remedy depends on whether candidates.csv still carries the ref (#558) -
+# A ghost row a human ruled on survives the rebuild (#218 ratchet), so
+# `factlog eject --orphans` — which builds its cited set from candidates.csv —
+# CAN retire it. Printing "does not cover these" there was a false remedy.
+REMKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$REMKB" >/dev/null
+printf 'live\n' > "$REMKB/sources/live.md"
+# kept.md and review.md are still cited by candidates.csv; blind.md is not
+# (merge dropped it). review.md is `needs_review` on purpose: it is EJECTABLE
+# (eject reads the raw CSV at any status) but invisible to the orphan axis, which
+# counts engine statuses only — so a hint keyed on the orphan list, the obvious
+# shortcut, would tell the reader to hand-edit runs/*.json for a source
+# `eject --orphans` retires. Only a raw-CSV predicate gets this row right.
+printf '%s\n%s\n%s\n%s\n' "$HEADER" \
+  '갑봇,통합,을서비스,sources/live.md,accepted,0.9,' \
+  '유령,참조,대상,sources/kept.md,confirmed,0.9,' \
+  '유령,참조,검토,sources/review.md,needs_review,0.9,' > "$REMKB/facts/candidates.csv"
+printf '%s' '[{"subject":"유령","relation":"참조","object":"대상","source":"sources/kept.md","status":"confirmed","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"검토","source":"sources/review.md","status":"needs_review","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"둘","source":"sources/blind.md","status":"candidate","confidence":"0.9","note":""}]' > "$REMKB/runs/2026-01-01-mixed.json"
+set +e; mout="$("$PYTHON" "$COV" --wiki "$REMKB" 2>&1)"; mrc=$?; set -e
+printf '%s' "$mout" | grep -qF "RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/kept.md" \
+  && ok "a ref candidates.csv still carries is not called 'dropped at merge'" || bad "kept.md line wrong: $mout"
+printf '%s' "$mout" | grep -qF "RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/review.md" \
+  && ok "a needs_review ghost is ejectable even though it is not an orphan citation" || bad "review.md line wrong: $mout"
+printf '%s' "$mout" | grep -qF 'run rows cite 2 missing source(s) (2 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`' \
+  && ok "ejectable refs are pointed at the command that retires them" || bad "eject remedy missing: $mout"
+printf '%s' "$mout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/blind.md" \
+  && ok "the blind-spot ref keeps its own wording in the same report" || bad "blind.md line wrong: $mout"
+printf '%s' "$mout" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)' \
+  && ok "both classes get their own truthful hint in one KB" || bad "blind-spot hint missing: $mout"
+# The orphan axis is untouched by any of this: kept.md is an engine-status row
+# citing a missing file, so it was, and still is, exactly one orphan citation.
+printf '%s' "$mout" | grep -qF "1 orphan citation(s), 3 run-cited source(s) missing" \
+  && ok "orphan citation count and meaning unchanged" || bad "orphan count changed: $mout"
+[ "$mrc" -eq 0 ] && ok "mixed KB still exits 0" || bad "mixed KB exit $mrc"
+
+# --- an unreadable run file is skipped, but SAID so ---------------------------
+# Skipping keeps the report alive (merge itself exits 1 here); skipping in
+# silence would recreate this PR's own complaint — rows nobody reports.
+printf '%s' '{ not json at all' > "$REMKB/runs/2026-01-02-corrupt.json"
+set +e; uout="$("$PYTHON" "$COV" --wiki "$REMKB" 2>&1)"; urc=$?; set -e
+printf '%s' "$uout" | grep -qF "skipped unreadable runs/2026-01-02-corrupt.json — its rows are NOT in the counts above" \
+  && ok "unreadable run file is named on stderr" || bad "unreadable run file skipped in silence: $uout"
+[ "$urc" -eq 0 ] && ok "an unreadable run file does not take the report down" || bad "unreadable run file exit $urc"
+printf '%s' "$uout" | grep -qF "3 run-cited source(s) missing" && ok "the counts are unchanged by the unreadable file" || bad "counts changed: $uout"
 
 echo ""
 echo "========================================"

@@ -105,10 +105,38 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 이 필드는 해당 상태가 없으면 요약 줄에 출력되지 않으며, 종료 코드에도 영향을 주지
 않습니다(`--strict` 는 여전히 텍스트 누락에만 반응합니다).
 
-> **`factlog eject --orphans` 는 현재 이 상태를 정리하지 못합니다**(수정은
+#### 정리 방법은 행이 `candidates.csv` 에 남았는지에 달려 있습니다
+
+리포트가 소스별로 둘 중 하나를 알려주므로 출력 문구를 그대로 따르면 됩니다.
+
+**(1) 행이 `candidates.csv` 에 남아 있는 경우** — 사람이 판정한 행
+(`confirmed`/`accepted`/`needs_review`)은 [#218](https://github.com/SeoyunL/factlog-academic/issues/218)
+래칫이 rebuild 를 거부하므로 유령 행이 표에 그대로 남습니다. 이때는
+`factlog eject --orphans` 가 그 소스를 인식하고 한 번에 정리합니다.
+
+```
+  RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/doomed.md
+  run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`
+```
+
+**(2) 행이 이미 사라진 경우** — 미판정(`candidate`) 행은 조용히 rebuild 되어 표에서
+사라집니다. `eject` 는 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에 이
+소스를 보지 못하고 `no orphaned sources found` 로 끝납니다.
+
+```
+  RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md
+  run rows cite 1 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)
+```
+
+> **(2) 는 `factlog eject --orphans` 로 정리되지 않습니다**(수정은
 > [#559](https://github.com/SeoyunL/factlog-academic/issues/559) 에서 별도로
-> 다룹니다). 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에, 드롭된 행은
-> 그 명령에도 보이지 않습니다(`no orphaned sources found` 로 끝납니다).
-> 정리하려면 `runs/*.json` 을
-> 직접 확인하거나, 지운 파일을 `sources/` 에 되돌린 뒤 merge 를 다시 돌리고
-> `factlog eject <source> --purge --delete-original` 로 정식 제거하십시오.
+> 다룹니다). `runs/*.json` 을 직접 확인하거나, 지운 파일을 `sources/` 에 되돌린 뒤
+> merge 를 다시 돌리고 `factlog eject <source> --purge --delete-original` 로 정식
+> 제거하십시오.
+
+읽을 수 없는 `runs/*.json` 이 있으면 그 파일은 집계에서 빠지며, 빠졌다는 사실을
+stderr 에 한 줄로 알립니다(merge 역시 그 파일을 읽지 못합니다).
+
+```
+  skipped unreadable runs/2026-01-02-r.json — its rows are NOT in the counts above (merge cannot read it either)
+```

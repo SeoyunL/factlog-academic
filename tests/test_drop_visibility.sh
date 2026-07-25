@@ -30,6 +30,12 @@
 #       missing (its own fact count is 0 — coverage counts engine facts and these
 #       rows are `candidate`, which is the pre-existing rule, untouched here)
 #   (d) the report stays informational — exit 0, no --strict gate
+#   (e) the OTHER class, and the remedy it gets: with `confirmed` rows the #218
+#       ratchet refuses the rebuild, the ghost row survives in candidates.csv, and
+#       `factlog eject --orphans` retires it. The report must name that command
+#       there instead of the #559 "does not cover these" hint — and the test RUNS
+#       it, asserting the KB comes back clean on both axes, so the hint is pinned
+#       as a remedy rather than as a string.
 #
 # Deterministic; no pyrewire.  Usage: bash tests/test_drop_visibility.sh
 
@@ -127,6 +133,56 @@ printf '%s' "$cov_out" | grep -qE "0 fact\(s\): sources/keeper.md" \
 printf '%s' "$cov_out" | grep -qE "RUN ROWS cite a missing source.*sources/keeper\.md" \
   && bad "a source that IS on disk was reported as missing" \
   || ok "a source on disk is never reported as run-cited-missing"
+
+# --- the OTHER class: a ghost row a human ruled on ----------------------------
+# Same round trip with `confirmed` rows. The #218 ratchet REFUSES the rebuild
+# that would delete a ruled-on row, so the ghost row survives in candidates.csv —
+# and `factlog eject --orphans`, which builds its cited set from that file, can
+# retire it in one command. The report must say so instead of the #559 hint: the
+# first version printed "eject --orphans does not cover these" while that very
+# command cleaned the KB, sending the reader to hand-edit runs/*.json for nothing.
+RKB="$TMP_ROOT/ratchet"
+"$PYTHON" -m factlog init --target "$RKB" >/dev/null
+printf 'keeper\n' > "$RKB/sources/keeper.md"
+printf 'doomed\n' > "$RKB/sources/doomed.md"
+cat > "$RKB/runs/2026-01-01T00-00-00-a.json" <<'JSON'
+[{"subject":"갑봇","relation":"통합","object":"을서비스","source":"sources/keeper.md","status":"confirmed","confidence":0.9,"note":""},
+ {"subject":"구성_요소","relation":"포함","object":"주_속성","source":"sources/doomed.md","status":"confirmed","confidence":0.9,"note":""}]
+JSON
+"$PYTHON" "$MERGE" --wiki "$RKB" >/dev/null 2>&1
+rm -f "$RKB/sources/doomed.md"
+set +e; rmerge="$("$PYTHON" "$MERGE" --wiki "$RKB" 2>&1 >/dev/null)"; set -e
+printf '%s' "$rmerge" | grep -qF "REFUSING to rebuild facts/candidates.csv" \
+  && ok "ratchet refuses the rebuild for a ruled-on ghost row" || bad "ratchet did not fire: $rmerge"
+grep -qF "sources/doomed.md" "$RKB/facts/candidates.csv" \
+  && ok "the ghost row survives in candidates.csv" || bad "ghost row not kept (fixture broken)"
+
+set +e; rcov="$("$PYTHON" "$COV" --wiki "$RKB" 2>&1)"; rcov_rc=$?; set -e
+printf '%s' "$rcov" | grep -qF "RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/doomed.md" \
+  && ok "the line does not claim the row was dropped at merge" || bad "wording wrong: $rcov"
+printf '%s' "$rcov" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`' \
+  && ok "the remedy names the command that actually works" || bad "eject remedy missing: $rcov"
+printf '%s' "$rcov" | grep -qF "does not cover these" \
+  && bad "printed the #559 hint for a ref eject --orphans DOES clean" \
+  || ok "no false 'does not cover these' claim for an ejectable ref"
+printf '%s' "$rcov" | grep -qF "1 orphan citation(s), 1 run-cited source(s) missing" \
+  && ok "both axes fire, each counting its own" || bad "summary wrong: $rcov"
+[ "$rcov_rc" -eq 0 ] && ok "two axes firing still exits 0" || bad "coverage exited $rcov_rc"
+
+# Now RUN the remedy. It has to leave the KB clean on both axes — that is what
+# makes the hint a remedy rather than a suggestion.
+set +e; ejout="$("$PYTHON" -m factlog eject --orphans --target "$RKB" 2>&1)"; ej_rc=$?; set -e
+[ "$ej_rc" -eq 0 ] && ok "eject --orphans succeeds on the state the hint names" || bad "eject exited $ej_rc: $ejout"
+printf '%s' "$ejout" | grep -qF "no orphaned sources found" \
+  && bad "eject found nothing to do — the hint would be false" \
+  || ok "eject --orphans actually matched the ghost source"
+set +e; acov="$("$PYTHON" "$COV" --wiki "$RKB" 2>&1)"; set -e
+printf '%s' "$acov" | grep -qF "0 orphan citation(s)" \
+  && ok "after eject: no orphan citations" || bad "orphan citation survived eject: $acov"
+printf '%s' "$acov" | grep -qF "run-cited source(s) missing" \
+  && bad "after eject: run-orphan field still printed" || ok "after eject: the run-orphan field is gone (rows stripped)"
+printf '%s' "$acov" | grep -qF "RUN ROWS cite" \
+  && bad "after eject: run-orphan line still printed" || ok "after eject: no run-orphan line"
 
 echo ""
 echo "========================================"

@@ -504,7 +504,12 @@ def source_file_refs(root: Path) -> set[str]:
     }
 
 
-def run_cited_sources(root: Path, pattern: str = "runs/*.json") -> dict[str, int]:
+def run_cited_sources(
+    root: Path,
+    pattern: str = "runs/*.json",
+    *,
+    unreadable: list[str] | None = None,
+) -> dict[str, int]:
     """Source ref -> how many run rows under *pattern* cite it.
 
     The counterpart of :func:`source_file_refs` on the OTHER side of the merge
@@ -513,8 +518,16 @@ def run_cited_sources(root: Path, pattern: str = "runs/*.json") -> dict[str, int
     merge is about to drop — a fact candidates.csv cannot report, because merge
     drops those rows before writing it (#558).
 
-    The lookup key is built by EXACTLY the rule merge keys on, so the two cannot
-    disagree about which ref a row names:
+    *pattern* is the literal ``runs/*.json`` rather than a glob derived from
+    ``RUNS_DIR``, which is how merge single-sources its own default
+    (merge_candidates' ``input_pattern``). The two agree today, and the parameter
+    is here so a caller can say otherwise; what this helper deliberately does NOT
+    follow is merge's ``--input`` override, so a merge aimed at a non-default glob
+    and this report can describe different row sets. Acceptable for a diagnostic
+    that reports the KB's resting state, and worth revisiting if RUNS_DIR ever
+    becomes configurable.
+
+    The lookup key is built by the rule merge keys on:
 
         NFC(strip(raw)) then everything before the first '#'
 
@@ -533,18 +546,35 @@ def run_cited_sources(root: Path, pattern: str = "runs/*.json") -> dict[str, int
     must all be non-empty — so a row this counts is a row merge would have kept
     had its source been on disk.
 
-    Unreadable input is skipped in SILENCE: a non-array JSON (other tools write
-    objects under runs/), a file that fails to parse, a file that fails to read.
-    ``load_candidate_files`` raises SystemExit on a parse failure, and that
-    policy must NOT be copied here — the caller is a diagnostic report, and a
-    report that dies on one malformed file tells the reader nothing about the
-    rest of the KB.
+    Where this KNOWINGLY differs from merge, rather than matching it:
+
+    - A source that is nothing but an anchor (``"#sec"``) strips to the empty ref
+      and is not counted. Merge drops that row too, but it counts it — its
+      warning reads ``skip row: source ''``. Counting it here would attribute
+      rows to a source with no name to report, so the omission is deliberate
+      (pinned by ``test_anchor_only_source_contributes_nothing``). A caller that
+      compares this count against merge's per-source skip count — as
+      tests/test_drop_visibility.sh does — is comparing equal figures only for a
+      KB with no anchor-only sources.
+    - Unreadable input is SKIPPED, never fatal: a file that fails to parse, one
+      that fails to read, one whose bytes do not decode.
+      ``load_candidate_files`` raises SystemExit on a parse failure, and that
+      policy must NOT be copied here — the caller is a diagnostic report, and a
+      report that dies on one malformed file tells the reader nothing about the
+      rest of the KB. Skipping is not the same as hiding, though: pass
+      *unreadable* and it is EXTENDED with the name of each file skipped that
+      way, so the caller can say what it could not read. (A non-array JSON is not
+      collected: other tools write objects under runs/ on purpose — that file
+      holds no candidate rows to miss.) An out-parameter rather than a second
+      return value, so the existing callers keep reading one dict.
     """
     cited: dict[str, int] = {}
     for path in sorted(root.glob(pattern)):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            if unreadable is not None:
+                unreadable.append(path.name)
             continue
         if not isinstance(data, list):
             continue

@@ -73,7 +73,14 @@ class TestKeyRule:
         assert common.run_cited_sources(tmp_path) == {"sources/a.md": 3}
 
     def test_anchor_only_source_contributes_nothing(self, tmp_path):
-        """'#sec' strips to the empty ref, which names no source."""
+        """'#sec' strips to the empty ref, which names no source.
+
+        A KNOWN divergence from merge, not a match: merge drops that row too but
+        COUNTS it, warning `skip row: source ''`. Counting it here would attribute
+        rows to a source with no name to print, so the row is omitted — which also
+        means a KB carrying anchor-only sources breaks the "coverage N == merge's
+        per-source skip count" equality tests/test_drop_visibility.sh pins.
+        """
         write_run(tmp_path, "r.json", [row(source="#sec")])
         assert common.run_cited_sources(tmp_path) == {}
 
@@ -136,6 +143,51 @@ class TestUnreadableInputIsSilent:
 
     def test_missing_runs_dir_is_empty(self, tmp_path):
         assert common.run_cited_sources(tmp_path) == {}
+
+
+class TestUnreadableOutParameter:
+    """Skipping quietly is what keeps the report alive; skipping INVISIBLY would
+    make it commit the fault it exists to fix. A corrupt run file can hold a
+    hundred rows citing a deleted source, and merge cannot read it either (it
+    exits 1), so the caller has to be able to say what the count leaves out.
+    """
+
+    def test_corrupt_file_is_named(self, tmp_path):
+        (tmp_path / "runs").mkdir()
+        (tmp_path / "runs" / "bad.json").write_text("{not json", encoding="utf-8")
+        write_run(tmp_path, "r.json", [row()])
+        skipped: list[str] = []
+        assert common.run_cited_sources(tmp_path, unreadable=skipped) == {"sources/a.md": 1}
+        assert skipped == ["bad.json"]
+
+    def test_undecodable_and_unreadable_are_named(self, tmp_path):
+        (tmp_path / "runs").mkdir()
+        (tmp_path / "runs" / "bytes.json").write_bytes(b"\xff\xfe\x00binary")
+        (tmp_path / "runs" / "adir.json").mkdir()
+        skipped: list[str] = []
+        common.run_cited_sources(tmp_path, unreadable=skipped)
+        assert sorted(skipped) == ["adir.json", "bytes.json"]
+
+    def test_non_array_json_is_not_named(self, tmp_path):
+        """Not a candidate file at all — other tools write objects under runs/ on
+        purpose, so it holds no rows this count could be missing."""
+        write_run(tmp_path, "policy-response.json", {"queries": []})
+        skipped: list[str] = []
+        common.run_cited_sources(tmp_path, unreadable=skipped)
+        assert skipped == []
+
+    def test_the_list_is_extended_not_replaced(self, tmp_path):
+        (tmp_path / "runs").mkdir()
+        (tmp_path / "runs" / "bad.json").write_text("{", encoding="utf-8")
+        skipped = ["earlier.json"]
+        common.run_cited_sources(tmp_path, unreadable=skipped)
+        assert skipped == ["earlier.json", "bad.json"]
+
+    def test_omitting_the_parameter_still_skips_silently(self, tmp_path):
+        (tmp_path / "runs").mkdir()
+        (tmp_path / "runs" / "bad.json").write_text("{", encoding="utf-8")
+        write_run(tmp_path, "r.json", [row()])
+        assert common.run_cited_sources(tmp_path) == {"sources/a.md": 1}
 
 
 class TestPattern:

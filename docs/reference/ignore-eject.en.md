@@ -106,11 +106,41 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 The field is omitted from the summary line when there is nothing to report, and
 it never affects the exit code (`--strict` still fires on text gaps only).
 
-> **`factlog eject --orphans` does not currently clean this state** (fixing it is
-> tracked separately in
-> [#559](https://github.com/SeoyunL/factlog-academic/issues/559)). It builds its
-> cited set from `facts/candidates.csv`, so the dropped rows are invisible to it
-> too (it ends with "no orphaned sources found"). To clean up, inspect
+#### How you clean it up depends on whether the row survived in `candidates.csv`
+
+The report says which of the two each source is, so follow the line it prints.
+
+**(1) The row is still in `candidates.csv`.** A row a human has ruled on
+(`confirmed`/`accepted`/`needs_review`) makes the
+[#218](https://github.com/SeoyunL/factlog-academic/issues/218) ratchet refuse the
+rebuild, so the ghost row stays in the table — and `factlog eject --orphans` sees
+that source and retires it in one command.
+
+```
+  RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/doomed.md
+  run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`
+```
+
+**(2) The row is already gone.** An unruled (`candidate`) row is rebuilt away
+silently. `eject` builds its cited set from `facts/candidates.csv`, so it cannot
+see that source either and ends with "no orphaned sources found".
+
+```
+  RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md
+  run rows cite 1 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)
+```
+
+> **Case (2) is not cleaned by `factlog eject --orphans`** (fixing it is tracked
+> separately in
+> [#559](https://github.com/SeoyunL/factlog-academic/issues/559)). Inspect
 > `runs/*.json` directly — or restore the deleted file under `sources/`, re-run
 > the merge, and remove it properly with
 > `factlog eject <source> --purge --delete-original`.
+
+A `runs/*.json` that cannot be read is left out of the counts, and the report
+says so on stderr rather than skipping it in silence (merge cannot read it
+either):
+
+```
+  skipped unreadable runs/2026-01-02-r.json — its rows are NOT in the counts above (merge cannot read it either)
+```
