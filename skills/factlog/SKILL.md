@@ -139,6 +139,12 @@ unaimed run writes what an aimed one would; the announcement is there because th
 remaining hazard is a *reading* one — believing you checked KB A while reading a
 report from KB B.
 
+"Before doing anything else" is about **stdout**, which is what a report reader
+parses. One line can precede them on **stderr**: the bundled `tools/compile_facts.py`
+emits the `FACTLOG_PREFER_INSTALLED` split warning before argument parsing (#553), so
+on a terminal — where both streams interleave — it can appear above the `factlog:`
+line. The stdout order itself never changes.
+
 The two are guarded **differently, on purpose**, and the difference is the size of
 the damage. `compile_facts.py` has one destructive step: on a single-valued
 contradiction the gate deletes `facts/accepted.dl` so no reader trusts the engine
