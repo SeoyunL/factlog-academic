@@ -246,6 +246,13 @@ def _collect_doctor_checks() -> list[Check]:
                   ("[터미널] pip install -r requirements.txt",))
         )
 
+    # factlog's own version and import path, straight after pyrewire's (#554). Reporting
+    # a dependency's version while saying nothing about our own was the asymmetry that
+    # let a bundled 0.6.0 and a working-tree 0.7.0 be mistaken for each other. Advisory
+    # only — the rows below are OK/INFO/WARN and never FAIL, so the exit code is
+    # untouched (smoke.sh/setup.sh depend on a healthy environment exiting 0).
+    checks.extend(_factlog_runtime_checks())
+
     # (1) git availability. macOS ships it via the Command Line Tools.
     # FAIL for doctor's sake, but blocks_setup=False: `setup` (pip + KB init)
     # does not touch git, so a missing git must not flip setup's exit code.
@@ -355,6 +362,31 @@ def _rename_migration_checks() -> list[Check]:
 
     found = rename_migration_check(installed_distributions(), shutil.which("factlog") is not None)
     return [found] if found else []
+
+
+def _factlog_runtime_checks() -> list[Check]:
+    """The ``factlog <version> (<path>)`` row, plus a skew advisory when they disagree.
+
+    All the I/O lives here — importing the package, reading pip's distribution
+    metadata. The judgement itself is :func:`factlog.runtime.installation_skew`, a
+    pure argument-injected function, for the same reason
+    :func:`rename_migration_check` is one: every state it can report is then pinned
+    by a unit test rather than by arranging a venv.
+    """
+    from factlog.runtime import installation_skew, installed_factlog_dist, running_factlog
+
+    version, path = running_factlog()
+    checks = [Check("OK", f"factlog {version} ({path})")]
+
+    dist = installed_factlog_dist()
+    name, dist_version, dist_root = dist if dist else (None, None, None)
+    skew = installation_skew(name, dist_version, dist_root, version, path)
+    if skew is not None:
+        # Check(...) not Advisory: runtime.py cannot name Check without importing cli
+        # back. blocks_setup keeps its default — irrelevant here, since a non-FAIL row
+        # gates nothing either way.
+        checks.append(Check(skew.severity, skew.title, skew.hints))
+    return checks
 
 
 def _render_doctor(checks: list[Check], emit_summary: bool = False, gate: str = "all") -> bool:

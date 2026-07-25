@@ -120,6 +120,9 @@ from common import (  # noqa: E402
     sync_ignore_patterns,
     typed_relations,
 )
+# Below the `from common import (...)` block, never in the sys.path bootstrap at the
+# top of this file: that block is #553's conflict surface and must stay untouched.
+from factlog.runtime import provenance_line  # noqa: E402
 
 # Two things the text-estimate fallback needs, both already defined in ask_router:
 #
@@ -672,6 +675,11 @@ def main(argv: list[str] | None = None) -> int:
         help="exit non-zero if any declared question has no engine-input vocabulary",
     )
     args = parser.parse_args(argv)
+    # Which factlog produced the coverage figures, before the first of them (#554).
+    # After the strict parse, so --help and a rejected argument stay pure argparse
+    # output with no execution context in stdout
+    # (tests/unit/test_unaimed_engine_step_guard.py pins that contract).
+    print(provenance_line())
     # An empty flag value is refused rather than dropped to the next tier (#546):
     # `--target "$FACTLOG_ROOT"` in a shell that never exported the variable is
     # exactly this shape, and falling through would target the configured KB while

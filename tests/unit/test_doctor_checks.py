@@ -34,12 +34,27 @@ def _by_title(checks, needle):
     return None
 
 
+def _by_prefix(checks, prefix):
+    """Return the first check whose title *starts with* *prefix* (or None).
+
+    Needed for rows whose token also occurs inside another row's path. Since #554
+    the factlog row carries an absolute path and sits above the git row, so on a
+    checkout kept under e.g. ``~/git/factlog`` a substring search for ``git``
+    would return the factlog row — a test that passes or fails depending on where
+    the developer keeps their code.
+    """
+    for c in checks:
+        if c.title.startswith(prefix):
+            return c
+    return None
+
+
 class TestGitCheck:
     def test_missing_git_is_fail(self, monkeypatch):
         # `shutil` is imported inside the function, so patch the module directly.
         monkeypatch.setattr(shutil, "which", lambda name: None)
         checks = cli._collect_doctor_checks()
-        git = _by_title(checks, "git")
+        git = _by_prefix(checks, "git")
         assert git is not None
         assert git.severity == "FAIL"
         assert git.hints, "a missing-git FAIL must carry an install hint"
@@ -49,7 +64,7 @@ class TestGitCheck:
     def test_present_git_is_ok(self, monkeypatch):
         monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/git")
         checks = cli._collect_doctor_checks()
-        git = _by_title(checks, "git")
+        git = _by_prefix(checks, "git")
         assert git is not None
         assert git.severity == "OK"
 
@@ -319,3 +334,127 @@ class TestRenameMigrationCheck:
             _path = Path("/venv/lib/python3.12/site-packages/x.dist-info")
 
         assert installed_distributions(lambda: [_Broken()]) == set()
+
+
+class TestFactlogRuntimeRow:
+    """doctor names factlog's own version and import path (#554).
+
+    doctor reported ``pyrewire 1.0.3`` while saying nothing about factlog itself —
+    a dependency's version surfaced, our own withheld. In an environment where a
+    bundled copy and a working tree coexist, that left no way to tell which code
+    the user was actually running, and four already-fixed defects were re-reported
+    as live bugs from artifacts that one row would have disambiguated.
+    """
+
+    def test_factlog_row_carries_both_version_and_path(self):
+        import factlog
+
+        checks = cli._collect_doctor_checks()
+        row = _by_prefix(checks, "factlog ")
+        assert row is not None, "doctor must name the factlog it is running"
+        assert row.severity == "OK"
+        # BOTH, not either: the version alone cannot tell two checkouts of the same
+        # release apart, and the path alone cannot tell two releases apart.
+        assert factlog.__version__ in row.title
+        assert factlog.__file__ in row.title
+
+    def test_factlog_row_sits_directly_after_pyrewire(self):
+        # Placement is the point of the row: the asymmetry #554 names is "reports the
+        # engine's version, not its own", so the answer belongs next to the question.
+        pytest.importorskip("pyrewire")
+        titles = [c.title for c in cli._collect_doctor_checks()]
+        engine = next(i for i, t in enumerate(titles) if t.startswith("pyrewire"))
+        assert titles[engine + 1].startswith("factlog ")
+
+    def test_row_is_present_even_when_no_distribution_is_installed(self):
+        # The version/path row is unconditional; only the *skew* row depends on pip
+        # having recorded something. A source checkout with no install must still be
+        # able to say which code it ran.
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(
+                "factlog.runtime.installed_factlog_dist", lambda distributions=None: None
+            )
+            rows = cli._factlog_runtime_checks()
+        finally:
+            monkey.undo()
+        assert len(rows) == 1 and rows[0].severity == "OK"
+
+    def test_skew_warn_is_appended_after_the_version_row(self, monkeypatch):
+        monkeypatch.setattr(
+            "factlog.runtime.installed_factlog_dist",
+            lambda distributions=None: ("factlog-academic", "0.6.0", "/bundled/copy"),
+        )
+        rows = cli._factlog_runtime_checks()
+        assert [r.severity for r in rows] == ["OK", "WARN"]
+        assert "/bundled/copy" in rows[1].title
+        assert rows[1].hints
+
+    def test_the_skew_warn_is_a_different_axis_from_the_shadow_warn(self, monkeypatch):
+        """Two WARNs about sys.path must not read as the same warning.
+
+        ``_shadow_factlog_dir`` warns about a stray ``./factlog`` folder in the
+        *current directory*. This one warns that the *installed distribution*
+        disagrees with the *imported package*, wherever either lives. A reader who
+        cannot tell them apart will apply the wrong remedy.
+        """
+        monkeypatch.setattr(
+            "factlog.runtime.installed_factlog_dist",
+            lambda distributions=None: ("factlog-academic", "0.6.0", "/bundled/copy"),
+        )
+        skew = cli._factlog_runtime_checks()[1]
+        assert "설치된 배포판" in skew.title and "실행 중인" in skew.title
+        assert "이 폴더에" not in skew.title
+        assert "pip install -e ." in " ".join(skew.hints)
+
+    def test_skew_warn_does_not_flip_the_doctor_exit_code(self, monkeypatch, capsys):
+        """The contract this row must never break.
+
+        WARN/INFO are advisory; only FAIL gates. A diagnostic added to make skew
+        *observable* must not turn a working install into a failing one — smoke.sh
+        and setup.sh both depend on a healthy environment exiting 0, and the skew
+        state is the NORMAL state for anyone running from a checkout.
+        """
+        monkeypatch.setattr(
+            "factlog.runtime.installed_factlog_dist",
+            lambda distributions=None: ("factlog-academic", "0.6.0", "/bundled/copy"),
+        )
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/git")
+        rows = cli._factlog_runtime_checks()
+        assert cli._render_doctor(rows) is True
+        assert cli._render_doctor(rows, gate="setup") is True
+        assert "WARN" in capsys.readouterr().out
+
+    def test_stale_metadata_after_a_version_bump_is_info_not_warn(self, monkeypatch):
+        # Every maintainer's daily state: __version__ bumped, no reinstall. A WARN
+        # here would fire in every clone and train people to ignore the row.
+        import factlog
+
+        monkeypatch.setattr(
+            "factlog.runtime.installed_factlog_dist",
+            lambda distributions=None: (
+                "factlog-academic",
+                "0.0.0-stale",
+                str(Path(factlog.__file__).parent.parent),
+            ),
+        )
+        rows = cli._factlog_runtime_checks()
+        assert [r.severity for r in rows] == ["OK", "INFO"]
+        assert cli._render_doctor(rows) is True
+
+    def test_matching_install_adds_no_second_row(self, monkeypatch):
+        import factlog
+
+        monkeypatch.setattr(
+            "factlog.runtime.installed_factlog_dist",
+            lambda distributions=None: (
+                "factlog-academic",
+                factlog.__version__,
+                str(Path(factlog.__file__).parent.parent),
+            ),
+        )
+        assert len(cli._factlog_runtime_checks()) == 1
+
+    def test_no_row_from_this_module_is_ever_fail(self):
+        # Measured against the real environment, not an injected one.
+        assert all(c.severity != "FAIL" for c in cli._factlog_runtime_checks())

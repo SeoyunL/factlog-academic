@@ -111,6 +111,10 @@ from common import (  # noqa: E402
     quoted_constants,
 )
 
+# Below the `from common import (...)` block, never in the sys.path bootstrap at the
+# top of this file: that block is #553's conflict surface and must stay untouched.
+from factlog.runtime import provenance_line  # noqa: E402
+
 
 def _kb_relative(path) -> str:
     """``policy/logic-policy.dl`` — the path as the report has always shown it."""
@@ -889,6 +893,14 @@ def main() -> int | None:
     report = [
         "Logic Check Report",
         "==================",
+        # The producer's identity, directly above the engine's (#554). This is the one
+        # provenance line that belongs IN the artifact: `target KB` names an input
+        # LOCATION the reader already knows (they opened the file there), which is why
+        # test_unaimed_engine_step_guard.py:348 keeps it out; `factlog:` names WHO
+        # produced the report — the same category as `engine:` on the next line, and
+        # unrecoverable from the file's location. Without it, a bundled 0.6.0 and a
+        # working-tree 0.7.0 write reports no reader can tell apart.
+        provenance_line(),
         "engine: wirelog / pyrewire",
         "input: facts/accepted.dl",
         policy_provenance_line(policy),
@@ -992,6 +1004,11 @@ if __name__ == "__main__":
     # Before run_cli, so --help and a rejected argument exit without ensure_dirs
     # having created a facts/ tree under whatever the pre-pass resolved (#528).
     _parse_args()
+    # After the strict parse, so --help/exit-2 stay pure argparse output. Which factlog
+    # is running is stdout's first word, before the KB is even named: when the two lines
+    # disagree with a reader's expectations, it is nearly always this one that explains
+    # why (#554).
+    print(provenance_line())
     # After the strict parse, so --help/exit-2 stay pure argparse output, and before
     # run_cli, so the KB is named before the report is read, written or printed (#547).
     print(announce_target())
