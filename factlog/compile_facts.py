@@ -102,6 +102,7 @@ from factlog.common import (  # noqa: E402
     typed_relations,
     wirelog_undecodable_chars,
 )
+from factlog.runtime import provenance_line  # noqa: E402
 
 
 def unaimed_removal_refusal(root: Path, source: str, cwd: Path) -> str | None:
@@ -336,6 +337,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     _parse_args()
+    # Which factlog is doing the compiling, before which KB it compiles (#554). After
+    # the strict parse for the same reason the line below is: --help and a rejected
+    # argument must stay pure argparse output, with no execution context leaking into
+    # stdout (tests/unit/test_unaimed_engine_step_guard.py).
+    print(provenance_line())
     # Name the KB about to be compiled and where that choice came from, before anything
     # is read or written — the same line `factlog ingest`/`status`, merge_candidates and
     # finalize print ("target KB {root} (from {source})"). The provenance is the part

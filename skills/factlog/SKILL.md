@@ -92,10 +92,12 @@ the configured KB it finalizes that KB rather than refusing. Run the export step
 above before any `"$FACTLOG_ROOT"` call below.
 
 The steps that only rewrite their own engine outputs (`compile_facts.py`,
-`run_logic_check.py`) take a config-tier root with no flag, and **both announce the
-target first** — `compile_facts: target KB <root> (from <source>)`,
-`run_logic_check: target KB <root> (from <source>)`, the same line the mutating
-steps print. Compiling and checking re-derive that KB's own artifacts, so an
+`run_logic_check.py`) take a config-tier root with no flag, and **both announce
+themselves and then the target, before doing anything else** — first
+`factlog: <version> (<path to factlog/__init__.py>)`, naming the code that is
+running (#554), then `compile_facts: target KB <root> (from <source>)` /
+`run_logic_check: target KB <root> (from <source>)`, the same target line the
+mutating steps print. Compiling and checking re-derive that KB's own artifacts, so an
 unaimed run writes what an aimed one would; the announcement is there because the
 remaining hazard is a *reading* one — believing you checked KB A while reading a
 report from KB B.

@@ -142,6 +142,7 @@ from source_coverage import (  # noqa: E402
     relation_vocabulary,
 )
 from factlog import literal_types  # noqa: E402
+from factlog.runtime import provenance_line  # noqa: E402
 # No `Heading` here on purpose: this module never holds a heading's coordinates
 # across a write. `insert_bullet` resolves them from the text it is editing and
 # drops them again, which is what keeps a stale one from being expressible.
@@ -1582,6 +1583,11 @@ def main() -> int:
     # (cli.py: "target KB {target} (from {source})"). The run_id line below already
     # showed `wiki=`, but not the provenance, which is the part that tells a reader
     # this run picked the KB up from config rather than from their command.
+    #
+    # Which factlog is doing the writing comes first (#554) — after the strict parse
+    # above, so --help and a rejected argument stay pure argparse output with no
+    # execution context in stdout.
+    print(provenance_line())
     print(f"merge_candidates: target KB {root} (from {TARGET_SOURCE})")
     refusal = implicit_target_refusal(root, TARGET_SOURCE, Path.cwd().resolve())
     if refusal is not None:
