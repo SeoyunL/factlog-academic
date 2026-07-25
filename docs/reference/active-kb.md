@@ -12,7 +12,7 @@
 factlog use ~/wiki        # make ~/wiki the active KB (recorded in config)
 factlog where             # show the active KB and how it was resolved
 factlog sources           # list registered sources (original, conversion, fact count)
-factlog status            # KB state: facts by status, vocabulary, conflicts, logic freshness, engine
+factlog status            # KB state: facts by status, vocabulary, conflicts, questions, logic freshness, engine
 cd /anywhere && factlog ingest report.pdf   # → ~/wiki/runs/sources/report.txt
 factlog eject report.pdf  # inverse of ingest: remove the conversion + retire its facts
 factlog ignore drafts/*.md   # exclude sources from sync (re-extraction)
