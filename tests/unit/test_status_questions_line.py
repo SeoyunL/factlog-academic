@@ -176,11 +176,84 @@ class TestNothingToReport:
         assert cli.main(["status", "--target", str(kb)]) == 0
         capsys.readouterr()
 
-    def test_a_report_without_a_query_section_is_survivable(self, tmp_path, capsys):
+    def test_a_report_without_a_query_section_says_unknown_not_zero(self, tmp_path, capsys):
+        """A report file with no `Query evaluation:` header at all — truncated
+        mid-write, or written by something other than run_logic_check.
+
+        This test used to be named `..._is_survivable` and pinned the opposite
+        contract: `0 answerable (2 without a result)`. That name fixed a conclusion
+        ("it doesn't crash") over the question the line actually answers, and the
+        conclusion contradicted `test_no_logic_report_says_unknown_not_zero` two
+        tests up — the same commit called one absence of evidence "unknown" and the
+        other "zero". Zero is the reading that reproduces the #536 illusion: a
+        confident number with nothing behind it. Renamed and re-pinned to unknown by
+        the maintainer's decision (2026-07-25).
+        """
         kb = _kb(tmp_path, questions=["a?", "b?"])
         (kb / "facts" / "logic_report.txt").write_text("errors: 0\nwarnings: 0\n", encoding="utf-8")
         assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, answerable unknown"
+            " (logic_report.txt has no Query evaluation section — run /factlog check)"
+        )
+
+    def test_a_report_without_a_query_section_does_not_raise(self, tmp_path, capsys):
+        """What the old name was protecting, kept as its own test."""
+        kb = _kb(tmp_path, questions=["a?"])
+        (kb / "facts" / "logic_report.txt").write_text("errors: 0\nwarnings: 0\n", encoding="utf-8")
+        assert cli.main(["status", "--target", str(kb)]) == 0
+        capsys.readouterr()
+
+
+class TestEvidenceForTheAnswerableCount:
+    """The four states the report can be in, and what each licenses status to claim.
+
+    "No answerable questions" and "no evidence about answerable questions" are
+    different findings; the count on this line is only meaningful when the report
+    actually evaluated the queries.
+    """
+
+    def test_no_report_file_is_unknown(self, tmp_path, capsys):
+        kb = _kb(tmp_path, questions=["a?", "b?"])
+        assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, answerable unknown (no logic_report.txt yet — run /factlog check)"
+        )
+
+    def test_a_report_with_no_query_section_is_unknown(self, tmp_path, capsys):
+        kb = _kb(tmp_path, questions=["a?", "b?"])
+        (kb / "facts" / "logic_report.txt").write_text(
+            "Logic Check Report\n==================\nerrors: 0\nwarnings: 0\n", encoding="utf-8"
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, answerable unknown"
+            " (logic_report.txt has no Query evaluation section — run /factlog check)"
+        )
+
+    def test_an_empty_query_section_is_a_stated_zero_not_unknown(self, tmp_path, capsys):
+        """The section IS there and carries no result: run_logic_check evaluated the
+        queries and produced nothing. That is a zero we can state, and it must not be
+        blurred into the unknown above — the fix belongs in facts/query.dl, not in
+        re-running the check."""
+        kb = _kb(tmp_path, questions=["a?", "b?"], query_results=[])
+        assert _questions_line(kb, capsys) == (
             "  questions:  2 declared, 0 answerable (2 without a result) — see facts/query.dl"
+        )
+
+    def test_a_file_level_placeholder_is_also_a_stated_zero(self, tmp_path, capsys):
+        """Same state as above by another route: the section exists but its only line
+        describes the FILE, so it yields no items. Still evidence, still zero."""
+        kb = _kb(tmp_path, questions=["a?", "b?"], query_results=["no facts/query.dl found"])
+        assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, 0 answerable (2 without a result) — see facts/query.dl"
+        )
+
+    def test_a_section_with_items_is_counted(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            questions=["a?", "b?"],
+            query_results=["relation results: 1 rows; A, r, B", "review_required: b?"],
+        )
+        assert _questions_line(kb, capsys) == (
+            "  questions:  2 declared, 1 answerable (1 review_required) — see facts/query.dl"
         )
 
 

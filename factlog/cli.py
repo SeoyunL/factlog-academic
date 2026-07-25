@@ -2323,14 +2323,24 @@ def _declared_question_count(questions_md: _Path) -> int:
     return count
 
 
-def _query_evaluation_items(report_text: str) -> list[str]:
-    """The per-query result items of the report's ``Query evaluation:`` section.
+def _query_evaluation_section(report_text: str) -> tuple[bool, list[str]]:
+    """``(does the report have a ``Query evaluation:`` header, its result items)``.
+
+    The header flag is reported SEPARATELY from the items because an empty item list
+    means two different things and status has to say two different things about them.
+    A report that HAS the section and evaluated nothing is evidence of zero answers;
+    a report with no section at all (truncated mid-write, or produced by something
+    other than run_logic_check) is no evidence either way. Collapsing the two made
+    status assert "0 answerable" from a report that never spoke on the subject — the
+    illusion #536 exists to remove, and a contradiction with the `report_text is None`
+    branch of :func:`cmd_status`, which calls exactly that absence of evidence unknown.
 
     run_logic_check emits one ``- <item>`` line per query line in facts/query.dl,
     then a blank line/EOF. Its three "nothing to report" placeholders (no query.dl,
     an empty query.dl, lines that produced no result) describe the FILE rather than
     any one query, so they are dropped here — they are not results, and counting
-    them as such would let an absent query.dl read as an evaluated question.
+    them as such would let an absent query.dl read as an evaluated question. They do
+    NOT clear the header flag: the section WAS written, it just carries no result.
 
     The ``- `` read here is run_logic_check's own item marker in a *generated plain-text
     report*, not markdown list structure, so it deliberately does not route through
@@ -2341,9 +2351,11 @@ def _query_evaluation_items(report_text: str) -> list[str]:
     """
     placeholders = ("no facts/query.dl found", "facts/query.dl is empty", "facts/query.dl has ")
     items: list[str] = []
+    seen_header = False
     in_section = False
     for line in report_text.splitlines():
         if line.startswith("Query evaluation:"):
+            seen_header = True
             in_section = True
             continue
         if not in_section:
@@ -2354,7 +2366,7 @@ def _query_evaluation_items(report_text: str) -> list[str]:
         item = item.strip()
         if not item.startswith(placeholders):
             items.append(item)
-    return items
+    return seen_header, items
 
 
 def _classify_query_results(items: list[str]) -> dict[str, int]:
@@ -2638,6 +2650,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     # as perfectly healthy: facts, vocabulary, conflicts and logic all looked fine and the
     # one thing that had stopped working was the one thing status never mentioned (#536).
     declared = _declared_question_count(ctx.questions_md)
+    seen_query_section, items = _query_evaluation_section(report_text or "")
     if not declared:
         # Same `n/a` convention as the conflicts line: nothing is wrong, there is
         # simply nothing declared to report on.
@@ -2646,8 +2659,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         # No report is not zero answerable questions — it is an unknown, and saying
         # "0 answerable" about an unchecked KB would be the mirror of the bug above.
         print(f"  questions:  {declared} declared, answerable unknown (no logic_report.txt yet — run /factlog check)")
+    elif not seen_query_section:
+        # A report that never wrote the section (truncated mid-write, or written by
+        # something other than run_logic_check) is the same absence of evidence as no
+        # report at all, so it gets the same verdict and the same wording. Distinct
+        # from a section that is present and empty, one branch down: THAT report did
+        # evaluate the queries and found no result, which is a zero we can state.
+        print(
+            f"  questions:  {declared} declared, answerable unknown "
+            "(logic_report.txt has no Query evaluation section — run /factlog check)"
+        )
     else:
-        items = _query_evaluation_items(report_text)
         counts = _classify_query_results(items)
         notes = [
             f"{n} {label}"
