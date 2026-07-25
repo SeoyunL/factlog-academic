@@ -4212,3 +4212,148 @@ def validate_candidate_query(
     """
     ok, _code, reason = classify_query(line, facts, policy_program)
     return ok, reason
+
+
+# ---------------------------------------------------------------------------
+# classify_query_results — the ONE reading of a written report's query section
+# ---------------------------------------------------------------------------
+# `classify_query` above judges a query BEFORE it runs; this judges the result
+# line the report wrote AFTER it ran. Both readers of that section — the
+# `queries:` header tools/run_logic_check.py writes into the report (#535) and
+# the `questions:` line `factlog status` reads back out of it (#536) — call this
+# one function, so they can never tell different stories about one file. It sits
+# here rather than in factlog.cli because run_logic_check is a bundled
+# DETERMINISTIC script: the tools/* layer already depends on factlog.common as
+# its shared vocabulary, and depending on the CLI (a presentation layer, through
+# an underscore-prefixed name with no stability contract) would have inverted
+# that direction.
+
+_QUERY_RESULT_UNVERIFIED_TAIL = " is not accepted vocabulary (see Warnings above)"
+_QUERY_RESULT_PREDICATE = r"[A-Za-z_][A-Za-z0-9_]*"
+_PATH_ANSWERED_LITERALS = (
+    "(not found)",  # the verified negative the path branch exists to render
+    "reachable (engine); no route through the accepted facts",
+)
+
+
+def _separator_positions(text: str, sep: str) -> list[int]:
+    """Every index at which *sep* occurs in *text* (overlapping starts included)."""
+    positions: list[int] = []
+    at = text.find(sep)
+    while at != -1:
+        positions.append(at)
+        at = text.find(sep, at + 1)
+    return positions
+
+
+def _classify_pinned_path(item: str) -> str | None:
+    """The verdict for ``path <start> -> <target>: <value>``, or None if *item* is
+    not that form.
+
+    The form is AMBIGUOUS: an entity carrying ``": "`` or ``" -> "`` — an academic
+    KB is full of them (``BERT: Pre-training of…``) — splits it in more than one
+    place. A single non-greedy regex took the FIRST split and only that one, so
+    ``path("A", "Fig: 3")?`` rendered its route correctly and was then counted
+    `unclassified`: a committed report artifact reading `evaluated: 0` about a
+    question the engine had answered.
+
+    So each candidate split is tried, and the item is answerable when ANY of them
+    is CONSISTENT — the value read as a route begins at the start node and ends at
+    the target node. That is a demanding test, not a lenient one: an unrecognised
+    value ("garbage") matches no split, and the two fixed values and the unverified
+    form are anchored on the item's TAIL, where no split is needed at all.
+    """
+    if not item.startswith("path "):
+        return None
+    body = item[len("path ") :]
+    for literal in _PATH_ANSWERED_LITERALS:
+        if body.endswith(f": {literal}"):
+            return "answerable"
+    if ": unverified — " in body and body.endswith(_QUERY_RESULT_UNVERIFIED_TAIL):
+        return "unverified"
+    for colon in _separator_positions(body, ": "):
+        left, value = body[:colon], body[colon + 2 :]
+        route = value.split(" -> ")
+        for arrow in _separator_positions(left, " -> "):
+            start, target = left[:arrow], left[arrow + 4 :]
+            # dependency_path renders the STORED spelling of each endpoint, which may
+            # differ from the query constant by normalisation form; compare through
+            # the same canonicalisation it resolved them with.
+            if _canonical_value(route[0]) == _canonical_value(start) and _canonical_value(
+                route[-1]
+            ) == _canonical_value(target):
+                return "answerable"
+    return None
+
+
+def classify_query_results(items: list[str]) -> dict[str, int]:
+    """Split ``Query evaluation:`` items into answerable vs the reasons they are not.
+
+    ANSWERABLE means the engine returned a verified answer for the question — rows,
+    or a verified zero ("0 rows" / "(not found)"). A verified negative IS an answer
+    here, deliberately: run_logic_check works hard to keep "the engine checked and
+    found nothing" apart from "the engine never got to check" (#347/#350/#362), and
+    collapsing the two in status would undo that distinction one line lower.
+
+    ANSWERABLE IS A WHITELIST, and the default is `unclassified`, not `answerable`.
+    The first cut fell through to answerable whenever no reason-substring matched, so
+    every new branch in run_logic_check's `evaluate_queries` silently tilted the
+    default towards "the engine answered this" — and `unknown query predicate`, an
+    item validate_query raises a HARD ERROR for, was already counted as answered
+    (0 answerable read as 2 answerable). An item whose shape this function does not
+    recognise is not evidence of an answer; it is counted `unclassified` and shown on
+    the line, so the drift is visible instead of inflating the headline number.
+
+    Matching reads the HEAD of an item only — the part before the first `;`, and,
+    where a form allows it, an exact tail. `relation results: N rows; …` and
+    `path A -> B: …` append ENGINE FACT VALUES verbatim
+    (tools/run_logic_check.py:522-530), and `unverified` is ordinary factlog domain
+    vocabulary ("unverified preprint"), so a substring test against the whole item
+    flips two answered questions to "unverified" on real data.
+
+    The reasons a question is not answerable, by the report's own wording:
+    ``review_required: `` (routed to a human; the colon is REQUIRED — a policy may
+    ``.decl`` a predicate named ``review_required_manual``, whose ordinary
+    ``… results: 3 rows`` findings are answers), ``unverified`` (a constant its
+    position does not accept), ``malformed``, and ``unknown query predicate``.
+
+    ``<pred> query malformed`` is matched by PREDICATE PATTERN, not against the
+    fixed set path/relation/count: policy predicates are named by the KB's own
+    policy file, and the report emits the same malformed line for them (#535
+    review). Hard-coding the three built-ins would have counted a malformed policy
+    query — one validate_query raises an ERROR for — as `unclassified`.
+    """
+
+    def classify(item: str) -> str:
+        # Values are appended after "; " — judge on the head, never the payload.
+        head = item.split(";", 1)[0]
+        if item == "unknown query predicate — see Errors above":
+            # validate_query raises `query unknown predicate` as a hard ERROR for this
+            # line (tools/run_logic_check.py:203-205): the question is confirmed
+            # unanswerable, not answered.
+            return "unknown_predicate"
+        if item.startswith("review_required: "):
+            return "review_required"
+        if re.fullmatch(rf"{_QUERY_RESULT_PREDICATE} query malformed — see Errors above", item):
+            return "malformed"
+        if re.fullmatch(
+            rf"{_QUERY_RESULT_PREDICATE} results: unverified — .*", item
+        ) and item.endswith(_QUERY_RESULT_UNVERIFIED_TAIL):
+            return "unverified"
+        if re.fullmatch(rf"{_QUERY_RESULT_PREDICATE} results: \d+ rows", head):
+            return "answerable"
+        if re.fullmatch(r"count results: \d+ \(distinct objects\)", head):
+            return "answerable"
+        return _classify_pinned_path(item) or "unclassified"
+
+    counts = {
+        "answerable": 0,
+        "review_required": 0,
+        "unverified": 0,
+        "malformed": 0,
+        "unknown_predicate": 0,
+        "unclassified": 0,
+    }
+    for item in items:
+        counts[classify(item)] += 1
+    return counts

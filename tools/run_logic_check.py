@@ -65,6 +65,7 @@ from common import (  # noqa: E402
     FACTS_DIR,
     KNOWN_STATUSES,
     QueryVocabulary,
+    classify_query_results,
     is_valid_arg,
     is_variable,
     relation_aliases,
@@ -465,6 +466,19 @@ def evaluate_queries(
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
+            # The guard the path (L476), relation (L544) and count (L593) branches
+            # already had, and the last branch to get it. validate_query's policy
+            # branch (L269, L278) raises a HARD ERROR on either shape, yet this branch
+            # went straight to policy_result_line, which filters `inferred[predicate]`
+            # with a matcher that reads a bare token as a WILDCARD -- so the report
+            # rendered `<pred> results: N rows` for a line it had just errored on, and
+            # #535's new header then counted that line as `evaluated`. The same trap
+            # this branch's siblings were fixed for (#284/#319/#321), reappearing one
+            # level up as an inflated headline number.
+            args = query_args(line)
+            if len(args) != 2 or not all(is_valid_arg(a) for a in args):
+                results.append(f"{predicate} query malformed — see Errors above")
+                continue
             results.append(policy_result_line(predicate, line, inferred, vocab))
         elif predicate == "path":
             # Constants AND variables. The old branch only handled two quoted
@@ -634,6 +648,50 @@ def evaluate_queries(
             # tag it "see Errors above" for an error that is not there.
             results.append("unknown query predicate — see Errors above")
     return results
+
+
+def query_summary_line(items: list[str]) -> str:
+    """The ``queries:`` header tally over the ``Query evaluation:`` section below it.
+
+    The header counted policy findings and never counted queries, so a KB whose
+    declared questions had ALL routed to a human read ``errors: 0 / warnings: 0``
+    above six ``review_required`` lines -- six questions, zero answers, and no
+    number anywhere saying so (#535). This is a COUNT of the items printed below,
+    in the same slot and with the same standing as ``policy findings:``. It is not
+    a new failure condition: ``errors``/``warnings`` keep their meaning and the
+    exit code still turns on errors alone, because "the engine could not answer
+    this question" is a normal KB state, not a broken check.
+
+    Classification is :func:`factlog.common.classify_query_results` -- the very
+    function ``factlog status`` reads this section with (#536). A second
+    classifier here would agree today and drift the moment
+    :func:`evaluate_queries` grows a branch, and then the header and ``status``
+    would report different numbers for the same file: the confusion #535 removes,
+    reintroduced one line up. ANSWERABLE is a whitelist there, so an item shape
+    neither side recognises lands in ``unclassified`` and is shown, never folded
+    into the headline count.
+
+    It is imported from ``factlog.common``, not from ``factlog.cli``: this script
+    is a bundled DETERMINISTIC step, and every factlog module the tools/* layer
+    reaches for (``common``/``config``/``literal_types``/``md_lines``/
+    ``review_sections``) is a shared-vocabulary module. Reaching into the CLI --
+    a presentation layer, through a ``_``-prefixed name carrying no stability
+    contract -- would have made a deterministic step depend on the layer above it
+    (#535 review).
+    """
+    counts = classify_query_results(items)
+    notes = [f"evaluated: {counts['answerable']}"] + [
+        f"{label}: {n}"
+        for label, n in (
+            ("review_required", counts["review_required"]),
+            ("unverified", counts["unverified"]),
+            ("malformed", counts["malformed"]),
+            ("unknown predicate", counts["unknown_predicate"]),
+            ("unclassified", counts["unclassified"]),
+        )
+        if n
+    ]
+    return f"queries: {len(items)} ({', '.join(notes)})"
 
 
 def engine_relation_gap(
@@ -806,6 +864,11 @@ def main() -> int | None:
         # that survives validate_query is a genuinely unaccepted constant.
         warnings.extend(query_warnings)
 
+    # Evaluated once, here: the header counts these items and the section below prints
+    # them, and two calls would let a header disagree with the list it is counting.
+    # After the validate_query loop above so the evaluation order is unchanged.
+    query_results = evaluate_queries(facts, inferred, policy_query_predicates, value_hierarchy())
+
     report = [
         "Logic Check Report",
         "==================",
@@ -815,6 +878,7 @@ def main() -> int | None:
         f"engine facts: {len(facts)}",
         f"review facts outside engine input: {len(review_facts(candidates))}",
         f"policy findings: {len(policy_findings)}",
+        query_summary_line(query_results),
         f"errors: {len(errors)}",
         f"warnings: {len(warnings)}",
         "",
@@ -835,10 +899,7 @@ def main() -> int | None:
     )
     report.append("")
     report.append("Query evaluation:")
-    query_items = [
-        f"- {item}"
-        for item in evaluate_queries(facts, inferred, policy_query_predicates, value_hierarchy())
-    ]
+    query_items = [f"- {item}" for item in query_results]
     if query_items:
         report.extend(query_items)
     elif not (FACTS_DIR / "query.dl").is_file():

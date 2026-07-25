@@ -2342,6 +2342,15 @@ def _query_evaluation_section(report_text: str) -> tuple[bool, list[str]]:
     them as such would let an absent query.dl read as an evaluated question. They do
     NOT clear the header flag: the section WAS written, it just carries no result.
 
+    Split on ``"\\n"``, never ``str.splitlines()``: python splits the latter on
+    U+2028/U+2029/U+0085 as well, and compile_facts' control-character guard (#331)
+    deliberately ACCEPTS those three in fact values. One U+2028 inside a queried value
+    therefore turned a single item into two physical lines, the second of which does not
+    start with ``- `` — so the loop below broke and EVERY remaining item vanished from
+    status while the report's own ``queries:`` header (counted from the in-memory list)
+    still showed them. The report is assembled by joining on ``"\\n"``, so reading it
+    back the same way is not a behaviour change, it is the inverse of how it was written.
+
     The ``- `` read here is run_logic_check's own item marker in a *generated plain-text
     report*, not markdown list structure, so it deliberately does not route through
     :mod:`factlog.md_lines` (the SSOT that ``tests/unit/test_markdown_scan_contract.py``
@@ -2353,7 +2362,7 @@ def _query_evaluation_section(report_text: str) -> tuple[bool, list[str]]:
     items: list[str] = []
     seen_header = False
     in_section = False
-    for line in report_text.splitlines():
+    for line in report_text.split("\n"):
         if line.startswith("Query evaluation:"):
             seen_header = True
             in_section = True
@@ -2369,100 +2378,13 @@ def _query_evaluation_section(report_text: str) -> tuple[bool, list[str]]:
     return seen_header, items
 
 
-def _classify_query_results(items: list[str]) -> dict[str, int]:
-    """Split ``Query evaluation:`` items into answerable vs the reasons they are not.
-
-    ANSWERABLE means the engine returned a verified answer for the question — rows,
-    or a verified zero ("0 rows" / "(not found)"). A verified negative IS an answer
-    here, deliberately: run_logic_check works hard to keep "the engine checked and
-    found nothing" apart from "the engine never got to check" (#347/#350/#362), and
-    collapsing the two in status would undo that distinction one line lower.
-
-    ANSWERABLE IS A WHITELIST, and the default is `unclassified`, not `answerable`.
-    The first cut fell through to answerable whenever no reason-substring matched, so
-    every new branch in run_logic_check's `evaluate_queries` silently tilted the
-    default towards "the engine answered this" — and `unknown query predicate`, an
-    item validate_query raises a HARD ERROR for, was already counted as answered
-    (0 answerable read as 2 answerable). An item whose shape this function does not
-    recognise is not evidence of an answer; it is counted `unclassified` and shown on
-    the line, so the drift is visible instead of inflating the headline number.
-
-    Matching reads the HEAD of an item only — the part before the first `;`, and,
-    where a form allows it, an exact tail. `relation results: N rows; …` and
-    `path A -> B: …` append ENGINE FACT VALUES verbatim
-    (tools/run_logic_check.py:522-530), and `unverified` is ordinary factlog domain
-    vocabulary ("unverified preprint"), so a substring test against the whole item
-    flips two answered questions to "unverified" on real data. The route form is
-    accepted only when its first and last node are the queried endpoints, compared
-    through ``canonical_value`` the way dependency_path resolved them.
-
-    The reasons a question is not answerable, by the report's own wording:
-    ``review_required: `` (routed to a human; the colon is REQUIRED — a policy may
-    ``.decl`` a predicate named ``review_required_manual``, whose ordinary
-    ``… results: 3 rows`` findings are answers), ``unverified`` (a constant its
-    position does not accept), ``malformed``, and ``unknown query predicate``.
-    """
-    import re
-
-    from factlog.common import canonical_value
-
-    pred = r"[A-Za-z_][A-Za-z0-9_]*"
-    unverified_tail = " is not accepted vocabulary (see Warnings above)"
-    malformed = {
-        f"{p} query malformed — see Errors above" for p in ("path", "relation", "count")
-    }
-
-    def classify(item: str) -> str:
-        # Values are appended after "; " — judge on the head, never the payload.
-        head = item.split(";", 1)[0]
-        if item == "unknown query predicate — see Errors above":
-            # validate_query raises `query unknown predicate` as a hard ERROR for this
-            # line (tools/run_logic_check.py:203-205): the question is confirmed
-            # unanswerable, not answered.
-            return "unknown_predicate"
-        if item.startswith("review_required: "):
-            return "review_required"
-        if item in malformed:
-            return "malformed"
-        if re.fullmatch(rf"{pred} results: unverified — .*", item) and item.endswith(unverified_tail):
-            return "unverified"
-        if re.fullmatch(rf"{pred} results: \d+ rows", head):
-            return "answerable"
-        if re.fullmatch(r"count results: \d+ \(distinct objects\)", head):
-            return "answerable"
-        # `path <start> -> <target>: <value>`, the two-constant form. Non-greedy so the
-        # split takes the FIRST " -> " / ": "; an endpoint carrying either separator
-        # mis-splits and lands in `unclassified`, which is the safe direction.
-        pinned = re.fullmatch(r"path (?P<start>.+?) -> (?P<target>.+?): (?P<value>.+)", item)
-        if pinned:
-            value = pinned["value"]
-            if value == "(not found)":
-                return "answerable"  # the verified negative this branch exists for
-            if value == "reachable (engine); no route through the accepted facts":
-                return "answerable"
-            if value.startswith("unverified — ") and value.endswith(unverified_tail):
-                return "unverified"
-            route = value.split(" -> ")
-            if canonical_value(route[0]) == canonical_value(pinned["start"]) and canonical_value(
-                route[-1]
-            ) == canonical_value(pinned["target"]):
-                # dependency_path renders the STORED spelling of each endpoint, which
-                # may differ from the query constant by normalisation form; compare
-                # through the same canonicalisation it resolved them with.
-                return "answerable"
-        return "unclassified"
-
-    counts = {
-        "answerable": 0,
-        "review_required": 0,
-        "unverified": 0,
-        "malformed": 0,
-        "unknown_predicate": 0,
-        "unclassified": 0,
-    }
-    for item in items:
-        counts[classify(item)] += 1
-    return counts
+# _classify_query_results moved to factlog.common as the public
+# `classify_query_results` (#535 review). The report's `queries:` header is written
+# by tools/run_logic_check.py, a bundled DETERMINISTIC script, and it must classify
+# with the very function this command reads the section back with -- but tools/*
+# depends on factlog.common, never on the CLI. Importing a presentation-layer
+# `_`-prefixed name into a deterministic step inverted that direction; the shared
+# classifier now lives in the module both layers already share.
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -2670,7 +2592,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "(logic_report.txt has no Query evaluation section — run /factlog check)"
         )
     else:
-        counts = _classify_query_results(items)
+        counts = common.classify_query_results(items)
         notes = [
             f"{n} {label}"
             for label, n in (
@@ -2678,7 +2600,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 ("unverified", counts["unverified"]),
                 ("malformed", counts["malformed"]),
                 ("unknown predicate", counts["unknown_predicate"]),
-                # An item shape _classify_query_results does not recognise. Shown
+                # An item shape classify_query_results does not recognise. Shown
                 # rather than folded into answerable: if run_logic_check grows a
                 # result form this function has not learned, that shows up here as an
                 # unexplained bucket instead of silently inflating "N answerable".
