@@ -92,13 +92,34 @@ the configured KB it finalizes that KB rather than refusing. Run the export step
 above before any `"$FACTLOG_ROOT"` call below.
 
 The steps that only rewrite their own engine outputs (`compile_facts.py`,
-`run_logic_check.py`) take a config-tier root with no flag. That bounds the *file
-set* they touch to their own engine output; it is not a claim that an unaimed run
-is harmless. `compile_facts.py` run from outside the KB against a config-tier root
-**deletes** `facts/accepted.dl` when it finds a single-valued contradiction (exit
-`1`), so a run nobody aimed can leave the active KB with no engine input until the
-conflict is resolved. Their exemption from the guard is provisional, not a settled
-rule — `merge_candidates`' guard docstring leaves the two "to a follow-up".
+`run_logic_check.py`) take a config-tier root with no flag, and **both announce the
+target first** — `compile_facts: target KB <root> (from <source>)`,
+`run_logic_check: target KB <root> (from <source>)`, the same line the mutating
+steps print. Compiling and checking re-derive that KB's own artifacts, so an
+unaimed run writes what an aimed one would; the announcement is there because the
+remaining hazard is a *reading* one — believing you checked KB A while reading a
+report from KB B.
+
+The two are guarded **differently, on purpose**, and the difference is the size of
+the damage. `compile_facts.py` has one destructive step: on a single-valued
+contradiction the gate deletes `facts/accepted.dl` so no reader trusts the engine
+input of a KB whose confirmed rows contradict each other (#212/#327). On a run
+nobody aimed — a config-tier root while cwd is outside that KB — it now **refuses
+that deletion** and keeps the file (`REFUSING to remove …/facts/accepted.dl`), still
+exiting `1` and compiling nothing (#547). An **aimed** run (`--target`,
+`$FACTLOG_ROOT`, or standing in the KB) deletes as before, so the #212 invariant is
+unchanged for every documented flow. `run_logic_check.py` refuses nothing: it
+destroys nothing (its only write, `facts/logic_report.txt`, IS the check being run,
+so it cannot make a stale report look fresh), and it is the command
+`hooks/gate_check.sh` names as the remedy in its own DENIED message — resolving the
+guarded KB through that same config tier — so refusing here would make the gate's
+prescribed fix unrunnable.
+
+The accepted trade in the refusal: the KB keeps its **pre-contradiction snapshot**
+of `accepted.dl`, so `/factlog ask` goes on answering from it until an aimed run
+resolves the conflict. The exit code is `1` and the message says so in as many
+words. Leaving a KB stale is recoverable by the next aimed run; leaving a KB nobody
+aimed at with no engine input at all is not.
 
 There is no longer a third group outside the precedence. `generate_logic_policy.py`
 took no KB flag and never consulted the config, so the bare call this skill makes

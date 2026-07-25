@@ -87,14 +87,34 @@ take `--target`. A flag applies only to the **single command** it was given to, 
 > blank value on to the next rank, so from *inside* the configured KB it finalizes
 > that KB rather than refusing.
 
-> **`compile_facts.py`/`run_logic_check.py`, which only rewrite their own engine
-> outputs, take a rank-3 root with no flag.** That means the *file set* they touch
-> is bounded to their own engine output — not that an unaimed run is harmless. Run
-> from outside the KB with no aim, `compile_facts.py` **deletes** the active KB's
-> `facts/accepted.dl` when it finds a single-valued contradiction (exit 1), so that
-> KB is left with no engine input until the conflict is resolved. Their exemption
-> from the guard is provisional rather than settled (`merge_candidates`' guard
-> docstring leaves the two "to a follow-up"). No script is outside the config tier
+> **`compile_facts.py`/`run_logic_check.py` take a rank-3 root with no flag, and
+> both name the target first.** Each prints `<tool>: target KB <root> (from
+> <source>)` before doing anything — the same line the mutating tools print. Both
+> re-derive that KB's own artifacts, so an unaimed run writes what an aimed one
+> would; the line is there because what is left is a *reading* hazard: believing you
+> checked KB A while reading a report from KB B.
+>
+> **They are guarded differently, on purpose**, sized to what each can destroy.
+> `compile_facts.py` has one destructive step — on a single-valued contradiction the
+> gate deletes `facts/accepted.dl` so no reader trusts the engine input of a KB whose
+> confirmed rows contradict each other (#212/#327). On a run nobody aimed (rank 3
+> while the current directory is outside that KB) it **refuses that deletion** and
+> keeps the file, still exiting 1 and compiling nothing (#547). An **aimed** run
+> (`--target`, `$FACTLOG_ROOT`, or standing inside the KB) deletes as before, so the
+> #212 invariant is unchanged for every documented flow. `run_logic_check.py` refuses
+> nothing: it destroys nothing (its only write, `facts/logic_report.txt`, *is* the
+> check being run, so it cannot make a stale report look fresh), and it is the
+> command `hooks/gate_check.sh` prescribes in its own DENIED message — that hook
+> resolves the KB it guards through the same rank-3 tier, so refusing here would make
+> the gate's own remedy unrunnable.
+>
+> The trade in that refusal, stated plainly: the KB keeps its **pre-contradiction
+> snapshot** of `accepted.dl`, so `/factlog ask` goes on answering from it until an
+> aimed run resolves the conflict. Exit code 1 and the message say so. A stale KB is
+> healed by the next aimed run; a KB nobody aimed at, left with no engine input at
+> all, is not.
+
+> No script is outside the config tier
 > any more: `tools/generate_logic_policy.py` — which the skill and `finalize` both
 > call with no arguments — used to see only `$FACTLOG_ROOT` and the current
 > directory and exited 1 with `not a factlog KB root: …` whenever only the config
