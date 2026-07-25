@@ -8,15 +8,18 @@ definition, correct. Meanwhile the questions the KB was built to answer have no
 vocabulary left in engine input. A guard named "silent-omission" that reports a
 clean line in that state is the omission.
 
-The mapping from question to query is READ, not inferred: `facts/query.dl` is the
-committed question→query-draft contract, each draft anchored by a `// q3: ...`
-comment carrying the id policy/questions.md declares. The verdict on each draft is
-`common.classify_query` — the engine's own gate. Both halves are pinned here, and
-the last class of test in this file is the one that matters most: an end-to-end
-contract against the bundled `examples/sample-kb` asserting the axis never calls a
-question unresolvable that the ENGINE just answered. A previous implementation
-matched relation names against the question TEXT and did exactly that for five of
-the sample KB's seven questions.
+Where a question HAS a draft in `facts/query.dl`, the mapping is READ, not
+inferred: each draft is anchored by a `// q3: ...` comment carrying the id
+policy/questions.md declares, and the verdict is `common.classify_query` — the
+engine's own gate. `facts/query.dl` is written by the LLM `/factlog query` step, so
+a question can have no draft at all; those fall back to an estimate off the
+question text, labelled as an estimate in the report.
+
+The last class in this file is the one that matters most: an end-to-end contract
+against the bundled `examples/sample-kb` asserting the axis never calls a question
+unresolvable that the ENGINE just answered. An implementation that ignored the
+committed drafts and matched relation names against the question TEXT did exactly
+that for five of the sample KB's seven questions.
 """
 from __future__ import annotations
 
@@ -25,14 +28,19 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
 from source_coverage import (
     draft_verdict,
+    effective_relations,
+    estimated_verdict,
+    mentioned_relations,
     query_drafts,
     question_rows,
     relation_argument,
+    relation_probes,
 )
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -174,12 +182,14 @@ class TestDraftVerdict:
     def test_a_relation_missing_from_engine_input_is_the_loss(self):
         assert draft_verdict(
             'relation("Claude Code", "develops", "Anthropic")?', _ONE_FACT, ""
-        ) == ("lost", "relation 'develops' is not in engine input")
+        ) == ("lost", "relation 'develops' has no rows in engine input")
 
     def test_an_attribute_relation_with_no_rows_is_named(self):
+        # The report frame is English and QUOTES the name as declared, the repo's
+        # convention for a message about a Korean identifier (tools/validate.py).
         assert draft_verdict('count("Claude Code", "총_문항_수")?', _ONE_FACT, "") == (
             "lost",
-            "relation '총_문항_수' is not in engine input",
+            "relation '총_문항_수' has no rows in engine input",
         )
 
     def test_an_entity_missing_from_engine_input_is_a_loss_too(self):
@@ -187,7 +197,7 @@ class TestDraftVerdict:
             'relation("factlog", "developed_by", "Anthropic")?', _ONE_FACT, ""
         )
         assert state == "lost"
-        assert reason.startswith("not in engine input — ")
+        assert reason.startswith("no rows in engine input — ")
         assert "factlog" in reason
 
     def test_review_required_is_routed_not_lost(self):
@@ -205,68 +215,232 @@ class TestDraftVerdict:
         assert reason.startswith("query draft is not usable — ")
 
 
+# --- the fallback estimate, for a question with no draft ----------------------
+
+
+class TestRelationProbes:
+    """A relation is stored `총_문항_수`; a question spells it any of three ways."""
+
+    def test_separator_folded_form_is_probed(self):
+        assert "총 문항 수" in relation_probes("총_문항_수")
+
+    def test_separator_removed_form_is_probed_for_cjk(self):
+        # `총문항수는?` is ordinary Korean spelling. Without this probe the question
+        # named no relation at all, which reads as "never grounded" instead of the
+        # loss (or the coverage) it actually is.
+        assert "총문항수" in relation_probes("총_문항_수")
+
+    def test_name_as_declared_is_always_probed(self):
+        assert "총_문항_수" in relation_probes("총_문항_수")
+
+    def test_hyphen_folds_too(self):
+        assert "published year" in relation_probes("published-year")
+
+    def test_ascii_fold_needs_a_word_longer_than_two_chars(self):
+        # `is_a` -> "is a" matches nearly every English question; a question would
+        # be reported grounded in a relation it never names.
+        assert relation_probes("is_a") == ["is_a"]
+        assert "developed by" in relation_probes("developed_by")
+
+    def test_the_joined_probe_stays_cjk_only(self):
+        # English never drops the separator, so `developedby` would only be noise.
+        assert "developedby" not in relation_probes("developed_by")
+
+    def test_a_name_without_separators_probes_only_itself(self):
+        assert relation_probes("uses") == ["uses"]
+
+
+class TestMentionedRelations:
+    def test_most_specific_first(self):
+        # 총_문항_수 contains 문항_수: the narrower name is the one the author meant
+        # and the one worth naming in the report.
+        vocab = {"총_문항_수", "문항_수", "벤치마크"}
+        # Equal-length names fall back to a sorted (deterministic) order.
+        assert mentioned_relations("factlog 벤치마크의 총 문항 수는?", vocab) == [
+            "총_문항_수", "문항_수", "벤치마크",
+        ]
+
+    def test_a_relation_the_question_never_names_is_not_matched(self):
+        assert mentioned_relations("A유형 질문의 목표 비율은?", {"채점_정의"}) == []
+
+    def test_ascii_relation_matched_on_word_boundaries(self):
+        assert mentioned_relations("Who is Claude Code developed by?", {"developed_by"}) == [
+            "developed_by",
+        ]
+        # 'api' must not match inside 'therapist' (ask_router's boundary rule).
+        assert mentioned_relations("who is the therapist?", {"api"}) == []
+
+
+class TestEffectiveRelations:
+    def test_a_broad_name_contained_in_a_narrower_one_is_shadowed(self):
+        assert effective_relations(["총_문항_수", "문항_수"]) == ["총_문항_수"]
+
+    def test_independent_relations_all_survive(self):
+        assert effective_relations(["developed_by", "uses"]) == ["developed_by", "uses"]
+
+    def test_nothing_to_shadow(self):
+        assert effective_relations([]) == []
+
+
+class TestEstimatedVerdict:
+    ALIASES: dict[str, str] = {}
+
+    def _verdict(self, question, vocab, accepted, aliases=None):
+        return estimated_verdict(
+            question, vocab, accepted, self.ALIASES if aliases is None else aliases
+        )
+
+    def test_a_surviving_broad_relation_must_not_answer_for_the_lost_narrow_one(self):
+        # THE regression this axis exists to catch, reproduced with a relation pair
+        # that really is declared together in a KB: 총_문항_수 has zero rows, 문항_수
+        # still has one about the very subject the question names. Judged as
+        # independent evidence, the broad survivor made the report read
+        # `0 unresolvable` — the silence the tool is named after.
+        assert self._verdict(
+            "factlog 벤치마크의 총 문항 수는?",
+            {"총_문항_수", "문항_수"},
+            _accepted(("factlog 벤치마크", "문항_수", "20")),
+        ) == ("lost", "relation '총_문항_수' has no rows in engine input")
+
+    def test_the_reason_names_the_relation_that_is_actually_missing(self):
+        # 총_문항_수 HAS rows (on another subject) and 문항_수 does not. Blaming
+        # 문항_수 would point at a relation the question never named on its own —
+        # it is only there as a substring — and would hide the real shortfall,
+        # which is the subject mismatch.
+        assert self._verdict(
+            "factlog 벤치마크의 총 문항 수는?",
+            {"총_문항_수", "문항_수"},
+            _accepted(("다른 벤치", "총_문항_수", "60")),
+        ) == (
+            "unmatched",
+            "relation '총_문항_수' has rows in engine input, but none about "
+            "anything the question names",
+        )
+
+    def test_a_relation_gone_from_engine_input_is_named(self):
+        assert self._verdict(
+            "factlog 벤치마크의 총 문항 수는?", {"총_문항_수"}, []
+        ) == ("lost", "relation '총_문항_수' has no rows in engine input")
+
+    def test_evidence_about_a_named_entity_resolves(self):
+        assert self._verdict(
+            "Who is Claude Code developed by?", {"developed_by"}, _ONE_FACT
+        ) == ("resolvable", "")
+
+    def test_rows_under_a_named_relation_about_nothing_the_question_names(self):
+        # Naming a relation is not evidence on its own: 벤치마크 survives on an
+        # unrelated arXiv paper in the issue's KB.
+        state, reason = self._verdict(
+            "Who is factlog developed by?", {"developed_by"}, _ONE_FACT
+        )
+        assert state == "unmatched"
+        assert reason.startswith("relation 'developed_by' has rows in engine input")
+
+    def test_a_question_naming_no_relation_has_no_vocabulary(self):
+        assert self._verdict("C유형 질문의 주제는 무엇인가?", {"채점_정의"}, []) == (
+            "no_vocabulary",
+            "the question names no relation this KB declares",
+        )
+
+    def test_an_nfd_stored_question_still_finds_its_evidence(self):
+        # macOS stores Korean text NFD. The relation match normalises the question,
+        # so the grounding half has to see the SAME normalised text or every
+        # question in an NFD questions.md reads as ungrounded.
+        question = unicodedata.normalize("NFD", "factlog 벤치마크의 총 문항 수는?")
+        assert self._verdict(
+            question, {"총_문항_수"}, _accepted(("factlog 벤치마크", "총_문항_수", "20"))
+        ) == ("resolvable", "")
+
+    def test_a_separator_free_spelling_still_finds_its_relation(self):
+        assert self._verdict(
+            "factlog 벤치마크의 총문항수는?", {"총_문항_수"}, []
+        ) == ("lost", "relation '총_문항_수' has no rows in engine input")
+
+    def test_alias_is_not_mistaken_for_a_missing_relation(self):
+        # The question names the alias; engine input carries the canonical.
+        assert self._verdict(
+            "Claude Code 게재연도는?",
+            {"게재연도"},
+            _accepted(("Claude Code", "published_year", "2024")),
+            {"게재연도": "published_year"},
+        ) == ("resolvable", "")
+
+
 class TestQuestionRows:
     QUESTIONS = [
         {"id": "q1", "question": "Who developed Claude Code?"},
         {"id": "q2", "question": "Does this KB record that Anthropic develops it?"},
     ]
+    VOCAB = {"developed_by", "develops"}
 
-    def _states(self, drafts, accepted=_ONE_FACT):
+    def _rows(self, drafts, accepted=_ONE_FACT):
         return {
-            row["id"]: (row["state"], row["reason"])
-            for row in question_rows(self.QUESTIONS, drafts, accepted, "")
+            row["id"]: row
+            for row in question_rows(self.QUESTIONS, drafts, accepted, "", self.VOCAB, {})
         }
 
-    def test_a_question_with_no_draft_is_not_a_lost_relation(self):
-        # "the query step has not run" is a different state from "engine input no
-        # longer carries what the draft asks for" (#538).
-        rows = self._states({})
-        assert rows["q1"] == ("no_draft", "no query draft in facts/query.dl — run /factlog query")
+    def test_a_question_with_no_draft_falls_back_to_the_estimate(self):
+        # "the query step has not run" is a different claim from "the engine
+        # refused the draft" (#538), so the reason says which one this is.
+        row = self._rows({})["q2"]
+        assert row["estimated"] is True
+        assert row["state"] == "lost"
+        assert row["reason"] == (
+            "no query draft; estimated from the question text: "
+            "relation 'develops' has no rows in engine input"
+        )
 
-    def test_the_draft_note_is_configurable_for_an_absent_file(self):
-        rows = question_rows(self.QUESTIONS, {}, _ONE_FACT, "", "facts/query.dl absent")
-        assert rows[0]["reason"] == "facts/query.dl absent"
+    def test_a_drafted_question_is_never_labelled_an_estimate(self):
+        row = self._rows({
+            "q1": ['relation("Claude Code", "developed_by", "Anthropic")?'],
+        })["q1"]
+        assert row["estimated"] is False
+        assert row["state"] == "resolvable"
 
     def test_each_question_is_judged_by_its_own_draft(self):
-        rows = self._states({
+        rows = self._rows({
             "q1": ['relation("Claude Code", "developed_by", "Anthropic")?'],
             "q2": ['relation("Claude Code", "develops", "Anthropic")?'],
         })
-        assert rows["q1"][0] == "resolvable"
-        assert rows["q2"] == ("lost", "relation 'develops' is not in engine input")
+        assert rows["q1"]["state"] == "resolvable"
+        assert rows["q2"]["reason"] == "relation 'develops' has no rows in engine input"
 
     def test_a_question_with_any_evaluable_draft_is_resolvable(self):
         # The engine answers it, so the axis must not call it unresolvable.
-        rows = self._states({
+        rows = self._rows({
             "q1": [
                 'relation("Claude Code", "develops", "Anthropic")?',
                 'relation("Claude Code", "developed_by", "Anthropic")?',
             ],
         })
-        assert rows["q1"][0] == "resolvable"
+        assert rows["q1"]["state"] == "resolvable"
 
     def test_a_loss_outranks_a_review_route_on_the_same_question(self):
-        rows = self._states({
+        rows = self._rows({
             "q1": [
                 'review_required("Which steps?")?',
                 'relation("Claude Code", "develops", "Anthropic")?',
             ],
         })
-        assert rows["q1"] == ("lost", "relation 'develops' is not in engine input")
+        assert rows["q1"]["state"] == "lost"
 
     def test_empty_engine_input_loses_every_drafted_relation(self):
-        rows = self._states(
+        rows = self._rows(
             {"q1": ['relation("Claude Code", "developed_by", "Anthropic")?']}, accepted=[]
         )
-        assert rows["q1"][0] == "lost"
+        assert rows["q1"]["state"] == "lost"
 
 
 # --- CLI contract -------------------------------------------------------------
 
 
 def _kb(tmp_path, *, questions=None, query=None, accepted=None, candidates=None,
-        aliases=None, source="a.md"):
-    """A minimal KB root; every engine input is written explicitly by the test."""
+        attributes=None, single_valued=None, aliases=None, source="a.md", raw=None):
+    """A minimal KB root; every engine input is written explicitly by the test.
+
+    ``raw`` writes BYTES for a named policy file, for the tests that hand this axis
+    a file it cannot decode.
+    """
     kb = tmp_path / "kb"
     for name in ("sources", "pages", "facts", "decisions", "policy"):
         (kb / name).mkdir(parents=True)
@@ -276,13 +450,23 @@ def _kb(tmp_path, *, questions=None, query=None, accepted=None, candidates=None,
         (kb / "policy" / "questions.md").write_text(questions, encoding="utf-8")
     if query is not None:
         (kb / "facts" / "query.dl").write_text(query, encoding="utf-8")
+    if attributes is not None:
+        (kb / "policy" / "attribute-relations.md").write_text(attributes, encoding="utf-8")
+    if single_valued is not None:
+        (kb / "policy" / "single-valued.md").write_text(single_valued, encoding="utf-8")
     if aliases is not None:
         (kb / "policy" / "relation-aliases.md").write_text(aliases, encoding="utf-8")
     if accepted is not None:
         (kb / "facts" / "accepted.dl").write_text(accepted, encoding="utf-8")
     rows = [_HEADER] + list(candidates or [])
     (kb / "facts" / "candidates.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    for name, blob in (raw or {}).items():
+        (kb / "policy" / name).write_bytes(blob)
     return kb
+
+
+def _hangul(text: str) -> bool:
+    return any("가" <= ch <= "힣" for ch in text)
 
 
 def _run(kb, *args):
@@ -312,6 +496,16 @@ _LOST = dict(
     candidates=['arXiv_2603.20582,벤치마크,기하브라운운동,sources/a.md,accepted,0.9,'],
 )
 
+# The same KB with the query step never run — the state the fallback estimate is
+# there for. `문항_수` still has a row about the very subject q3 names, so a broad
+# relation is standing where the lost narrow one used to be.
+_LOST_NO_DRAFT = dict(
+    questions="- [q3] factlog 벤치마크의 총 문항 수는?\n",
+    attributes="총_문항_수\n문항_수\n",
+    accepted='relation("factlog 벤치마크", "문항_수", "20").\n',
+    candidates=['factlog 벤치마크,문항_수,20,sources/a.md,accepted,0.9,'],
+)
+
 
 class TestQuestionAxisOutput:
     def test_the_lost_relation_is_named_on_its_own_line(self, tmp_path):
@@ -323,12 +517,31 @@ class TestQuestionAxisOutput:
         )
         assert (
             "  - [q3] factlog 벤치마크의 총 문항 수는?  "
-            "(relation '총_문항_수' is not in engine input)" in out.stdout
+            "(relation '총_문항_수' has no rows in engine input)" in out.stdout
         )
         assert (
             "  - [q6] C유형 질문의 주제는 무엇인가?  "
             "(routed to human review (review_required))" in out.stdout
         )
+
+    @pytest.mark.parametrize("kb_kwargs", [_LOST, _LOST_NO_DRAFT], ids=["drafted", "estimated"])
+    def test_the_report_frames_are_english_around_the_quoted_original(
+        self, tmp_path, kb_kwargs
+    ):
+        # The repo's convention for a message about a Korean identifier
+        # (tools/validate.py): an ENGLISH frame quoting the name as declared. This
+        # file used to be the only tool under tools/ emitting Korean prose.
+        out = _run(_kb(tmp_path, **kb_kwargs))
+        summary = [ln for ln in out.stdout.splitlines() if ln.startswith("questions:")]
+        reasons = [
+            ln.rsplit("  (", 1)[1] for ln in out.stdout.splitlines() if ln.startswith("  - [")
+        ]
+        assert summary and reasons, out.stdout
+        for frame in summary + reasons:
+            # The question text and the relation name are quoted verbatim; strip
+            # those and nothing Korean may be left in the wording around them.
+            bare = re.sub(r"'[^']*'", "''", frame)
+            assert not _hangul(bare), frame
 
     def test_the_source_axis_alone_reports_nothing_wrong(self, tmp_path):
         # The premise of #537: the source line is clean in exactly this state, and
@@ -361,24 +574,39 @@ class TestQuestionAxisOutput:
         assert "- [q2] factlog 벤치마크의 총 문항 수는?" in out.stdout
         assert "- [q1]" not in out.stdout
 
-    def test_a_question_with_no_draft_is_reported_apart_from_a_loss(self, tmp_path):
+    def test_a_drafted_verdict_and_an_estimate_are_labelled_differently(self, tmp_path):
         kb = _kb(
             tmp_path,
-            questions="- [q1] Who is Claude Code developed by?\n- [q2] 아직 초안이 없다?\n",
+            questions=(
+                "- [q1] Who is Claude Code developed by?\n"
+                "- [q2] factlog 벤치마크의 총 문항 수는?\n"
+            ),
             query=(
                 "// q1: Who is Claude Code developed by?\n"
                 'relation("Claude Code", "develops", "Anthropic")?\n'
             ),
+            attributes="총_문항_수\n",
             accepted='relation("Claude Code", "developed_by", "Anthropic").\n',
             candidates=['Claude Code,developed_by,Anthropic,sources/a.md,accepted,0.9,'],
         )
         out = _run(kb)
+        assert "1 question(s) have no query draft — estimated" in out.stdout
         assert (
-            "questions: 2 declared; 0 with resolvable vocabulary, 1 unresolvable, "
-            "1 without a query draft" in out.stdout
+            "- [q1] Who is Claude Code developed by?  "
+            "(relation 'develops' has no rows in engine input)" in out.stdout
         )
-        assert "- [q1] Who is Claude Code developed by?  (relation 'develops' is not in engine input)" in out.stdout
-        assert "- [q2] 아직 초안이 없다?  (no query draft in facts/query.dl — run /factlog query)" in out.stdout
+        assert (
+            "- [q2] factlog 벤치마크의 총 문항 수는?  (no query draft; estimated from the "
+            "question text: relation '총_문항_수' has no rows in engine input)" in out.stdout
+        )
+
+    def test_the_estimate_catches_the_loss_a_broad_relation_would_mask(self, tmp_path):
+        # CLI end of the pin: 문항_수 survives on the subject the question names and
+        # must not answer for the missing 총_문항_수.
+        out = _run(_kb(tmp_path, **_LOST_NO_DRAFT), "--strict-questions")
+        assert out.returncode == 1, out.stdout
+        assert "questions: 1 declared; 0 with resolvable vocabulary, 1 unresolvable" in out.stdout
+        assert "relation '총_문항_수' has no rows in engine input" in out.stdout
 
     def test_reported_on_an_empty_kb_too(self, tmp_path):
         # No source files at all: the axis still reports, after the coverage line.
@@ -409,13 +637,50 @@ class TestDegradedInputs:
         assert "questions: 0 declared (policy/questions.md line 2: duplicate question id" in out.stdout
 
     def test_absent_query_dl_is_stated_as_such(self, tmp_path):
+        # facts/query.dl is LLM-authored, so its absence is a normal state and the
+        # summary says the verdicts below it are estimates.
         kb = _kb(tmp_path, **{k: v for k, v in _LOST.items() if k != "query"})
         out = _run(kb)
         assert out.returncode == 0, out.stderr
         assert (
-            "questions: 2 declared; 0 with resolvable vocabulary, 0 unresolvable, "
-            "2 without a query draft (facts/query.dl absent — run /factlog query)" in out.stdout
+            "(facts/query.dl absent — run /factlog query; questions estimated from text)"
+            in out.stdout
         )
+
+    def test_a_non_utf8_questions_file_does_not_take_the_tool_down(self, tmp_path):
+        # A Korean policy file stored EUC-KR is a real thing in this repo's world.
+        # The source axis never read policy/questions.md, so raising here would take
+        # source coverage away from a KB that had it before this axis existed.
+        kb = _kb(tmp_path, questions=None, accepted='relation("A", "b", "C").\n',
+                 candidates=['A,b,C,sources/a.md,accepted,0.9,'],
+                 raw={"questions.md": b"\xff\xfe- [q1] hi\n"})
+        out = _run(kb)
+        assert out.returncode == 0, out.stderr
+        assert "coverage: 1 source(s); 1 covered" in out.stdout
+        assert "questions: 0 declared (" in out.stdout
+        assert "codec can't decode" in out.stdout
+
+    def test_a_non_utf8_relation_policy_file_does_not_take_the_tool_down(self, tmp_path):
+        kb = _kb(tmp_path, questions="- [q1] 총 문항 수는?\n",
+                 accepted='relation("A", "b", "C").\n',
+                 candidates=['A,b,C,sources/a.md,accepted,0.9,'],
+                 raw={"attribute-relations.md": b"\xff\xfe\xc3\xd1_\xb9\xae\xc7\xd7_\xbc\xf6\n"})
+        out = _run(kb)
+        assert out.returncode == 0, out.stderr
+        assert "coverage: 1 source(s); 1 covered" in out.stdout
+        assert "questions: 1 declared; vocabulary unreadable" in out.stdout
+
+    def test_a_relation_declared_only_in_single_valued_md_is_still_named(self, tmp_path):
+        # A relation declared in single-valued.md (or typed-relations.md) and then
+        # emptied is exactly as lost as one declared in attribute-relations.md;
+        # leaving those files out of the vocabulary downgraded the report to the
+        # vaguer "names no relation this KB declares".
+        kb = _kb(tmp_path, questions="- [q1] What is the published year of Claude Code?\n",
+                 single_valued="published_year\n",
+                 accepted='relation("Claude Code", "developed_by", "Anthropic").\n',
+                 candidates=['Claude Code,developed_by,Anthropic,sources/a.md,accepted,0.9,'])
+        out = _run(kb)
+        assert "relation 'published_year' has no rows in engine input" in out.stdout
 
     def test_absent_accepted_dl(self, tmp_path):
         kb = _kb(tmp_path, **{k: v for k, v in _LOST.items() if k != "accepted"})
@@ -463,13 +728,33 @@ class TestExitCodes:
         )
         assert _run(kb, "--strict-questions").returncode == 0
 
-    def test_a_question_with_no_draft_never_gates(self, tmp_path):
-        # The normal state right after `factlog init`: nothing has been lost yet, so
-        # the opt-in gate stays silent (it is a LOSS gate, not a completeness gate).
-        kb = _kb(tmp_path, **{k: v for k, v in _LOST.items() if k != "query"})
+    def test_a_question_naming_no_known_relation_never_gates(self, tmp_path):
+        # The scaffolded question of a fresh `factlog init` KB: nothing has been
+        # lost, so the opt-in gate stays silent (it is a LOSS gate, not a
+        # completeness gate) while the line is still reported.
+        kb = _kb(tmp_path, questions="- [q1] 이 KB는 무엇을 다루는가?\n",
+                 accepted='relation("A", "b", "C").\n',
+                 candidates=['A,b,C,sources/a.md,accepted,0.9,'])
         out = _run(kb, "--strict-questions")
         assert out.returncode == 0, out.stderr
         assert "--strict-questions:" not in out.stderr
+        assert "1 naming no known relation" in out.stdout
+
+    def test_an_estimate_that_finds_a_loss_does_gate(self, tmp_path):
+        out = _run(_kb(tmp_path, **_LOST_NO_DRAFT), "--strict-questions")
+        assert out.returncode == 1
+        assert "--strict-questions: 1 declared question(s)" in out.stderr
+
+    def test_rows_about_other_subjects_do_not_gate(self, tmp_path):
+        # The relation is THERE; only the estimate's entity match falls short. That
+        # is too weak a signal to fail a build on, so it is reported, not gated.
+        kb = _kb(tmp_path, questions="- [q3] factlog 벤치마크의 총 문항 수는?\n",
+                 attributes="총_문항_수\n",
+                 accepted='relation("다른 벤치", "총_문항_수", "60").\n',
+                 candidates=['다른 벤치,총_문항_수,60,sources/a.md,accepted,0.9,'])
+        out = _run(kb, "--strict-questions")
+        assert out.returncode == 0, out.stderr
+        assert "1 with no matching rows" in out.stdout
 
     def test_strict_keeps_its_own_contract(self, tmp_path):
         # Every text source is covered and a question lost its relation: --strict is
@@ -612,5 +897,5 @@ class TestSampleKbAgreesWithTheEngine:
         assert "'develops' is not accepted vocabulary" in report
         assert (
             "  - [q5] Does this KB record that Anthropic develops Claude Code?  "
-            "(relation 'develops' is not in engine input)" in coverage
+            "(relation 'develops' has no rows in engine input)" in coverage
         ), coverage
