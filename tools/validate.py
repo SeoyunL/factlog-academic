@@ -343,18 +343,21 @@ def validate(root: Path) -> list[str]:
         if has_needs_review and not decision_bullets:
             errors.append("needs_review facts exist but decisions/open-questions.md has no review bullets")
         # A fence left open at the end of the file is not just a reading hazard (see
-        # the warning) — with needs_review rows waiting, it is proof the mirror is
-        # stalled. The writer refuses to append to a file that `ends_inside_fence`
-        # (merge_candidates.refuse_unclosed_fence), so those rows never reach
-        # open-questions.md while this holds, yet a bullet above the fence keeps the
-        # check above quiet. Re-derive the writer's own predicate here, off the file,
-        # so the gate reports what the writer already decided. Independent of
-        # decision_bullets: the escaping case has bullets above the fence.
+        # the warning). With needs_review rows in the queue it means the *next* merge
+        # cannot file them: the writer refuses to append to a file that
+        # `ends_inside_fence` (merge_candidates.refuse_unclosed_fence). So this is a
+        # preemptive gate — re-derive the writer's own predicate here, off the file,
+        # and report that filing will stall until the fence is closed. The tense is
+        # deliberate: a prior merge may already have mirrored today's rows (the file
+        # can hold their bullets above the fence), so the true statement is about what
+        # the next merge will refuse, not what one already did. Independent of
+        # decision_bullets: a bullet above the fence keeps the check above quiet.
         if has_needs_review and ends_inside_fence(decision_text):
             errors.append(
                 "needs_review facts exist but decisions/open-questions.md ends inside an "
-                f"unclosed code fence on line {unclosed_fence_line(decision_text)} — the writer "
-                "refused to file the pending needs_review rows; close the fence and re-run merge"
+                f"unclosed code fence on line {unclosed_fence_line(decision_text)} — merge will "
+                "refuse to file the pending needs_review rows until the fence is closed; close "
+                "the fence and re-run merge"
             )
 
     stale_pages = []
@@ -406,12 +409,15 @@ def review_section_warnings(root: Path) -> list[tuple[str, str]]:
     Whether the exit code moves depends on *where* the fence opens and on whether any
     needs_review rows are waiting. Below the four headings the fence hides nothing any
     structural check requires, so with no needs_review rows queued the run passes with
-    only this warning. But a fence there while needs_review rows wait is proof the
-    mirror is stalled — the writer refused to file them — and ``validate`` raises
-    that to an error off the same `ends_inside_fence` predicate the writer uses (#512).
-    So the message says what the fence does, not what the errors say — it used to claim
-    it was "why sections you can see are reported missing", which is false in exactly
-    that case, the common one where someone pasted a fragment onto the end of the file.
+    only this warning. But a fence there while needs_review rows wait means the next
+    merge will refuse to file them — so ``validate`` raises that subset to an error off
+    the same `ends_inside_fence` predicate the writer uses, escalating it from this
+    warning (#512). The error is future-tense on purpose: a prior merge may already
+    have mirrored today's rows, so what is true is that filing stalls until the fence
+    is closed, not that a refusal has already happened. So the message says what the
+    fence does, not what the errors say — it used to claim it was "why sections you can
+    see are reported missing", which is false in exactly that case, the common one
+    where someone pasted a fragment onto the end of the file.
 
     ``split_review_section`` is not an error at all: a split file is structurally
     complete and every check above passes on it. The earlier section reads
