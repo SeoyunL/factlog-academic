@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Which KB a bare ``merge_candidates.py`` is allowed to write (#532).
 
-The script resolves its root through the active-KB config, which its sibling write
-steps (``compile_facts.py``, ``run_logic_check.py``, ``finalize.py``) do not — so a
-bare run from an unrelated directory rewrote the configured KB's
-``facts/candidates.csv`` and ``pages/`` and exited 0, flipping that KB's logic
-report to STALE. The siblings all exit 1 there.
+The script resolves its root through the active-KB config, so a bare run from an
+unrelated directory rewrote the configured KB's ``facts/candidates.csv`` and
+``pages/`` and exited 0, flipping that KB's logic report to STALE. The guard keys on
+where the root came from: a 'config' root the caller is not standing inside is a
+target nobody named, and this script may not write to it.
 
 Driven as a subprocess rather than by calling ``main()``: what is under test is the
 resolution that happens at *import* time (the ``--wiki`` prepass and the
@@ -109,9 +109,23 @@ class TestImplicitConfigTarget:
         assert f"--wiki {active_kb}" in result.stderr
         assert f"FACTLOG_ROOT={active_kb}" in result.stderr
 
+    def test_refusal_gives_this_runs_writes_as_the_reason(self, active_kb: Path, elsewhere: Path):
+        # The stated reason must be what this run would do to the KB, not a claim
+        # about how the other steps behave — those are gaining the same config tier
+        # (#527/#528/#529), so any such claim would go stale. Asserted by element
+        # rather than by whole sentence so wording stays editable.
+        stderr = run_merge(cwd=elsewhere).stderr
+        assert "facts/candidates.csv" in stderr
+        assert "pages/" in stderr
+        assert "decisions/open-questions.md" in stderr
+        assert "logic report" in stderr
+        for sibling in ("compile_facts", "run_logic_check", "finalize"):
+            assert sibling not in stderr
+
     def test_bare_run_outside_a_kb_with_no_config_still_refuses(self, elsewhere: Path, tmp_path: Path, monkeypatch):
-        # Sibling parity, from the other direction: with nothing configured the root
-        # is the cwd, and a cwd that is not a KB is rejected as it always was.
+        # The other direction: with nothing configured the root is the cwd, and a cwd
+        # that is not a KB is rejected by ensure_dirs as it always was — the new guard
+        # does not fire ('cwd', not 'config') and does not need to.
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
         result = run_merge(cwd=elsewhere)
         assert result.returncode == 1, result.stdout + result.stderr

@@ -1038,12 +1038,14 @@ def implicit_target_refusal(root: Path, source: str, cwd: Path) -> str | None:
     the one that made a merge run from ``/tmp`` rewrite the configured KB's
     candidates.csv and pages/, flipping its logic report to STALE with exit 0.
 
-    The sibling write steps all exit 1 in exactly that situation, and not by a guard
-    of their own: ``compile_facts.py`` / ``run_logic_check.py`` / ``finalize.py``
-    never consult the active-KB config at all, so a bare run outside a KB resolves to
-    the cwd and ``ensure_wiki_root`` (or finalize's own sources/ check) rejects it.
-    This script is the only writer that reaches past the cwd, so it is the only one
-    that needs to say no in code.
+    The refusal stands on what THIS run would do — rewrite ``facts/candidates.csv``,
+    ``pages/`` and ``decisions/open-questions.md`` in a KB the caller never named,
+    invalidating its logic report — not on a comparison with the other steps. That
+    comparison does not hold still: the config tier is being extended to the sibling
+    write steps (#527 compile_facts, #528 run_logic_check, #529 finalize), which gives
+    each of them the same exposure this guard exists for. Per the decision on those
+    issues, finalize carries a matching refusal (#529), while compile_facts and
+    run_logic_check write only derived artifacts and are left to a follow-up.
 
     Announcing the target instead of refusing was the other option on the issue, and
     main() does announce it — but announcing alone cannot be the whole fix here,
@@ -1052,10 +1054,10 @@ def implicit_target_refusal(root: Path, source: str, cwd: Path) -> str | None:
     write auditable; it is not a way to stop an unintended one.
 
     'cwd' needs no refusal: the root IS the cwd, so a non-KB there is caught by
-    ``ensure_dirs`` exactly as it is for the siblings. And a config root the caller
-    is standing inside is not implicit — running the merge from the KB (or a
-    subdirectory of it) with no flag is the documented workflow, and the shell
-    harness's ``--wiki``/``FACTLOG_ROOT`` calls are 'flag'/'env'.
+    ``ensure_dirs``. And a config root the caller is standing inside is not implicit —
+    running the merge from the KB (or a subdirectory of it) with no flag is the
+    documented workflow, and the shell harness's ``--wiki``/``FACTLOG_ROOT`` calls are
+    'flag'/'env'.
     """
     if source != "config":
         return None
@@ -1064,9 +1066,8 @@ def implicit_target_refusal(root: Path, source: str, cwd: Path) -> str | None:
     return (
         f"merge_candidates: REFUSING to write to {root} — that KB comes from the active-KB "
         f"config, not from this command, and the current directory ({cwd}) is not inside it.\n"
-        f"  This script writes facts/candidates.csv, pages/ and decisions/open-questions.md, "
-        f"which invalidates the KB's logic report. compile_facts.py, run_logic_check.py and "
-        f"finalize.py all refuse here; a write step must be at least as conservative (#532).\n"
+        f"  This run would rewrite facts/candidates.csv, pages/ and "
+        f"decisions/open-questions.md there, invalidating that KB's logic report (#532).\n"
         f"  Name the target explicitly:\n"
         f"    python3 tools/merge_candidates.py --wiki {root}\n"
         f"  or export FACTLOG_ROOT={root}"
