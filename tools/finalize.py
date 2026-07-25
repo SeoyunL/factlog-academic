@@ -19,7 +19,7 @@ check is skipped with a clear note (facts are still merged and compiled) so the
 command degrades gracefully rather than hard-failing.
 
 Usage:
-    python3 finalize.py [--target <kb>]
+    python3 finalize.py [--target|--wiki <kb>]
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import factlog_config
 from common import (
     EMPTY_POLICY_DL,
     logic_policy_md_has_rejected_items,
@@ -78,6 +79,31 @@ def _run(script: str, *args: str, env: dict[str, str]) -> subprocess.CompletedPr
         return subprocess.CompletedProcess(exc.cmd, returncode=124, stdout=stdout, stderr=stderr)
 
 
+def resolve_kb_root(cli_value: str | None) -> Path:
+    """Resolve the KB root finalize operates on, honouring the config tier (#529).
+
+    Precedence is the documented one (factlog/config.py):
+
+        --target/--wiki  >  $FACTLOG_ROOT  >  active-KB config  >  cwd
+
+    The flag default used to be ``os.environ.get("FACTLOG_ROOT", ".")``, which skipped
+    the config tier entirely: run outside a KB with neither the flag nor the env var —
+    the normal shape for a user who set an active KB once with `factlog use` — finalize
+    resolved to cwd and refused with "is not a factlog KB (no sources/)" instead of
+    finalizing the KB every other command was already targeting.
+
+    Sibling tools (tools/merge_candidates.py and friends) do this as a pre-pass that
+    exports FACTLOG_ROOT *before* importing common, because common binds its path
+    globals at import time. finalize does not need that: it imports only a constant and
+    two path-taking predicates from common, and hands every chained step an explicit
+    FACTLOG_ROOT in ``env``. Resolving here instead keeps the root a function of
+    ``main``'s argv rather than of module import order. That holds only while finalize
+    imports nothing ROOT-bound from common — adding such an import means moving this
+    to a pre-pass.
+    """
+    return Path(factlog_config.resolve_root(cli_value)[0])
+
+
 def _pyrewire_ok() -> bool:
     try:
         import pyrewire  # type: ignore
@@ -100,7 +126,21 @@ def main(argv: list[str] | None = None) -> int:
             except (AttributeError, ValueError, OSError):
                 pass
     parser = argparse.ArgumentParser(prog="finalize", description="deterministic /factlog add finalize chain")
-    parser.add_argument("--target", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
+    # `--wiki` is accepted as an alias of `--target` so the KB-root flag is spelled the
+    # same way everywhere in the toolchain (merge_candidates/check_conflicts take
+    # `--wiki`, ask_router takes `--target`); both land in the same dest.
+    #
+    # No argparse `default=` here: the default is not a constant but a resolution over
+    # env → config → cwd, and computing it in resolve_kb_root keeps the help text and
+    # the behaviour describing one rule instead of two (#529).
+    parser.add_argument(
+        "--target",
+        "--wiki",
+        dest="target",
+        default=None,
+        help="KB root (authoritative; sets FACTLOG_ROOT for the chained steps; "
+        "default: $FACTLOG_ROOT, then the active KB from `factlog use`, then '.')",
+    )
     parser.add_argument(
         "--allow-unverified",
         action="store_true",
@@ -114,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    root = Path(args.target).expanduser().resolve()
+    root = resolve_kb_root(args.target)
     if not (root / "sources").is_dir():
         print(f"finalize: {root} is not a factlog KB (no sources/).", file=sys.stderr)
         return 1
