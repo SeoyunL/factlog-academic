@@ -377,3 +377,31 @@ def test_a_missing_policy_prompt_does_not_silence_a_stale_dl(kb):
     assert "missing or empty policy/prompts/natural_language_to_policy.md" in combined, combined
     lines = _policy_lines(proc)
     assert any("stale" in line for line in lines), combined
+
+
+def test_an_md_authoring_error_is_not_reported_as_dl_drift(kb):
+    """(12) #557 defect B: validate does not assert a comparison it never made.
+
+    --check exits non-zero for two different kinds of reason. A marker the policy grammar
+    rejects is an authoring error in the .md — the .dl may not even exist yet — and
+    "does not match policy/logic-policy.md" pointed the reader at regenerating the .dl,
+    which cannot fix it. On real drift the same words were a duplicate of the child's own
+    "is stale". validate compares nothing here, so it claims nothing; the child's detail
+    is relayed and it already names the file to edit.
+
+    Kills the mutant that restores the "does not match" wording. The {Canonical} marker
+    has to lead the sentence — anywhere else _strip_canonical_prefix accepts it as prose
+    and the bullet compiles quietly.
+    """
+    md = kb / "policy" / "logic-policy.md"
+    md.write_text(
+        md.read_text(encoding="utf-8")
+        + "\n- [canon] {Canonical} The `develops` relation names the canonical form.\n",
+        encoding="utf-8",
+    )
+
+    lines = _policy_lines(_validate(kb))
+    assert len(lines) == 1, lines
+    assert "unrecognized leading marker" in lines[0], lines
+    assert "logic-policy.dl" in lines[0], lines
+    assert "does not match" not in lines[0], lines

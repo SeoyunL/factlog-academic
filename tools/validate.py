@@ -235,7 +235,16 @@ def validate_logic_policy(root: Path) -> list[str]:
     if completed.returncode == 0:
         return []
     detail = (completed.stderr or completed.stdout).strip()
-    return [f"policy/logic-policy.dl does not match policy/logic-policy.md: {detail}"]
+    # "check failed", not "does not match" (#557): --check exits non-zero for reasons that
+    # are not drift — an unparseable marker in the .md is an authoring error whose fix is
+    # in the .md, and the old prefix sent the reader to regenerate the .dl instead. Nothing
+    # here measured the two files against each other, so nothing here can assert it; the
+    # child already says which of the two is wrong and that detail is relayed verbatim.
+    # The logic-policy.dl token stays in the prefix: it is what identifies these lines to
+    # readers and to tests/unit/test_empty_policy_roundtrip.py's _policy_lines. Branching
+    # on the detail text to pick a prefix would put the child's verdict in two places
+    # again, which is the duplication #491 removed.
+    return [f"policy/logic-policy.dl check failed: {detail}"]
 
 
 def validate(root: Path) -> list[str]:
