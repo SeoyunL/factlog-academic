@@ -36,6 +36,11 @@
 #       there instead of the #559 "does not cover these" hint — and the test RUNS
 #       it, asserting the KB comes back clean on both axes, so the hint is pinned
 #       as a remedy rather than as a string.
+#   (f) and the SAME check pointing the other way: the blind-spot KB also runs
+#       `eject --orphans`, pinning that it finds nothing. Both halves of the
+#       report's claim are then measured against the command they name, so
+#       whichever one stops being true (#559 makes it the second) fails here
+#       instead of quietly becoming the next false remedy.
 #
 # Deterministic; no pyrewire.  Usage: bash tests/test_drop_visibility.sh
 
@@ -133,6 +138,21 @@ printf '%s' "$cov_out" | grep -qE "0 fact\(s\): sources/keeper.md" \
 printf '%s' "$cov_out" | grep -qE "RUN ROWS cite a missing source.*sources/keeper\.md" \
   && bad "a source that IS on disk was reported as missing" \
   || ok "a source on disk is never reported as run-cited-missing"
+
+# The hint this KB prints CLAIMS `factlog eject --orphans` cannot clean the class.
+# Run it and check, rather than asserting the sentence. The claim is unverified in
+# exactly the direction that matters next: #559 teaches eject to read runs/*.json,
+# and on that day this KB becomes ejectable while the hint still says it is not —
+# the same lie this branch just removed for ruled-on rows, arriving from the other
+# side. Then this line goes red and the hint has to be rewritten WITH the fix
+# instead of outliving it. (The `eject --orphans` run on the ruled-on KB below is
+# this same guard pointing the other way: that one pins "the command works", this
+# one pins "it does not".)
+set +e; ej_blind="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"; ejb_rc=$?; set -e
+printf '%s' "$ej_blind" | grep -qF "no orphaned sources found" \
+  && ok "eject --orphans really cannot clean this class (the #559 hint is true)" \
+  || bad "eject --orphans DID match — the 'does not cover these (see #559)' hint is now false: $ej_blind"
+[ "$ejb_rc" -eq 0 ] && ok "eject exits 0 with nothing to do" || bad "eject exited $ejb_rc: $ej_blind"
 
 # --- the OTHER class: a ghost row a human ruled on ----------------------------
 # Same round trip with `confirmed` rows. The #218 ratchet REFUSES the rebuild

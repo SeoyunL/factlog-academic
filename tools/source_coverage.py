@@ -240,6 +240,17 @@ def eject_visible_refs(candidates_csv: Path) -> set[str]:
     strips every field, and eject does not, so a hand-edited row whose source
     carries a leading space is a ref eject cannot match. Stripping here would
     promise a cleanup that command would not perform.
+
+    That leaves this set ASYMMETRIC with ``run_cited_sources``, which does strip
+    (merge strips on load, so a trailing-space run row is alive). In a KB whose
+    candidates.csv AND run rows were both hand-edited with trailing whitespace,
+    the two keys miss each other and the ref is filed as the blind-spot class: the
+    report says to inspect runs/*.json while `eject --orphans` would in fact have
+    retired it. Left as is because the error runs in the SAFE direction — it sends
+    the reader to a manual check that works, never to a command that silently does
+    nothing — and because matching merge is what keeps a live source out of this
+    report in the first place. Leading whitespace has no such gap: neither side
+    treats it as ejectable.
     """
     refs: set[str] = set()
     for row in read_csv(candidates_csv):
