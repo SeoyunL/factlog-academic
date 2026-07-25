@@ -47,6 +47,42 @@ take `--target`. A flag applies only to the **single command** it was given to, 
 > rather than falling through to the next rank — otherwise one unset variable
 > silently changes the target.
 
+> **The two mutating tools refuse a rank-3 root.** `tools/finalize.py`
+> (`--target`, alias `--wiki`) and `tools/merge_candidates.py` (`--wiki` — it does
+> not accept `--target`) resolve by the table above, but then **refuse** a KB
+> that was named only by rank 3 (the active-KB config) while the current directory
+> is outside that KB (exit 1). `merge_candidates` rewrites `facts/candidates.csv`,
+> `pages/` and `decisions/open-questions.md`; `finalize` writes none of those
+> itself — it chains `merge_candidates` and then recompiles `facts/accepted.dl`.
+> The refusal stops a run nobody aimed from silently overwriting the active KB and
+> invalidating its logic report. There are three ways to aim one: name it with
+> `--target`/`--wiki`, name it with `$FACTLOG_ROOT`, or run from inside it. The
+> refusal prints the resolved path and both ways to name it (the flag and
+> `export FACTLOG_ROOT`) — running from inside is an aim, but not one the message
+> mentions.
+
+> **Known exception: an empty flag value does not go through that table.** With
+> `--wiki ""`/`--target ""` — the form you get from passing an unexported
+> `$FACTLOG_ROOT` — the two tools diverge. `finalize.py --target ""` still resolves
+> to the config KB and refuses it (exit 1). `merge_candidates.py --wiki ""` resolves
+> the root **twice**: the guard sees the config tier while the write path re-reads
+> the empty argument and falls to the **current directory**, so it writes to the
+> current directory with no refusal, labels the provenance `(from config)` anyway,
+> and exits 0.
+
+> **`compile_facts.py`/`run_logic_check.py`, which only rewrite their own engine
+> outputs, take a rank-3 root with no flag.** That means the *file set* they touch
+> is bounded to their own engine output — not that an unaimed run is harmless. Run
+> from outside the KB with no aim, `compile_facts.py` **deletes** the active KB's
+> `facts/accepted.dl` when it finds a single-valued contradiction (exit 1), so that
+> KB is left with no engine input until the conflict is resolved. Their exemption
+> from the guard is provisional rather than settled (`merge_candidates`' guard
+> docstring leaves the two "to a follow-up"). And some scripts do not consult the
+> config tier **at all**: `tools/generate_logic_policy.py` takes no KB flag and sees
+> only `$FACTLOG_ROOT` and the current directory, so with just the config set and a
+> cwd outside the KB it exits 1 with `not a factlog KB root: …` (unifying the flag
+> surface is #533).
+
 Whichever way a path arrives, it goes through `~` expansion and absolute-path
 normalization. If the config file is missing, its JSON is corrupt, or its `root`
 field is empty, resolution **falls through to the next rank instead of crashing** —

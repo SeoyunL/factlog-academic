@@ -56,6 +56,50 @@ tools use (`factlog/config.py` `resolve_root`):
 Exporting once turns the hook↔tool agreement from a "same-env assumption" into an
 enforced invariant: every later command and the gate hook read this exact root.
 
+Exporting is also what keeps the **mutating** engine steps runnable from anywhere.
+`finalize.py` (`--target`, alias `--wiki`) and `merge_candidates.py` (`--wiki` —
+it does *not* accept `--target`) resolve by the precedence above but then
+**refuse** a root that came *only* from the active-KB config while the current
+directory is outside that KB. `merge_candidates` rewrites `facts/candidates.csv`,
+`pages/` and `decisions/open-questions.md`; `finalize` writes none of those itself
+— it chains `merge_candidates` and then recompiles `facts/accepted.dl`. So they
+act only on a KB this command actually aimed at: named by `--target`/`--wiki`,
+named by `$FACTLOG_ROOT`, or the KB you are standing in. The refusal prints the
+resolved path and both ways to *name* it — the flag and `export FACTLOG_ROOT`;
+standing in the KB is an aim too but the message does not list it — and exits `1`.
+
+**Known exception — an empty flag value does not go through that table**, and the
+two tools diverge there. `--wiki ""` / `--target ""` is exactly what
+`--wiki "$FACTLOG_ROOT"` becomes in a shell that skipped the export step above.
+`finalize.py --target ""` still resolves to the config-tier KB and refuses it
+(exit `1`). `merge_candidates.py --wiki ""` does not: it resolves the root twice —
+the guard sees the config tier, while the write path re-reads the empty argv and
+falls to the **current directory** — so it writes to cwd, prints `(from config)`
+for a path that did not come from config, and exits `0`. Run the export step above
+*before* any of the `--wiki "$FACTLOG_ROOT"` calls below.
+
+The steps that only rewrite their own engine outputs (`compile_facts.py`,
+`run_logic_check.py`) take a config-tier root with no flag. That bounds the *file
+set* they touch to their own engine output; it is not a claim that an unaimed run
+is harmless. `compile_facts.py` run from outside the KB against a config-tier root
+**deletes** `facts/accepted.dl` when it finds a single-valued contradiction (exit
+`1`), so a run nobody aimed can leave the active KB with no engine input until the
+conflict is resolved. Their exemption from the guard is provisional, not a settled
+rule — `merge_candidates`' guard docstring leaves the two "to a follow-up".
+
+A third group is still outside the precedence entirely: some `tools/` scripts take
+no KB flag and never consult the active-KB config, so they see only `$FACTLOG_ROOT`
+and cwd — `generate_logic_policy.py` is one, and from outside a KB with only the
+config set it exits `1` with `not a factlog KB root: …`. Unifying that surface is
+#533's job; until then the export above is what makes those scripts work from
+anywhere.
+
+If you followed the export step, the first group passes its guard as `env` with no
+flag at all, so the `--target`/`--wiki "$FACTLOG_ROOT"` spelled out in the examples
+below is defence in depth rather than a requirement. It is defence only while the
+export actually happened: without it the flag degrades to the empty value above,
+which for `merge_candidates` is *weaker* than passing nothing. Export first.
+
 For diagnostics, the plain `factlog where` (no flag) additionally prints where the
 root was resolved from and the config file path — use it to debug, but always
 machine-read the root via `--porcelain`.
@@ -807,7 +851,10 @@ on the route: on the **engine** route `render` appends the warning text itself; 
 the **wiki** route `render` only forwards the `policy_uncompiled` flag in its JSON
 directive (no text), and the warning text is appended by the `wiki` command. Either
 way you show the warning verbatim (below). Tell the user to run
-`tools/generate_logic_policy.py` (or `/factlog add`) to compile the policy.
+`tools/generate_logic_policy.py` (or `/factlog add`) to compile the policy. That
+script takes no KB flag and does not read the active-KB config, so run it with
+`FACTLOG_ROOT` exported (the resolve step at the top of this file) or from inside
+the KB; with only the config set it exits `1` with `not a factlog KB root: …`.
 
 ### Step 2′ — Multi-draft probe (reduce missed-engine)
 
