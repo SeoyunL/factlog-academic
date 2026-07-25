@@ -1,16 +1,58 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Interactively review candidate facts that still need human judgment."""
+"""Interactively review candidate facts that still need human judgment.
+
+Usage:
+    python3 review_candidates.py [--target <kb>] [--dry-run] [--yes] [--limit N]
+
+--target ("--wiki" is an accepted alias) overrides $FACTLOG_ROOT, which overrides
+the active-KB config, which overrides cwd — the same precedence `factlog review`
+follows, so the two ways into the review queue cannot land on different KBs (#533).
+"""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
-from common import (
+# Ensure tools/ is importable when run directly, and resolve the KB root BEFORE
+# importing common (whose module-level ROOT captures FACTLOG_ROOT at import, and
+# from which CANDIDATES_CSV and DECISIONS_DIR below are derived).
+_TOOLS_DIR = Path(__file__).parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+import factlog_config  # noqa: E402
+
+# --target is the canonical spelling across the toolchain; --wiki is accepted as an
+# alias so one spelling works everywhere (#533). ONE tuple feeds BOTH the pre-pass
+# below and main()'s strict parser: a spelling only one of the two knew would be
+# either read-but-unadvertised or accepted-but-ignored, and an ignored KB flag
+# silently reviews (and rewrites) whatever the config/cwd tier resolved to.
+_ROOT_FLAGS = ("--target", "--wiki")
+
+
+def _peek_root_flag(argv: list[str] | None = None) -> str | None:
+    """The KB root given on the command line, or None.
+
+    ``parse_known_args`` because this runs at import time, before main()'s real
+    parser exists: the peek must not reject an argument it is not responsible for.
+    Rejecting a typo is main()'s job, once, through its own strict parse.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument(*_ROOT_FLAGS, dest="target", default=None)
+    known, _ = pre.parse_known_args(sys.argv[1:] if argv is None else argv)
+    return known.target
+
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root(_peek_root_flag())[0]
+
+from common import (  # noqa: E402
     CANDIDATES_CSV,
     DECISIONS_DIR,
     FACT_HEADER,
@@ -174,10 +216,37 @@ def write_review_log(decisions: list[ReviewDecision]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Review needs_review facts in facts/candidates.csv.")
+    # The root flag was already consumed by the pre-pass above; declaring it again
+    # here is what puts it in --help and what makes a misspelled `--targt /path`
+    # exit 2 instead of being silently ignored and reviewing whatever the config/cwd
+    # tier resolved to. No argparse `default=`: the default is not a constant but a
+    # resolution over env → config → cwd.
+    parser.add_argument(
+        *_ROOT_FLAGS,
+        dest="target",
+        default=None,
+        metavar="PATH",
+        help=(
+            "KB root (--wiki is an alias). Overrides $FACTLOG_ROOT and the "
+            "active-KB config; without it the root is resolved as "
+            "$FACTLOG_ROOT > active-KB config > cwd."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="only list facts that need review")
     parser.add_argument("--yes", action="store_true", help="write changes without the final confirmation prompt")
     parser.add_argument("--limit", type=int, help="review only the first N rows")
     args = parser.parse_args()
+    # An empty flag value is refused rather than dropped to the next tier (#546):
+    # `--target "$FACTLOG_ROOT"` in a shell that never exported the variable is
+    # exactly this shape, and falling through would open the configured KB's review
+    # queue while the caller believes they named one.
+    if args.target is not None and not args.target.strip():
+        print(
+            "review_candidates: the KB-root flag (--target/--wiki) was empty; pass a KB path, "
+            "or pass no flag at all to use the active KB.",
+            file=sys.stderr,
+        )
+        return 1
 
     ensure_dirs()
     rows = read_candidate_rows()

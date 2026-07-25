@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Generate policy/logic-policy.dl from controlled natural-language policy text."""
+"""Generate policy/logic-policy.dl from controlled natural-language policy text.
+
+Usage:
+    python3 generate_logic_policy.py [--target <kb>] [--dry-run | --check]
+
+--target ("--wiki" is an accepted alias) overrides $FACTLOG_ROOT, which overrides
+the active-KB config, which overrides cwd. SKILL.md and tools/finalize.py both name
+this script with no arguments, so the config tier is what lets that documented form
+run from outside a KB: without it a bare run resolved to cwd and died with
+"not a factlog KB root: ..." for a user who had set an active KB once (#533).
+"""
 
 from __future__ import annotations
 
@@ -12,7 +22,40 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from common import (
+# Ensure tools/ is importable when run directly, and resolve the KB root BEFORE
+# importing common (whose module-level ROOT captures FACTLOG_ROOT at import, and
+# from which every path constant below is derived).
+_TOOLS_DIR = Path(__file__).parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+import factlog_config  # noqa: E402
+
+# --target is the canonical spelling across the toolchain (the `factlog` CLI, the
+# engine steps and finalize all take it); --wiki is accepted as an alias so one
+# spelling works everywhere (#533). ONE tuple feeds BOTH the pre-pass below and
+# main()'s strict parser: a spelling only one of the two knew would be either
+# read-but-unadvertised or accepted-but-ignored, and an ignored KB flag silently
+# writes policy/logic-policy.dl into whatever the config/cwd tier resolved to.
+_ROOT_FLAGS = ("--target", "--wiki")
+
+
+def _peek_root_flag(argv: list[str] | None = None) -> str | None:
+    """The KB root given on the command line, or None.
+
+    ``parse_known_args`` because this runs at import time, before main()'s real
+    parser exists: the peek must not reject an argument it is not responsible for
+    (``--dry-run``, ``--check``). Rejecting a typo is main()'s job, once.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument(*_ROOT_FLAGS, dest="target", default=None)
+    known, _ = pre.parse_known_args(sys.argv[1:] if argv is None else argv)
+    return known.target
+
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root(_peek_root_flag())[0]
+
+from common import (  # noqa: E402
     EMPTY_POLICY_DL,
     POLICY_DIR,
     PROMPTS_DIR,
@@ -32,7 +75,7 @@ from common import (
 )
 
 try:
-    from pyrewire import EasySession
+    from pyrewire import EasySession  # noqa: E402
 except ImportError:  # pragma: no cover - exercised only on machines without pyrewire.
     EasySession = None
 
@@ -596,9 +639,34 @@ def _reject_dropped_policy(rules: list[dict[str, Any]], policy_text: str) -> Non
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate policy/logic-policy.dl from controlled natural-language policy text.")
+    # The root flag was already consumed by the pre-pass above; declaring it again
+    # here is what puts it in --help and what makes a misspelled `--targt /path`
+    # exit 2 instead of being silently ignored and compiling into whatever the
+    # config/cwd tier resolved to. No argparse `default=`: the default is not a
+    # constant but a resolution over env → config → cwd.
+    parser.add_argument(
+        *_ROOT_FLAGS,
+        dest="target",
+        default=None,
+        metavar="PATH",
+        help=(
+            "KB root (--wiki is an alias). Overrides $FACTLOG_ROOT and the "
+            "active-KB config; without it the root is resolved as "
+            "$FACTLOG_ROOT > active-KB config > cwd."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="render and validate, but do not write policy/logic-policy.dl")
     parser.add_argument("--check", action="store_true", help="verify policy/logic-policy.dl matches the generated output")
     args = parser.parse_args()
+    # An empty flag value is refused rather than dropped to the next tier (#546):
+    # `--target "$FACTLOG_ROOT"` in a shell that never exported the variable is
+    # exactly this shape, and falling through would write logic-policy.dl into the
+    # configured KB while the caller believes they named one.
+    if args.target is not None and not args.target.strip():
+        raise SystemExit(
+            "generate_logic_policy: the KB-root flag (--target/--wiki) was empty; pass a KB path, "
+            "or pass no flag at all to use the active KB."
+        )
     if args.dry_run and args.check:
         raise SystemExit("--dry-run and --check cannot be used together")
 

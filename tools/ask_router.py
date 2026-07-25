@@ -32,7 +32,8 @@ Usage:
     python3 ask_router.py render   "<draft>" [--target <kb>]
 
 Each subcommand prints JSON (validate/evaluate) or the rendered answer (render)
-to stdout. --target overrides FACTLOG_ROOT (authoritative).
+to stdout. --target ("--wiki" is an accepted alias) overrides $FACTLOG_ROOT, which
+overrides the active-KB config, which overrides cwd.
 """
 
 from __future__ import annotations
@@ -57,7 +58,39 @@ if str(_TOOLS_DIR) not in sys.path:
 # its module-level paths from FACTLOG_ROOT at import time.
 import factlog_config  # noqa: E402
 
-os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--target")
+# --target is the canonical spelling across the toolchain; --wiki stays accepted as
+# an alias because the sibling engine scripts and SKILL.md spell it that way (#533).
+# ONE tuple feeds BOTH the import-time pre-pass below and every subparser in
+# build_parser(): a spelling only one of the two knew would be either
+# read-but-unadvertised or accepted-but-ignored, and an ignored KB flag silently
+# routes the ask at whatever the config/cwd tier resolved to.
+_ROOT_FLAGS = ("--target", "--wiki")
+
+# The one help string every subcommand's root flag uses, so six declarations cannot
+# drift into six descriptions of one rule. It states the resolution the pre-pass
+# actually performs; the old "overrides FACTLOG_ROOT" stopped at the second tier and
+# never mentioned the active-KB config (#531).
+_ROOT_FLAG_HELP = (
+    "KB root (--wiki is an alias). Overrides $FACTLOG_ROOT and the active-KB "
+    "config; without it the root is resolved as $FACTLOG_ROOT > active-KB config > cwd."
+)
+
+
+def _peek_root_flag(argv: list[str] | None = None) -> str | None:
+    """The KB root given on the command line, or None.
+
+    ``parse_known_args`` because this runs at import time, before build_parser()'s
+    real parser exists: the peek must not reject an argument it is not responsible
+    for — here that includes the subcommand and its positional draft/question.
+    Rejecting a typo is main()'s job, once, through the strict parse.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument(*_ROOT_FLAGS, dest="target", default=None)
+    known, _ = pre.parse_known_args(sys.argv[1:] if argv is None else argv)
+    return known.target
+
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root(_peek_root_flag())[0]
 
 from common import (  # noqa: E402
     ACCEPTED_DL,
@@ -883,24 +916,24 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         p = sub.add_parser(name, help=helptext)
         p.add_argument("draft", help="the candidate Datalog query line")
-        p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
+        p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
         p.set_defaults(func=func)
 
     # Path B (wiki) subcommands take the natural-language question, not a draft.
     search_p = sub.add_parser("search", help="search the wiki corpus (sources/ + runs/sources/) (JSON)")
     search_p.add_argument("text", help="the natural-language question")
-    search_p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
+    search_p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
     search_p.set_defaults(func=cmd_search)
 
     wiki_p = sub.add_parser("wiki", help="render the UNVERIFIED — wiki exploration answer")
     wiki_p.add_argument("text", help="the natural-language question")
     wiki_p.add_argument("--reason", default="not expressible over accepted facts", help="why the engine path did not apply")
-    wiki_p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
+    wiki_p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
     wiki_p.set_defaults(func=cmd_wiki)
 
     note_p = sub.add_parser("note", help="record an unanswered question to the non-engine-input sink")
     note_p.add_argument("text", help="the natural-language question")
-    note_p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
+    note_p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
     note_p.set_defaults(func=cmd_note)
 
     return parser
@@ -908,6 +941,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # An empty flag value is refused rather than dropped to the next tier (#546):
+    # `--target "$FACTLOG_ROOT"` in a shell that never exported the variable is
+    # exactly this shape, and falling through would route the ask at the configured
+    # KB while the caller believes they named one.
+    if args.target is not None and not args.target.strip():
+        print(
+            "ask_router: the KB-root flag (--target/--wiki) was empty; pass a KB path, "
+            "or pass no flag at all to use the active KB.",
+            file=sys.stderr,
+        )
+        return 1
     return args.func(args)
 
 
