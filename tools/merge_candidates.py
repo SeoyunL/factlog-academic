@@ -96,17 +96,36 @@ from common import (  # noqa: E402
     SUPERSEDED_STATUSES,
     RUNS_DIR,
     attribute_relation_forms,
+    dedup_engine_atoms,
     is_attribute_relation,
+    engine_facts,
     ensure_dirs,
     fact_key,
     is_sync_ignored,
     is_text_source,
+    load_logic_policy,
+    load_questions,
     normalize_confidence,
     paired_conversion,
+    relation_aliases,
+    resolve_relation,
     slugify,
     source_file_refs,
     source_rel_key,
     sync_ignore_patterns,
+)
+# #537's question axis, reused rather than reimplemented (see the drop-impact
+# section below): `query_drafts` READS the question -> query mapping out of
+# facts/query.dl's `// qN:` anchors, and `question_rows` (with the vocabulary
+# `relation_vocabulary` builds) delegates the verdict on each draft to
+# common.classify_query — the gate the engine's own report and `/factlog ask` use.
+# Importing costs ~4ms on top of common and buys the guarantee that this line and
+# facts/logic_report.txt cannot disagree about which questions the engine can answer.
+from source_coverage import (  # noqa: E402
+    estimated_verdict,
+    query_drafts,
+    question_rows,
+    relation_vocabulary,
 )
 from factlog import literal_types  # noqa: E402
 # No `Heading` here on purpose: this module never holds a heading's coordinates
@@ -353,11 +372,49 @@ def _flush_skipped_sources(skipped: dict[str, int], *, show_counts: bool = True)
     skipped.clear()
 
 
+def clean_row(row: dict[str, str]) -> dict[str, str]:
+    """One raw run row as it would be stored in facts/candidates.csv.
+
+    Lifted out of :func:`normalize_rows` so a row the merge REJECTS can be put on
+    the same footing as one it keeps (#538): the drop-impact report has to ask
+    "what would engine input have held if this row had survived", and that question
+    is only answerable against the normalised status and the NFC-folded relation
+    name, not against the raw run row. One definition, so the counterfactual and
+    the CSV cannot disagree about what a row says.
+
+    - source is NFC-folded but NOT stripped: macOS stores filenames as NFD while
+      extracted sources are NFC, so folding is what keeps a Korean-named source's
+      facts from being dropped; the value is otherwise passed through as-is,
+      because it is also the key the source-existence check compares.
+    - subject/relation/object are stripped and NFC-folded, so key, CSV and engine
+      hold ONE form even when the surviving row of a dedup arrived as NFD.
+    - status falls back to 'needs_review' when it is not a known status.
+    - confidence is clamped to [0.00, 1.00].
+    - an amount object is canonicalised to `amount(N,"unit")` — before the dedup
+      key is taken, so `amount(7,"억")` and `amount(7,억)` collapse to one.
+    """
+    source = unicodedata.normalize("NFC", row["source"])
+    clean = {field: row.get(field, "").strip() for field in FACT_HEADER}
+    clean["source"] = source  # NFC-normalised canonical source
+    for field in ("subject", "relation", "object"):
+        clean[field] = unicodedata.normalize("NFC", clean[field])
+    clean["status"] = clean["status"] if clean["status"] in VALID_STATUSES else "needs_review"
+    clean["confidence"] = normalize_confidence(clean["confidence"])
+    # The engine .dl parser supports \" escapes (wirelog#924), so quoting the unit
+    # unconditionally keeps a unit with spaces/commas unambiguous and accepted.dl
+    # still loads cleanly.
+    canon_amount = literal_types.canonical_amount(clean["object"])
+    if canon_amount is not None:
+        clean["object"] = canon_amount
+    return clean
+
+
 def normalize_rows(
     root: Path,
     rows: list[dict[str, str]],
     *,
     strict: bool = False,
+    dropped_rows: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """Validate, normalise, and deduplicate raw candidate rows.
 
@@ -385,6 +442,14 @@ def normalize_rows(
     - result is sorted by (source, subject, relation, object)
 
     If *strict* is True, any dropped row causes a non-zero exit.
+
+    *dropped_rows*, when given, is EXTENDED with the cleaned form of every row
+    rejected because its source is not on disk — the input the drop-impact report
+    needs (#538).  Rows lost to dedup are deliberately NOT collected: a dedup loser
+    shares its (subject, relation, object, source-file) key with the row that
+    survived, so it can take nothing out of engine input and can affect no
+    question.  An out-parameter rather than a second return value, so that the
+    existing callers (and the tests pinning them) keep reading one list.
     """
     known_sources = source_file_refs(root)
     # Anchor-insensitive dedup: key on (subject, relation, object, source-file),
@@ -398,18 +463,21 @@ def normalize_rows(
     skipped: dict[str, int] = {}
 
     for row in rows:
-        # NFC-normalise the source: macOS stores filenames as NFD, but extracted
-        # sources are typically NFC; comparing/storing NFC keeps both sides equal
-        # so a Korean-named source's facts are not silently dropped (and the
-        # canonical value written to candidates.csv is consistently NFC).
-        source = unicodedata.normalize("NFC", row["source"])
+        # Cleaned up front, before the source check, so a REJECTED row can be handed
+        # to the drop-impact report in the same shape a kept one has (#538). The
+        # source is NFC-folded here (see clean_row): macOS stores filenames as NFD
+        # but extracted sources are typically NFC, and comparing on one form is what
+        # keeps a Korean-named source's facts from being silently dropped.
+        clean = clean_row(row)
         # Compare the pre-anchor portion against known sources/-prefixed refs.
         # The canonical source value is already sources/-prefixed; bare filenames
         # will not match and are dropped with a warning.
-        source_file = source.partition("#")[0]
+        source_file = clean["source"].partition("#")[0]
         if source_file not in known_sources:
             skipped[source_file] = skipped.get(source_file, 0) + 1
             dropped += 1
+            if dropped_rows is not None:
+                dropped_rows.append(clean)
             if strict:
                 # strict still dies on the FIRST offending row -- flush here so
                 # the diagnostic is not lost to the early exit.  No count: it
@@ -420,27 +488,6 @@ def normalize_rows(
                     f"--strict: input row rejected (source not found): {source_file}"
                 )
             continue
-        clean = {field: row.get(field, "").strip() for field in FACT_HEADER}
-        clean["source"] = source  # NFC-normalised canonical source
-        # NFC-normalise the stored content values too, mirroring the source above.
-        # fact_key folds subject/relation/object to NFC, so dedup already treats an
-        # NFC and an NFD spelling as one fact; but the SURVIVOR is picked by source
-        # order and could carry an NFD spelling into candidates.csv (and on to
-        # accepted.dl). Folding the stored value keeps key, CSV and engine on ONE
-        # consistent NFC form instead of "folded, but which spelling wins is
-        # nondeterministic".
-        for _field in ("subject", "relation", "object"):
-            clean[_field] = unicodedata.normalize("NFC", clean[_field])
-        clean["status"] = clean["status"] if clean["status"] in VALID_STATUSES else "needs_review"
-        clean["confidence"] = normalize_confidence(clean["confidence"])
-        # Canonicalise an amount object to the always-quoted `amount(N,"unit")`
-        # form (commas stripped from N). Quoting the unit unconditionally keeps a
-        # unit with spaces/commas unambiguous; the engine .dl parser supports \"
-        # escapes (wirelog#924), so accepted.dl loads cleanly. Done before the
-        # dedup key so `amount(7,"억")` and `amount(7,억)` collapse to one.
-        canon_amount = literal_types.canonical_amount(clean["object"])
-        if canon_amount is not None:
-            clean["object"] = canon_amount
         # Fact identity comes from ONE place, common.fact_key -- the same function the
         # review CLI keys its runs/*.json writes on. Re-deriving it here (subject,
         # relation, object, anchor-stripped source) is how the two definitions drifted
@@ -465,6 +512,301 @@ def normalize_rows(
         dedup.values(),
         key=lambda item: (item["source"], item["subject"], item["relation"], item["object"]),
     )
+
+
+# ---------------------------------------------------------------------------
+# Drop impact: what the dropped rows cost the declared questions (#538)
+# ---------------------------------------------------------------------------
+# A row dropped because its source file is gone takes its relation's vocabulary with
+# it, and every downstream summary then reads clean: no candidate row cites the
+# missing source, so there is no orphan citation and no uncovered source; the logic
+# report has no errors because a relation with no rows contradicts nothing. The KB
+# has lost the ability to answer a question it declares in policy/questions.md and
+# nothing says so. The `warning: N row(s) dropped` line above is a quantity, not a
+# consequence.
+#
+# The question -> query mapping and the verdict on each query are NOT re-invented
+# here. Both are #537's, imported from source_coverage: the mapping is READ from the
+# `// qN:` anchor comments in facts/query.dl (a committed contract artifact), and the
+# verdict comes from common.classify_query — the same gate facts/logic_report.txt's
+# "Query evaluation" section and `/factlog ask` route every query through. #537's own
+# first draft matched relation names against the question TEXT and called five
+# questions the engine had just answered "unresolvable"; a second implementation of
+# that rule here would put this line and the engine's report back into disagreement.
+
+# The state source_coverage reports for a question the engine can evaluate (or, for a
+# question with no query draft, one its text estimate found engine-input evidence
+# for). "The drop cost the KB an answer" is defined as a question that HELD this
+# state before the drop and does not hold it after.
+_ANSWERABLE = "resolvable"
+
+# Gate verdicts that say nothing about a question's VOCABULARY, so the flip test
+# cannot see a loss through them: `review` is a draft that defers to a human by
+# design, `unusable` one that is not a well-formed query at all. Both read the same
+# before and after any drop. For those two — and only those — the report also asks
+# source_coverage for the ESTIMATE it falls back to on a draft-less question, because
+# the issue's own KB is in exactly that state (its six questions evaluate to
+# review_required) and reporting it as unaffected would be the silence again.
+#
+# The estimate is still required to FLIP, which is what keeps this from re-raising
+# #537's false alarm: that failure was an estimate that read a question wrong in a
+# fixed way, and a verdict that reads the same on both sides of the drop reports
+# nothing. Only a verdict that CHANGED because rows were dropped is printed.
+#
+# Each maps to the reason PREFIX its line carries. Spelled here rather than reusing
+# source_coverage's own estimate prefix, which reads "no query draft": these questions
+# HAVE a draft, and saying they do not would misdirect the reader to the query step.
+# The half that must not drift — "this is an estimate off the question text, weaker
+# than the gate's own answer" — is stated by both.
+_GATE_SILENT_STATES = {
+    "review": "the query draft routes this question to human review",
+    "unusable": "the query draft is not a usable query",
+}
+
+
+def engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """The (subject, relation, object) atoms *rows* would put into facts/accepted.dl.
+
+    This is the answer to "judged against what?" (#538). The drop happens DURING the
+    merge, so facts/accepted.dl on disk still describes the previous run and cannot
+    say what this run costs. What can is the merge's own output: compile_facts writes
+    accepted.dl from exactly the candidates.csv rows this run is about to write,
+    filtered to ENGINE_STATUSES. So a relation is "gone" when the PROJECTED
+    post-merge engine input has no row for it — not when the stale file on disk lacks
+    it, and not merely because a dropped row named it (a relation whose dropped rows
+    all had surviving twins lost nothing).
+
+    Reuses ``engine_facts`` for the status filter and ``dedup_engine_atoms`` for the
+    triple collapse, the two rules compile_facts itself applies, so the projection
+    and the real thing cannot disagree.
+    """
+    return dedup_engine_atoms([
+        {"subject": row["subject"], "relation": row["relation"], "object": row["object"]}
+        for row in engine_facts(rows)
+    ])
+
+
+def counterfactual_status(
+    row: dict[str, str],
+    superseded_keys: set[tuple[str, str, str, str]],
+    engine_keys: dict[tuple[str, str, str, str], str],
+    review_keys: set[tuple[str, str, str, str]],
+) -> str:
+    """The status *row* would carry had the merge not dropped it.
+
+    A dropped row never reaches the status-preservation passes in ``main``, so its
+    own status understates what it would have contributed: a fact a human accepted
+    in a previous merge comes back from the run as 'candidate' and is re-promoted
+    from candidates.csv. Without that, a KB whose accepted rows all lost their source
+    would measure as "nothing left engine input", and the report would say nothing.
+
+    The precedence mirrors ``main``'s passes exactly, in their order: a superseded
+    tombstone wins outright; otherwise a recorded engine status is restored; a
+    deliberate re-review then holds an engine status back at needs_review (and
+    leaves a 'candidate' alone, as the hold there does).
+    """
+    key = fact_key(row["subject"], row["relation"], row["object"], row["source"])
+    if key in superseded_keys:
+        return "superseded"
+    status = engine_keys.get(key, row["status"])
+    if key in review_keys and status in ENGINE_STATUSES:
+        return "needs_review"
+    return status
+
+
+def lost_relations(
+    kept: list[dict[str, str]],
+    dropped: list[dict[str, str]],
+    aliases: dict[str, str],
+) -> list[str]:
+    """Relation names only the DROPPED rows would have put into engine input.
+
+    Compared canonically (``resolve_relation``, THE alias probe — the same one
+    source_coverage's ``supported_relations`` uses) so a declared alias of a
+    surviving relation is not reported as a loss. Sorted, for a line that does not
+    move between runs.
+    """
+    survivors = {resolve_relation(atom["relation"], aliases) for atom in engine_atoms(kept)}
+    return sorted({
+        canonical
+        for atom in engine_atoms(dropped)
+        if (canonical := resolve_relation(atom["relation"], aliases)) not in survivors
+    })
+
+
+def question_states(
+    questions: list[dict[str, str]],
+    drafts: dict[str, list[str]],
+    accepted: list[dict[str, str]],
+    vocabulary: set[str],
+    policy_program: str,
+    aliases: dict[str, str],
+) -> dict[str, dict[str, object]]:
+    """id -> source_coverage's per-question verdict over *accepted* as engine input."""
+    return {
+        str(row["id"]): row
+        for row in question_rows(
+            questions, drafts, accepted, policy_program, vocabulary, aliases
+        )
+    }
+
+
+def unanswerable_questions(
+    questions: list[dict[str, str]],
+    drafts: dict[str, list[str]],
+    kept: list[dict[str, str]],
+    would_be: list[dict[str, str]],
+    policy_program: str,
+    aliases: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """(id, question, reason) for each question the drop turned unanswerable.
+
+    Measured as a counterfactual, not as an absolute: the verdict is taken twice,
+    once over the engine input this merge produces (*kept*) and once over the engine
+    input it WOULD have produced had nothing been dropped (*kept* + *would_be*), and
+    only a question that was answerable before and is not after is reported. That is
+    what makes the line about THIS drop — a question whose vocabulary was already
+    missing, or that was never grounded to begin with, is #537's axis to report and
+    is not news the merge caused.
+
+    It is also why dedup losers are left out of *would_be* upstream: their twins
+    survive, so the two passes would be identical.
+    """
+    before, after = kept + would_be, kept
+    acc_before, acc_after = engine_atoms(before), engine_atoms(after)
+    voc_before = relation_vocabulary(before, acc_before, aliases)
+    voc_after = relation_vocabulary(after, acc_after, aliases)
+    before_states = question_states(
+        questions, drafts, acc_before, voc_before, policy_program, aliases
+    )
+    after_states = question_states(
+        questions, drafts, acc_after, voc_after, policy_program, aliases
+    )
+
+    lost: list[tuple[str, str, str]] = []
+    gate_silent: list[tuple[dict[str, str], str]] = []
+    for question in questions:
+        was, now = before_states[question["id"]], after_states[question["id"]]
+        if was["state"] == _ANSWERABLE and now["state"] != _ANSWERABLE:
+            lost.append((question["id"], question["question"], str(now["reason"])))
+        elif was["state"] in _GATE_SILENT_STATES and now["state"] == was["state"]:
+            gate_silent.append((question, str(was["state"])))
+
+    # For those, ask source_coverage's own text estimate — the fallback it applies to a
+    # draft-less question — on both sides of the drop, and report only a flip.
+    for question, state in gate_silent:
+        was, _ = estimated_verdict(question["question"], voc_before, acc_before, aliases)
+        now, why = estimated_verdict(question["question"], voc_after, acc_after, aliases)
+        if was == _ANSWERABLE and now != _ANSWERABLE:
+            reason = f"{_GATE_SILENT_STATES[state]}; estimated from the question text: {why}"
+            lost.append((question["id"], question["question"], reason))
+
+    return lost
+
+
+def report_drop_impact(
+    root: Path,
+    kept: list[dict[str, str]],
+    dropped: list[dict[str, str]],
+    superseded_keys: set[tuple[str, str, str, str]],
+    engine_keys: dict[tuple[str, str, str, str], str],
+    review_keys: set[tuple[str, str, str, str]],
+) -> None:
+    """Print what the dropped rows cost this KB's declared questions (#538).
+
+    Silent when nothing was dropped; otherwise it always prints at least one line,
+    including "no relation lost, no question affected" — a drop with no consequence
+    is a fact worth stating, because the whole complaint is that the reader could
+    not tell the two cases apart.
+
+    Never raises, for the same reason source_coverage's question axis does not: every
+    input read here is a file a KB may legitimately have absent, empty, malformed or
+    not valid UTF-8, and this report is a diagnostic printed alongside a warning. It
+    must never be the reason a merge fails.
+    """
+    if not dropped:
+        return
+    try:
+        _report_drop_impact(root, kept, dropped, superseded_keys, engine_keys, review_keys)
+    except Exception as exc:  # noqa: BLE001 — see docstring: never take the merge down
+        detail = " ".join(str(exc).split())
+        print(f"  drop impact: unavailable ({detail})", file=sys.stderr)
+
+
+def _report_drop_impact(
+    root: Path,
+    kept: list[dict[str, str]],
+    dropped: list[dict[str, str]],
+    superseded_keys: set[tuple[str, str, str, str]],
+    engine_keys: dict[tuple[str, str, str, str], str],
+    review_keys: set[tuple[str, str, str, str]],
+) -> None:
+    """:func:`report_drop_impact` without the guard. May raise."""
+    aliases = relation_aliases(root)
+    would_be = [
+        {**row, "status": counterfactual_status(row, superseded_keys, engine_keys, review_keys)}
+        for row in dropped
+    ]
+    relations = lost_relations(kept, would_be, aliases)
+    if relations:
+        print(
+            f"  drop impact: {len(relations)} relation(s) left with no row in engine "
+            f"input: {', '.join(relations)}",
+            file=sys.stderr,
+        )
+
+    try:
+        questions = load_questions()
+    except Exception as exc:  # noqa: BLE001
+        # A KB with no readable policy/questions.md declares no questions, so there is
+        # no answerability to lose — said out loud rather than passed over, because
+        # "no question was affected" and "no question could be checked" are different
+        # findings and the reader is here looking for the second one.
+        #
+        # Not only FactlogError: policy/questions.md is a file, and a Korean one stored
+        # EUC-KR raises UnicodeDecodeError instead (the surprise that made #537's axis a
+        # regression rather than a missing feature).
+        detail = " ".join(str(exc).split())
+        print(f"  drop impact: no declared questions to check ({detail})", file=sys.stderr)
+        return
+
+    query_dl = root / "facts" / "query.dl"
+    if query_dl.is_file():
+        drafts = query_drafts(
+            query_dl.read_text(encoding="utf-8"), {q["id"] for q in questions}
+        )
+    else:
+        # facts/query.dl is written by the LLM `/factlog query` step, so its absence is
+        # a normal state rather than a loss. Every question then falls back to
+        # source_coverage's text estimate, and each reported line says so itself.
+        drafts = {}
+        print(
+            "  drop impact: facts/query.dl absent (run /factlog query) — questions "
+            "estimated from their text",
+            file=sys.stderr,
+        )
+
+    unanswerable = unanswerable_questions(
+        questions, drafts, kept, would_be, load_logic_policy(), aliases
+    )
+    if not unanswerable:
+        # Stated even when a relation WAS lost: "some vocabulary is gone" and "an
+        # answer is gone" are different findings, and a relation nothing asks about is
+        # the case where the merge is allowed to look clean.
+        lead = "" if relations else "no relation left engine input; "
+        print(
+            f"  drop impact: {lead}no declared question changed answerability",
+            file=sys.stderr,
+        )
+        return
+    ids = " ".join(f"[{qid}]" for qid, _question, _reason in unanswerable)
+    print(
+        f"  drop impact: {len(unanswerable)} declared question(s) in policy/questions.md "
+        f"turned unanswerable: {ids}",
+        file=sys.stderr,
+    )
+    for qid, question, reason in unanswerable:
+        print(f"    - [{qid}] {question}  ({reason})", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1200,7 +1542,11 @@ def main() -> int:
     # ------------------------------------------------------------------
     # 2. Normalise and deduplicate
     # ------------------------------------------------------------------
-    rows = normalize_rows(root, raw_rows, strict=args.strict)
+    # Rows rejected for a missing source are kept aside for the drop-impact report
+    # (#538); it can only run once the status-preservation passes below have settled
+    # what this merge's engine input actually is.
+    dropped_rows: list[dict[str, str]] = []
+    rows = normalize_rows(root, raw_rows, strict=args.strict, dropped_rows=dropped_rows)
     print(f"  rows after normalise/dedup: {len(rows)}")
 
     # Preserve human-marked supersessions across re-merge: a row previously set
@@ -1318,6 +1664,11 @@ def main() -> int:
                 held += 1
         if held:
             print(f"  held {held} human-reviewed row(s) at needs_review (re-review respected)")
+
+    # `rows` is now exactly what candidates.csv will hold, so the projection
+    # engine_atoms() makes is the engine input this merge produces — the only basis
+    # available for "which relation is gone" while the merge is still running (#538).
+    report_drop_impact(root, rows, dropped_rows, superseded_keys, engine_keys, review_keys)
 
     # Warn prominently when rows were loaded but all were dropped — this
     # distinguishes a silent contract violation from a genuinely empty run.
