@@ -1366,6 +1366,43 @@ def allowed_relations(facts: list[dict[str, str]] | None = None) -> set[str]:
     return {row["relation"] for row in selected if row["relation"]}
 
 
+def nearby_vocabulary(term: str, vocabulary: set[str], *, limit: int = 3) -> list[str]:
+    """Return bounded, deterministic spelling suggestions without rewriting *term*.
+
+    Comparison folds NFC and case; returned values retain the trusted vocabulary's
+    spelling.  The small length-relative edit-distance threshold keeps unrelated
+    names out of a display-only did-you-mean hint.
+    """
+    query = unicodedata.normalize("NFC", term).strip().casefold()
+    if len(query) < 2 or limit <= 0:
+        return []
+
+    def distance(left: str, right: str) -> int:
+        previous = list(range(len(right) + 1))
+        for i, lch in enumerate(left, 1):
+            current = [i]
+            for j, rch in enumerate(right, 1):
+                current.append(min(previous[j] + 1, current[j - 1] + 1,
+                                   previous[j - 1] + (lch != rch)))
+            previous = current
+        return previous[-1]
+
+    maximum = min(3, max(1, len(query) // 3))
+    by_key: dict[str, str] = {}
+    for value in vocabulary:
+        shown = unicodedata.normalize("NFC", value).strip()
+        key = shown.casefold()
+        if not shown or key == query:
+            continue  # exact/NFC/case-equivalent is never a suggestion
+        if key not in by_key or shown < by_key[key]:
+            by_key[key] = shown
+    scored = [(distance(query, key), shown) for key, shown in by_key.items()]
+    return [shown for dist, shown in sorted(
+        (item for item in scored if item[0] <= maximum),
+        key=lambda item: (item[0], item[1].casefold(), item[1]),
+    )[:limit]]
+
+
 def slugify(value: str) -> str:
     text = re.sub(r"[^0-9A-Za-z가-힣]+", "-", value.strip().lower())
     return text.strip("-") or "item"

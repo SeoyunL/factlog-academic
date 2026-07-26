@@ -821,7 +821,7 @@ the relation, just not that object). Show it verbatim beneath the verdict block.
 ### Step 3b — Wiki exploration (UNVERIFIED)
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" wiki "<question>" --reason "<why>" --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" wiki "<question>" --reason "<why>" --draft "<draft>" --target "$FACTLOG_ROOT"
 ```
 
 Show the `UNVERIFIED — wiki exploration` block verbatim (cited `sources/` /
@@ -832,6 +832,12 @@ about those entities — verified anchors beside the unverified prose. The
 unverified excerpts cite only source text, never `facts/accepted.dl`. Do NOT
 present wiki excerpts as confirmed facts. Optionally record the unanswered
 question for later review (a non-engine-input sink, never `facts/query.dl`):
+
+For a stable entity/relation vocabulary miss, keep the same validated `<draft>`
+in the `wiki --draft` call. The optional `note: ... did you mean: ...?` line is
+an accepted-vocabulary spelling hint only: show it verbatim, do not replace the
+user's term, draft a corrected query, or retry automatically. It is absent for
+verified negatives, malformed/variable drafts, exact matches, and distant names.
 
 The wiki renderer applies the same explicit row cap to cited excerpts and
 engine-grounding rows. Its warning is printed before those rows, and `--all`

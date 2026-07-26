@@ -1249,6 +1249,9 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     from factlog.common import (
+        KbContext,
+        entity_set,
+        nearby_vocabulary,
         normalize_confidence,
         relation_aliases,
         source_file_refs,
@@ -1321,6 +1324,27 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     if not matched:
         shown = ", ".join(f"{k}={v}" for k, v in filt.items())
         print(f"factlog provenance: no fact matches ({shown})", file=sys.stderr)
+        # Keep no-match's stderr/rc=1 contract.  The optional notes are derived
+        # only from accepted engine vocabulary (never candidate/source text).
+        if (target / "facts" / "accepted.dl").is_file():
+            accepted = KbContext.for_root(target).load_accepted_facts()
+            entities = entity_set(accepted)
+            relations = {row["relation"] for row in accepted if row["relation"]} | set(aliases) | set(aliases.values())
+            for kind, term, vocabulary in (
+                ("entity", filt.get("subject"), entities),
+                ("relation", filt.get("relation"), relations),
+                ("entity", filt.get("object"), entities),
+            ):
+                if term is None:
+                    continue
+                if any(nfc(value).casefold() == nfc(term).casefold() for value in vocabulary):
+                    continue
+                suggestions = nearby_vocabulary(term, vocabulary)
+                if suggestions:
+                    print(
+                        f"note: no accepted {kind} '{term}'. did you mean: {', '.join(suggestions)}?",
+                        file=sys.stderr,
+                    )
         return 1
 
     on_disk = source_file_refs(target)  # NFC-normalised refs of files that exist

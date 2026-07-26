@@ -78,6 +78,26 @@ if router render 'relation("Acme API", "uses", V)?' | grep -qF "Acme API, uses, 
 neg="$(router render 'relation("Acme API", "uses", "Postgres")?')"
 if printf '%s' "$neg" | grep -qF "VERIFIED — engine" && printf '%s' "$neg" | grep -qF "verified negative"; then ok "render verified-negative is engine-marked"; else bad "render verified-negative not engine-marked"; fi
 
+# #273: accepted-vocabulary spelling hints decorate only the stable wiki miss;
+# they neither change its route nor rewrite/retry the draft.
+entity_directive="$(router render 'relation("Acme AP", "uses", V)?')"
+if printf '%s' "$entity_directive" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d['route']=='wiki' and d['did_you_mean']==[{'kind':'entity','term':'Acme AP','suggestions':['Acme API']}] else 1)"; then ok "entity typo keeps wiki route and carries deterministic hint"; else bad "entity typo directive/hint wrong: $entity_directive"; fi
+entity_wiki="$(router wiki 'What does Acme AP use?' --reason 'entity not accepted' --draft 'relation("Acme AP", "uses", V)?')"
+if printf '%s' "$entity_wiki" | grep -qF "note: no accepted entity 'Acme AP'. did you mean: Acme API?"; then ok "wiki answer appends entity did-you-mean without correction"; else bad "wiki entity hint missing"; fi
+relation_directive="$(router render 'relation("Acme API", "use", V)?')"
+if printf '%s' "$relation_directive" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d['did_you_mean']==[{'kind':'relation','term':'use','suggestions':['uses']}] else 1)"; then ok "relation typo gets accepted-relation hint"; else bad "relation typo hint wrong: $relation_directive"; fi
+if printf '%s' "$neg" | grep -qF 'did_you_mean\|did you mean'; then bad "verified negative must not get typo hint"; else ok "verified negative stays hint-free"; fi
+distant="$(router render 'relation("Completely Distant", "uses", V)?')"
+if printf '%s' "$distant" | "$PYTHON" -c "import json,sys; raise SystemExit(0 if not json.load(sys.stdin)['did_you_mean'] else 1)"; then ok "distant entity stays hint-free"; else bad "distant entity produced false-positive hint"; fi
+case_only="$(router render 'relation("acme api", "uses", V)?')"
+if printf '%s' "$case_only" | "$PYTHON" -c "import json,sys; raise SystemExit(0 if not json.load(sys.stdin)['did_you_mean'] else 1)"; then ok "case-only entity variant stays hint-free"; else bad "case-only entity variant produced hint"; fi
+LKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$LKB" >/dev/null
+printf 'relation("Acme API", "year", "2024").\n' > "$LKB/facts/accepted.dl"
+printf '%s\n' '- year' > "$LKB/policy/attribute-relations.md"
+literal_miss="$("$PYTHON" "$ROUTER" render 'relation("Acme API", "year", "202")?' --target "$LKB")"
+if printf '%s' "$literal_miss" | "$PYTHON" -c "import json,sys; raise SystemExit(0 if not json.load(sys.stdin)['did_you_mean'] else 1)"; then ok "attribute literal never becomes an entity spelling hint"; else bad "attribute literal leaked into entity hint"; fi
+
 # --- path routing & verified-negative (renderable for any predicate) ---
 check_field "reachable path routes engine" validate 'path("Acme API", "FastAPI")?' route engine
 check_field "unreachable path = verified negative (engine)" validate 'path("Postgres", "FastAPI")?' route engine
@@ -507,6 +527,8 @@ check_field_router() {  # like check_field but uses arouter
 check_field_router "#227: canonical name routes engine (not wiki)" validate 'relation("논문A", "published_year", X)?' route engine
 check_field_router "#227: canonical name code=ok (positive, not fact_absent)" validate 'relation(S, "published_year", O)?' code ok
 check_field_router "#227: canonical query not flagged negative" validate 'relation(S, "published_year", O)?' negative False
+alias_typo="$(arouter render 'relation("논문A", "publshed_year", O)?')"
+if printf '%s' "$alias_typo" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d['did_you_mean']==[{'kind':'relation','term':'publshed_year','suggestions':['published_year']}] else 1)"; then ok "#273: typo suggests declared canonical relation alias"; else bad "#273 alias suggestion missing/wrong: $alias_typo"; fi
 
 # 2. evaluate: canonical query returns BOTH surface-variant rows
 aeval_count="$(arouter evaluate 'relation(S, "published_year", O)?' | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin)['count'])")"

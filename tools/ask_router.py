@@ -65,8 +65,10 @@ from common import (  # noqa: E402
     ACCEPTED_DL,
     CANDIDATES_CSV,
     LOGIC_POLICY_DL,
+    QUERY_ENTITY_NOT_ACCEPTED,
     QUERY_FACT_ABSENT,
     QUERY_OK,
+    QUERY_RELATION_NOT_ACCEPTED,
     FactlogError,
     arg_value,
     canonical_value,
@@ -83,6 +85,7 @@ from common import (  # noqa: E402
     load_facts,
     load_logic_policy,
     logic_policy_md_has_rules,
+    nearby_vocabulary,
     policy_predicates,
     relation_aliases,
     run_wirelog,
@@ -359,6 +362,41 @@ def coverage_hint(
         f"{other_facts} fact(s) under other relations (possible predicate mismatch): "
         f"{listing}"
     )
+
+
+def did_you_mean_hints(draft: str, facts: list[dict[str, str]]) -> list[dict[str, object]]:
+    """Return display-only hints for validator-confirmed vocabulary misses (#273).
+
+    Only concrete relation arguments on stable entity/relation-not-accepted
+    routes qualify.  This deliberately excludes verified negatives, malformed
+    drafts, variables, review queries, candidate data, and source/wiki text.
+    """
+    decision = classify(draft, facts)
+    if decision["code"] not in {QUERY_ENTITY_NOT_ACCEPTED, QUERY_RELATION_NOT_ACCEPTED}:
+        return []
+    if _predicate_of(draft) != "relation":
+        return []
+    args = query_args(draft)
+    if len(args) != 3:
+        return []
+    aliases = relation_aliases()
+    entities = entity_set(facts)
+    relations = {row["relation"] for row in facts if row["relation"]} | set(aliases) | set(aliases.values())
+    hints: list[dict[str, object]] = []
+    for kind, arg, vocabulary in (
+        ("entity", args[0], entities),
+        ("relation", args[1], relations),
+        ("entity", args[2], entities),
+    ):
+        if not is_quoted_string(arg):
+            continue
+        term = arg_value(arg)
+        if any(canonical_value(value).casefold() == canonical_value(term).casefold() for value in vocabulary):
+            continue
+        suggestions = nearby_vocabulary(term, vocabulary)
+        if suggestions:
+            hints.append({"kind": kind, "term": term, "suggestions": suggestions})
+    return hints
 
 
 def _reachable_pairs(facts: list[dict[str, str]]) -> set[tuple[str, str]]:
@@ -794,6 +832,7 @@ def render_wiki_answer(
     reason: str,
     results: list[dict[str, object]],
     grounding: list[dict[str, str]] | None = None,
+    did_you_mean: list[dict[str, object]] | None = None,
     limit: int | None = DEFAULT_RENDER_ROW_LIMIT,
     total_results: int | None = None,
 ) -> str:
@@ -836,6 +875,11 @@ def render_wiki_answer(
     truncation = _truncation_line(result_total, len(visible_results))
     if truncation:
         lines.append(truncation)
+    for hint in did_you_mean or []:
+        suggestions = ", ".join(str(value) for value in hint["suggestions"])
+        lines.append(
+            f"note: no accepted {hint['kind']} '{hint['term']}'. did you mean: {suggestions}?"
+        )
     return "\n".join(lines)
 
 
@@ -954,6 +998,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             "route": "wiki",
             "reason": decision["reason"],
             "policy_uncompiled": decision["policy_uncompiled"],
+            "did_you_mean": did_you_mean_hints(args.draft, facts),
         },
         ensure_ascii=False,
     ))
@@ -988,11 +1033,13 @@ def cmd_wiki(args: argparse.Namespace) -> int:
     # Grounding: accepted facts about mentioned entities (empty if not compiled yet).
     accepted = load_accepted_facts() if ACCEPTED_DL.is_file() else []
     grounding = grounding_facts(args.text, accepted)
+    hints = did_you_mean_hints(args.draft, accepted) if args.draft else []
     print(render_wiki_answer(
         args.text,
         args.reason,
         results,
         grounding,
+        hints,
         limit=None if args.all else DEFAULT_RENDER_ROW_LIMIT,
         total_results=total_results,
     ))
@@ -1034,6 +1081,7 @@ def build_parser() -> argparse.ArgumentParser:
     wiki_p = sub.add_parser("wiki", help="render the UNVERIFIED — wiki exploration answer")
     wiki_p.add_argument("text", help="the natural-language question")
     wiki_p.add_argument("--reason", default="not expressible over accepted facts", help="why the engine path did not apply")
+    wiki_p.add_argument("--draft", default=None, help="validated draft query; append display-only spelling hints when eligible")
     wiki_p.add_argument("--all", action="store_true", help="show every excerpt and grounding row")
     wiki_p.add_argument("--target", default=None, help="KB root (overrides FACTLOG_ROOT)")
     wiki_p.set_defaults(func=cmd_wiki)
