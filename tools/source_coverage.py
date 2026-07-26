@@ -224,9 +224,20 @@ def eject_visible_refs(candidates_csv: Path) -> set[str]:
     so it is derived from cmd_eject's own rule rather than guessed at:
 
     * its cited set is every candidates.csv row's source, `nfc(...)` then
-      everything before the first '#', at ANY status (factlog/cli.py:3612-3618);
+      everything before the first '#', at ANY status (factlog/cli.py:3708);
     * its orphan scan then matches a cited ref that is not on disk, and only
-      under the two source roots (factlog/cli.py:3467-3470).
+      under the two source roots (factlog/cli.py:3489-3493).
+
+    Since #562 the scan then SUBTRACTS refs it has nothing left to do for (no
+    file on disk, no complete runs/*.json row, every citing row already
+    `superseded`), and `--purge` exempts itself from that subtraction. Neither
+    narrowing is re-derived here, because neither can reach this set's only
+    consumer: ``report_run_orphans`` is fed by ``run_orphan_sources``, which
+    lists a ref precisely BECAUSE ``run_cited_sources`` counted rows for it —
+    and the eject filter now asks that same helper the same question. A ref this
+    report names therefore always has a live run row, so eject's filter never
+    skips it. Copying the two conditions in would be a fourth transcription of a
+    rule with no case to decide.
 
     Note "at ANY status". The obvious shortcut — reuse the `orphans` list
     coverage already computes — is WRONG, and measurably so: that list is built

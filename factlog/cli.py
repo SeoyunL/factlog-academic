@@ -3172,8 +3172,13 @@ class _EjectSelection(NamedTuple):
     runs/*.json items are stripped, keyed on common.fact_key — merge's own fact
     identity — so the CLI and merge agree which run row IS this fact and a decision
     reaches the source of truth merge rebuilds candidates.csv from (#480). Source
-    mode passes the same predicate for both (it keys on the source ref, which both
-    stores already normalise identically)."""
+    mode keys both on the source ref but still passes two DIFFERENT predicates: the
+    two stores do not normalise it identically. merge strips a run row's source (its
+    loader and clean_row both do), while candidates.csv is read raw here on purpose
+    — so a run row whose source carries stray whitespace is alive to merge and was
+    invisible to an unstripped matcher (#562). run_match therefore keys on
+    common.fact_key's source component; match_row deliberately does not (the
+    asymmetry is load-bearing — see _select_eject_sources)."""
 
     match_row: Callable[[dict], bool]
     run_match: Callable[[dict], bool]
@@ -3249,6 +3254,8 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     nothing matches. Prints the plan exactly as cmd_eject used to inline."""
     import re
     from pathlib import Path, PurePosixPath
+
+    from factlog.common import fact_key, run_cited_sources
 
     # Tie each runs/sources/ conversion to the original it was made from, read
     # from the ingest provenance header ("... | source: <name> | ..."). Two
@@ -3446,6 +3453,34 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         #    erring toward retention.
         from pathlib import PurePosixPath
 
+        # Which source refs still have a live run row behind them. Feeds the
+        # "nothing left to do" filter below, and comes from common.run_cited_sources
+        # rather than a local loop: that helper already IS this rule — NFC(strip(raw))
+        # cut at '#', plus merge's row-completeness test — and an open-coded third
+        # copy is how the run/csv key drift this very commit set fixes got in. It
+        # also skips a run file whose BYTES do not decode, which a hand-rolled
+        # `except (JSONDecodeError, OSError)` does not: such a file made this scan
+        # die with a UnicodeDecodeError traceback.
+        #
+        # The row-completeness test has a COST worth naming. A ref whose only run
+        # rows are incomplete (one of subject/relation/object/source empty) counts
+        # as row-less here, so if its citing rows are all `superseded` too the scan
+        # now skips it and leaves those rows in runs/*.json — measured against
+        # d7afd96, which swept them. That is intended, not a leak: the question this
+        # filter asks is "will the next merge re-assert this fact", and merge drops
+        # an incomplete row before writing candidates.csv (`skip incomplete row in
+        # ...`), so the honest answer is no. The rows are still reachable — `eject
+        # <ref>` and `eject --orphans --purge` both strip them, because neither goes
+        # through this filter.
+        #
+        # An unreadable run file makes the answer unknown, so the filter is skipped
+        # entirely rather than guessed at — under-reporting an orphan whose run
+        # backing we cannot see would be the same silent gap #562 is about. The
+        # retirement tail reports the unreadable file itself.
+        runs_unreadable_names: list[str] = []
+        run_source_keys = set(run_cited_sources(target, unreadable=runs_unreadable_names))
+        runs_unreadable = bool(runs_unreadable_names)
+
         src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
         for ref in all_refs:
             if ref.startswith("runs/sources/"):
@@ -3467,10 +3502,56 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                     matched.add(ref)  # cited conversion whose file is already gone
             elif ref.startswith("sources/") and ref not in disk_refs:
                 matched.add(ref)  # a directly-cited source whose file is gone
+        # Drop refs this command has NOTHING left to do for. A retired orphan is
+        # cited only by its own tombstones, and the scan above re-matched those
+        # forever: `eject --orphans` re-reported and re-superseded the same rows on
+        # every run, so a user could never reach "the KB is clean" (#562). This is a
+        # filter on the AUTOMATIC selection only — an explicit `eject <ref>` still
+        # matches, because naming a ref is a deliberate request, not a scan result.
+        #
+        # The predicate has to be NARROW. "no run rows and every csv row superseded"
+        # alone is VACUOUSLY true of a ref with NO csv rows, which is the commonest
+        # --orphans case: an uncited conversion still on disk whose original was
+        # deleted. Measured with both guards below removed, test_eject_cmd fails BOTH
+        # "on-disk orphan conversion skipped by the idempotency filter" AND "uncited
+        # orphan conversion kept" — the two regressions this shape avoids.
+        #
+        # Two guards cover that one shape, on purpose. The on-disk check is the wider
+        # statement (a file left to delete IS work, whatever the rows say) and is the
+        # only thing that keeps an on-disk orphan whose rows are ALL already
+        # superseded — measured: removing it alone fails "on-disk orphan conversion
+        # skipped by the idempotency filter". Given it, `bool(cited)` is redundant by
+        # construction: every ref reaching it came from cited_refs, which is built
+        # from these same rows under the same key, so `cited` cannot be empty. It
+        # stays because the emptiness is what makes the `all(...)` below meaningless,
+        # and a later change to how `matched` is seeded (e.g. #559's run-only ghost
+        # sources, which are NOT in cited_refs) would make it load-bearing again.
+        if not runs_unreadable:
+            def _nothing_to_do(ref: str) -> bool:
+                if args.purge:
+                    # --purge DELETES the tombstones this filter reads as "done".
+                    # Skipping the ref then reported "no orphaned sources found" at
+                    # rc 0 while the rows the user asked to destroy stayed put — the
+                    # same silent-success shape as the run-matcher bug above. Still
+                    # idempotent: the purge removes the rows, so on the next scan the
+                    # ref is no longer cited at all and never reaches this filter.
+                    return False
+                if ref in disk_refs:
+                    return False  # a conversion/original is still there to delete
+                if ref in run_source_keys:
+                    return False  # a live run row would re-assert it on the next merge
+                cited = [
+                    r for r in rows
+                    if nfc(str(r.get("source", "")).partition("#")[0]) == ref
+                ]
+                return bool(cited) and all(r.get("status") == "superseded" for r in cited)
+
+            matched = {ref for ref in matched if not _nothing_to_do(ref)}
         if not matched:
             print(
                 "factlog eject: no orphaned sources found "
-                "(every cited source's original is present)."
+                "(every cited source's original is present, or its rows are "
+                "already retired)."
             )
             return 0
         print(f"factlog eject (KB: {target}): orphan scan — {len(matched)} orphaned source(s)")
@@ -3491,7 +3572,25 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             return 1
 
     def match_row(d: dict) -> bool:
+        # candidates.csv: NFC-fold and cut the #anchor, but do NOT strip. The raw
+        # read is deliberate and documented against: source_coverage's
+        # eject_visible_refs derives the set of refs this command can act on from
+        # THIS rule, and reasons explicitly about the whitespace gap ("eject does
+        # not [strip] ... the error runs in the SAFE direction"). Stripping here
+        # would silently widen what eject retires in candidates.csv beyond what
+        # that report promises. runs/*.json is the opposite case — see run_match.
         return nfc(str(d.get("source", "")).partition("#")[0]) in matched
+
+    def run_match(d: dict) -> bool:
+        # runs/*.json: key on common.fact_key's source component — NFC-folded,
+        # STRIPPED, cut at '#' — because that is exactly what merge does to a run
+        # row's source on the way in (its loader and clean_row both strip). A run
+        # row written with a padded source ("sources/live.md  ") is therefore a
+        # LIVE row to merge, and the unstripped matcher missed it: eject reported
+        # success (and with --delete-original removed the original) while the run
+        # row survived, so the next merge either skipped it as a missing source or
+        # resurrected a purged fact (#480 shape, #562).
+        return fact_key("", "", "", str(d.get("source", "")))[3] in matched
 
     matched_sorted = sorted(matched)
     print(f"factlog eject (KB: {target}): {len(matched_sorted)} matched source ref(s):")
@@ -3538,10 +3637,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
-    # Source mode keys both stores on the source ref, which candidates.csv and
-    # runs/*.json store identically (both NFC-fold + drop the #anchor here), so the
-    # same predicate serves as the runs matcher.
-    return _EjectSelection(match_row, match_row, conv_to_delete, orig_on_disk, True)
+    return _EjectSelection(match_row, run_match, conv_to_delete, orig_on_disk, True)
 
 
 def cmd_eject(args: argparse.Namespace) -> int:
@@ -3575,6 +3671,10 @@ def cmd_eject(args: argparse.Namespace) -> int:
     flat conversion (runs/sources/report.md) keeps the legacy basename match since
     its path records no subdir. Either way it errs toward keeping. Renaming an
     original on disk without re-ingesting counts as orphaning its old conversion.
+    A ref the command has nothing left to do for — no file on disk, no runs/*.json
+    row, and citing rows that are all already `superseded` — is skipped, so
+    re-running --orphans reaches "no orphaned sources found" instead of re-retiring
+    its own tombstones forever. Naming such a ref explicitly still matches it.
 
     Fact mode (`eject --fact SUBJECT RELATION OBJECT`, repeatable) — retires
     candidate rows matching the given (subject, relation, object) triple(s)
@@ -3678,9 +3778,14 @@ def cmd_eject(args: argparse.Namespace) -> int:
         for jp in sorted(runs_dir.glob("*.json")):
             try:
                 data = json.loads(jp.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as exc:
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
                 # surface it: a corrupt run file left behind could still hold the
                 # retired rows and resurrect them on a later merge.
+                # UnicodeDecodeError belongs here for the same reason
+                # common.run_cited_sources lists it: a runs/*.json whose BYTES do
+                # not decode is one more shape of "unreadable", and leaving it out
+                # made the whole eject die with a traceback on such a file instead
+                # of naming it and finishing the rest of the job.
                 print(f"factlog eject: skipping unreadable {jp.name}: {exc}", file=sys.stderr)
                 continue
             if not isinstance(data, list):
