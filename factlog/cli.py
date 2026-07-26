@@ -3522,6 +3522,14 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # sources, which are NOT in cited_refs) would make it load-bearing again.
         if not runs_unreadable:
             def _nothing_to_do(ref: str) -> bool:
+                if args.purge:
+                    # --purge DELETES the tombstones this filter reads as "done".
+                    # Skipping the ref then reported "no orphaned sources found" at
+                    # rc 0 while the rows the user asked to destroy stayed put — the
+                    # same silent-success shape as the run-matcher bug above. Still
+                    # idempotent: the purge removes the rows, so on the next scan the
+                    # ref is no longer cited at all and never reaches this filter.
+                    return False
                 if ref in disk_refs:
                     return False  # a conversion/original is still there to delete
                 if ref in run_source_keys:

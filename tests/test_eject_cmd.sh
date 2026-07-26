@@ -343,6 +343,26 @@ printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/gone.md,superseded,0.9,' > "$KB/fac
 [ ! -f "$KB/runs/sources/gone.md" ] && ok "orphan conversion on disk is deleted even with only superseded rows" \
   || bad "on-disk orphan conversion skipped by the idempotency filter"
 
+# --- --orphans --purge still DELETES rows the earlier supersede left behind ----
+# The idempotency filter reads "every citing row superseded" as "nothing to do",
+# which is false under --purge: those very rows are what --purge destroys. Left
+# unguarded the command reported "no orphaned sources found" at rc 0 and changed
+# nothing — the same silent-success shape #562's run-matcher bug had.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/ghosty.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog eject --orphans --target "$KB" >/dev/null 2>&1   # -> superseded
+grep -q "sources/ghosty.md,superseded," "$KB/facts/candidates.csv" || bad "setup: ghost row not superseded"
+set +e; out="$("$PYTHON" -m factlog eject --orphans --purge --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF "1 candidate row(s) purged" \
+  && ok "--orphans --purge deletes a row an earlier supersede left" \
+  || bad "--orphans --purge became a no-op on tombstones (rc=$rc): $out"
+grep -q "sources/ghosty.md" "$KB/facts/candidates.csv" && bad "--orphans --purge left the row" || ok "the tombstoned row is gone from candidates.csv"
+# ...and it is still idempotent: the row is purged, so nothing cites the ref now.
+set +e; out="$("$PYTHON" -m factlog eject --orphans --purge --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF "no orphaned sources found" \
+  && ok "a second --orphans --purge reports none (idempotent)" || bad "--orphans --purge is not idempotent (rc=$rc): $out"
+
 # --- validation: --orphans cannot mix with source(s) or --fact ----------------
 KB="$(mktemp -d)/wiki"; seed_orphans "$KB"
 set +e
