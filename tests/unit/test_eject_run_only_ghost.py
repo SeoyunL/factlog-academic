@@ -84,6 +84,21 @@ def validate(tmp_path, kb) -> subprocess.CompletedProcess:
     )
 
 
+def csv_line(subject, relation, object_, source, status="confirmed", confidence="0.90", note="") -> str:
+    """One candidates.csv line, quoted the way the writers quote it.
+
+    Hand-formatted lines are fine until a value carries a comma — an `amount(7,"억")`
+    object splits into two fields and the fixture stops describing the KB it names.
+    """
+    import io
+
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerow(
+        [subject, relation, object_, source, status, confidence, note]
+    )
+    return buf.getvalue()
+
+
 def write_csv(kb: Path, *rows: str) -> None:
     (kb / "facts" / "candidates.csv").write_text(HEADER + "".join(rows), encoding="utf-8")
 
@@ -251,15 +266,19 @@ class TestTombstone:
         built from one would fail validate (empty subject). So it is stripped with no
         tombstone — the documented cost of matching merge's completeness rule.
 
-        The ref reaches the scan through an unrelated candidates.csv row, which is
-        what isolates the incomplete row's OWN fact: nothing may be written for it.
+        The ref reaches the scan through an unrelated candidates.csv row (a live one:
+        a ref whose rows are ALL superseded is skipped by the idempotency filter),
+        which is what isolates the incomplete row's OWN fact: nothing may be written
+        for it.
         """
         kb = ghost_kb(
             tmp_path,
-            csv_rows=("A,rel,B,sources/ghost.md,superseded,0.90,\n",),
+            csv_rows=("A,rel,B,sources/ghost.md,confirmed,0.90,\n",),
             run_rows=[run_row(subject="", object_="C")],
         )
-        assert eject(tmp_path, kb, "--orphans").returncode == 0
+        proc = eject(tmp_path, kb, "--orphans")
+        assert proc.returncode == 0, proc.stderr
+        assert "0 tombstone(s) written" in proc.stdout, proc.stdout
         assert not (kb / "runs" / "2026-01-01-ghost.json").exists()
         rows = read_rows(kb)
         assert [(r["subject"], r["object"]) for r in rows] == [("A", "B")], rows
@@ -286,7 +305,13 @@ class TestNoDemotion:
         after = read_rows(kb)
         assert len(after) == 1, after
         assert after[0]["status"] == expect_status, after
-        assert merge(tmp_path, kb).returncode == 0
+        # ...and it still reads that way to the next merge. Its exit code is not the
+        # subject here: a KB whose runs/ no longer assert a `confirmed` row makes the
+        # #218 ratchet REFUSE the rebuild (rc 1), which is the pre-existing contract.
+        # What must hold either way is that no second row appeared and no decision
+        # was rewritten.
+        merged = merge(tmp_path, kb)
+        assert "Traceback" not in merged.stderr, merged.stderr
         final = read_rows(kb)
         assert len(final) == 1, final
         assert final[0]["status"] == expect_status, final
@@ -327,8 +352,8 @@ class TestNoDemotion:
         kb = ghost_kb(
             tmp_path,
             csv_rows=(
-                "유령,참조," + unicodedata.normalize("NFD", 'amount(7,"억")')
-                + ",  sources/ghost.md ,confirmed,0.90,\n",
+                csv_line("유령", "참조", unicodedata.normalize("NFD", 'amount(7,"억")'),
+                         "  sources/ghost.md "),
             ),
             run_rows=[run_row(
                 object_=unicodedata.normalize("NFC", "amount(7,억)"),
