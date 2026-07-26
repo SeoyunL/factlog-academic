@@ -35,9 +35,20 @@ The four types:
   (ROUND_HALF_UP).
 
 Extractors may emit typed literal objects as compact compound terms when that
-preserves structure better: `date(2030,1)`, `date(2030,1,15)`, `number(2.5)`,
-`ordinal(3)`, `amount(100,"억")`. The `relation/3` object stores that term as a
-string, and the typed side-relation projects the comparable scalar.
+preserves structure better: `date(2030)`, `date(2030,1)`, `date(2030,1,15)`,
+`number(2.5)`, `ordinal(3)`, `amount(100,"억")`. The `relation/3` object stores
+that term as a string, and the typed side-relation projects the comparable
+scalar.
+
+A date compound term takes year, month or day precision. Missing parts default
+to `01`, so `date(2030)` sorts as `20300101`, the start of the year — the same
+convention that already fills in a missing day (`2030.1` → `20300101`). A
+threshold like `D >= 20300101` therefore includes a year-only fact. The
+human-readable form appended to an answer, by contrast, carries only the
+precision the term actually has: `date(2030)` shows as `2030`, never padded out
+to `2030-01`. A bare `2030` with no `date(…)` wrapper still does NOT parse as a
+date — with neither a separator nor the wrapper it is indistinguishable from a
+plain number.
 
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).

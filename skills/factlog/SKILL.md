@@ -270,11 +270,17 @@ you supply it: `D >= 20300101` is inclusive of the boundary day (2030-01-01 is
 included). For `date`, the value is a sortable `yyyymmdd` int64 — a source object
 `2030.1` normalises to `20300101` (missing parts default to `01`), so a comparison
 threshold is also written `yyyymmdd`. The source object must be in a parseable
-form (`2030.1`, not a bare `2030`). Typed source objects may also be emitted as
-compact compound terms when that preserves structure better than prose strings:
-`date(2030,1)`, `date(2030,1,15)`, `number(2.5)`, `ordinal(3)`, or
-`amount(100,"억")`. The flat `relation/3` fact still stores that term as the
-object string, while the typed side-relation projects its comparable scalar.
+form (`2030.1` or the compound `date(2030)`, not a bare `2030`). Typed source
+objects may also be emitted as compact compound terms when that preserves
+structure better than prose strings: `date(2030)`, `date(2030,1)`,
+`date(2030,1,15)`, `number(2.5)`, `ordinal(3)`, or `amount(100,"억")`. A date
+compound term takes year, month or day precision, and the missing parts default
+to `01` just as a missing day does — so `date(2030)` projects to `20300101`, the
+start of the year, and a `D >= 20300101` threshold includes a fact whose source
+knew only the year. Its humanized display shows only the precision the term
+carries (`date(2030)` → `2030`, not `2030-01`). The flat `relation/3` fact still
+stores that term as the object string, while the typed side-relation projects its
+comparable scalar.
 `ordinal` compares on **rank only**: the ordinal-class unit (호/위/번/차/등/째, and
 English st/nd/rd/th) is dropped at normalization, so `제3호` and `3위` are the *same* value (rank 3) to both
 the engine and the conflict checker. If a rank and a house number are genuinely
