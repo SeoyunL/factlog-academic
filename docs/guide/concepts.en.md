@@ -129,7 +129,7 @@ To summarize:
 That `runs/*.json` is where a fact's value lives matters. merge rebuilds
 `candidates.csv` from it every time, so hand-edits to `candidates.csv` are
 overwritten and lost on the next `/factlog sync`. That is why correcting a value
-goes through [`factlog amend`](../reference/review.en.md#reviewing-facts-factlog-review--accept--reject),
+goes through [`factlog amend`](../reference/review.en.md),
 which updates both sides together.
 
 ## candidate vs accepted — the trust boundary

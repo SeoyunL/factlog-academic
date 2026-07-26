@@ -7,8 +7,9 @@
 `/factlog sync` 는 매 실행마다 **모든** 소스를 다시 추출합니다. 특정 소스를
 그 대상에서 빼려면 — 초안, 작업 중인 문서, 외부 문서 등 — KB별 **sync-ignore
 목록**(`policy/sync-ignore.md`)에 추가하십시오. 무시된 소스는 **수정되더라도**
-`/factlog sync`, `factlog ingest --scan`, 커버리지 누락 보고에서 건너뜁니다. 이미
-머지된 사실은 그대로 유지됩니다(사실을 실제로 제거하려면 `factlog eject` 사용).
+`/factlog sync`, `factlog ingest --scan`, 커버리지 누락 보고와 `/factlog ask`의
+wiki 탐색 근거에서 건너뜁니다. 이미 머지된 사실은 그대로 유지됩니다(사실을 실제로
+제거하려면 `factlog eject` 사용).
 
 ```bash
 factlog ignore drafts/*.md sources/wip-notes.md   # add pattern(s)

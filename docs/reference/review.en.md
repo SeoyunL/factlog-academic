@@ -1,8 +1,6 @@
-# Reviewing facts
+# Reviewing facts (`factlog review` / `accept` / `reject`)
 
 > 🌐 **English** | [한국어](review.md)
-
-## Reviewing facts (`factlog review` / `accept` / `reject`)
 
 Extraction marks facts `candidate` or `needs_review`; only `confirmed`/`accepted`
 facts become engine input. Promote or retire them without hand-editing
@@ -16,6 +14,31 @@ factlog accept Acme                  # accept every pending fact about a subject
 factlog reject Acme uses Datadog     # pending → superseded (retired, kept for audit)
 factlog accept Acme uses FastAPI --dry-run
 ```
+
+### Selecting reviewed facts by number
+
+`factlog review` assigns stable numbers to the pending triples and prints a
+full `sha256:` snapshot digest. After a person has reviewed that exact output,
+they can select one or more items without retyping a triple:
+
+```bash
+factlog review
+#   [1] Acme / uses / FastAPI
+#   [2] Acme / uses / PostgreSQL
+#   snapshot: sha256:...
+factlog accept --number 1 --number 2 --from sha256:...
+factlog reject --number 2 --from sha256:... --dry-run
+```
+
+`--number` is repeatable and requires the digest printed by `review`. The
+digest covers the complete normalized pending queue; if it is missing,
+malformed, or stale, the command changes nothing and asks you to review again.
+Only the default all-pending `factlog review` prints numbers and a digest;
+`review --status ...` is a display filter and is not numeric approval evidence.
+Numbers are only available with `--from`, so the existing positional triple
+and `-` wildcard syntax remains unchanged and cannot be mixed with numbered
+selection. A fresh snapshot proves that the human saw this queue; it is not an
+authorization for a model to promote facts without a human decision.
 
 `accept`/`reject` change **only pending rows**; a `confirmed`/`accepted`/
 `superseded` match is reported and left untouched (use `factlog eject` to retire
@@ -104,7 +127,7 @@ A fact's `status` falls into three classes.
 | Class | Status values | Meaning |
 |-------|---------------|---------|
 | **pending** | `candidate`, `needs_review` | Extracted, but still waiting on a human decision. Shows up in the `factlog review` queue. |
-| **engine input** | `accepted`, `confirmed` | A fact a human confirmed. **Only these two statuses compile into `accepted.dl`** and become engine input. |
+| **engine input** | `accepted`, `confirmed` | `accepted` is a fact a human accepted with the review CLI. `confirmed` is a legacy compatible engine status. **Only these two statuses compile into `accepted.dl`** and become engine input. |
 | **retired** | `superseded` | A fact that has stepped down. Kept in `candidates.csv` for audit, but it is not engine input and is ignored by conflict detection. |
 
 ### Status transition table

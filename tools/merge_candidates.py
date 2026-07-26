@@ -437,7 +437,10 @@ def normalize_rows(
     (e.g. "sources/my-doc.md" or "sources/subdir/notes.md#anchor").  A bare
     filename ("my-doc.md") does not match and the row is dropped.
 
-    - status is normalised to 'needs_review' if not in VALID_STATUSES
+    - a new run's status is normalised to 'needs_review' unless it is already a
+      review status.  In particular, model-supplied ``confirmed``, ``accepted``,
+      and ``superseded`` cannot bypass the human review gate; existing human
+      statuses in candidates.csv are restored later by the preservation passes.
     - confidence is clamped to [0.00, 1.00]
     - subject/relation/object (and source) are NFC-normalised on the way in, so the
       value stored in candidates.csv is on the same NFC form fact_key keys on — key,

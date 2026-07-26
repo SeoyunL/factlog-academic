@@ -82,6 +82,26 @@ if router render 'relation("Acme API", "uses", V)?' | grep -qF "Acme API, uses, 
 neg="$(router render 'relation("Acme API", "uses", "Postgres")?')"
 if printf '%s' "$neg" | grep -qF "VERIFIED — engine" && printf '%s' "$neg" | grep -qF "verified negative"; then ok "render verified-negative is engine-marked"; else bad "render verified-negative not engine-marked"; fi
 
+# #273: accepted-vocabulary spelling hints decorate only the stable wiki miss;
+# they neither change its route nor rewrite/retry the draft.
+entity_directive="$(router render 'relation("Acme AP", "uses", V)?')"
+if printf '%s' "$entity_directive" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d['route']=='wiki' and d['did_you_mean']==[{'kind':'entity','term':'Acme AP','suggestions':['Acme API']}] else 1)"; then ok "entity typo keeps wiki route and carries deterministic hint"; else bad "entity typo directive/hint wrong: $entity_directive"; fi
+entity_wiki="$(router wiki 'What does Acme AP use?' --reason 'entity not accepted' --draft 'relation("Acme AP", "uses", V)?')"
+if printf '%s' "$entity_wiki" | grep -qF "note: no accepted entity 'Acme AP'. did you mean: Acme API?"; then ok "wiki answer appends entity did-you-mean without correction"; else bad "wiki entity hint missing"; fi
+relation_directive="$(router render 'relation("Acme API", "use", V)?')"
+if printf '%s' "$relation_directive" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d['did_you_mean']==[{'kind':'relation','term':'use','suggestions':['uses']}] else 1)"; then ok "relation typo gets accepted-relation hint"; else bad "relation typo hint wrong: $relation_directive"; fi
+if printf '%s' "$neg" | grep -qF 'did_you_mean\|did you mean'; then bad "verified negative must not get typo hint"; else ok "verified negative stays hint-free"; fi
+distant="$(router render 'relation("Completely Distant", "uses", V)?')"
+if printf '%s' "$distant" | "$PYTHON" -c "import json,sys; raise SystemExit(0 if not json.load(sys.stdin)['did_you_mean'] else 1)"; then ok "distant entity stays hint-free"; else bad "distant entity produced false-positive hint"; fi
+case_only="$(router render 'relation("acme api", "uses", V)?')"
+if printf '%s' "$case_only" | "$PYTHON" -c "import json,sys; raise SystemExit(0 if not json.load(sys.stdin)['did_you_mean'] else 1)"; then ok "case-only entity variant stays hint-free"; else bad "case-only entity variant produced hint"; fi
+LKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$LKB" >/dev/null
+printf 'relation("Acme API", "year", "2024").\n' > "$LKB/facts/accepted.dl"
+printf '%s\n' '- year' > "$LKB/policy/attribute-relations.md"
+literal_miss="$("$PYTHON" "$ROUTER" render 'relation("Acme API", "year", "202")?' --target "$LKB")"
+if printf '%s' "$literal_miss" | "$PYTHON" -c "import json,sys; raise SystemExit(0 if not json.load(sys.stdin)['did_you_mean'] else 1)"; then ok "attribute literal never becomes an entity spelling hint"; else bad "attribute literal leaked into entity hint"; fi
+
 # --- path routing & verified-negative (renderable for any predicate) ---
 check_field "reachable path routes engine" validate 'path("Acme API", "FastAPI")?' route engine
 check_field "unreachable path = verified negative (engine)" validate 'path("Postgres", "FastAPI")?' route engine
@@ -206,6 +226,21 @@ if router search "what uses FastAPI" | "$PYTHON" -c "import json,sys; d=json.loa
 if router search "WidgetX ToolA" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(r['dir']=='runs/sources' for r in d['results']) else 1)"; then ok "search finds excerpts in runs/sources/"; else bad "search missed runs/sources/"; fi
 # pages/ candidate content must never appear in search citations
 if router search "Datadog may_use" | grep -qE 'pages/|may_use|confidence=0\.40'; then bad "pages/ candidate content leaked into search results"; else ok "pages/ excluded from search (no candidate leak)"; fi
+
+# Sync-ignored primary sources are deliberately excluded from wiki evidence;
+# non-ignored sources and supplementary decisions retain their normal behavior.
+mkdir -p "$KB/sources/drafts" "$KB/runs/sources/drafts"
+printf 'syncignoretoken appears only in an ignored original.\n' > "$KB/sources/drafts/ignored.md"
+printf 'syncignoretoken appears only in an ignored conversion.\n' > "$KB/runs/sources/drafts/ignored.md"
+printf 'syncignoretoken appears in the retained source.\n' > "$KB/sources/retained.md"
+printf -- '- drafts/**\n' >> "$KB/policy/sync-ignore.md"
+ignored_search="$(router search "syncignoretoken")"
+if printf '%s' "$ignored_search" | grep -qE 'sources/drafts/ignored\.md|runs/sources/drafts/ignored\.md'; then bad "sync-ignored sources leaked into search results"; else ok "sync-ignored sources excluded from search results"; fi
+if printf '%s' "$ignored_search" | grep -qF 'sources/retained.md'; then ok "non-ignored source remains in search results"; else bad "non-ignored source missing from search results"; fi
+if router wiki "syncignoretoken" | grep -qE 'sources/drafts/ignored\.md|runs/sources/drafts/ignored\.md'; then bad "sync-ignored sources leaked into rendered wiki evidence"; else ok "sync-ignored sources excluded from rendered wiki evidence"; fi
+rm -rf "$KB/sources/drafts" "$KB/runs/sources/drafts" "$KB/sources/retained.md"
+# Keep later search cases independent from this filtering fixture.
+sed -i.bak '/^- drafts\/\*\*$/d' "$KB/policy/sync-ignore.md" && rm -f "$KB/policy/sync-ignore.md.bak"
 
 wiki_out="$(router wiki "what uses FastAPI" --reason "unknown entity")"
 if printf '%s' "$wiki_out" | grep -qF "UNVERIFIED — wiki exploration"; then ok "wiki answer carries UNVERIFIED marker"; else bad "wiki answer missing UNVERIFIED marker"; fi
@@ -517,6 +552,8 @@ check_field_router() {  # like check_field but uses arouter
 check_field_router "#227: canonical name routes engine (not wiki)" validate 'relation("논문A", "published_year", X)?' route engine
 check_field_router "#227: canonical name code=ok (positive, not fact_absent)" validate 'relation(S, "published_year", O)?' code ok
 check_field_router "#227: canonical query not flagged negative" validate 'relation(S, "published_year", O)?' negative False
+alias_typo="$(arouter render 'relation("논문A", "publshed_year", O)?')"
+if printf '%s' "$alias_typo" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d['did_you_mean']==[{'kind':'relation','term':'publshed_year','suggestions':['published_year']}] else 1)"; then ok "#273: typo suggests declared canonical relation alias"; else bad "#273 alias suggestion missing/wrong: $alias_typo"; fi
 
 # 2. evaluate: canonical query returns BOTH surface-variant rows
 aeval_count="$(arouter evaluate 'relation(S, "published_year", O)?' | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin)['count'])")"
@@ -652,6 +689,65 @@ if hrouter render 'relation("존재안함", "게재연도", O)?' | grep -qF "pos
 # read-only invariant preserved by the hint path.
 if [ -f "$HKB/facts/query.dl" ]; then bad "#189: coverage-hint path wrote facts/query.dl"; else ok "#189: coverage-hint path never writes facts/query.dl"; fi
 if [ "$(cat "$HKB/facts/accepted.dl")" = "$HACCEPTED_BEFORE" ]; then ok "#189: coverage-hint path leaves accepted.dl unchanged"; else bad "#189: coverage-hint path mutated accepted.dl"; fi
+
+# --- #279: renderer row caps are explicit and escapable ---------------------
+# Test below / at / above the same small cap directly.  This keeps the boundary
+# deterministic without making the fixture depend on the production default.
+if "$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+from ask_router import render_engine_answer, render_wiki_answer
+
+rows = [['S1', 'rel', 'O1'], ['S2', 'rel', 'O2'], ['S3', 'rel', 'O3']]
+for count in (1, 2):
+    out = render_engine_answer('relation(S, rel, O)?', rows[:count], limit=2)
+    assert f'rows: {count}' in out, out
+    assert 'more rows' not in out, out
+out = render_engine_answer('relation(S, rel, O)?', rows, limit=2)
+assert 'rows: 3' in out, out
+assert 'S1, rel, O1' in out and 'S2, rel, O2' in out and 'S3, rel, O3' not in out, out
+assert '… 1 more rows (full output: --all)' in out, out
+all_out = render_engine_answer('relation(S, rel, O)?', rows, limit=None)
+assert all(row[0] in all_out for row in rows), all_out
+assert 'more rows' not in all_out, all_out
+
+# One varying column is an indexed, lossless projection: the fixed positions and
+# every varying value are printed, so the displayed triples can be reconstructed.
+same_tail = [['S1', 'rel', 'O'], ['S2', 'rel', 'O'], ['S3', 'rel', 'O']]
+signals = {('S1', 'rel', 'O'): {'sources': 1, 'source_paths': ['sources/a.md'], 'confidence': '0.90', 'stale': False}}
+compact = render_engine_answer('relation(S, rel, O)?', same_tail, signals, limit=None)
+assert 'rows differ only at column 0; fixed: [1] rel, [2] O' in compact, compact
+assert all(f'    - S{i}' in compact for i in range(1, 4)), compact
+assert '← sources/a.md' in compact, compact
+
+results = [
+    {'file': 'sources/a.md', 'line': 1, 'dir': 'sources', 'excerpt': 'alpha'},
+    {'file': 'sources/b.md', 'line': 2, 'dir': 'sources', 'excerpt': 'beta'},
+    {'file': 'sources/c.md', 'line': 3, 'dir': 'sources', 'excerpt': 'gamma'},
+]
+grounding = [
+    {'subject': 'S1', 'relation': 'rel', 'object': 'O1'},
+    {'subject': 'S2', 'relation': 'rel', 'object': 'O2'},
+    {'subject': 'S3', 'relation': 'rel', 'object': 'O3'},
+]
+wiki = render_wiki_answer('question', 'reason', results, grounding, limit=2, total_results=3)
+assert 'UNVERIFIED — wiki exploration' in wiki, wiki
+assert 'WARNING: unverified candidates' in wiki, wiki
+assert wiki.index('WARNING: unverified candidates') < wiki.index('VERIFIED — engine (grounding'), wiki
+assert 'grounding facts: 3' in wiki and 'S3, rel, O3' not in wiki, wiki
+assert '[sources/a.md:1] (sources)' in wiki and '[sources/b.md:2] (sources)' in wiki and '[sources/c.md:3]' not in wiki, wiki
+assert wiki.count('… 1 more rows (full output: --all)') == 2, wiki
+" 2>/dev/null; then ok "#279: engine/wiki caps retain totals, citations, warning, and explicit truncation"; else bad "#279: renderer cap contract failed"; fi
+
+# JSON search keeps its existing `results` array and adds an explicit total and
+# truncation flag. --all is the lossless escape hatch for the same corpus.
+LKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$LKB" >/dev/null
+for n in $(seq 1 11); do printf 'limitprobe item %s\n' "$n" > "$LKB/sources/$n.md"; done
+limited_search="$("$PYTHON" "$ROUTER" search limitprobe --target "$LKB")"
+all_search="$("$PYTHON" "$ROUTER" search limitprobe --all --target "$LKB")"
+if printf '%s' "$limited_search" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); assert len(d['results']) == 10 and d['total'] == 11 and d['truncated'] is True"; then ok "#279: JSON search exposes capped total and truncation"; else bad "#279: JSON search cap metadata missing/wrong"; fi
+if printf '%s' "$all_search" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); assert len(d['results']) == 11 and d['total'] == 11 and d['truncated'] is False"; then ok "#279: JSON search --all returns every excerpt"; else bad "#279: JSON search --all is not lossless"; fi
 
 echo ""
 echo "========================================"

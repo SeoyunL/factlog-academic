@@ -7,9 +7,10 @@
 `/factlog sync` re-extracts **every** source on each run. To keep specific
 sources out of that — a draft, a work-in-progress, an external doc — add them to
 the per-KB **sync-ignore list** (`policy/sync-ignore.md`). Ignored sources are
-skipped by `/factlog sync`, `factlog ingest --scan`, and coverage gap reporting,
-**even when modified**. Their already-merged facts are kept untouched (use
-`factlog eject` to actually remove a fact).
+skipped by `/factlog sync`, `factlog ingest --scan`, coverage gap reporting, and
+the wiki-exploration evidence in `/factlog ask`, **even when modified**. Their
+already-merged facts are kept untouched (use `factlog eject` to actually remove
+a fact).
 
 ```bash
 factlog ignore drafts/*.md sources/wip-notes.md   # add pattern(s)

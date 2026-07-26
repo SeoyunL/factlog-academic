@@ -716,9 +716,10 @@ explanation of its purpose.
 # Sync-ignore list
 #
 # Source files matching these glob patterns are SKIPPED by `/factlog sync`
-# (re-extraction), `factlog ingest --scan`, and coverage gap reporting — even
-# when modified. Their already-merged facts are KEPT (use `factlog eject` to
-# remove those). Manage with `factlog ignore [--remove] <pattern>`.
+# (re-extraction), `factlog ingest --scan`, coverage gap reporting, and
+# `/factlog ask` wiki exploration — even when modified. Their already-merged
+# facts are KEPT (use `factlog eject` to remove those). Manage with
+# `factlog ignore [--remove] <pattern>`.
 #
 # One pattern per line; '#' comments and '-' bullets allowed; quote a pattern
 # with spaces (or one starting with '#') in `backticks`. A pattern matches a
@@ -1240,6 +1241,40 @@ def _triple_filter(terms: list[str]) -> dict[str, str] | None:
     return filt or None
 
 
+def _review_queue(rows: list[dict[str, str]]) -> tuple[list[tuple[str, str, str]], str]:
+    """Return stable pending-fact numbers and a digest of their full snapshot.
+
+    Numbers name unique NFC-normalized triples, sorted lexicographically.  The
+    digest additionally covers every pending backing row (including source,
+    status, confidence and note), so accepting a number cannot silently act on
+    a queue that changed after it was reviewed.
+    """
+    import hashlib
+    import json
+    import unicodedata
+
+    from factlog.common import REVIEW_STATUSES
+
+    def fld(row: dict[str, str], key: str) -> str:
+        return unicodedata.normalize("NFC", (row.get(key) or "").strip())
+
+    pending_rows = [row for row in rows if (row.get("status") or "").strip() in REVIEW_STATUSES]
+    triples = sorted({(fld(row, "subject"), fld(row, "relation"), fld(row, "object")) for row in pending_rows})
+    snapshot_rows = sorted(
+        (
+            fld(row, "subject"), fld(row, "relation"), fld(row, "object"),
+            fld(row, "source"), fld(row, "status"), fld(row, "confidence"), fld(row, "note"),
+        )
+        for row in pending_rows
+    )
+    payload = json.dumps(
+        {"domain": "factlog-review-snapshot-v1", "rows": snapshot_rows},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return triples, "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     """List facts awaiting a human decision (status candidate/needs_review).
 
@@ -1267,9 +1302,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     if csv_path.is_file():
         with csv_path.open(newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
+    queue, digest = _review_queue(rows)
     pending = [r for r in rows if (r.get("status") or "").strip() in want]
     if not pending:
         print(f"factlog review (KB: {target}): no pending facts ({'/'.join(sorted(want))})")
+        if args.status is None:
+            print(f"  snapshot: {digest}")
         return 0
 
     def fld(r: dict, k: str) -> str:
@@ -1279,9 +1317,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     for r in pending:
         groups.setdefault((fld(r, "subject"), fld(r, "relation"), fld(r, "object")), []).append(r)
 
+    number = {triple: index for index, triple in enumerate(queue, start=1)}
     print(f"factlog review (KB: {target}): {len(groups)} pending fact(s), {len(pending)} row(s)")
-    for (s, rel, o), grp in groups.items():
-        print(f"  {s} / {rel} / {o}")
+    for (s, rel, o) in sorted(groups):
+        grp = groups[(s, rel, o)]
+        prefix = f"[{number[(s, rel, o)]}] " if args.status is None else ""
+        print(f"  {prefix}{s} / {rel} / {o}")
         for r in sorted(grp, key=lambda r: fld(r, "source")):
             src = fld(r, "source")
             status = (r.get("status") or "").strip()
@@ -1291,6 +1332,9 @@ def cmd_review(args: argparse.Namespace) -> int:
             if note:
                 print(f"        note: {note}")
     print("  decide with: factlog accept <subject> <relation> <object>   (or: factlog reject ...)")
+    if args.status is None:
+        print(f"  snapshot: {digest}")
+        print(f"  or by reviewed number: factlog accept --number 1 --from {digest}")
     return 0
 
 
@@ -1416,15 +1460,42 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     target = Path(target_str)
     if not _require_kb(target, verb):
         return 1
-    if len(args.terms) > 3:
+    numbers = list(args.numbers or [])
+    numbered = bool(numbers)
+    if numbered:
+        import re
+
+        if args.terms:
+            print(
+                f"factlog {verb}: do not mix --number with a triple selector",
+                file=sys.stderr,
+            )
+            return 2
+        if len(set(numbers)) != len(numbers):
+            print(f"factlog {verb}: duplicate --number value; give each review number once", file=sys.stderr)
+            return 2
+        if any(number < 1 for number in numbers):
+            print(f"factlog {verb}: --number must be a positive review number", file=sys.stderr)
+            return 2
+        if args.from_digest is None or not re.fullmatch(r"sha256:[0-9a-f]{64}", args.from_digest):
+            print(
+                f"factlog {verb}: numeric selection needs the current review snapshot; no changes made. "
+                "Run factlog review again.",
+                file=sys.stderr,
+            )
+            return 1
+    elif args.from_digest is not None:
+        print(f"factlog {verb}: --from is only valid with one or more --number selectors", file=sys.stderr)
+        return 2
+    elif len(args.terms) > 3:
         print(
             f"factlog {verb}: too many terms — give at most SUBJECT RELATION OBJECT "
             "(quote a value that contains spaces)",
             file=sys.stderr,
         )
         return 2
-    filt = _triple_filter(args.terms)
-    if filt is None:
+    filt = None if numbered else _triple_filter(args.terms)
+    if not numbered and filt is None:
         print(
             f"factlog {verb}: give at least one of SUBJECT RELATION OBJECT "
             "(use '-' to wildcard a position)",
@@ -1444,7 +1515,29 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     def fld(r: dict, k: str) -> str:
         return nfc((r.get(k) or "").strip())
 
-    matched = [r for r in rows if all(fld(r, k) == v for k, v in filt.items())]
+    selected_numbers: set[int] = set()
+    selected_triples: set[tuple[str, str, str]] = set()
+    if numbered:
+        queue, actual_digest = _review_queue(rows)
+        selected_numbers = set(numbers)
+        invalid = sorted(number for number in selected_numbers if number > len(queue))
+        if invalid:
+            print(
+                f"factlog {verb}: review number(s) out of range: {', '.join(map(str, invalid))}; no changes made. "
+                "Run factlog review again.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.from_digest != actual_digest:
+            print(
+                f"factlog {verb}: review snapshot is stale; no changes made. Run factlog review again.",
+                file=sys.stderr,
+            )
+            return 1
+        selected_triples = {queue[number - 1] for number in selected_numbers}
+        matched = [r for r in rows if (fld(r, "subject"), fld(r, "relation"), fld(r, "object")) in selected_triples]
+    else:
+        matched = [r for r in rows if all(fld(r, k) == v for k, v in filt.items())]
     if not matched:
         shown = ", ".join(f"{k}={v}" for k, v in filt.items())
         print(f"factlog {verb}: no fact matches ({shown})", file=sys.stderr)
@@ -1477,7 +1570,11 @@ def _apply_review_status(args: argparse.Namespace, new_status: str, verb: str) -
     changed = 0
     decided: set[tuple[str, str, str, str]] = set()
     for r in rows:
-        if all(fld(r, k) == v for k, v in filt.items()) and (r.get("status") or "").strip() in REVIEW_STATUSES:
+        is_selected = (
+            (fld(r, "subject"), fld(r, "relation"), fld(r, "object")) in selected_triples
+            if numbered else all(fld(r, k) == v for k, v in filt.items())
+        )
+        if is_selected and (r.get("status") or "").strip() in REVIEW_STATUSES:
             r["status"] = new_status
             changed += 1
             # MATCHING and IDENTITY are different jobs. Matching (fld/filt above) stays
@@ -1542,8 +1639,9 @@ def cmd_reject(args: argparse.Namespace) -> int:
 def cmd_amend(args: argparse.Namespace) -> int:
     """Correct a fact's subject / relation / object / note (durable).
 
-    The positional triple identifies the fact (exact NFC match, any status); the
-    --set-* flags give the new values (at least one required, or --accept). A
+    The positional triple identifies a live fact (exact NFC match); superseded
+    tombstones are never matched. The --set-* flags give the new values (at
+    least one required, or --accept). A
     fact's values live in runs/*.json (merge rebuilds candidates.csv from it), so
     amend updates BOTH the matching candidates.csv rows AND their backing
     runs/*.json rows — otherwise the edit would vanish on the next sync.
@@ -2075,6 +2173,9 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     from factlog.common import (
+        KbContext,
+        entity_set,
+        nearby_vocabulary,
         normalize_confidence,
         relation_aliases,
         source_file_refs,
@@ -2147,6 +2248,27 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     if not matched:
         shown = ", ".join(f"{k}={v}" for k, v in filt.items())
         print(f"factlog provenance: no fact matches ({shown})", file=sys.stderr)
+        # Keep no-match's stderr/rc=1 contract.  The optional notes are derived
+        # only from accepted engine vocabulary (never candidate/source text).
+        if (target / "facts" / "accepted.dl").is_file():
+            accepted = KbContext.for_root(target).load_accepted_facts()
+            entities = entity_set(accepted)
+            relations = {row["relation"] for row in accepted if row["relation"]} | set(aliases) | set(aliases.values())
+            for kind, term, vocabulary in (
+                ("entity", filt.get("subject"), entities),
+                ("relation", filt.get("relation"), relations),
+                ("entity", filt.get("object"), entities),
+            ):
+                if term is None:
+                    continue
+                if any(nfc(value).casefold() == nfc(term).casefold() for value in vocabulary):
+                    continue
+                suggestions = nearby_vocabulary(term, vocabulary)
+                if suggestions:
+                    print(
+                        f"note: no accepted {kind} '{term}'. did you mean: {', '.join(suggestions)}?",
+                        file=sys.stderr,
+                    )
         return 1
 
     on_disk = source_file_refs(target)  # NFC-normalised refs of files that exist
@@ -2201,12 +2323,13 @@ def cmd_provenance(args: argparse.Namespace) -> int:
 
 
 def cmd_ignore(args: argparse.Namespace) -> int:
-    """Manage policy/sync-ignore.md — glob patterns of sources excluded from sync.
+    """Manage policy/sync-ignore.md — sources excluded from sync and wiki evidence.
 
     No patterns: list current entries and the on-disk sources each matches.
     With pattern(s): add them, or remove them with --remove. Excluding a source
-    only stops its re-extraction (ingest --scan / sync / coverage); its already-
-    merged facts are untouched (use `factlog eject` to remove those).
+    stops its re-extraction (ingest --scan / sync / coverage) and keeps it out
+    of `/factlog ask` wiki evidence; its already-merged facts are untouched
+    (use `factlog eject` to remove those).
     """
     import re
     import unicodedata
@@ -8253,9 +8376,24 @@ def build_parser() -> argparse.ArgumentParser:
         )
         _p.add_argument(
             "terms",
-            nargs="+",
+            nargs="*",
             metavar="TERM",
             help="SUBJECT [RELATION [OBJECT]] prefix; use '-' to wildcard a position",
+        )
+        _p.add_argument(
+            "--number",
+            dest="numbers",
+            action="append",
+            type=int,
+            metavar="N",
+            help="select reviewed pending fact number N (repeatable; requires --from)",
+        )
+        _p.add_argument(
+            "--from",
+            dest="from_digest",
+            default=None,
+            metavar="SNAPSHOT",
+            help="select reviewed numeric item(s) only if this review snapshot digest still matches",
         )
         _p.add_argument("--dry-run", action="store_true", help="print the planned changes without modifying anything")
         _p.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
@@ -8298,7 +8436,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ignore = sub.add_parser(
         "ignore",
-        help="manage policy/sync-ignore.md: glob patterns of sources excluded from sync",
+        help="manage policy/sync-ignore.md: glob patterns excluded from sync and wiki evidence",
     )
     ignore.add_argument("patterns", nargs="*", help="glob/path pattern(s) to add (omit to list)")
     ignore.add_argument("--remove", action="store_true", help="remove the given pattern(s) instead of adding")

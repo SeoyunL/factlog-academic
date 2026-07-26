@@ -128,8 +128,10 @@ def test_accept_reaches_both_notations(tmp_path):
     # candidates.csv is what merge would write: ONE NFC row.
     _write_candidates(kb, [_row(NFC, "R", "X", "sources/a.md", status="candidate")])
 
+    # numbers/from_digest are the numeric-selection flags argparse always supplies;
+    # their argparse defaults mean "select by triple", which is what this test does.
     args = SimpleNamespace(
-        terms=[NFC, "R", "X"], target=str(kb), dry_run=False
+        terms=[NFC, "R", "X"], target=str(kb), dry_run=False, numbers=None, from_digest=None
     )
     rc = cli.cmd_accept(args)
     assert rc in (0, 1)  # 1 only if recompile fails (no engine in tmp KB)

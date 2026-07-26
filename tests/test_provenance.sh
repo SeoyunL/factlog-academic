@@ -38,6 +38,7 @@ printf '%s\n%s\n%s\n%s\n%s\n' "$H" \
   'X,rel,Y,sources/b.md,confirmed,0.95,from doc b' \
   'X,attr,2030,sources/a.md,superseded,0.80,retired value' \
   'G,rel,H,sources/gone.md,confirmed,0.70,cites a missing file' > "$KB/facts/candidates.csv"
+printf 'relation("X", "rel", "Y").\nrelation("Acme API", "uses", "FastAPI").\n' > "$KB/facts/accepted.dl"
 
 # --- exact triple: all backing rows with path/status/conf/note ----------------
 out="$("$PYTHON" -m factlog provenance X rel Y --target "$KB" 2>&1)"
@@ -73,6 +74,21 @@ printf '%s' "$out" | grep -qF "1 stale row(s)" && ok "stale row counted in summa
 # --- no match -> rc 1 ---------------------------------------------------------
 set +e; "$PYTHON" -m factlog provenance nope nope nope --target "$KB" >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -eq 1 ] && ok "no match exits rc 1" || bad "no-match rc wrong ($rc)"
+
+# #273: preserve the existing stderr/rc=1 contract and add only accepted-
+# vocabulary hints. Candidate rows must never become spelling candidates.
+set +e; typo_out="$("$PYTHON" -m factlog provenance 'Acme AP' --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 1 ] && printf '%s' "$typo_out" | grep -qF "factlog provenance: no fact matches" \
+  && ok "typo keeps provenance no-match stderr/rc contract" || bad "typo changed provenance no-match contract"
+printf '%s' "$typo_out" | grep -qF "note: no accepted entity 'Acme AP'. did you mean: Acme API?" \
+  && ok "zero-result provenance suggests close accepted entity" || bad "provenance entity typo hint missing: $typo_out"
+set +e; rel_typo="$("$PYTHON" -m factlog provenance X rell --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 1 ] && printf '%s' "$rel_typo" | grep -qF "did you mean: rel?" \
+  && ok "zero-result provenance suggests close accepted relation" || bad "provenance relation typo hint missing: $rel_typo"
+printf '%s\n' 'Ghost Typo,unaccepted_relation,Elsewhere,sources/a.md,candidate,0.4,draft only' >> "$KB/facts/candidates.csv"
+set +e; candidate_only="$("$PYTHON" -m factlog provenance 'Ghost Typ' --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 1 ] && ! printf '%s' "$candidate_only" | grep -qF 'Ghost Typo' \
+  && ok "candidate-only vocabulary never leaks into provenance hint" || bad "candidate-only name leaked into provenance hint: $candidate_only"
 
 # --- all-wildcard (no constraint) -> rc 2 ------------------------------------
 set +e; "$PYTHON" -m factlog provenance - - - --target "$KB" >/dev/null 2>&1; rc=$?; set -e

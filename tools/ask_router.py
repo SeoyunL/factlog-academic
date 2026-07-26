@@ -29,7 +29,9 @@ This module is READ-ONLY with respect to engine inputs: it never writes
 Usage:
     python3 ask_router.py validate "<draft>" [--target <kb>]
     python3 ask_router.py evaluate "<draft>" [--target <kb>]
-    python3 ask_router.py render   "<draft>" [--target <kb>]
+    python3 ask_router.py render   "<draft>" [--all] [--target <kb>]
+    python3 ask_router.py search   "<question>" [--all] [--target <kb>]
+    python3 ask_router.py wiki     "<question>" [--all] [--target <kb>]
 
 Each subcommand prints JSON (validate/evaluate) or the rendered answer (render)
 to stdout. --target ("--wiki" is an accepted alias) overrides $FACTLOG_ROOT, which
@@ -96,8 +98,10 @@ from common import (  # noqa: E402
     ACCEPTED_DL,
     CANDIDATES_CSV,
     LOGIC_POLICY_DL,
+    QUERY_ENTITY_NOT_ACCEPTED,
     QUERY_FACT_ABSENT,
     QUERY_OK,
+    QUERY_RELATION_NOT_ACCEPTED,
     FactlogError,
     arg_value,
     canonical_value,
@@ -114,12 +118,20 @@ from common import (  # noqa: E402
     logic_policy_md_has_rules,
     relation_row_matches,
     policy_row_matches,
+    nearby_vocabulary,
     policy_predicates,
     relation_aliases,
     value_hierarchy,
     run_wirelog,
+    is_sync_ignored,
+    sync_ignore_patterns,
 )
 from factlog import literal_types  # noqa: E402
+
+# Keep the default answer short enough to scan while retaining an explicit,
+# deterministic escape hatch for audit work.  This cap is deliberately applied
+# by renderers, not by an LLM deciding which facts matter.
+DEFAULT_RENDER_ROW_LIMIT = 20
 
 
 def _policy_program_optional() -> str:
@@ -376,6 +388,50 @@ def coverage_hint(
     )
 
 
+def did_you_mean_hints(draft: str, facts: list[dict[str, str]]) -> list[dict[str, object]]:
+    """Return display-only hints for validator-confirmed vocabulary misses (#273).
+
+    Only concrete relation arguments on stable entity/relation-not-accepted
+    routes qualify.  This deliberately excludes verified negatives, malformed
+    drafts, variables, review queries, candidate data, and source/wiki text.
+    """
+    decision = classify(draft, facts)
+    if decision["code"] not in {QUERY_ENTITY_NOT_ACCEPTED, QUERY_RELATION_NOT_ACCEPTED}:
+        return []
+    if _predicate_of(draft) != "relation":
+        return []
+    args = query_args(draft)
+    if len(args) != 3:
+        return []
+    aliases = relation_aliases()
+    entities = entity_set(facts)
+    relations = {row["relation"] for row in facts if row["relation"]} | set(aliases) | set(aliases.values())
+    hints: list[dict[str, object]] = []
+    for kind, arg, vocabulary in (
+        ("entity", args[0], entities),
+        ("relation", args[1], relations),
+        ("entity", args[2], entities),
+    ):
+        if not is_quoted_string(arg):
+            continue
+        term = arg_value(arg)
+        if any(canonical_value(value).casefold() == canonical_value(term).casefold() for value in vocabulary):
+            continue
+        suggestions = nearby_vocabulary(term, vocabulary)
+        if suggestions:
+            hints.append({"kind": kind, "term": term, "suggestions": suggestions})
+    return hints
+
+
+# `_reachable_pairs` — upstream's pure-python transitive closure for `path` —
+# is deliberately NOT carried here. Answering a path query from a closure over
+# accepted facts made ask return a VERIFIED NEGATIVE for a pair the engine had
+# proved (an edge rule in logic-policy.extra.dl reaches pairs no closure over
+# relation/3 can see), so ask and the report disagreed about one KB (#220). The
+# path branch below asks the engine instead, and degrades to a signalled empty
+# result rather than a faked negative.
+
+
 def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     """Evaluate a validated engine query: relation, path, or a policy predicate.
 
@@ -467,6 +523,8 @@ def render_engine_answer(
     rows: list[list[str]],
     signals: dict[tuple[str, str, str], dict[str, object]] | None = None,
     annotate_objects: bool = False,
+    limit: int | None = DEFAULT_RENDER_ROW_LIMIT,
+    project: bool = True,
 ) -> str:
     """Render the VERIFIED — engine answer block (positive or negative).
 
@@ -497,8 +555,17 @@ def render_engine_answer(
     """
     lines = ["VERIFIED — engine", f"query: {draft}", f"rows: {len(rows)}"]
     if rows:
-        for row in rows:
-            line = f"  - {', '.join(row)}"
+        visible_rows = rows if limit is None else rows[:_render_limit(limit)]
+        projection = _single_column_projection(visible_rows) if project else None
+        if projection:
+            varying_index, fixed_columns = projection
+            fixed = ", ".join(f"[{index}] {value}" for index, value in fixed_columns)
+            lines.append(f"  - rows differ only at column {varying_index}; fixed: {fixed}")
+        for row in visible_rows:
+            line = (
+                f"    - {row[projection[0]]}"
+                if projection else f"  - {', '.join(row)}"
+            )
             # Display-only: annotate a compound-term object (amount/date/number)
             # with its human-friendly form. Gated to relation rows via
             # annotate_objects so a coincidental 3-element shape on a path/policy
@@ -527,6 +594,9 @@ def render_engine_answer(
             if sig:
                 for path in sig.get("source_paths", []):
                     lines.append(f"    ← {path}")
+        truncation = _truncation_line(len(rows), len(visible_rows))
+        if truncation:
+            lines.append(truncation)
     else:
         lines.append("no such fact (verified negative)")
     return "\n".join(lines)
@@ -641,7 +711,7 @@ def _semantic_rerank(question: str, results: list[dict[str, object]]) -> list[di
         return results  # graceful degrade to lexical ranking
 
 
-def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, object]]:
+def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[str, object]]:
     """Relevance-ranked search over the wiki corpus (sources/ + runs/sources/).
 
     Collects keyword-matched excerpts, ranks them by relevance (keyword coverage,
@@ -653,6 +723,7 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
     if not patterns:
         return []
     scored: list[tuple[tuple[int, int], dict[str, object]]] = []
+    ignored_patterns = sync_ignore_patterns(root)
     for rel, label in _wiki_corpus():
         base = root / rel
         if not base.is_dir():
@@ -661,6 +732,12 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
         for path in sorted(p for p in base.rglob("*") if p.is_file()):
             # Stay within the corpus root: never follow a symlink out of the KB.
             if not path.resolve().is_relative_to(base_resolved):
+                continue
+            ref = path.relative_to(root).as_posix()
+            # Sync-ignore means this primary source is not evidence for wiki
+            # exploration either. Supplementary decisions remain searchable:
+            # they are explicitly labeled and are not source files.
+            if rel in WIKI_SOURCE_DIRS and is_sync_ignored(ref, ignored_patterns):
                 continue
             try:
                 text = path.read_text(encoding="utf-8")
@@ -681,7 +758,7 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
                 last_end = end - 1
                 excerpt = "\n".join(_sanitize(line_text) for line_text in lines[start:end])
                 result = {
-                    "file": path.relative_to(root).as_posix(),
+                    "file": ref,
                     "line": i + 1,
                     "excerpt": excerpt,
                     "dir": label,
@@ -690,8 +767,43 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
     # Rank by relevance (desc); ties keep corpus/line order (stable sort over the
     # already-ordered collection). Then take the cap, then optional neural rerank.
     scored.sort(key=lambda item: item[0], reverse=True)
-    ranked = [result for _score, result in scored][:limit]
+    ranked = [result for _score, result in scored]
+    if limit is not None:
+        ranked = ranked[:limit]
     return _semantic_rerank(question, ranked)
+
+
+def _render_limit(value: int | None) -> int | None:
+    """Translate the public ``--all`` mode to an internal row cap."""
+    return None if value is None else max(0, value)
+
+
+def _truncation_line(total: int, shown: int) -> str | None:
+    """Return an explicit audit escape-hatch notice when rows were omitted."""
+    omitted = total - shown
+    if omitted <= 0:
+        return None
+    return f"… {omitted} more rows (full output: --all)"
+
+
+def _single_column_projection(rows: list[list[str]]) -> tuple[int, list[tuple[int, str]]] | None:
+    """Describe a lossless projection when exactly one column varies.
+
+    The returned column index and fixed indexed values retain enough structure to
+    reconstruct every displayed row.  Provenance stays attached to each varying
+    value in :func:`render_engine_answer`; this is display compaction, never an
+    LLM-authored summary.
+    """
+    if len(rows) < 2 or not rows or not rows[0]:
+        return None
+    width = len(rows[0])
+    if any(len(row) != width for row in rows):
+        return None
+    varying = [index for index in range(width) if any(row[index] != rows[0][index] for row in rows[1:])]
+    if len(varying) != 1:
+        return None
+    varying_index = varying[0]
+    return varying_index, [(index, rows[0][index]) for index in range(width) if index != varying_index]
 
 
 def _entity_mentioned(entity: str, question_low: str) -> bool:
@@ -729,6 +841,9 @@ def render_wiki_answer(
     reason: str,
     results: list[dict[str, object]],
     grounding: list[dict[str, str]] | None = None,
+    did_you_mean: list[dict[str, object]] | None = None,
+    limit: int | None = DEFAULT_RENDER_ROW_LIMIT,
+    total_results: int | None = None,
 ) -> str:
     """Render the UNVERIFIED — wiki exploration answer block.
 
@@ -742,21 +857,38 @@ def render_wiki_answer(
         "UNVERIFIED — wiki exploration",
         f"question: {question}",
         f"reason: {reason}",
+        "WARNING: unverified candidates — do not treat as confirmed facts.",
     ]
+    total_grounding = len(grounding or [])
+    visible_grounding = (grounding or []) if limit is None else (grounding or [])[:_render_limit(limit)]
     if grounding:
         lines.append("")
         lines.append("VERIFIED — engine (grounding: accepted facts about mentioned entities):")
-        lines.extend(f"  - {row['subject']}, {row['relation']}, {row['object']}" for row in grounding)
+        lines.append(f"grounding facts: {total_grounding}")
+        lines.extend(f"  - {row['subject']}, {row['relation']}, {row['object']}" for row in visible_grounding)
+        truncation = _truncation_line(total_grounding, len(visible_grounding))
+        if truncation:
+            lines.append(truncation)
         lines.append("")
     lines.append(f"sources searched: {', '.join(label for _rel, label in _wiki_corpus())}")
-    if results:
-        for r in results:
+    result_total = len(results) if total_results is None else total_results
+    lines.append(f"source excerpts: {result_total}")
+    visible_results = results if limit is None else results[:_render_limit(limit)]
+    if visible_results:
+        for r in visible_results:
             lines.append(f"[{r['file']}:{r['line']}] ({r['dir']})")
             for excerpt_line in str(r["excerpt"]).splitlines():
                 lines.append(f"    {excerpt_line}")
     else:
         lines.append("(no matching source excerpts found)")
-    lines.append("WARNING: unverified candidates — do not treat as confirmed facts.")
+    truncation = _truncation_line(result_total, len(visible_results))
+    if truncation:
+        lines.append(truncation)
+    for hint in did_you_mean or []:
+        suggestions = ", ".join(str(value) for value in hint["suggestions"])
+        lines.append(
+            f"note: no accepted {hint['kind']} '{hint['term']}'. did you mean: {suggestions}?"
+        )
     return "\n".join(lines)
 
 
@@ -858,6 +990,8 @@ def cmd_render(args: argparse.Namespace) -> int:
                 result["rows"],
                 signals,
                 annotate_objects=is_relation,
+                limit=None if args.all else DEFAULT_RENDER_ROW_LIMIT,
+                project=not args.all,
             ))
         # The engine answer is real, but if the author wrote policy rules and
         # never compiled them, the engine had no policy to apply — say so, so a
@@ -873,6 +1007,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             "route": "wiki",
             "reason": decision["reason"],
             "policy_uncompiled": decision["policy_uncompiled"],
+            "did_you_mean": did_you_mean_hints(args.draft, facts),
         },
         ensure_ascii=False,
     ))
@@ -881,17 +1016,42 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     root = Path(os.environ["FACTLOG_ROOT"])
-    print(json.dumps({"results": search(args.text, root)}, ensure_ascii=False))
+    if args.all:
+        results = search(args.text, root, limit=None)
+        total = len(results)
+    else:
+        # Keep the existing top-10 retrieval/reranking behaviour for callers of
+        # the stable ``results`` array.  The additive fields make the cap visible.
+        results = search(args.text, root)
+        total = len(search(args.text, root, limit=None))
+    print(json.dumps(
+        {"results": results, "total": total, "truncated": len(results) < total},
+        ensure_ascii=False,
+    ))
     return 0
 
 
 def cmd_wiki(args: argparse.Namespace) -> int:
     root = Path(os.environ["FACTLOG_ROOT"])
-    results = search(args.text, root)
+    if args.all:
+        results = search(args.text, root, limit=None)
+        total_results = len(results)
+    else:
+        results = search(args.text, root)
+        total_results = len(search(args.text, root, limit=None))
     # Grounding: accepted facts about mentioned entities (empty if not compiled yet).
     accepted = load_accepted_facts() if ACCEPTED_DL.is_file() else []
     grounding = grounding_facts(args.text, accepted)
-    print(render_wiki_answer(args.text, args.reason, results, grounding))
+    hints = did_you_mean_hints(args.draft, accepted) if args.draft else []
+    print(render_wiki_answer(
+        args.text,
+        args.reason,
+        results,
+        grounding,
+        hints,
+        limit=None if args.all else DEFAULT_RENDER_ROW_LIMIT,
+        total_results=total_results,
+    ))
     # A wiki answer is already UNVERIFIED, but an uncompiled-but-authored policy
     # is a separate, actionable defect the author should fix — surface it (#193).
     if _policy_uncompiled():
@@ -916,18 +1076,22 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         p = sub.add_parser(name, help=helptext)
         p.add_argument("draft", help="the candidate Datalog query line")
+        p.add_argument("--all", action="store_true", help="show every answer row (no renderer cap)")
         p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
         p.set_defaults(func=func)
 
     # Path B (wiki) subcommands take the natural-language question, not a draft.
     search_p = sub.add_parser("search", help="search the wiki corpus (sources/ + runs/sources/) (JSON)")
     search_p.add_argument("text", help="the natural-language question")
+    search_p.add_argument("--all", action="store_true", help="return every matching excerpt")
     search_p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
     search_p.set_defaults(func=cmd_search)
 
     wiki_p = sub.add_parser("wiki", help="render the UNVERIFIED — wiki exploration answer")
     wiki_p.add_argument("text", help="the natural-language question")
     wiki_p.add_argument("--reason", default="not expressible over accepted facts", help="why the engine path did not apply")
+    wiki_p.add_argument("--draft", default=None, help="validated draft query; append display-only spelling hints when eligible")
+    wiki_p.add_argument("--all", action="store_true", help="show every excerpt and grounding row")
     wiki_p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
     wiki_p.set_defaults(func=cmd_wiki)
 

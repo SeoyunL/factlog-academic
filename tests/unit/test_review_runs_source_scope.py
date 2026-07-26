@@ -57,7 +57,11 @@ def _kb(tmp_path, csv_rows, run_files, sources=("note1.md", "note2.md")):
 
 
 def _invoke(tmp_path, terms, new_status, verb, dry_run=False):
-    args = argparse.Namespace(terms=terms, target=str(tmp_path), dry_run=dry_run)
+    # numbers/from_digest are the numeric-selection flags argparse always supplies;
+    # their argparse defaults mean "select by triple", which is what these tests do.
+    args = argparse.Namespace(
+        terms=terms, target=str(tmp_path), dry_run=dry_run, numbers=None, from_digest=None
+    )
     return cli._apply_review_status(args, new_status, verb)
 
 

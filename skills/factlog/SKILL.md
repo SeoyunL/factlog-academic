@@ -571,8 +571,9 @@ Sources matching `policy/sync-ignore.md` are skipped. Then extract from **both**
 source whose path matches one of its glob patterns — by full ref (`sources/...`
 or `runs/sources/...`) or by the path within the source root (so `drafts/*.md`
 matches `sources/drafts/x.md`). These sources are excluded from re-extraction on
-purpose; their already-merged facts are left as-is. (Manage the list with
-`factlog ignore`.)
+purpose and are also excluded from `/factlog ask` wiki-exploration evidence;
+their already-merged facts are left as-is. (Manage the list with `factlog
+ignore`.)
 
 For each *non-ignored* file under `sources/<name>` **and** `runs/sources/<name>`
 in the KB root:
@@ -724,7 +725,14 @@ without hand-editing `candidates.csv`, use the review CLI: `factlog review`
 lists the pending queue, `factlog accept <subject> <relation> <object>` sets
 matching pending rows to `accepted`, and `factlog reject ...` sets them to
 `superseded` (both recompile `accepted.dl`; `-` wildcards a position). To
-correct a fact's value, `factlog amend <subject> <relation> <object>
+select facts a human has just reviewed without retyping a triple, copy the
+`sha256:` snapshot printed by `factlog review` into
+`factlog accept --number N --from sha256:...` (repeat `--number` as needed).
+The snapshot must still match and is evidence of the human's explicit choice;
+it never authorizes the model to promote a fact on its own. Keep using the
+triple form for any decision the human has not explicitly made.
+
+To correct a fact's value, `factlog amend <subject> <relation> <object>
 --set-object ... [--set-subject/--set-relation/--set-note] [--accept]` rewrites
 it durably: the **value** `--set-*` gives goes into both `candidates.csv` and the
 backing `runs/*.json`, so it survives a re-merge. `--accept` is narrower — its
@@ -1055,6 +1063,11 @@ and carry no extraction confidence by construction. The verdict stays binary in
 every case. For an out-of-band trace (any fact, full or partial triple, all
 statuses), use `factlog provenance <subject> [relation] [object]`.
 
+The renderer shows at most 20 answer rows by default and explicitly reports any
+omitted rows as `… N more rows (full output: --all)` while keeping `rows: N` as
+the real total. When the full audit trail is needed, rerun the same command with
+`--all`; do not ask the model to select or summarize omitted rows.
+
 A verified-negative relation query may additionally carry an informational
 `note: ... (possible predicate mismatch): ...` line (#189). It appears **only**
 when the queried subject is an accepted entity that has **no** fact under the
@@ -1068,7 +1081,7 @@ the relation, just not that object). Show it verbatim beneath the verdict block.
 ### Step 3b — Wiki exploration (UNVERIFIED)
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" wiki "<question>" --reason "<why>" --target "$FACTLOG_ROOT"
+"${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" wiki "<question>" --reason "<why>" --draft "<draft>" --target "$FACTLOG_ROOT"
 ```
 
 Show the `UNVERIFIED — wiki exploration` block verbatim (cited `sources/` /
@@ -1079,6 +1092,16 @@ about those entities — verified anchors beside the unverified prose. The
 unverified excerpts cite only source text, never `facts/accepted.dl`. Do NOT
 present wiki excerpts as confirmed facts. Optionally record the unanswered
 question for later review (a non-engine-input sink, never `facts/query.dl`):
+
+For a stable entity/relation vocabulary miss, keep the same validated `<draft>`
+in the `wiki --draft` call. The optional `note: ... did you mean: ...?` line is
+an accepted-vocabulary spelling hint only: show it verbatim, do not replace the
+user's term, draft a corrected query, or retry automatically. It is absent for
+verified negatives, malformed/variable drafts, exact matches, and distant names.
+
+The wiki renderer applies the same explicit row cap to cited excerpts and
+engine-grounding rows. Its warning is printed before those rows, and `--all`
+returns every available excerpt and grounding fact for audit.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
