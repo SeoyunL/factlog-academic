@@ -15,11 +15,14 @@
 #     carries whitespace is still NOT matched. That asymmetry is deliberate and
 #     documented — source_coverage.eject_visible_refs classifies each ref by the
 #     unstripped CSV rule, so widening it there would break a promise that report
-#     makes. Only the runs side moved. (#559's tombstone LOOKUP asks a third,
-#     wider question — "does candidates.csv hold this fact at all", keyed on
-#     common.fact_key — so such a row is not tombstoned a second time and demoted
-#     from the human's decision. That is a different question from what this
-#     command RETIRES.)
+#     makes. Only the runs side moved. #559 then had to answer for the gap that
+#     asymmetry leaves, which is NOT only the demotion one: on such a row nothing
+#     retires it AND no tombstone is due (the table does hold the fact), while
+#     this stripped runs matcher would still delete its run row — the last thing
+#     merge can rebuild from. Measured: `1 run row(s) stripped, 0 superseded,
+#     0 tombstone(s) written` at rc 0, after which the rebuild is REFUSED forever.
+#     Those rows are now HELD BACK and the command exits 1; the fixture lives in
+#     tests/unit/test_eject_run_only_ghost.py::TestHeldBackRunRows.
 #   - an NFD run source (run / csv / disk in different Unicode forms) is matched
 #
 # Deterministic; no pyrewire required. Usage: bash tests/test_eject_run_key.sh

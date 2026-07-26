@@ -31,6 +31,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -170,9 +171,11 @@ class TestRunOnlyGhostIsSelected:
         union puts a run-only ref into the known set for it to compare against."""
         kb = ghost_kb(tmp_path, run_rows=[run_row(source="ghosty.md")])
         proc = eject(tmp_path, kb, "ghosty.md")
-        assert proc.returncode == 0, proc.stderr + proc.stdout
         assert "1 matched source ref(s)" in proc.stdout, proc.stdout
         assert not (kb / "runs" / "2026-01-01-ghost.json").exists()
+        # rc 1: it worked, and it destroyed the fact's last copy doing so (no
+        # tombstone is possible for this ref) — see the next test.
+        assert proc.returncode == 1, proc.stdout
 
     def test_a_ref_outside_the_source_roots_gets_no_tombstone(self, tmp_path):
         """validate REJECTS a candidates.csv source outside the two roots, so writing
@@ -185,6 +188,21 @@ class TestRunOnlyGhostIsSelected:
         assert "no tombstone" in proc.stderr, proc.stderr
         assert "ghosty.md" in proc.stderr
         assert validate(tmp_path, kb).returncode == 0, validate(tmp_path, kb).stdout
+
+    def test_a_last_copy_stripped_with_no_tombstone_never_exits_0(self, tmp_path):
+        """The asymmetry that made the refusal backwards: the class that CAN be
+        tombstoned was blocked at rc 1 while the class that can NEVER be tombstoned
+        went through at rc 0, in both modes. There is no two-pass route for this one
+        (candidates.csv cannot hold the source at all), so the exit code is the whole
+        signal — a fact left the KB."""
+        for name, argv in (("plain", ["ghosty.md"]), ("purge", ["ghosty.md", "--purge"])):
+            home = tmp_path / name
+            home.mkdir()
+            kb = ghost_kb(home, run_rows=[run_row(source="ghosty.md")])
+            proc = eject(home, kb, *argv)
+            assert proc.returncode == 1, (argv, proc.returncode, proc.stdout)
+            assert "stripped with no tombstone" in proc.stderr, proc.stderr
+            assert not (kb / "runs" / "2026-01-01-ghost.json").exists()
 
 
 class TestTombstone:
@@ -334,21 +352,68 @@ class TestNoDemotion:
         )
         self._guard(tmp_path, kb, expect_status="superseded")
 
+
+class TestHeldBackRunRows:
+    """★ The third outcome of the padded-CSV input, and the one that destroys a KB.
+
+    `match_row` does not strip the candidates.csv value, so a row whose `source`
+    carries whitespace is retired by NOTHING — and the fact IS in the table, so no
+    tombstone is written for it either. But `run_match` DOES strip (merge's key), so
+    the run row was deleted: `1 run row(s) stripped, 0 candidate row(s) superseded,
+    0 tombstone(s) written` at rc 0, on a `confirmed` fact.
+
+    That is worse than it reads. runs/*.json is the artifact #218 tells users to
+    restore, so with it gone the row a human ruled on can never be re-asserted: the
+    next merge REFUSES the rebuild forever and the only exit is `--allow-delete`,
+    which kills the row. Restoring the source file — the recovery path this KB shape
+    exists for — no longer works.
+
+    So those run rows are HELD BACK, the command says which fact and why, and it
+    exits 1 so `eject --orphans && ...` cannot read the untouched rows as a clean
+    sweep. Each test here ends by restoring the source and merging, because
+    "recovery still works" is the property, not "the rows are still on disk".
+    """
+
+    def _guard(self, tmp_path, kb, *, run_name="2026-01-01-ghost.json"):
+        run_path = kb / "runs" / run_name
+        before_run = run_path.read_text(encoding="utf-8")
+        before_csv = read_rows(kb)
+        assert len(before_csv) == 1, before_csv
+
+        proc = eject(tmp_path, kb, "--orphans")
+        assert proc.returncode == 1, (proc.returncode, proc.stdout)
+        assert "0 tombstone(s) written" in proc.stdout, proc.stdout
+        assert "0 run row(s) stripped" in proc.stdout, proc.stdout
+        assert "HELD BACK: 1 fact(s)" in proc.stdout, proc.stdout
+        assert "NOT stripping the run row(s)" in proc.stderr, proc.stderr
+        assert run_path.read_text(encoding="utf-8") == before_run
+        after = read_rows(kb)
+        assert len(after) == 1, after
+        assert after[0]["status"] == "confirmed", after
+
+        # The property: the recovery path still works. Put the source back and the
+        # next merge rebuilds normally, with the human's decision intact — which is
+        # exactly what stripping the run row made impossible.
+        (kb / "sources" / "ghost.md").write_text("back\n", encoding="utf-8")
+        merged = merge(tmp_path, kb)
+        assert merged.returncode == 0, merged.stdout + merged.stderr
+        assert "REFUSING" not in merged.stdout + merged.stderr
+        final = read_rows(kb)
+        assert len(final) == 1, final
+        assert final[0]["status"] == "confirmed", final
+
     def test_padded_csv_source_and_clean_run_row(self, tmp_path):
-        """The demotion case proper: `match_row` does NOT strip, so this row is not
-        retired by the command at all — and if the tombstone lookup used that same
-        narrow key, the command would ADD a `superseded` row for a fact the human
-        confirmed, and merge would fold the decision away."""
         kb = ghost_kb(
             tmp_path,
             csv_rows=("유령,참조,대상,  sources/ghost.md ,confirmed,0.90,\n",),
             run_rows=[run_row(source="sources/ghost.md")],
         )
-        self._guard(tmp_path, kb, expect_status="confirmed")
+        self._guard(tmp_path, kb)
 
     def test_object_merge_would_canonicalise_and_a_padded_csv_source(self, tmp_path):
-        """Same demotion, reached through the OBJECT axis: NFD vs NFC inside an
-        amount compound is one fact to merge (fact_key folds then canonicalises)."""
+        """Same input reached through the OBJECT axis: NFD vs NFC inside an amount
+        compound is one fact to merge (fact_key folds then canonicalises), so the
+        table does hold this fact and no tombstone may be written for it."""
         kb = ghost_kb(
             tmp_path,
             csv_rows=(
@@ -360,7 +425,38 @@ class TestNoDemotion:
                 source="sources/ghost.md",
             )],
         )
-        self._guard(tmp_path, kb, expect_status="confirmed")
+        self._guard(tmp_path, kb)
+
+    def test_only_the_stranded_fact_is_held_back(self, tmp_path):
+        """One padded row must not freeze the whole ref: another fact of the same
+        source, with no candidates.csv row, is still retired with its tombstone."""
+        kb = ghost_kb(
+            tmp_path,
+            csv_rows=("유령,참조,대상,  sources/ghost.md ,confirmed,0.90,\n",),
+            run_rows=[
+                run_row(source="sources/ghost.md"),
+                run_row(object_="다른것", source="sources/ghost.md"),
+            ],
+        )
+        proc = eject(tmp_path, kb, "--orphans")
+        assert proc.returncode == 1, proc.stdout
+        assert "1 run row(s) stripped" in proc.stdout, proc.stdout
+        assert "1 tombstone(s) written" in proc.stdout, proc.stdout
+        kept = json.loads((kb / "runs" / "2026-01-01-ghost.json").read_text(encoding="utf-8"))
+        assert [r["object"] for r in kept] == ["대상"], kept
+        assert {(r["object"], r["status"]) for r in read_rows(kb)} == {
+            ("대상", "confirmed"), ("다른것", "superseded"),
+        }
+
+    def test_the_dry_run_says_the_same_thing(self, tmp_path):
+        kb = ghost_kb(
+            tmp_path,
+            csv_rows=("유령,참조,대상,  sources/ghost.md ,confirmed,0.90,\n",),
+            run_rows=[run_row(source="sources/ghost.md")],
+        )
+        proc = eject(tmp_path, kb, "--orphans", "--dry-run")
+        assert proc.returncode == 1, (proc.returncode, proc.stdout)
+        assert "HELD BACK: 1 fact(s)" in proc.stdout, proc.stdout
 
 
 class TestPurgeRefusesTheLastCopy:
@@ -422,6 +518,21 @@ class TestPurgeRefusesTheLastCopy:
         assert second.returncode == 0, second.stderr
         assert read_rows(kb) == []
 
+    def test_fact_mode_purge_also_exits_1_on_a_tombstone_less_last_copy(self, tmp_path):
+        """The same backwards asymmetry, on the other selector: this purge cannot be
+        refused into a two-pass route (candidates.csv can never hold `ghosty.md`), so
+        the run row goes — and the exit code is the only thing left to say so."""
+        kb = init_kb(tmp_path)
+        (kb / "sources" / "a.md").write_text("a\n", encoding="utf-8")
+        write_csv(kb, "X,rel,Y,sources/a.md,confirmed,0.90,\n")
+        write_run(kb, "r.json",
+                  run_row(subject="X", relation="rel", object_="Y", source="sources/a.md"),
+                  run_row(subject="X", relation="rel", object_="Y", source="ghosty.md"))
+        proc = eject(tmp_path, kb, "--fact", "X", "rel", "Y", "--purge")
+        assert "stripped with no tombstone" in proc.stderr, proc.stderr
+        assert proc.returncode == 1, (proc.returncode, proc.stdout)
+        assert not (kb / "runs" / "r.json").exists()
+
     def test_purge_proceeds_when_every_run_row_has_a_candidates_row(self, tmp_path):
         kb = init_kb(tmp_path)
         (kb / "sources" / "a.md").write_text("a\n", encoding="utf-8")
@@ -456,12 +567,111 @@ class TestDryRunHonesty:
         real = eject(tmp_path, kb, "--orphans")
         assert plan_lines(dry.stdout) == plan_lines(real.stdout), (dry.stdout, real.stdout)
 
+    def test_a_file_that_keeps_a_live_row_is_not_counted_as_emptied(self, tmp_path):
+        """"would be emptied" has to mean the file disappears. Counting any file the
+        strip touches printed `1 file(s) would be emptied` for a file that survives
+        with its live rows — a dry-run that overstates the damage is the same kind of
+        lie as one that hides it."""
+        kb = init_kb(tmp_path)
+        (kb / "sources" / "live.md").write_text("live\n", encoding="utf-8")
+        write_csv(kb)
+        write_run(kb, "mixed.json", run_row(), run_row(source="sources/live.md"))
+        out = eject(tmp_path, kb, "--orphans", "--dry-run").stdout
+        assert "1 row(s) to strip (0 file(s) would be emptied)" in out, out
+
     def test_dry_run_changes_nothing(self, tmp_path):
         kb = ghost_kb(tmp_path)
         before = (kb / "runs" / "2026-01-01-ghost.json").read_text(encoding="utf-8")
         assert eject(tmp_path, kb, "--orphans", "--dry-run").returncode == 0
         assert (kb / "runs" / "2026-01-01-ghost.json").read_text(encoding="utf-8") == before
         assert read_rows(kb) == []
+
+
+class TestTheWriteHappensBeforeTheStrip:
+    """The ordering is the whole safety argument, and it IS observable.
+
+    Making facts/ unwritable stands in for the crash between the two steps. With the
+    tombstone written first, a failure there aborts before anything is stripped and
+    the run row — the copy merge can rebuild from — is still on disk. Swap the two
+    steps and the same failure leaves the run file deleted and the tombstone never
+    written, i.e. the fact gone. (Measured: the swapped order deletes the file.)
+    """
+
+    def test_a_failed_tombstone_write_leaves_the_run_row_alone(self, tmp_path):
+        if os.geteuid() == 0:
+            return  # root ignores the mode bits; the fixture cannot fail the write
+        kb = ghost_kb(tmp_path)
+        run_path = kb / "runs" / "2026-01-01-ghost.json"
+        before = run_path.read_text(encoding="utf-8")
+        facts = kb / "facts"
+        facts.chmod(0o500)
+        try:
+            proc = eject(tmp_path, kb, "--orphans")
+        finally:
+            facts.chmod(0o700)
+        assert proc.returncode != 0, proc.stdout
+        assert run_path.is_file(), "the run row was stripped even though no tombstone landed"
+        assert run_path.read_text(encoding="utf-8") == before
+
+    def test_a_kb_with_no_facts_dir_gets_one(self, tmp_path):
+        """This step is the first that can CREATE candidates.csv, so it is also the
+        first that meets a KB whose facts/ was never made. It used to die with a
+        FileNotFoundError from the atomic write's .tmp."""
+        kb = ghost_kb(tmp_path)
+        shutil.rmtree(kb / "facts")
+        proc = eject(tmp_path, kb, "--orphans")
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert read_rows(kb)[0]["status"] == "superseded"
+
+
+class TestExistingHeaderIsPreserved:
+    def test_a_custom_column_survives_the_rewrite(self, tmp_path):
+        """The write now happens on KBs it never touched before, so the header
+        fallback matters: forcing FACT_HEADER would silently drop a column a user
+        added, on every eject."""
+        kb = init_kb(tmp_path)
+        (kb / "facts" / "candidates.csv").write_text(
+            "subject,relation,object,source,status,confidence,note,reviewer\n"
+            "A,rel,B,sources/gone.md,confirmed,0.90,,seoyun\n",
+            encoding="utf-8",
+        )
+        write_run(kb, "r.json", run_row(source="sources/ghost.md"))
+        assert eject(tmp_path, kb, "--orphans").returncode == 0
+        text = (kb / "facts" / "candidates.csv").read_text(encoding="utf-8")
+        assert text.splitlines()[0].endswith(",reviewer"), text
+        assert [r["reviewer"] for r in read_rows(kb) if r["subject"] == "A"] == ["seoyun"]
+
+
+class TestMatchedRefLabels:
+    def test_a_run_only_ref_is_not_labelled_as_cited(self, tmp_path):
+        """"cited only (no file)" sends the reader to grep candidates.csv. For this
+        class that table says nothing — the rows are in runs/*.json."""
+        kb = ghost_kb(tmp_path)
+        out = eject(tmp_path, kb, "--orphans", "--dry-run").stdout
+        assert "sources/ghost.md  [cited only by runs/*.json (no file)]" in out, out
+
+    def test_a_csv_cited_ref_keeps_the_old_label(self, tmp_path):
+        kb = init_kb(tmp_path)
+        write_csv(kb, "A,rel,B,sources/gone.md,confirmed,0.90,\n")
+        out = eject(tmp_path, kb, "--orphans", "--dry-run").stdout
+        assert "sources/gone.md  [cited only (no file)]" in out, out
+
+
+class TestStreamOrdering:
+    def test_the_purge_refusal_prints_under_the_plan_it_refuses(self, tmp_path):
+        """stdout is block-buffered under a pipe and stderr is not, so without a
+        flush the refusal jumps above the plan (#457, #472) — read together they
+        then describe a run that never happened in that order."""
+        kb = ghost_kb(tmp_path)
+        merged = subprocess.run(
+            [sys.executable, "-m", "factlog", "eject", "--orphans", "--purge",
+             "--target", str(kb)],
+            cwd=ROOT, env=_env(tmp_path), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True,
+        )
+        out = merged.stdout
+        assert out.index("candidates.csv: 0 row(s) to purge") < out.index("refusing --purge"), out
 
 
 class TestRunFilePreservation:
