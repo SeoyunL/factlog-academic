@@ -3462,6 +3462,17 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # `except (JSONDecodeError, OSError)` does not: such a file made this scan
         # die with a UnicodeDecodeError traceback.
         #
+        # The row-completeness test has a COST worth naming. A ref whose only run
+        # rows are incomplete (one of subject/relation/object/source empty) counts
+        # as row-less here, so if its citing rows are all `superseded` too the scan
+        # now skips it and leaves those rows in runs/*.json — measured against
+        # d7afd96, which swept them. That is intended, not a leak: the question this
+        # filter asks is "will the next merge re-assert this fact", and merge drops
+        # an incomplete row before writing candidates.csv (`skip incomplete row in
+        # ...`), so the honest answer is no. The rows are still reachable — `eject
+        # <ref>` and `eject --orphans --purge` both strip them, because neither goes
+        # through this filter.
+        #
         # An unreadable run file makes the answer unknown, so the filter is skipped
         # entirely rather than guessed at — under-reporting an orphan whose run
         # backing we cannot see would be the same silent gap #562 is about. The

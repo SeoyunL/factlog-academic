@@ -401,6 +401,34 @@ grep -q "sources/ghosty.md,superseded," "$KB/facts/candidates.csv" \
   && ok "the orphan is still retired alongside an unreadable run file" \
   || bad "unreadable run file blocked the retirement"
 
+# --- an INCOMPLETE run row does not keep a retired ref in the scan -------------
+# The filter counts run rows merge's way, so a row missing one of the first four
+# fields is row-less to it. Narrower than the pre-#562 sweep on purpose: merge
+# discards such a row (`skip incomplete row in ...`), so nothing can come back
+# from it. The rows stay reachable — pinned here so the docs stay true.
+seed_incomplete() {  # $1 = KB path
+  "$PYTHON" -m factlog init --target "$1" >/dev/null
+  printf '%s\n%s\n' "$H" 'A,rel,B,sources/ghosty.md,superseded,0.9,' > "$1/facts/candidates.csv"
+  printf '[{"subject":"","relation":"rel","object":"B","source":"sources/ghosty.md","status":"candidate","confidence":0.9,"note":""}]\n' \
+    > "$1/runs/r.json"
+}
+KB="$(mktemp -d)/wiki"; seed_incomplete "$KB"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "no orphaned sources found" \
+  && ok "a ref backed only by an INCOMPLETE run row is treated as done" || bad "incomplete run row kept the ref in the scan: $out"
+[ -f "$KB/runs/r.json" ] && ok "the incomplete run row is left in place by the scan" || bad "scan stripped a row it reported nothing about"
+# ...and merge agrees the row is dead, so nothing is resurrected.
+"$PYTHON" "$PLUGIN_ROOT/tools/merge_candidates.py" --wiki "$KB" >/dev/null 2>&1 || true
+grep -q "^A,rel,B,sources/ghosty.md,superseded," "$KB/facts/candidates.csv" \
+  && ok "merge does not resurrect anything from the incomplete row" || bad "incomplete run row changed candidates.csv on merge"
+# Both explicit routes still remove it.
+KB="$(mktemp -d)/wiki"; seed_incomplete "$KB"
+"$PYTHON" -m factlog eject sources/ghosty.md --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/r.json" ] && ok "an explicitly named ref still strips the incomplete row" || bad "explicit eject left the incomplete row"
+KB="$(mktemp -d)/wiki"; seed_incomplete "$KB"
+"$PYTHON" -m factlog eject --orphans --purge --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/r.json" ] && ok "--orphans --purge still strips the incomplete row" || bad "--orphans --purge left the incomplete row"
+
 # --- validation: --orphans cannot mix with source(s) or --fact ----------------
 KB="$(mktemp -d)/wiki"; seed_orphans "$KB"
 set +e

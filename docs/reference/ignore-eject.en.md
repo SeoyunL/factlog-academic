@@ -123,11 +123,15 @@ source and retires it in one command.
 ```
 
 > The automatic scan SKIPS a ref it has nothing left to do for — no file on disk
-> to delete, no `runs/*.json` row, and citing rows that are all `superseded`. So
-> re-running the command ends with `no orphaned sources found`, which is how you
-> confirm the KB is clean. Case (1) above still has run rows, so it does not fall
-> here. To remove the tombstones as well, pass `--purge` (`--orphans --purge`
-> works) or name the ref directly — an explicitly named ref always matches.
+> to delete, no COMPLETE `runs/*.json` row (one with subject, relation, object
+> and source all filled in, the kind merge actually writes), and citing rows that
+> are all `superseded`. So re-running the command ends with `no orphaned sources
+> found`, which is how you confirm the KB is clean. Case (1) above still has run
+> rows, so it does not fall here. A ref whose only run rows are INCOMPLETE is
+> skipped too — merge discards those rows (`skip incomplete row in ...`), so
+> nothing can come back from them. To strip those rows from `runs/*.json` anyway,
+> or to remove the tombstones as well, pass `--purge` (`--orphans --purge` works)
+> or name the ref directly — an explicitly named ref always matches.
 
 **(2) The row is already gone.** An unruled (`candidate`) row is usually rebuilt
 away silently. `eject` builds its cited set from `facts/candidates.csv`, so it
