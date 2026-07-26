@@ -458,6 +458,31 @@ class TestHeldBackRunRows:
         assert proc.returncode == 1, (proc.returncode, proc.stdout)
         assert "HELD BACK: 1 fact(s)" in proc.stdout, proc.stdout
 
+    def test_the_counts_and_the_warnings_are_per_fact(self, tmp_path):
+        """The figures themselves, not just their presence. Two held-back facts, one
+        of them cited from two run files: the plan must say 2, and there must be
+        exactly two warnings, each naming its OWN source. Without all three checks a
+        dedup slip double-counts the fact that lives in two files, a hardcoded count
+        disagrees with the warnings printed under it, and an empty `source` degrades
+        the sentence to "differs from '' only by whitespace"."""
+        kb = ghost_kb(
+            tmp_path,
+            csv_rows=(
+                "유령,참조,대상,  sources/ghost.md ,confirmed,0.90,\n",
+                "유령,참조,둘,  sources/other.md ,confirmed,0.90,\n",
+            ),
+            run_rows=[run_row(), run_row(object_="둘", source="sources/other.md")],
+        )
+        write_run(kb, "2026-01-02-again.json", run_row())  # the same fact, second file
+        proc = eject(tmp_path, kb, "--orphans")
+        assert proc.returncode == 1, proc.stdout
+        assert "HELD BACK: 2 fact(s)" in proc.stdout, proc.stdout
+        assert "0 run row(s) stripped" in proc.stdout, proc.stdout
+        warnings = [ln for ln in proc.stderr.splitlines() if "NOT stripping" in ln]
+        assert len(warnings) == 2, warnings
+        assert sum("'sources/ghost.md'" in ln for ln in warnings) == 1, warnings
+        assert sum("'sources/other.md'" in ln for ln in warnings) == 1, warnings
+
 
 class TestPurgeRefusesTheLastCopy:
     def test_orphans_purge_refuses_and_changes_nothing(self, tmp_path):
@@ -659,19 +684,38 @@ class TestMatchedRefLabels:
 
 
 class TestStreamOrdering:
-    def test_the_purge_refusal_prints_under_the_plan_it_refuses(self, tmp_path):
-        """stdout is block-buffered under a pipe and stderr is not, so without a
-        flush the refusal jumps above the plan (#457, #472) — read together they
-        then describe a run that never happened in that order."""
-        kb = ghost_kb(tmp_path)
-        merged = subprocess.run(
-            [sys.executable, "-m", "factlog", "eject", "--orphans", "--purge",
-             "--target", str(kb)],
+    """stdout is block-buffered under a pipe and stderr is not, so without a flush
+    the warning jumps above the plan it qualifies (#457, #472) — read together they
+    then describe a run that never happened in that order. Every stderr line this
+    change adds needs its own pin: they are separate `flush()` calls, and deleting
+    any one of them is invisible to a test that only greps for the text.
+    """
+
+    def merged_run(self, tmp_path, kb, *argv):
+        return subprocess.run(
+            [sys.executable, "-m", "factlog", "eject", *argv, "--target", str(kb)],
             cwd=ROOT, env=_env(tmp_path), stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True,
-        )
-        out = merged.stdout
+        ).stdout
+
+    def test_the_purge_refusal_prints_under_the_plan_it_refuses(self, tmp_path):
+        kb = ghost_kb(tmp_path)
+        out = self.merged_run(tmp_path, kb, "--orphans", "--purge")
         assert out.index("candidates.csv: 0 row(s) to purge") < out.index("refusing --purge"), out
+
+    def test_the_held_back_warning_prints_under_the_plan(self, tmp_path):
+        kb = ghost_kb(
+            tmp_path,
+            csv_rows=("유령,참조,대상,  sources/ghost.md ,confirmed,0.90,\n",),
+            run_rows=[run_row(source="sources/ghost.md")],
+        )
+        out = self.merged_run(tmp_path, kb, "--orphans")
+        assert out.index("HELD BACK: 1 fact(s)") < out.index("NOT stripping the run row(s)"), out
+
+    def test_the_no_tombstone_warning_prints_under_the_plan(self, tmp_path):
+        kb = ghost_kb(tmp_path, run_rows=[run_row(source="ghosty.md")])
+        out = self.merged_run(tmp_path, kb, "ghosty.md")
+        assert out.index("1 matched source ref(s)") < out.index("stripped with no tombstone"), out
 
 
 class TestRunFilePreservation:
