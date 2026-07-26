@@ -34,7 +34,11 @@ out="$("$PYTHON" "$FINALIZE" --target "$KB" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "finalize exits 0" || bad "finalize exited $rc"
 
 [ -s "$KB/facts/candidates.csv" ] && ok "candidates.csv produced" || bad "no candidates.csv"
-if [ -f "$KB/facts/accepted.dl" ] && grep -q 'relation("Acme API", "uses", "FastAPI")' "$KB/facts/accepted.dl"; then ok "accepted.dl compiled with the fact"; else bad "accepted.dl missing the fact"; fi
+grep -q 'Acme API,uses,FastAPI,sources/acme.md,needs_review,' "$KB/facts/candidates.csv" \
+  && ok "model-supplied confirmed status enters review queue" \
+  || bad "model status bypassed review: $(grep 'Acme API,uses,FastAPI' "$KB/facts/candidates.csv")"
+"$PYTHON" -m factlog accept "Acme API" uses FastAPI --target "$KB" >/dev/null
+if [ -f "$KB/facts/accepted.dl" ] && grep -q 'relation("Acme API", "uses", "FastAPI")' "$KB/facts/accepted.dl"; then ok "accepted.dl compiled after human accept"; else bad "accepted.dl missing the accepted fact"; fi
 [ -f "$KB/policy/logic-policy.dl" ] && ok "policy/logic-policy.dl ensured" || bad "policy/logic-policy.dl not ensured"
 
 if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in pyrewire.__version__.split('.')[:3])>=(1,0,1) else 1)" >/dev/null 2>&1; then
@@ -278,6 +282,8 @@ if "$PYTHON" -c "import pyrewire; raise SystemExit(0 if tuple(int(x) for x in py
     'after2030(S, "launch_after_2030") :- launch_date(S, D), D >= 20300101.' \
     > "$KB12/policy/logic-policy.extra.dl"
   extra_before12="$($PYTHON -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())" "$KB12/policy/logic-policy.extra.dl")"
+  "$PYTHON" "$FINALIZE" --target "$KB12" >/dev/null 2>&1
+  "$PYTHON" -m factlog accept "을서비스" 정식_운영 'date(2030,1)' --target "$KB12" >/dev/null
   rc12=0; out12="$("$PYTHON" "$FINALIZE" --target "$KB12" 2>&1)" || rc12=$?
   extra_after12="$($PYTHON -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())" "$KB12/policy/logic-policy.extra.dl")"
   [ "$rc12" -eq 0 ] && ok "#219: finalize with a hand-authored extra.dl completes (rc=0)" || bad "#219: finalize broke on a valid logic-policy.extra.dl (rc=$rc12)"
