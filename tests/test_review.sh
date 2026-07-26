@@ -7,6 +7,7 @@
 #   - accept promotes matching pending row(s) -> accepted (into accepted.dl)
 #   - reject retires matching pending row(s) -> superseded (out of accepted.dl)
 #   - a non-pending (confirmed/accepted/superseded) match is skipped -> rc 1
+#   - numbered selection is snapshot-guarded, stable, atomic, and durable
 #   - partial/wildcard terms; --dry-run no-op; no-match rc 1; no/extra term rc 2
 #
 # Usage: bash tests/test_review.sh
@@ -43,6 +44,55 @@ printf '%s' "$out" | grep -qF "2 pending fact(s)" && ok "review counts both pend
 printf '%s' "$out" | grep -qF "X / rel / Y" && printf '%s' "$out" | grep -qF "X / rel / Z" && ok "review lists candidate + needs_review" || bad "pending facts missing"
 printf '%s' "$out" | grep -qF "W / rel / V" && bad "review listed a confirmed fact" || ok "review omits the confirmed fact"
 printf '%s' "$out" | grep -qF "note: maybe" && ok "review shows the note" || bad "note missing"
+printf '%s' "$out" | grep -qF "[1] X / rel / Y" && printf '%s' "$out" | grep -qF "[2] X / rel / Z" \
+  && ok "review assigns stable sorted numbers" || bad "review numbers missing or unstable"
+digest="$(printf '%s\n' "$out" | sed -n 's/^  snapshot: //p')"
+[ "${#digest}" -eq 71 ] && ok "review emits a full sha256 snapshot digest" || bad "review snapshot digest missing"
+
+# Reordering equivalent CSV rows changes neither queue numbering nor snapshot.
+printf '%s\n%s\n%s\n%s\n' "$H" \
+  'X,rel,Z,sources/a.md,needs_review,0.5,unsure' \
+  'X,rel,Y,sources/a.md,candidate,0.8,maybe' \
+  'W,rel,V,sources/a.md,confirmed,0.9,already engine input' > "$KB/facts/candidates.csv"
+reordered="$($PYTHON -m factlog review --target "$KB" 2>&1)"
+reordered_digest="$(printf '%s\n' "$reordered" | sed -n 's/^  snapshot: //p')"
+[ "$digest" = "$reordered_digest" ] && printf '%s' "$reordered" | grep -qF "[1] X / rel / Y" \
+  && ok "numbering and snapshot ignore equivalent row ordering" || bad "row ordering changed numbered snapshot"
+
+# Numeric selection is explicit, snapshot-guarded, and dry-run is a no-op.
+before="$(cat "$KB/facts/candidates.csv")"
+set +e; out="$($PYTHON -m factlog accept --number 1 --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qF "Run factlog review again" && [ "$(cat "$KB/facts/candidates.csv")" = "$before" ] \
+  && ok "numeric selection without snapshot rejects without writes" || bad "missing snapshot was not atomic"
+set +e; out="$($PYTHON -m factlog accept --number 1 --from bad --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 1 ] && [ "$(cat "$KB/facts/candidates.csv")" = "$before" ] && ok "malformed snapshot rejects without writes" || bad "malformed snapshot was not atomic"
+"$PYTHON" -m factlog accept --number 1 --number 2 --from "$digest" --dry-run --target "$KB" >/dev/null 2>&1
+[ "$(cat "$KB/facts/candidates.csv")" = "$before" ] && ok "numeric --dry-run leaves candidates.csv unchanged" || bad "numeric --dry-run mutated state"
+set +e; "$PYTHON" -m factlog accept --number 1 --number 1 --from "$digest" --target "$KB" >/dev/null 2>&1; rc=$?; set -e
+[ "$rc" -eq 2 ] && [ "$(cat "$KB/facts/candidates.csv")" = "$before" ] && ok "duplicate review number rejects atomically" || bad "duplicate review number handling wrong"
+set +e; "$PYTHON" -m factlog accept --number 3 --from "$digest" --target "$KB" >/dev/null 2>&1; rc=$?; set -e
+[ "$rc" -eq 2 ] && [ "$(cat "$KB/facts/candidates.csv")" = "$before" ] && ok "out-of-range review number rejects atomically" || bad "out-of-range number handling wrong"
+set +e; "$PYTHON" -m factlog accept X --number 1 --from "$digest" --target "$KB" >/dev/null 2>&1; rc=$?; set -e
+[ "$rc" -eq 2 ] && [ "$(cat "$KB/facts/candidates.csv")" = "$before" ] && ok "number and triple selectors cannot be mixed" || bad "mixed selectors accepted"
+
+# Queue mutation makes a formerly valid number stale, with no partial write.
+printf '%s\n' 'A,rel,B,sources/a.md,candidate,0.7,new row' >> "$KB/facts/candidates.csv"
+before="$(cat "$KB/facts/candidates.csv")"
+set +e; out="$($PYTHON -m factlog accept --number 1 --from "$digest" --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qF "snapshot is stale" && [ "$(cat "$KB/facts/candidates.csv")" = "$before" ] \
+  && ok "stale snapshot rejects atomically" || bad "stale snapshot was not atomic"
+
+# A fresh snapshot maps multi-number decisions to exactly the displayed facts.
+out="$($PYTHON -m factlog review --target "$KB" 2>&1)"
+digest="$(printf '%s\n' "$out" | sed -n 's/^  snapshot: //p')"
+"$PYTHON" -m factlog accept --number 1 --number 3 --from "$digest" --target "$KB" >/dev/null 2>&1
+grep -q 'A,rel,B,sources/a.md,accepted,' "$KB/facts/candidates.csv" \
+  && grep -q 'X,rel,Z,sources/a.md,accepted,' "$KB/facts/candidates.csv" \
+  && grep -q 'X,rel,Y,sources/a.md,candidate,' "$KB/facts/candidates.csv" \
+  && ok "multi-number selection changes exactly the numbered facts" || bad "multi-number selection changed wrong facts"
+
+# Keep the legacy review tests independent of the numbered-selection fixture.
+KB="$(mktemp -d)/wiki"; seed "$KB"
 
 # --- review --status narrows -------------------------------------------------
 out="$("$PYTHON" -m factlog review --status candidate --target "$KB" 2>&1)"
@@ -100,11 +150,15 @@ printf 'a\n' > "$KB/sources/a.md"
 printf '[{"subject":"X","relation":"rel","object":"Y","source":"sources/a.md","status":"candidate","confidence":0.8,"note":""},{"subject":"Z","relation":"rel","object":"W","source":"sources/a.md","status":"candidate","confidence":0.8,"note":""}]\n' \
   > "$KB/runs/r.json"
 "$PYTHON" "$PLUGIN_ROOT/tools/merge_candidates.py" --wiki "$KB" >/dev/null 2>&1
-"$PYTHON" -m factlog accept X rel Y --target "$KB" >/dev/null 2>&1
-"$PYTHON" -m factlog reject Z rel W --target "$KB" >/dev/null 2>&1
+out="$($PYTHON -m factlog review --target "$KB" 2>&1)"
+digest="$(printf '%s\n' "$out" | sed -n 's/^  snapshot: //p')"
+"$PYTHON" -m factlog accept --number 1 --from "$digest" --target "$KB" >/dev/null 2>&1
+out="$($PYTHON -m factlog review --target "$KB" 2>&1)"
+digest="$(printf '%s\n' "$out" | sed -n 's/^  snapshot: //p')"
+"$PYTHON" -m factlog reject --number 1 --from "$digest" --target "$KB" >/dev/null 2>&1
 "$PYTHON" "$PLUGIN_ROOT/tools/merge_candidates.py" --wiki "$KB" >/dev/null 2>&1   # re-extract & merge
-grep -q "X,rel,Y,sources/a.md,accepted," "$KB/facts/candidates.csv" && ok "accept survives a re-merge (preserved)" || bad "accept reverted after re-merge"
-grep -q "Z,rel,W,sources/a.md,superseded," "$KB/facts/candidates.csv" && ok "reject still durable after re-merge" || bad "reject reverted after re-merge"
+grep -q "X,rel,Y,sources/a.md,accepted," "$KB/facts/candidates.csv" && ok "numbered accept survives a re-merge (preserved)" || bad "numbered accept reverted after re-merge"
+grep -q "Z,rel,W,sources/a.md,superseded," "$KB/facts/candidates.csv" && ok "numbered reject survives a re-merge" || bad "numbered reject reverted after re-merge"
 
 # a human-'confirmed' row is restored as confirmed, not coerced to accepted
 KB="$(mktemp -d)/wiki"
