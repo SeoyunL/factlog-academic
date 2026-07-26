@@ -842,13 +842,20 @@ it is correctly reported as a gap, not "covered":
   This category reads the run files directly and surfaces the path with its row
   count on stderr (`RUN ROWS cite a missing source (dropped at merge, N
   row(s)): ...`), plus one summary field that is omitted entirely when the count
-  is 0. The remedy printed with it depends on the source: a ghost row a human has
-  ruled on survives in `candidates.csv` (the #218 ratchet refuses the rebuild), so
-  `factlog eject --orphans` retires it and the hint names that command; an unruled
-  row is rebuilt away, so that command cannot see it either and the hint says so
-  (tracked as #559). A run file that cannot be read is left out of the counts and
-  named on stderr rather than skipped in silence. See
-  `docs/reference/ignore-eject.md`.
+  is 0. The remedy printed with it depends on the source, in four classes: a ghost
+  row a human has ruled on survives in `candidates.csv` (the #218 ratchet refuses
+  the rebuild), so `factlog eject --orphans` retires that row; an unruled row is
+  rebuilt away, and the same command still retires it because it reads
+  `runs/*.json` too — writing a `superseded` tombstone into `candidates.csv` first,
+  since that run row is the fact's last copy; a ref that is not under `sources/` or
+  `runs/sources/` is never auto-selected (a malformed citation must not be ejected
+  by a command nobody aimed), so the hint says to name it: `factlog eject <ref>`,
+  which strips those rows with no tombstone and exits 1; and a ref `candidates.csv`
+  holds under a `source` differing only by whitespace, where eject retires nothing,
+  writes no tombstone, and deliberately leaves the run rows in place (exit 1) — the
+  fix there is the whitespace, not the command.
+  A run file that cannot be read is left out of the counts and named on stderr
+  rather than skipped in silence. See `docs/reference/ignore-eject.md`.
 
 The script is the **deterministic half** (per-source fact counts, unreferenced
 sources, orphan citations, run rows citing a missing source); it always exits 0
@@ -1361,10 +1368,26 @@ the human the planned changes whenever the triple is not fully specified.
   bring the fact back — and every citing row already `superseded`), so re-running
   it reaches `no orphaned sources found` instead of re-retiring its own
   tombstones; `--purge` and an explicitly named ref still act on such a ref.
+  A source cited only by `runs/*.json` is in scope too (merge drops those rows
+  before writing `candidates.csv`, so the table cannot report them): for each such
+  fact eject WRITES a `superseded` tombstone before stripping the run row, since
+  that row is the last copy. Two shapes get no tombstone and are stripped anyway,
+  because `validate` would reject the row: an incomplete run row (one of
+  subject/relation/object/source empty — merge drops it too) and a ref outside
+  `sources/`/`runs/sources/`; both are named on stderr, and the second **exits 1**
+  because the fact leaves the KB. A run row is instead HELD BACK (also exit 1) when
+  `candidates.csv` holds its fact under a `source` differing only by whitespace:
+  eject's table matcher does not strip while merge does, so nothing would retire
+  that row, and stripping the run row would delete the only artifact merge can
+  rebuild from (#218). Fix the whitespace, then re-run.
   By default retired rows are marked `superseded` and the user's
   original under `sources/` is left alone — **`--purge` deletes the rows outright
   and `--delete-original` deletes the user's file**, so use `--dry-run` and get
-  explicit human agreement before either.
+  explicit human agreement before either. `--dry-run` prints the run rows it would
+  strip, the run files that would be emptied, and how many facts it would be the
+  last copy of. `--purge` is **refused** (exit 1, nothing changed) for a fact that
+  exists only in `runs/*.json`: retire it first (`eject --orphans`), then purge the
+  tombstones in a second pass.
 - `factlog ignore [patterns...] [--remove]` — manage `policy/sync-ignore.md`, the
   glob list `/factlog sync` skips during extraction. With no arguments it lists
   the current patterns.

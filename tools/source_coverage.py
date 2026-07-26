@@ -110,6 +110,7 @@ from common import (  # noqa: E402
     classify_query,
     ensure_dirs,
     engine_facts,
+    fact_key,
     identity_relations,
     is_quoted_string,
     is_sync_ignored,
@@ -217,27 +218,44 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
     return rows, orphans
 
 
-def eject_visible_refs(candidates_csv: Path) -> set[str]:
-    """The source refs `factlog eject --orphans` is able to act on.
+# Which `factlog eject` route retires a ref — the ones the command actually has.
+EJECT_CSV_ROW = "csv-row"    # --orphans retires a row candidates.csv still carries
+EJECT_RUN_ONLY = "run-only"  # --orphans retires it, writing a tombstone first (#559)
+EJECT_BY_NAME = "by-name"    # --orphans will not auto-select it; naming it works
+EJECT_BLOCKED = "blocked"    # candidates.csv holds it under a whitespace-differing source
+
+
+def eject_visible_refs(root: Path) -> dict[str, str]:
+    """ref -> which `factlog eject` route retires it, for every ref eject can see.
 
     Which decides whether naming that command is a REMEDY or a wild goose chase,
-    so it is derived from cmd_eject's own rule rather than guessed at:
+    so it is derived from cmd_eject's own rule rather than guessed at. That rule
+    has TWO inputs since #559 — a set split is no longer enough:
 
-    * its cited set is every candidates.csv row's source, `nfc(...)` then
-      everything before the first '#', at ANY status (factlog/cli.py:3708);
-    * its orphan scan then matches a cited ref that is not on disk, and only
-      under the two source roots (factlog/cli.py:3489-3493).
+    * the cited set is every candidates.csv row's source, `nfc(...)` then
+      everything before the first '#', at ANY status, UNION the sources
+      ``run_cited_sources`` counts in runs/*.json (cmd_eject reads both);
+    * the orphan scan then matches a cited ref that is not on disk, and only
+      under the two source roots.
 
-    Since #562 the scan then SUBTRACTS refs it has nothing left to do for (no
-    file on disk, no complete runs/*.json row, every citing row already
-    `superseded`), and `--purge` exempts itself from that subtraction. Neither
-    narrowing is re-derived here, because neither can reach this set's only
-    consumer: ``report_run_orphans`` is fed by ``run_orphan_sources``, which
-    lists a ref precisely BECAUSE ``run_cited_sources`` counted rows for it —
-    and the eject filter now asks that same helper the same question. A ref this
-    report names therefore always has a live run row, so eject's filter never
-    skips it. Copying the two conditions in would be a fourth transcription of a
-    rule with no case to decide.
+    So a ref outside those roots (`ghosty.md`) is still not auto-selected — the
+    safety rule that keeps a malformed citation from being ejected by a command
+    nobody aimed — but it IS reachable by name: ``matches()`` compares the exact
+    ref before any prefix rule, and the union puts a run-only ref into the set it
+    compares against. That is a third answer, not a second, and collapsing it into
+    "eject does not cover this" would print the same false remedy #558 removed,
+    one class over.
+
+    Since #562 the scan also SUBTRACTS refs it has nothing left to do for (no file
+    on disk, no complete runs/*.json row, every citing row already `superseded`),
+    and `--purge` exempts itself from that subtraction. Neither narrowing is
+    re-derived here, because neither can reach this map's only consumer:
+    ``report_run_orphans`` is fed by ``run_orphan_sources``, which lists a ref
+    precisely BECAUSE ``run_cited_sources`` counted rows for it — and the eject
+    filter asks that same helper the same question. A ref this report names
+    therefore always has a live run row, so eject's filter never skips it. Copying
+    the two conditions in would be a fourth transcription of a rule with no case
+    to decide.
 
     Note "at ANY status". The obvious shortcut — reuse the `orphans` list
     coverage already computes — is WRONG, and measurably so: that list is built
@@ -247,28 +265,73 @@ def eject_visible_refs(candidates_csv: Path) -> set[str]:
     `eject --orphans` still retires the row and strips it from runs/*.json. A hint
     keyed on `orphans` would have called that command useless while it worked.
 
-    Read RAW (`read_csv`, not `load_facts`) for the same reason: `load_facts`
-    strips every field, and eject does not, so a hand-edited row whose source
-    carries a leading space is a ref eject cannot match. Stripping here would
-    promise a cleanup that command would not perform.
+    The CSV side is read RAW (`read_csv`, not `load_facts`) because eject's
+    candidates.csv matcher does not strip: a hand-edited row whose source carries a
+    leading space is a row that matcher cannot retire. The run side strips, as merge
+    does. Where those two disagree — a padded CSV source and a clean run row — eject
+    neither retires the row nor writes a tombstone, and (since it would otherwise
+    delete the only artifact merge can rebuild from) it now leaves the run rows in
+    place and exits 1. That is a FOURTH answer, EJECT_BLOCKED, and it must not be
+    filed under run-only: the run-only hint promises a tombstone this KB does not
+    get. Measured before it was split out: hint said "writing a `superseded`
+    tombstone first", command said `0 tombstone(s) written`.
 
-    That leaves this set ASYMMETRIC with ``run_cited_sources``, which does strip
-    (merge strips on load, so a trailing-space run row is alive). In a KB whose
-    candidates.csv AND run rows were both hand-edited with trailing whitespace,
-    the two keys miss each other and the ref is filed as the blind-spot class: the
-    report says to inspect runs/*.json while `eject --orphans` would in fact have
-    retired it. Left as is because the error runs in the SAFE direction — it sends
-    the reader to a manual check that works, never to a command that silently does
-    nothing — and because matching merge is what keeps a live source out of this
-    report in the first place. Leading whitespace has no such gap: neither side
-    treats it as ejectable.
+    Only a LEADING pad blocks, and the difference is the prefix test, not the
+    whitespace. eject's cited set keeps the raw value, so `"sources/x.md  "` still
+    starts with `sources/`: the orphan scan matches that ref in its own right and
+    `match_row` retires the row. Measured — `1 run row(s) stripped, 1 candidate
+    row(s) superseded` at rc 0, i.e. an ordinary cleanup — while a blocked verdict
+    was telling the reader to go hand-edit the table. So the stripped view is only
+    consulted for raw refs the prefix test REJECTS; a padded ref that passes it is a
+    row this command retires, which is what EJECT_CSV_ROW says.
+
+    EJECT_BLOCKED is decided per REF, while eject decides per FACT, so both
+    directions of that approximation exist. A ref holding a leading-padded row
+    (fact A) and a run-only fact B is filed blocked though B would be tombstoned;
+    a ref holding an ordinary row (fact A) and a leading-padded row (fact B) is
+    filed csv-row though B's run rows are held back. Neither sends the reader to a
+    wrong action — both hints name `factlog eject --orphans`, and the blocked one
+    names the whitespace the command itself names on stderr — and the alternative is
+    a fact-level index this report has no other use for.
     """
-    refs: set[str] = set()
-    for row in read_csv(candidates_csv):
-        ref = unicodedata.normalize("NFC", (row.get("source") or "").partition("#")[0])
-        if ref.startswith(("sources/", "runs/sources/")):
-            refs.add(ref)
-    return refs
+    csv_refs: set[str] = set()
+    csv_blocked: set[str] = set()   # under merge's key: rows the orphan scan cannot see
+    csv_retiring: set[str] = set()  # under merge's key: rows it sees and retires
+    csv_path = root / "facts" / "candidates.csv"
+    if csv_path.is_file():
+        for row in read_csv(csv_path):
+            raw = row.get("source") or ""
+            ref = unicodedata.normalize("NFC", raw.partition("#")[0])
+            if not ref:
+                continue
+            csv_refs.add(ref)
+            # Keyed the way MERGE keys it (fact_key strips), which is what eject's
+            # runs matcher and this report's run side both use — so a run-side ref
+            # can be asked whether the table holds it at all. The prefix test on the
+            # RAW value is what decides which way that answer cuts: pass it and the
+            # scan matches the row under its own value and retires it; fail it and
+            # the row is invisible there, and eject holds its run rows back instead.
+            key = fact_key("", "", "", raw)[3]
+            if ref.startswith(("sources/", "runs/sources/")):
+                csv_retiring.add(key)
+            else:
+                csv_blocked.add(key)
+    routes: dict[str, str] = {}
+    for ref in csv_refs | set(run_cited_sources(root)):
+        if not ref.startswith(("sources/", "runs/sources/")):
+            routes[ref] = EJECT_BY_NAME
+        elif ref in csv_refs:
+            routes[ref] = EJECT_CSV_ROW
+        elif ref in csv_blocked:
+            # Checked BEFORE csv_retiring: a ref with one row of each kind does have
+            # run rows held back, and that hint (exit 1, fix the whitespace) is the
+            # one that describes the run the user is about to get.
+            routes[ref] = EJECT_BLOCKED
+        elif ref in csv_retiring:
+            routes[ref] = EJECT_CSV_ROW
+        else:
+            routes[ref] = EJECT_RUN_ONLY
+    return routes
 
 
 def run_orphan_sources(root: Path, unreadable: list[str] | None = None) -> list[tuple[str, int]]:
@@ -316,28 +379,44 @@ def report_unreadable_runs(names: list[str]) -> None:
         )
 
 
-def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: set[str]) -> None:
+def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: dict[str, str]) -> None:
     """Print the run-cited-missing-source lines to stderr. No-op when empty.
 
-    *ejectable* is ``eject_visible_refs``: the refs `factlog eject --orphans`
-    can actually retire. The remedy DEPENDS on it, and printing one hint for both
-    cases made the report lie in a state that is easy to reach — a ghost row a
-    human has ruled on (`confirmed`/`accepted`/`needs_review`) survives in
-    candidates.csv because the #218 ratchet refuses the rebuild, and then
-    `eject --orphans` retires it in one command. Measured: the hint said "does not
-    cover these" while that very command cleaned the KB to `0 orphan citation(s)`,
-    sending the reader to hand-edit runs/*.json for nothing.
+    *ejectable* is ``eject_visible_refs``: ref -> the `factlog eject` route that
+    retires it. The remedy DEPENDS on it, and printing one hint for every ref made
+    the report lie in a state that is easy to reach — a ghost row a human has ruled
+    on (`confirmed`/`accepted`/`needs_review`) survives in candidates.csv because
+    the #218 ratchet refuses the rebuild, and then `eject --orphans` retires it in
+    one command. Measured: the hint said "does not cover these" while that very
+    command cleaned the KB to `0 orphan citation(s)`, sending the reader to
+    hand-edit runs/*.json for nothing.
 
-    So the two classes are separated and each gets the true remedy:
+    Three classes, each with the remedy that command actually performs:
 
-    * still in candidates.csv -> `factlog eject --orphans` retires it. Its rows
-      were NOT "dropped at merge" either: the rebuild was refused, so the wording
-      says what happened instead.
-    * gone from candidates.csv -> the #558 blind spot. eject builds its cited set
-      from that same file, so it reports nothing to do; #559 tracks the fix.
+    * still in candidates.csv -> `factlog eject --orphans` retires the row. Its
+      rows were NOT "dropped at merge" either: the rebuild was refused, so the
+      wording says what happened instead.
+    * gone from candidates.csv, ref under a source root -> `eject --orphans` reads
+      runs/*.json too since #559, so it retires this as well — writing a
+      `superseded` tombstone first, because the run row is the fact's last copy.
+      The hint says so: the row the user will find afterwards is one this command
+      created, not one that survived.
+    * ref outside sources/ and runs/sources/ -> the scan will not auto-select it
+      (that safety rule is what keeps a malformed citation from being ejected by a
+      command nobody aimed), but naming it works. Measured: `factlog eject
+      ghosty.md` matches and strips those rows — with no tombstone, since
+      candidates.csv cannot hold such a source, which is why the hint says the fact
+      is gone and the command exits 1.
+    * candidates.csv holds the ref under a whitespace-differing `source` -> eject
+      neither retires that row (its matcher does not strip) nor tombstones the fact
+      (the table does hold it), so it leaves the run rows alone and exits 1. The
+      remedy is the whitespace, not the command.
 
-    A KB can hold both at once (a `confirmed` ghost and a `candidate` ghost), which
-    is why the split is per-ref rather than a single verdict for the report.
+    A KB can hold all three at once, which is why the split is per-ref rather than
+    a single verdict for the report. A ref the map does not mention at all falls to
+    the by-name hint: naming a ref is the route that holds whatever the table and
+    the run files say, so an unknown ref is never sent to a command that would do
+    nothing for it.
     """
     if not run_orphans:
         return
@@ -347,19 +426,36 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: set[str]) 
     # are no-ops: deleting the early return changes the output for no input at
     # all. A mutation run reports it as a survivor; it is an equivalent mutant.
     #
-    # `if dropped:` and `if kept:` are NOT that. Neither is redundant with the
-    # early return nor with the other: each one guards the case where only the
-    # OTHER class is present, which is the ordinary state of a KB. Break either
-    # and a report carrying one class starts printing the other class's summary at
-    # zero — `run rows cite 0 missing source(s) ... retire them with
+    # The three `if` blocks below are NOT that. None is redundant with the early
+    # return nor with the others: each guards the case where only the OTHER classes
+    # are present, which is the ordinary state of a KB. Break one and a report
+    # carrying a single class starts printing another class's summary at zero —
+    # `run rows cite 0 missing source(s) ... retire them with
     # `factlog eject --orphans`` on a KB where that command does nothing, i.e. the
-    # false remedy this function exists to prevent. Both directions are pinned, in
+    # false remedy this function exists to prevent. All directions are pinned, in
     # tests/test_coverage.sh and tests/test_drop_visibility.sh.
-    kept = [(ref, n) for ref, n in run_orphans if ref in ejectable]
-    dropped = [(ref, n) for ref, n in run_orphans if ref not in ejectable]
+    kept = [(ref, n) for ref, n in run_orphans if ejectable.get(ref) == EJECT_CSV_ROW]
+    dropped = [(ref, n) for ref, n in run_orphans if ejectable.get(ref) == EJECT_RUN_ONLY]
+    blocked = [(ref, n) for ref, n in run_orphans if ejectable.get(ref) == EJECT_BLOCKED]
+    by_name = [
+        (ref, n) for ref, n in run_orphans
+        if ejectable.get(ref) not in (EJECT_CSV_ROW, EJECT_RUN_ONLY, EJECT_BLOCKED)
+    ]
     for ref, count in dropped:
         print(
             f"  RUN ROWS cite a missing source (dropped at merge, {count} row(s)): {ref}",
+            file=sys.stderr,
+        )
+    for ref, count in by_name:
+        print(
+            f"  RUN ROWS cite a missing source (dropped at merge, {count} row(s); "
+            f"outside the source roots): {ref}",
+            file=sys.stderr,
+        )
+    for ref, count in blocked:
+        print(
+            f"  RUN ROWS cite a missing source ({count} row(s); candidates.csv holds "
+            f"it under a whitespace-differing source): {ref}",
             file=sys.stderr,
         )
     for ref, count in kept:
@@ -371,8 +467,29 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: set[str]) 
     if dropped:
         total = sum(count for _ref, count in dropped)
         print(
-            f"  run rows cite {len(dropped)} missing source(s) ({total} row(s) total); "
-            "inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)",
+            f"  run rows cite {len(dropped)} missing source(s) ({total} row(s) total) "
+            "whose only copy is in runs/*.json; `factlog eject --orphans` retires "
+            "them, writing a `superseded` tombstone into candidates.csv first",
+            file=sys.stderr,
+        )
+    if by_name:
+        total = sum(count for _ref, count in by_name)
+        print(
+            f"  run rows cite {len(by_name)} missing source(s) ({total} row(s) total) "
+            "that --orphans will not auto-select (the ref is outside sources/ and "
+            "runs/sources/); name each one: `factlog eject <ref>` — which strips "
+            "those rows with NO tombstone, since candidates.csv cannot hold such a "
+            "source, and exits 1 to say the fact is gone",
+            file=sys.stderr,
+        )
+    if blocked:
+        total = sum(count for _ref, count in blocked)
+        print(
+            f"  run rows cite {len(blocked)} missing source(s) ({total} row(s) total) "
+            "that candidates.csv holds under a `source` differing only by whitespace; "
+            "`factlog eject --orphans` LEAVES those run rows in place (exit 1) rather "
+            "than delete what merge rebuilds from — fix the whitespace in "
+            "candidates.csv, then re-run it",
             file=sys.stderr,
         )
     if kept:
@@ -889,10 +1006,11 @@ def main(argv: list[str] | None = None) -> int:
     # wired to it, on a state that has always been present.
     unreadable_runs: list[str] = []
     run_orphans = run_orphan_sources(root, unreadable_runs)
-    # What `factlog eject --orphans` can actually retire, which decides which
-    # remedy the report is allowed to print for each ref. Raw CSV, any status —
-    # see eject_visible_refs for why coverage's own `orphans` list is not it.
-    ejectable = eject_visible_refs(CANDIDATES_CSV) if CANDIDATES_CSV.is_file() else set()
+    # Which eject route retires each ref, which decides which remedy the report is
+    # allowed to print for it. Reads BOTH stores the command reads (raw CSV at any
+    # status, and runs/*.json) — see eject_visible_refs for why coverage's own
+    # `orphans` list is not it.
+    ejectable = eject_visible_refs(root)
 
     def question_axis() -> int:
         """Report the question axis and return its exit code contribution."""

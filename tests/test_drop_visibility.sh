@@ -36,11 +36,13 @@
 #       there instead of the #559 "does not cover these" hint — and the test RUNS
 #       it, asserting the KB comes back clean on both axes, so the hint is pinned
 #       as a remedy rather than as a string.
-#   (f) and the SAME check pointing the other way: the blind-spot KB also runs
-#       `eject --orphans`, pinning that it finds nothing. Both halves of the
-#       report's claim are then measured against the command they name, so
-#       whichever one stops being true (#559 makes it the second) fails here
-#       instead of quietly becoming the next false remedy.
+#   (f) and the SAME check pointing the other way: the run-only KB also runs
+#       `eject --orphans`. Since #559 that command reads runs/*.json too, so it
+#       cleans this class as well — leaving a `superseded` tombstone it WROTE,
+#       because the run row it stripped was the fact's last copy. Both halves of
+#       the report's claim are measured against the command they name, so whichever
+#       one stops being true fails here instead of quietly becoming the next false
+#       remedy.
 #
 # Deterministic; no pyrewire.  Usage: bash tests/test_drop_visibility.sh
 
@@ -139,20 +141,30 @@ printf '%s' "$cov_out" | grep -qE "RUN ROWS cite a missing source.*sources/keepe
   && bad "a source that IS on disk was reported as missing" \
   || ok "a source on disk is never reported as run-cited-missing"
 
-# The hint this KB prints CLAIMS `factlog eject --orphans` cannot clean the class.
-# Run it and check, rather than asserting the sentence. The claim is unverified in
-# exactly the direction that matters next: #559 teaches eject to read runs/*.json,
-# and on that day this KB becomes ejectable while the hint still says it is not —
-# the same lie this branch just removed for ruled-on rows, arriving from the other
-# side. Then this line goes red and the hint has to be rewritten WITH the fix
-# instead of outliving it. (The `eject --orphans` run on the ruled-on KB below is
-# this same guard pointing the other way: that one pins "the command works", this
-# one pins "it does not".)
+# The hint this KB prints CLAIMS `factlog eject --orphans` retires these rows and
+# leaves a `superseded` tombstone behind. Run it and check, rather than asserting
+# the sentence — the whole point of this file is that a remedy nobody executes
+# drifts into a false one. Both halves matter: merely stripping the run rows would
+# ALSO make the axis clean while deleting the fact's last copy from the KB, which
+# is the destruction #559's tombstone exists to prevent.
 set +e; ej_blind="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"; ejb_rc=$?; set -e
 printf '%s' "$ej_blind" | grep -qF "no orphaned sources found" \
-  && ok "eject --orphans really cannot clean this class (the #559 hint is true)" \
-  || bad "eject --orphans DID match — the 'does not cover these (see #559)' hint is now false: $ej_blind"
-[ "$ejb_rc" -eq 0 ] && ok "eject exits 0 with nothing to do" || bad "eject exited $ejb_rc: $ej_blind"
+  && bad "eject --orphans is blind to a run-only ghost again: $ej_blind" \
+  || ok "eject --orphans matches a source cited only by runs/*.json"
+[ "$ejb_rc" -eq 0 ] && ok "eject exits 0 on the run-only class" || bad "eject exited $ejb_rc: $ej_blind"
+printf '%s' "$ej_blind" | grep -qF "1 tombstone(s) written" \
+  && ok "the last copy is retired, not merely deleted" || bad "no tombstone for the last copy: $ej_blind"
+grep -qF "sources/doomed.md,superseded," "$KB/facts/candidates.csv" \
+  && ok "the tombstone names the source whose rows were stripped" \
+  || bad "tombstone missing from candidates.csv: $(cat "$KB/facts/candidates.csv")"
+set +e; bcov="$("$PYTHON" "$COV" --wiki "$KB" 2>&1)"; set -e
+printf '%s' "$bcov" | grep -qF "RUN ROWS cite" \
+  && bad "after eject: run rows still cite a missing source: $bcov" \
+  || ok "after eject: the run-orphan axis is clean"
+# ...and re-running says so instead of retiring its own tombstone forever (#562).
+set +e; ej_again="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"; set -e
+printf '%s' "$ej_again" | grep -qF "no orphaned sources found" \
+  && ok "a second --orphans reports the KB clean" || bad "not idempotent: $ej_again"
 
 # --- the OTHER class: a ghost row a human ruled on ----------------------------
 # Same round trip with `confirmed` rows. The #218 ratchet REFUSES the rebuild
@@ -182,14 +194,15 @@ printf '%s' "$rcov" | grep -qF "RUN ROWS cite a missing source (1 row(s); candid
   && ok "the line does not claim the row was dropped at merge" || bad "wording wrong: $rcov"
 printf '%s' "$rcov" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`' \
   && ok "the remedy names the command that actually works" || bad "eject remedy missing: $rcov"
-# Both halves of the blind-spot hint must be absent here — its claim AND the
-# manual step it sends the reader to. Either one printed on this KB is the false
-# remedy in the other direction: hand-editing runs/*.json for a source one
-# command retires. Matched on the two fragments rather than the whole line so a
-# reworded hint cannot slip past by no longer matching verbatim.
-printf '%s' "$rcov" | grep -qE "does not cover these|inspect runs/\*\.json" \
-  && bad "printed the #559 hint for a ref eject --orphans DOES clean: $rcov" \
-  || ok "no false 'does not cover these' claim for an ejectable ref"
+# The OTHER classes' hints must be absent here. This ref's row is one a human
+# ruled on and candidates.csv still carries: telling the reader a tombstone will be
+# written for it would misdescribe what eject does (it retires the existing row),
+# and telling them to name the ref would be a step the scan already takes. Matched
+# on fragments rather than whole lines so a reworded hint cannot slip past by no
+# longer matching verbatim.
+printf '%s' "$rcov" | grep -qE "whose only copy is in runs|will not auto-select" \
+  && bad "printed another class's hint for a ref candidates.csv still carries: $rcov" \
+  || ok "no false remedy for a ref the table still carries"
 printf '%s' "$rcov" | grep -qF "1 orphan citation(s), 1 run-cited source(s) missing" \
   && ok "both axes fire, each counting its own" || bad "summary wrong: $rcov"
 [ "$rcov_rc" -eq 0 ] && ok "two axes firing still exits 0" || bad "coverage exited $rcov_rc"

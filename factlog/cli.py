@@ -3229,13 +3229,286 @@ class _EjectSelection(NamedTuple):
     — so a run row whose source carries stray whitespace is alive to merge and was
     invisible to an unstripped matcher (#562). run_match therefore keys on
     common.fact_key's source component; match_row deliberately does not (the
-    asymmetry is load-bearing — see _select_eject_sources)."""
+    asymmetry is load-bearing — see _select_eject_sources).
+
+    synthesized carries rows to ADD to candidates.csv (empty for every mode that
+    only retires what is already there). Decided during selection, not during the
+    write, so --dry-run prints the same figure the real run acts on.
+
+    partial says this run knowingly leaves the KB unfinished — a run row held back
+    (see _scan_run_strip's stranded) or a last copy stripped with no tombstone
+    possible. The caller exits non-zero for it: both states are ones a script must
+    not read as a clean sweep, and both are already named on stderr."""
 
     match_row: Callable[[dict], bool]
     run_match: Callable[[dict], bool]
     conv_to_delete: list[str]
     orig_on_disk: list[str]
     strip_runs: bool
+    synthesized: list[dict[str, str]]
+    partial: bool
+
+
+def _iter_run_candidate_files(target, *, unreadable: list[str] | None = None):
+    """Yield (path, items) for every runs/*.json that holds a candidate-row array.
+
+    ONE reader for the two passes that have to agree: the selection scan, which
+    decides what the command reports and what tombstones it writes, and the strip
+    itself. When those two walked runs/ separately, --dry-run could print a plan the
+    run did not carry out — the failure this scan exists to remove.
+
+    Unreadable input is skipped rather than fatal, matching common.run_cited_sources
+    and the strip loop that used to own this handling: a run file whose bytes do not
+    decode is one more shape of unreadable, and dying on it left the rest of the KB
+    un-ejected. *unreadable*, when given, is EXTENDED with "<name>: <error>" so the
+    caller can name what it could not read. A non-array JSON is not collected at
+    all: other tools write objects under runs/ on purpose, and that file holds no
+    candidate rows to miss.
+    """
+    import json
+
+    runs_dir = target / "runs"
+    if not runs_dir.is_dir():
+        return
+    for path in sorted(runs_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            if unreadable is not None:
+                unreadable.append(f"{path.name}: {exc}")
+            continue
+        if not isinstance(data, list):
+            continue
+        yield path, data
+
+
+class _RunStripPlan(NamedTuple):
+    """What stripping runs/*.json would do, decided before anything is written.
+
+    run_match is the EFFECTIVE predicate — the caller's, minus the rows this plan
+    refuses to strip (see stranded). rows_to_strip / files_emptied count what that
+    predicate actually removes, so --dry-run and the run print one computation.
+    """
+
+    run_match: Callable[[dict], bool]
+    rows_to_strip: int
+    files_emptied: int
+    last_copies: list[dict[str, str]]
+    unretirable: list[str]
+    stranded: list[dict[str, str]]
+
+
+def _scan_run_strip(target, run_match, rows, match_row, *, unreadable: list[str] | None = None):
+    """What stripping runs/*.json would do — and which facts it would be the LAST
+    copy of. Returns a :class:`_RunStripPlan`.
+
+    A *last copy* is a matched run row whose fact has no candidates.csv row at all.
+    Every other eject class reaches the retirement step BECAUSE the fact is in that
+    table, so a `superseded` tombstone was automatic; a source cited only by
+    runs/*.json has none, and stripping it deletes the fact from the KB with no
+    audit row and no way back (#559).
+
+    The lookup is ``common.fact_key`` on BOTH sides — the run row and the CSV row.
+    That is deliberately WIDER than ``match_row``, which does not strip the CSV
+    value, and the extra width runs in the safe direction::
+
+        csv "  sources/live.md#sec3 " -> fact_key ... 'sources/live.md'
+        run "sources/live.md"         -> fact_key ... 'sources/live.md'   EQUAL
+        match_row's keys:  '  sources/live.md'  vs  'sources/live.md'     DIFFER
+
+    Ask the narrow question and a KB whose CSV row is padded gets a tombstone for a
+    fact a human already ruled on; the next merge folds the two rows, `superseded`
+    wins, and the decision is gone with no warning — the #218 ratchet does not stop
+    it, because the fact is not being deleted, only re-decided. The wide question
+    answers "does this KB still hold this fact anywhere", which is the question a
+    last-copy test has to ask.
+
+    But the width answers only the TOMBSTONE question. The same input has a third
+    outcome that neither key sees: on that padded row `match_row` retires nothing
+    (it does not strip) and this scan writes no tombstone (the fact IS in the
+    table), while `run_match` — which does strip, matching merge — deletes the run
+    row. Measured on a `confirmed` padded row: `1 run row(s) stripped, 0 candidate
+    row(s) superseded, 0 tombstone(s) written` at rc 0, and because runs/*.json is
+    the recovery artifact #218 names, restoring the source afterwards no longer
+    brings the fact back — the next merge REFUSES the rebuild forever, and the only
+    way out is `--allow-delete`, i.e. killing the row a human ruled on.
+
+    So those rows are STRANDED, not stripped: any matched run row whose fact has a
+    candidates.csv row this command will not retire is left in place, named to the
+    caller, and makes the command exit non-zero. Leaving the run row keeps the fact
+    recoverable and keeps merge's ratchet quiet; the exit code is what stops
+    `eject --orphans && ...` from reading the untouched rows as a clean sweep. The
+    fix for the KB is the whitespace, which the message says.
+
+    Two shapes are skipped for a tombstone, and both are stripped WITHOUT one:
+
+    * a row missing one of the first four fields — merge drops it (`skip incomplete
+      row in ...`), and a tombstone built from it would fail validate;
+    * a source outside the two source roots — validate rejects such a row outright,
+      so writing one would leave the KB permanently "validation failed" (#562). The
+      caller names these refs and exits non-zero for them too; they are the one
+      route through this command that still drops a last copy.
+
+    Deduped on the fact key: merge collapses rows differing only in
+    confidence/note into one fact (fact_key carries neither), so two tombstones
+    would be two rows of a fact that has one.
+    """
+    from factlog.common import FACT_HEADER, fact_key, normalize_confidence
+
+    def _key(row) -> tuple[str, str, str, str]:
+        return fact_key(
+            row.get("subject", ""), row.get("relation", ""),
+            row.get("object", ""), row.get("source", ""),
+        )
+
+    csv_keys = {_key(r) for r in rows}
+    # Facts the table holds in a row this command will NOT retire. Decidable from
+    # candidates.csv alone, so it is computed once rather than per run row. In fact
+    # mode it is always empty for a matched run row: that mode matches on the
+    # triple, and a csv row sharing this fact_key shares the triple.
+    stranded_keys = csv_keys - {_key(r) for r in rows if match_row(r)}
+
+    def _complete(row) -> bool:
+        return all(row[field] for field in FACT_HEADER[:4])
+
+    def _clean(item) -> dict[str, str]:
+        return {field: str(item.get(field, "")).strip() for field in FACT_HEADER}
+
+    def effective_match(d: dict) -> bool:
+        """run_match, minus the rows whose only other copy this command leaves be."""
+        if not run_match(d):
+            return False
+        row = _clean(d)
+        if not _complete(row):
+            return True  # merge drops it anyway; nothing to strand it against
+        return _key(row) not in stranded_keys
+
+    rows_to_strip = 0
+    files_emptied = 0
+    seen: set[tuple[str, str, str, str]] = set()
+    stranded_seen: set[tuple[str, str, str, str]] = set()
+    last_copies: list[dict[str, str]] = []
+    stranded: list[dict[str, str]] = []
+    unretirable: set[str] = set()
+    for path, data in _iter_run_candidate_files(target, unreadable=unreadable):
+        hits = [item for item in data if isinstance(item, dict) and effective_match(item)]
+        held = [
+            item for item in data
+            if isinstance(item, dict) and run_match(item) and not effective_match(item)
+        ]
+        for item in held:
+            key = _key(_clean(item))
+            if key in stranded_seen:
+                continue
+            stranded_seen.add(key)
+            stranded.append({
+                "subject": key[0], "relation": key[1], "object": key[2], "source": key[3],
+            })
+        if not hits:
+            continue
+        rows_to_strip += len(hits)
+        if len(hits) == len(data):
+            files_emptied += 1  # nothing else in it: the strip removes the file
+        for item in hits:
+            row = _clean(item)
+            if not _complete(row):
+                continue
+            key = _key(row)
+            if key in csv_keys or key in seen:
+                continue
+            if not key[3].startswith(("sources/", "runs/sources/")):
+                unretirable.add(key[3])
+                continue
+            seen.add(key)
+            last_copies.append({
+                "subject": key[0],
+                "relation": key[1],
+                "object": key[2],
+                # The MATCHED key, not the raw run value: NFC-folded, stripped, cut
+                # at '#'. Write the raw value and the next scan cannot find its own
+                # tombstone, so --orphans never reaches "nothing left to do".
+                "source": key[3],
+                "status": "superseded",
+                "confidence": normalize_confidence(row["confidence"]),
+                # The run row's own `note` is NOT carried over: this row is an audit
+                # record of the retirement, and the run row is about to be deleted,
+                # so the sentence a reader needs is why the fact left the KB. A
+                # human note on the run row is lost with it — as it is on every
+                # other eject path. On a legacy candidates.csv with no `note`
+                # column the text is dropped by the writer's extrasaction="ignore",
+                # which is the same header contract every other row obeys.
+                "note": f"superseded by factlog eject: last copy of this fact, "
+                        f"no candidates.csv row (from runs/{path.name})",
+            })
+    return _RunStripPlan(
+        effective_match, rows_to_strip, files_emptied, last_copies,
+        sorted(unretirable), stranded,
+    )
+
+
+def _report_stranded(stranded: list[dict[str, str]]) -> None:
+    """Name every run row left in place because candidates.csv keeps its fact.
+
+    Not a silent skip: the rows stay in runs/*.json, so the ref keeps being
+    reported by `--orphans` and by coverage until someone fixes the row. Say which
+    fact, and say what to fix — the cause is always a candidates.csv `source` value
+    this command's matcher does not strip while merge does.
+    """
+    if stranded:
+        sys.stdout.flush()  # keep the warning under the plan it qualifies (#457, #472)
+    for row in stranded:
+        print(
+            f"factlog eject: NOT stripping the run row(s) for "
+            f"({row['subject']}, {row['relation']}, {row['object']}) — "
+            f"candidates.csv holds this fact in a row this command does not retire "
+            f"(its `source` differs from '{row['source']}' only by whitespace, which "
+            f"eject's candidates.csv matcher does not strip). Stripping it would "
+            f"delete the last copy merge can rebuild from and leave the rebuild "
+            f"REFUSED. Fix the whitespace in candidates.csv, then re-run.",
+            file=sys.stderr,
+        )
+
+
+def _refuse_purge_last_copy(last_copies: list[dict[str, str]], remedy: str) -> int:
+    """Refuse a --purge that would destroy a fact's last copy. Returns rc 1.
+
+    Every other --purge removes a row that candidates.csv holds — a decision the
+    user can see before they destroy it, and re-derive from runs/*.json afterwards.
+    A run-only ghost has neither: the row is in no table, and --purge deletes the
+    run row that IS the fact. There is no undo, and no `--force` here on purpose —
+    the two-pass route below is a complete workaround, and its point is that the
+    fact becomes VISIBLE in candidates.csv, once, before anyone deletes it.
+    """
+    # Flush the plan first: stdout is block-buffered under a pipe while stderr is
+    # not, so without this the refusal lands ABOVE the plan it refuses (#457, #472).
+    sys.stdout.flush()
+    print(
+        f"factlog eject: refusing --purge — {len(last_copies)} fact(s) exist ONLY in "
+        "runs/*.json (candidates.csv carries no row for them), so this would delete "
+        "the last copy with nothing left for audit:",
+        file=sys.stderr,
+    )
+    for row in last_copies:
+        print(
+            f"    ({row['subject']}, {row['relation']}, {row['object']})  "
+            f"[source: {row['source']}]",
+            file=sys.stderr,
+        )
+    print(remedy, file=sys.stderr)
+    return 1
+
+
+def _report_unretirable(refs: list[str]) -> None:
+    """Name every ref whose run rows are stripped with no tombstone."""
+    if refs:
+        sys.stdout.flush()  # keep the warning under the plan it qualifies (#457, #472)
+    for ref in refs:
+        print(
+            f"factlog eject: {ref} — a candidates.csv source must start with sources/ "
+            "or runs/sources/ (validate rejects anything else), so this ref's run "
+            "row(s) are stripped with no tombstone.",
+            file=sys.stderr,
+        )
 
 
 def _select_eject_facts(args, rows, fact_specs, target, nfc):
@@ -3295,14 +3568,45 @@ def _select_eject_facts(args, rows, fact_specs, target, nfc):
 
     # Keep runs/*.json on a supersede: the source stays, so the run keeps
     # re-asserting the fact and merge_candidates' superseded-preservation holds the
-    # retirement durably across the next sync. Only --purge strips the run row too.
-    return _EjectSelection(match_row, run_match, [], [], args.purge)
+    # retirement durably across the next sync. Only --purge strips the run row too,
+    # so only --purge has a plan to print for those files — and only it can reach a
+    # run row of a fact candidates.csv never carried (this mode keys on the TRIPLE,
+    # across every source).
+    partial = False
+    if args.purge:
+        plan = _scan_run_strip(target, run_match, rows, match_row)
+        print(
+            f"  runs/*.json: {plan.rows_to_strip} row(s) to strip "
+            f"({plan.files_emptied} file(s) would be emptied)"
+        )
+        _report_unretirable(plan.unretirable)
+        partial = bool(plan.unretirable)
+        if plan.last_copies:
+            # This mode keys on the TRIPLE across every source, so a --purge here can
+            # reach the run rows of a source candidates.csv never carried — the same
+            # last-copy destruction as the source mode, arriving from the other axis.
+            # The route out depends on why the table is missing the fact, so name
+            # both: a source still on disk means candidates.csv is merely stale.
+            return _refuse_purge_last_copy(
+                plan.last_copies,
+                "Get the fact into candidates.csv first, then re-run this purge:\n"
+                f"    python3 tools/merge_candidates.py --wiki {target}"
+                "   # source still on disk: the table is merely stale\n"
+                f"    factlog eject --orphans --target {target}"
+                "   # source gone: retires it as a superseded tombstone",
+            )
+    return _EjectSelection(match_row, run_match, [], [], args.purge, [], partial)
 
 
-def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
+def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs):
     """Source / --orphans mode: select source refs to retire (and their on-disk
     conversions/originals). Returns an _EjectSelection, or an int exit code when
-    nothing matches. Prints the plan exactly as cmd_eject used to inline."""
+    nothing matches. Prints the plan exactly as cmd_eject used to inline.
+
+    *csv_refs* is the cited set BEFORE the runs/*.json union — the refs
+    candidates.csv itself carries. Only the report reads it, so a ref whose rows
+    merge already dropped is not announced as "cited" when the table holds nothing
+    for it: that label is what sends a reader to grep candidates.csv."""
     import re
     from pathlib import Path, PurePosixPath
 
@@ -3507,9 +3811,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # Which source refs still have a live run row behind them. Feeds the
         # "nothing left to do" filter below, and comes from common.run_cited_sources
         # rather than a local loop: that helper already IS this rule — NFC(strip(raw))
-        # cut at '#', plus merge's row-completeness test — and an open-coded third
-        # copy is how the run/csv key drift this very commit set fixes got in. It
-        # also skips a run file whose BYTES do not decode, which a hand-rolled
+        # cut at '#', plus merge's row-completeness test — and an open-coded copy is
+        # how the run/csv key drift #562 fixed got in. cmd_eject's cited set is built
+        # from the same helper (#559), so the two agree by construction. It also
+        # skips a run file whose BYTES do not decode, which a hand-rolled
         # `except (JSONDecodeError, OSError)` does not: such a file made this scan
         # die with a UnicodeDecodeError traceback.
         #
@@ -3522,7 +3827,8 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # an incomplete row before writing candidates.csv (`skip incomplete row in
         # ...`), so the honest answer is no. The rows are still reachable — `eject
         # <ref>` and `eject --orphans --purge` both strip them, because neither goes
-        # through this filter.
+        # through this filter. A ref with NO csv rows at all and only incomplete run
+        # rows is not cited by either store's key, so it is not scanned at all.
         #
         # An unreadable run file makes the answer unknown, so the filter is skipped
         # entirely rather than guessed at — under-reporting an orphan whose run
@@ -3572,11 +3878,14 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # only thing that keeps an on-disk orphan whose rows are ALL already
         # superseded — measured: removing it alone fails "on-disk orphan conversion
         # skipped by the idempotency filter". Given it, `bool(cited)` is redundant by
-        # construction: every ref reaching it came from cited_refs, which is built
-        # from these same rows under the same key, so `cited` cannot be empty. It
-        # stays because the emptiness is what makes the `all(...)` below meaningless,
-        # and a later change to how `matched` is seeded (e.g. #559's run-only ghost
-        # sources, which are NOT in cited_refs) would make it load-bearing again.
+        # construction, and #559's run-only ghosts did NOT change that (an earlier
+        # note here predicted they would): cited_refs is now candidates.csv UNION
+        # run_cited_sources, so a ref reaching the `cited` computation is neither on
+        # disk nor in run_source_keys, which leaves only the csv side it could have
+        # come from — and that is the very list `cited` re-derives, under the same
+        # key. It stays because the emptiness is what makes the `all(...)` below
+        # meaningless, and because a third seeding source for `matched` would make it
+        # load-bearing again.
         if not runs_unreadable:
             def _nothing_to_do(ref: str) -> bool:
                 if args.purge:
@@ -3625,11 +3934,12 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     def match_row(d: dict) -> bool:
         # candidates.csv: NFC-fold and cut the #anchor, but do NOT strip. The raw
         # read is deliberate and documented against: source_coverage's
-        # eject_visible_refs derives the set of refs this command can act on from
-        # THIS rule, and reasons explicitly about the whitespace gap ("eject does
-        # not [strip] ... the error runs in the SAFE direction"). Stripping here
-        # would silently widen what eject retires in candidates.csv beyond what
-        # that report promises. runs/*.json is the opposite case — see run_match.
+        # eject_visible_refs classifies each ref by THIS rule (which of the command's
+        # routes retires it), so stripping here would silently widen what eject
+        # retires in candidates.csv beyond what that report promises. runs/*.json is
+        # the opposite case — see run_match. The tombstone lookup in _scan_run_strip
+        # is a THIRD question ("does the KB hold this fact anywhere") and is keyed
+        # wider than either, on purpose: see its docstring.
         return nfc(str(d.get("source", "")).partition("#")[0]) in matched
 
     def run_match(d: dict) -> bool:
@@ -3646,7 +3956,16 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     matched_sorted = sorted(matched)
     print(f"factlog eject (KB: {target}): {len(matched_sorted)} matched source ref(s):")
     for ref in matched_sorted:
-        print(f"  - {ref}  [{'on disk' if ref in disk_refs else 'cited only (no file)'}]")
+        if ref in disk_refs:
+            where = "on disk"
+        elif ref in csv_refs:
+            where = "cited only (no file)"
+        else:
+            # candidates.csv holds nothing for it: the rows are in runs/*.json and
+            # merge drops them on every rebuild. Saying "cited" unqualified sent the
+            # reader to grep a table that does not mention this ref.
+            where = "cited only by runs/*.json (no file)"
+        print(f"  - {ref}  [{where}]")
 
     conv_to_delete = [r for r in matched_sorted if r.startswith("runs/sources/") and r in disk_refs]
     orig_on_disk = [r for r in matched_sorted if not r.startswith("runs/sources/") and r in disk_refs]
@@ -3681,14 +4000,59 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             print(f"    factlog eject {ref}", file=sys.stderr)
         return 1
 
+    # Read runs/*.json BEFORE anything is written: step 2 of the retirement rewrites
+    # those files, so a scan placed after it finds the rows already gone and reports
+    # zero last copies on exactly the KB that has them.
+    scan_unreadable: list[str] = []
+    plan = _scan_run_strip(target, run_match, rows, match_row, unreadable=scan_unreadable)
+    last_copies = plan.last_copies
+
     action = "purge" if args.purge else "supersede"
     print(f"  candidates.csv: {len(affected)} row(s) to {action}")
+    print(
+        f"  runs/*.json: {plan.rows_to_strip} row(s) to strip "
+        f"({plan.files_emptied} file(s) would be emptied)"
+    )
+    if last_copies and not args.purge:
+        print(
+            f"  LAST COPY: {len(last_copies)} fact(s) have no candidates.csv row — "
+            "a `superseded` tombstone is written for each BEFORE the strip"
+        )
+    if plan.stranded:
+        print(
+            f"  HELD BACK: {len(plan.stranded)} fact(s) keep their run row(s) — "
+            "candidates.csv holds a row for them that this command does not retire"
+        )
     print(f"  runs/sources conversion(s) to delete: {len(conv_to_delete)}")
     if args.delete_original:
         print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
-    return _EjectSelection(match_row, run_match, conv_to_delete, orig_on_disk, True)
+    _report_unretirable(plan.unretirable)
+    _report_stranded(plan.stranded)
+    if args.dry_run:
+        # The only run that never reaches the strip, which is where an unreadable
+        # run file is otherwise named. Say it here so the preview does not present
+        # counts that quietly exclude a file.
+        for name in scan_unreadable:
+            print(f"factlog eject: skipping unreadable {name}", file=sys.stderr)
+    # --purge destroys rather than retires, so a last copy has nowhere to go: writing
+    # a tombstone it is about to delete would be theatre. Refuse instead, including
+    # under --dry-run — a preview that hid the refusal would be the same lie the
+    # dry-run figures above exist to remove.
+    if args.purge and last_copies:
+        return _refuse_purge_last_copy(
+            last_copies,
+            "Retire them first, then purge the tombstones in a second pass:\n"
+            f"    factlog eject --orphans --target {target}"
+            "            # writes superseded tombstones\n"
+            f"    factlog eject --orphans --purge --target {target}"
+            "    # removes them",
+        )
+    return _EjectSelection(
+        match_row, plan.run_match, conv_to_delete, orig_on_disk, True, last_copies,
+        bool(plan.stranded or plan.unretirable),
+    )
 
 
 def cmd_eject(args: argparse.Namespace) -> int:
@@ -3727,6 +4091,32 @@ def cmd_eject(args: argparse.Namespace) -> int:
     re-running --orphans reaches "no orphaned sources found" instead of re-retiring
     its own tombstones forever. Naming such a ref explicitly still matches it.
 
+    A source cited ONLY by runs/*.json is in scope for both selectors: merge drops
+    such a row before writing candidates.csv, so the table cannot report it and eject
+    used to be blind to it too (#559). It is the one class whose fact may have NO
+    candidates.csv row, so the retirement step WRITES a `superseded` tombstone for
+    each last copy — before the run rows are stripped — instead of letting the strip
+    delete the fact outright. Two shapes get no tombstone and are stripped anyway,
+    because a tombstone made from them would fail `validate`: a run row missing one
+    of subject/relation/object/source (merge drops it too), and a ref outside the two
+    source roots (candidates.csv sources must start with sources/ or runs/sources/).
+    Both are named on stderr, and the second makes the command exit 1: it is the one
+    route left that drops a fact's last copy, so it must not pass as a clean sweep.
+    Exit 1 for the same reason when a run row is HELD BACK — its fact has a
+    candidates.csv row this command does not retire (a `source` differing only by
+    whitespace, which the candidates.csv matcher does not strip while merge does).
+    Stripping those rows would delete the artifact merge rebuilds from and leave the
+    rebuild permanently REFUSED (#218), so they stay.
+
+    --purge is REFUSED for a last copy, at exit 1 with nothing changed. There is
+    deliberately no --force/--yes: the two-pass route the refusal prints (retire,
+    then purge the tombstones) is a complete workaround, and the step it forces —
+    the fact appearing in candidates.csv once, where a human can see it — is the
+    entire reason for the refusal. Fact mode has the same check, but reaches it only
+    when SOME candidate row matched the triple: with none it has already returned
+    `no candidate fact matches the given triple(s)` at exit 1, so a fact living only
+    in runs/*.json never gets that far.
+
     Fact mode (`eject --fact SUBJECT RELATION OBJECT`, repeatable) — retires
     candidate rows matching the given (subject, relation, object) triple(s)
     across all sources, leaving the source files in place. The default
@@ -3742,7 +4132,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import FACT_HEADER, is_hidden_source
+    from factlog.common import FACT_HEADER, is_hidden_source, run_cited_sources
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -3768,6 +4158,21 @@ def cmd_eject(args: argparse.Namespace) -> int:
             ref = nfc((row.get("source") or "").partition("#")[0])
             if ref:
                 cited_refs.add(ref)
+
+    # A source cited ONLY by runs/*.json is invisible to the loop above, and that
+    # was the whole of #559: merge drops a row whose source is gone BEFORE writing
+    # candidates.csv, so eject built its cited set from a file the ghost had already
+    # been erased from, reported "no orphaned sources found", and every later merge
+    # dropped and warned about the same rows. The loop never closed.
+    #
+    # Keyed by common.run_cited_sources rather than a local walk of runs/*.json:
+    # that helper IS merge's rule — NFC(strip(raw)) cut at '#', plus merge's
+    # row-completeness test — it is what the orphan scan's idempotency filter
+    # already asks the same question of, and it skips a run file whose bytes do not
+    # decode. A fourth open-coded copy of this key is exactly how the run/csv drift
+    # #562 fixed got in.
+    _csv_refs = set(cited_refs)  # what candidates.csv alone knows about
+    cited_refs |= set(run_cited_sources(target))
 
     disk_refs: dict[str, Path] = {}  # KB-relative ref -> path
     for base in ("sources", "runs/sources"):
@@ -3803,14 +4208,16 @@ def cmd_eject(args: argparse.Namespace) -> int:
     if fact_mode:
         sel = _select_eject_facts(args, rows, fact_specs, target, nfc)
     else:
-        sel = _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc)
+        sel = _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, _csv_refs)
     if isinstance(sel, int):
         return sel  # nothing matched / orphan scan empty — code already printed
-    match_row, run_match, conv_to_delete, orig_on_disk, strip_runs = sel
+    match_row, run_match, conv_to_delete, orig_on_disk, strip_runs, synthesized, partial = sel
 
     if args.dry_run:
         print("factlog eject: --dry-run, no changes made")
-        return 0
+        # Same exit code the real run would give: a preview that reported success
+        # for a run destined to leave work behind is the misdirection #559 is about.
+        return 1 if partial else 0
 
     # 1. delete the ingest conversion(s) (source mode only)
     deleted_conv = 0
@@ -3821,45 +4228,29 @@ def cmd_eject(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"factlog eject: could not delete {ref}: {exc}", file=sys.stderr)
 
-    # 2. strip the retired rows from runs/*.json (drop now-empty run files)
-    stripped_rows = 0
-    removed_files = 0
-    runs_dir = target / "runs"
-    if strip_runs and runs_dir.is_dir():
-        for jp in sorted(runs_dir.glob("*.json")):
-            try:
-                data = json.loads(jp.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
-                # surface it: a corrupt run file left behind could still hold the
-                # retired rows and resurrect them on a later merge.
-                # UnicodeDecodeError belongs here for the same reason
-                # common.run_cited_sources lists it: a runs/*.json whose BYTES do
-                # not decode is one more shape of "unreadable", and leaving it out
-                # made the whole eject die with a traceback on such a file instead
-                # of naming it and finishing the rest of the job.
-                print(f"factlog eject: skipping unreadable {jp.name}: {exc}", file=sys.stderr)
-                continue
-            if not isinstance(data, list):
-                continue  # non-candidate run JSON (e.g. a policy-gen object): leave it
-            kept = [item for item in data if not (isinstance(item, dict) and run_match(item))]
-            if len(kept) != len(data):
-                stripped_rows += len(data) - len(kept)
-                if kept:
-                    _atomic_write_text(jp, json.dumps(kept, ensure_ascii=False, indent=2) + "\n")
-                else:
-                    jp.unlink()
-                    removed_files += 1
-
-    # 3. retire candidate rows: supersede (default) or purge
+    # 2. retire candidate rows: supersede (default) or purge
+    #
+    # Guard the supersede path against a malformed/legacy header missing the status
+    # column — without this, DictWriter would raise mid-write on a truncated ("w")
+    # file and lose every row. Fall back to the canonical FACT_HEADER, and ensure
+    # 'status' exists when we set it. Computed OUTSIDE the write condition: the
+    # rows this step writes are no longer only the rows it read, so the header has
+    # to be known even when candidates.csv had none of its own.
+    out_fields = fieldnames or list(FACT_HEADER)
+    if not args.purge and "status" not in out_fields:
+        out_fields = [*out_fields, "status"]
     changed = 0
-    if rows:
-        # Guard the supersede path against a malformed/legacy header missing the
-        # status column — without this, DictWriter would raise mid-write on a
-        # truncated ("w") file and lose every row. Fall back to the canonical
-        # FACT_HEADER, and ensure 'status' exists when we set it.
-        out_fields = fieldnames or list(FACT_HEADER)
-        if not args.purge and "status" not in out_fields:
-            out_fields = [*out_fields, "status"]
+    # `synthesized` is what this command MAKES, as opposed to what it retires
+    # (always empty today; the run-only ghost class fills it). It is why the write
+    # is no longer gated on `rows`: a KB whose candidates.csv is header-only —
+    # the ordinary shape once merge has dropped a ghost's rows — never entered
+    # this step at all, so nothing could be written for it.
+    if rows or synthesized:
+        # facts/ may not exist: a KB is a directory with sources/, and this step is
+        # now the first that can CREATE candidates.csv rather than rewrite it. The
+        # atomic write lands a .tmp beside the target, so a missing parent was a
+        # FileNotFoundError traceback on a KB `eject` used to leave alone.
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
         new_rows: list[dict[str, str]] = []
         for r in rows:
             if match_row(r):
@@ -3868,9 +4259,37 @@ def cmd_eject(args: argparse.Namespace) -> int:
                     continue  # drop the row entirely
                 r["status"] = "superseded"
             new_rows.append(r)
+        new_rows.extend(synthesized)
         # Atomic temp+replace (see _atomic_write_csv) so an interrupted run can't
         # leave a half-written candidates.csv.
         _atomic_write_csv(csv_path, new_rows, out_fields)
+
+    # 3. strip the retired rows from runs/*.json (drop now-empty run files)
+    #
+    # AFTER the candidates.csv write, which is the whole ordering argument: the
+    # tombstone for a last copy has to be on disk before the row it stands for is
+    # removed. A crash between the two then converges on RETIREMENT — merge carries
+    # a `superseded` row over whether or not runs/ still asserts it — never on a
+    # fact with no copy anywhere. Under --purge the same window leaves rows in
+    # runs/*.json that candidates.csv no longer has, so the next merge rebuilds
+    # them; that is a job to re-run, not data lost.
+    stripped_rows = 0
+    removed_files = 0
+    if strip_runs:
+        unreadable: list[str] = []
+        for jp, data in _iter_run_candidate_files(target, unreadable=unreadable):
+            kept = [item for item in data if not (isinstance(item, dict) and run_match(item))]
+            if len(kept) != len(data):
+                stripped_rows += len(data) - len(kept)
+                if kept:
+                    _atomic_write_text(jp, json.dumps(kept, ensure_ascii=False, indent=2) + "\n")
+                else:
+                    jp.unlink()
+                    removed_files += 1
+        for name in unreadable:
+            # surface it: a corrupt run file left behind could still hold the
+            # retired rows and resurrect them on a later merge.
+            print(f"factlog eject: skipping unreadable {name}", file=sys.stderr)
 
     # 4. optionally delete the user's original(s) (source mode only)
     deleted_orig = 0
@@ -3895,10 +4314,15 @@ def cmd_eject(args: argparse.Namespace) -> int:
             f"stripped ({removed_files} run file(s) removed); {recompiled}"
         )
     else:
+        # Tombstones are counted SEPARATELY from retired rows, never summed into
+        # them: "a row a human had was retired" and "a row was invented because the
+        # KB had none" are different events, and one figure covering both makes a KB
+        # that nearly lost a fact read exactly like a routine cleanup.
         print(
             f"factlog eject: {deleted_conv} conversion(s) deleted, {stripped_rows} run row(s) "
             f"stripped ({removed_files} run file(s) removed), {changed} candidate row(s) {verb}, "
-            f"{deleted_orig} original(s) deleted; {recompiled}"
+            f"{len(synthesized)} tombstone(s) written, {deleted_orig} original(s) deleted; "
+            f"{recompiled}"
         )
     if changed:
         print(
@@ -3926,7 +4350,11 @@ def cmd_eject(args: argparse.Namespace) -> int:
             "factlog eject: note — kept original(s) will be re-converted on the next "
             "`factlog ingest --scan` / `/factlog sync`; pass --delete-original to remove them."
         )
-    return 1 if recompile_failed else 0
+    # `partial` is a completed run that knowingly left the KB unfinished: run rows
+    # held back, or a last copy stripped with no tombstone possible. Both are named
+    # on stderr above, and both are states `eject --orphans && ...` must not read as
+    # a clean sweep — the silent-success shape #562 removed from the other end.
+    return 1 if recompile_failed or partial else 0
 
 
 def _make_zotero_client(config):

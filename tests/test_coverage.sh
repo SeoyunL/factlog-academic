@@ -192,21 +192,38 @@ set +e; rout="$("$PYTHON" "$COV" --wiki "$RUNKB" 2>&1)"; rrc=$?; set -e
 printf '%s' "$rout" | grep -qF "0 orphan citation(s), 2 run-cited source(s) missing" && ok "run-cited missing sources counted in summary" || bad "run-orphan summary field missing: $rout"
 printf '%s' "$rout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 2 row(s)): sources/ghost.md" && ok "per-source line carries the row count (anchor folded)" || bad "ghost.md run-orphan line missing"
 printf '%s' "$rout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/gone.md" && ok "second missing source reported on its own line" || bad "gone.md run-orphan line missing"
-# The hint must stay TRUTHFUL: `eject --orphans` reads the same candidates.csv,
-# so naming it as the remedy would send the reader to a command that reports
-# nothing to do. The issue reference is pinned with it — dropping the number
-# would leave a dead end where there is a tracked fix (#559).
-printf '%s' "$rout" | grep -qF 'run rows cite 2 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)' \
-  && ok "remedy hint is truthful and names the tracked eject fix" || bad "remedy hint missing/wrong: $rout"
-# ...and the OTHER class's hint must be ABSENT. Asserting only what is printed
+# The hint must stay TRUTHFUL. Since #559 `eject --orphans` reads runs/*.json too,
+# so it DOES clean this class — and what it leaves behind is a row it created: a
+# `superseded` tombstone standing in for the last copy it stripped. The hint has to
+# say that, not just "this works": a reader who finds that row afterwards and takes
+# it for a surviving decision has been told the wrong history.
+printf '%s' "$rout" | grep -qF 'run rows cite 2 missing source(s) (3 row(s) total) whose only copy is in runs/*.json; `factlog eject --orphans` retires them, writing a `superseded` tombstone into candidates.csv first' \
+  && ok "remedy hint names the command AND the tombstone it writes" || bad "remedy hint missing/wrong: $rout"
+# ...and the OTHER classes' hints must be ABSENT. Asserting only what is printed
 # left `if kept:` unguarded: breaking it added
 # `run rows cite 0 missing source(s) ... retire them with eject --orphans` to this
-# very KB, where that command does nothing — the false remedy this change removed,
-# back as a second line nobody was checking for.
+# very KB, where candidates.csv carries nothing — the false remedy this change
+# removed, back as a second line nobody was checking for.
 printf '%s' "$rout" | grep -qF "candidates.csv still carries" \
-  && bad "printed the eject remedy on a KB where nothing is ejectable: $rout" \
-  || ok "no eject remedy line when no ref is ejectable"
+  && bad "printed the still-carried remedy on a KB whose table holds none of these: $rout" \
+  || ok "no still-carried remedy line when the table carries nothing"
+printf '%s' "$rout" | grep -qF "will not auto-select" \
+  && bad "printed the by-name hint for refs --orphans DOES auto-select: $rout" \
+  || ok "no by-name hint for refs under the source roots"
 [ "$rrc" -eq 0 ] && ok "run orphans alone do not fail the default run" || bad "run orphans caused exit $rrc"
+# ...and the hint is a REMEDY, not a suggestion: run it. The command has to leave
+# the KB clean on this axis and the tombstone it promised in the table.
+set +e; ej="$("$PYTHON" -m factlog eject --orphans --target "$RUNKB" 2>&1)"; ej_rc=$?; set -e
+[ "$ej_rc" -eq 0 ] && ok "eject --orphans succeeds on the run-only class" || bad "eject exited $ej_rc: $ej"
+# One per FACT, not per source: the anchored row is a different object, so these
+# three run rows are three facts across two refs.
+printf '%s' "$ej" | grep -qF "3 tombstone(s) written" \
+  && ok "one tombstone per last-copy fact" || bad "tombstone count wrong: $ej"
+grep -qF "sources/ghost.md,superseded," "$RUNKB/facts/candidates.csv" \
+  && ok "the promised tombstone is in candidates.csv" || bad "no tombstone written: $(cat "$RUNKB/facts/candidates.csv")"
+set +e; acov="$("$PYTHON" "$COV" --wiki "$RUNKB" 2>&1)"; set -e
+printf '%s' "$acov" | grep -qF "RUN ROWS cite" \
+  && bad "after eject: the run-orphan line is still printed: $acov" || ok "after eject: the axis is clean"
 # The new axis is informational: --strict's contract is text gaps, nothing else.
 set +e; "$PYTHON" "$COV" --wiki "$RUNKB" --strict >/dev/null 2>&1; srrc=$?; set -e
 [ "$srrc" -eq 0 ] && ok "--strict does not gate on run orphans" || bad "--strict failed on run orphans (exit $srrc)"
@@ -220,10 +237,14 @@ printf '%s' "$eout" | grep -qF "coverage: no source files" && ok "empty-sources 
 printf '%s' "$eout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/live.md" && ok "early return reports run orphans too" || bad "early return silent about run orphans: $eout"
 [ "$erc" -eq 0 ] && ok "early return with run orphans exits 0" || bad "early return exit $erc"
 
-# --- the remedy depends on whether candidates.csv still carries the ref (#558) -
-# A ghost row a human ruled on survives the rebuild (#218 ratchet), so
-# `factlog eject --orphans` — which builds its cited set from candidates.csv —
-# CAN retire it. Printing "does not cover these" there was a false remedy.
+# --- the remedy depends on WHICH eject route retires the ref (#558, #559) ------
+# Three routes, three sentences. A ghost row a human ruled on survives the rebuild
+# (#218 ratchet) and `factlog eject --orphans` retires the row it finds in
+# candidates.csv. A run-only ghost is retired by the same command since #559, but
+# the row the user sees afterwards is one that command WROTE (a tombstone). A ref
+# outside the two source roots is not auto-selected at all — that safety rule
+# stands — and has to be named. Printing any one of these for another class is the
+# false remedy this split exists to prevent.
 REMKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$REMKB" >/dev/null
 printf 'live\n' > "$REMKB/sources/live.md"
@@ -233,11 +254,12 @@ printf 'live\n' > "$REMKB/sources/live.md"
 # counts engine statuses only — so a hint keyed on the orphan list, the obvious
 # shortcut, would tell the reader to hand-edit runs/*.json for a source
 # `eject --orphans` retires. Only a raw-CSV predicate gets this row right.
+# ghosty.md carries no source-root prefix: the scan will not select it.
 printf '%s\n%s\n%s\n%s\n' "$HEADER" \
   '갑봇,통합,을서비스,sources/live.md,accepted,0.9,' \
   '유령,참조,대상,sources/kept.md,confirmed,0.9,' \
   '유령,참조,검토,sources/review.md,needs_review,0.9,' > "$REMKB/facts/candidates.csv"
-printf '%s' '[{"subject":"유령","relation":"참조","object":"대상","source":"sources/kept.md","status":"confirmed","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"검토","source":"sources/review.md","status":"needs_review","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"둘","source":"sources/blind.md","status":"candidate","confidence":"0.9","note":""}]' > "$REMKB/runs/2026-01-01-mixed.json"
+printf '%s' '[{"subject":"유령","relation":"참조","object":"대상","source":"sources/kept.md","status":"confirmed","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"검토","source":"sources/review.md","status":"needs_review","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"둘","source":"sources/blind.md","status":"candidate","confidence":"0.9","note":""},{"subject":"유령","relation":"참조","object":"밖","source":"ghosty.md","status":"candidate","confidence":"0.9","note":""}]' > "$REMKB/runs/2026-01-01-mixed.json"
 set +e; mout="$("$PYTHON" "$COV" --wiki "$REMKB" 2>&1)"; mrc=$?; set -e
 printf '%s' "$mout" | grep -qF "RUN ROWS cite a missing source (1 row(s); candidates.csv still carries rows for it): sources/kept.md" \
   && ok "a ref candidates.csv still carries is not called 'dropped at merge'" || bad "kept.md line wrong: $mout"
@@ -246,14 +268,95 @@ printf '%s' "$mout" | grep -qF "RUN ROWS cite a missing source (1 row(s); candid
 printf '%s' "$mout" | grep -qF 'run rows cite 2 missing source(s) (2 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`' \
   && ok "ejectable refs are pointed at the command that retires them" || bad "eject remedy missing: $mout"
 printf '%s' "$mout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s)): sources/blind.md" \
-  && ok "the blind-spot ref keeps its own wording in the same report" || bad "blind.md line wrong: $mout"
-printf '%s' "$mout" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)' \
-  && ok "both classes get their own truthful hint in one KB" || bad "blind-spot hint missing: $mout"
+  && ok "the run-only ref keeps its own wording in the same report" || bad "blind.md line wrong: $mout"
+printf '%s' "$mout" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) total) whose only copy is in runs/*.json; `factlog eject --orphans` retires them, writing a `superseded` tombstone into candidates.csv first' \
+  && ok "the run-only class gets its own truthful hint in the same report" || bad "run-only hint missing: $mout"
+printf '%s' "$mout" | grep -qF "RUN ROWS cite a missing source (dropped at merge, 1 row(s); outside the source roots): ghosty.md" \
+  && ok "a ref outside the source roots is marked as such on its own line" || bad "ghosty.md line wrong: $mout"
+printf '%s' "$mout" | grep -qF 'run rows cite 1 missing source(s) (1 row(s) total) that --orphans will not auto-select (the ref is outside sources/ and runs/sources/); name each one: `factlog eject <ref>`' \
+  && ok "all three classes get their own truthful hint in one KB" || bad "by-name hint missing: $mout"
 # The orphan axis is untouched by any of this: kept.md is an engine-status row
 # citing a missing file, so it was, and still is, exactly one orphan citation.
-printf '%s' "$mout" | grep -qF "1 orphan citation(s), 3 run-cited source(s) missing" \
+printf '%s' "$mout" | grep -qF "1 orphan citation(s), 4 run-cited source(s) missing" \
   && ok "orphan citation count and meaning unchanged" || bad "orphan count changed: $mout"
 [ "$mrc" -eq 0 ] && ok "mixed KB still exits 0" || bad "mixed KB exit $mrc"
+# Now RUN both claims the by-name hint makes, because both are new: --orphans
+# leaves such a ref alone, and naming it removes its rows. A hint asserted only as
+# a string is a hint nobody has checked. In its OWN KB — running eject against
+# REMKB would retire the rows the blocks below still read.
+BYNAMEKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$BYNAMEKB" >/dev/null
+printf '%s\n' "$HEADER" > "$BYNAMEKB/facts/candidates.csv"
+printf '%s' '[{"subject":"유령","relation":"참조","object":"밖","source":"ghosty.md","status":"candidate","confidence":"0.9","note":""}]' > "$BYNAMEKB/runs/2026-01-01-outside.json"
+set +e; bej="$("$PYTHON" -m factlog eject --orphans --target "$BYNAMEKB" 2>&1)"; set -e
+printf '%s' "$bej" | grep -qF "no orphaned sources found" \
+  && ok "--orphans leaves a ref outside the source roots alone" \
+  || bad "--orphans auto-selected a ref outside the source roots: $bej"
+grep -qF "ghosty.md" "$BYNAMEKB/runs/2026-01-01-outside.json" \
+  && ok "its run row is still there after --orphans" || bad "--orphans stripped it anyway"
+set +e; bnamed="$("$PYTHON" -m factlog eject ghosty.md --target "$BYNAMEKB" 2>&1)"; bnamed_rc=$?; set -e
+[ ! -f "$BYNAMEKB/runs/2026-01-01-outside.json" ] \
+  && ok "naming the ref strips its run row" || bad "naming the ref did not strip its run row: $bnamed"
+# ...and it is stripped with NO tombstone, said out loud AND at a non-zero exit.
+# validate rejects a candidates.csv source outside the two roots, so no row can be
+# left behind (#562) and the fact is simply gone. This is the one route through
+# eject that still loses a last copy — reporting success for it while REFUSING
+# --purge for the class that CAN be tombstoned had the guard exactly backwards.
+[ "$bnamed_rc" -eq 1 ] && ok "a last copy dropped with no tombstone exits 1" \
+  || bad "eject ghosty.md exited $bnamed_rc, hiding a destroyed fact: $bnamed"
+printf '%s' "$bnamed" | grep -qF "stripped with no tombstone" \
+  && ok "the one route that still drops a last copy says so" || bad "silent last-copy drop: $bnamed"
+grep -qF "ghosty.md" "$BYNAMEKB/facts/candidates.csv" \
+  && bad "wrote a tombstone validate would reject: $(cat "$BYNAMEKB/facts/candidates.csv")" \
+  || ok "no unvalidatable tombstone written"
+
+# --- the class the run-only hint must NOT claim: a whitespace-differing source ---
+# eject's candidates.csv matcher does not strip while merge (and its runs matcher)
+# does, so on this KB it retires nothing AND writes no tombstone. Filed as run-only,
+# the report promised "writing a `superseded` tombstone first" while the command
+# printed `0 tombstone(s) written` — so the hint is checked here by RUNNING it.
+WSKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$WSKB" >/dev/null
+printf '%s\n%s\n' "$HEADER" 'Ghosty,founded_in,2019,"  sources/ghosty.md",confirmed,0.90,' > "$WSKB/facts/candidates.csv"
+printf '%s' '[{"subject":"Ghosty","relation":"founded_in","object":"2019","source":"sources/ghosty.md","status":"confirmed","confidence":"0.9","note":""}]' > "$WSKB/runs/2026-01-01-ws.json"
+set +e; wout="$("$PYTHON" "$COV" --wiki "$WSKB" 2>&1)"; set -e
+printf '%s' "$wout" | grep -qF "candidates.csv holds it under a whitespace-differing source" \
+  && ok "a whitespace-blocked ref gets its own line" || bad "whitespace-blocked line missing: $wout"
+printf '%s' "$wout" | grep -qF "writing a \`superseded\` tombstone" \
+  && bad "promised a tombstone this KB does not get: $wout" \
+  || ok "the run-only tombstone promise is not made for a blocked ref"
+set +e; wej="$("$PYTHON" -m factlog eject --orphans --target "$WSKB" 2>&1)"; wej_rc=$?; set -e
+printf '%s' "$wej" | grep -qF "0 tombstone(s) written" \
+  && ok "the command indeed writes no tombstone here (the hint would have lied)" || bad "tombstone written after all: $wej"
+grep -qF "ghosty.md" "$WSKB/runs/2026-01-01-ws.json" \
+  && ok "the run row merge rebuilds from is left in place" || bad "the last recoverable copy was stripped: $wej"
+[ "$wej_rc" -eq 1 ] && ok "and the command exits 1 rather than report a clean sweep" \
+  || bad "held-back rows reported as success (rc=$wej_rc): $wej"
+# The property behind all of it: restoring the source still brings the fact back.
+printf 'ghost\n' > "$WSKB/sources/ghosty.md"
+set +e; wmerge="$("$PYTHON" "$PLUGIN_ROOT/tools/merge_candidates.py" --wiki "$WSKB" 2>&1)"; wmerge_rc=$?; set -e
+[ "$wmerge_rc" -eq 0 ] && ok "after restoring the source, merge rebuilds normally" || bad "merge blocked after eject: $wmerge"
+grep -qF "Ghosty,founded_in,2019,sources/ghosty.md,confirmed," "$WSKB/facts/candidates.csv" \
+  && ok "the human's decision survived the whole round trip" || bad "decision lost: $(cat "$WSKB/facts/candidates.csv")"
+
+# ...and the OTHER end of the same rule: whitespace is not what blocks, the PREFIX
+# TEST is. A TRAILING pad still starts with 'sources/', so the orphan scan matches
+# that ref on its own and retires the row — an ordinary cleanup at rc 0. Filing it
+# as blocked sent the reader off to hand-edit candidates.csv for a state one command
+# already fixes: the #558 fault again, in the harmless direction.
+TWKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$TWKB" >/dev/null
+printf '%s\n%s\n' "$HEADER" 'B,rel,VB,"sources/ghosty.md  ",confirmed,0.90,' > "$TWKB/facts/candidates.csv"
+printf '%s' '[{"subject":"B","relation":"rel","object":"VB","source":"sources/ghosty.md","status":"confirmed","confidence":"0.9","note":""}]' > "$TWKB/runs/2026-01-01-tw.json"
+set +e; tout="$("$PYTHON" "$COV" --wiki "$TWKB" 2>&1)"; set -e
+printf '%s' "$tout" | grep -qF "candidates.csv still carries rows for it" \
+  && ok "a trailing-pad ref is reported as one candidates.csv carries" || bad "trailing-pad ref misfiled: $tout"
+printf '%s' "$tout" | grep -qF "whitespace-differing source" \
+  && bad "called it blocked when eject retires it in one run: $tout" || ok "no blocked verdict for a ref the scan matches"
+set +e; tej="$("$PYTHON" -m factlog eject --orphans --target "$TWKB" 2>&1)"; tej_rc=$?; set -e
+[ "$tej_rc" -eq 0 ] && ok "and the remedy it names exits 0" || bad "trailing-pad eject exited $tej_rc: $tej"
+printf '%s' "$tej" | grep -qF "1 candidate row(s) superseded" \
+  && ok "the padded row is retired, not held back" || bad "trailing-pad row not retired: $tej"
 
 # --- a run row citing an ingest CONVERSION on disk is not a missing source -----
 # "On disk" spans BOTH source roots (common.source_file_refs walks sources/ and
@@ -286,7 +389,7 @@ set +e; uout="$("$PYTHON" "$COV" --wiki "$REMKB" 2>&1)"; urc=$?; set -e
 printf '%s' "$uout" | grep -qF "skipped unreadable runs/2026-01-02-corrupt.json — its rows are NOT in the counts above" \
   && ok "unreadable run file is named on stderr" || bad "unreadable run file skipped in silence: $uout"
 [ "$urc" -eq 0 ] && ok "an unreadable run file does not take the report down" || bad "unreadable run file exit $urc"
-printf '%s' "$uout" | grep -qF "3 run-cited source(s) missing" && ok "the counts are unchanged by the unreadable file" || bad "counts changed: $uout"
+printf '%s' "$uout" | grep -qF "4 run-cited source(s) missing" && ok "the counts are unchanged by the unreadable file" || bad "counts changed: $uout"
 
 echo ""
 echo "========================================"
