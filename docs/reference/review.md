@@ -1,8 +1,6 @@
-# 사실 검토
+# 사실 검토 (`factlog review` / `accept` / `reject`)
 
 > 🌐 [English](review.en.md) | **한국어**
-
-## 사실 검토 (`factlog review` / `accept` / `reject`)
 
 추출은 사실을 `candidate` 또는 `needs_review` 로 표시하며, `confirmed`/`accepted`
 사실만 엔진 입력이 됩니다. `facts/candidates.csv` 를 직접 손대지 않고 승격하거나

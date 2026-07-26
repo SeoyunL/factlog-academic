@@ -123,7 +123,7 @@ Windows `C:\Users\<이름>`), `--target <경로>` 로 원하는 위치를 고를
 `runs/*.json` 이 “사실의 원본”이라는 점이 중요합니다. merge가 매번 그로부터
 `candidates.csv` 를 다시 만들기 때문에, `candidates.csv` 를 손으로 고치면 다음
 `/factlog sync` 에 덮여 사라집니다. 그래서 값 교정은 양쪽을 함께 갱신하는
-[`factlog amend`](../reference/review.md#사실-검토-factlog-review--accept--reject) 를
+[`factlog amend`](../reference/review.md) 를
 씁니다.
 
 ## candidate vs accepted — 신뢰 경계

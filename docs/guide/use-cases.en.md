@@ -59,4 +59,4 @@ walks the whole flow through once without your own data.
 - `/factlog sync` to produce candidate facts
 - `factlog review` to review the candidates
 - retire badly extracted candidates with `factlog reject`; for candidates that only need their wording tidied, fix the value with `factlog amend` and then approve with `factlog accept` (or `factlog amend --accept`)
-- For details, see [Reviewing facts](../reference/review.en.md#reviewing-facts-factlog-review--accept--reject)
+- For details, see [Reviewing facts](../reference/review.en.md)

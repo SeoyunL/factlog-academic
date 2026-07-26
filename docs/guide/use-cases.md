@@ -55,4 +55,4 @@
 - `/factlog sync` 로 후보 사실을 만든다
 - `factlog review` 로 후보를 검토한다
 - 잘못 추출된 후보는 `factlog reject` 로 폐기하고, 표현만 다듬을 후보는 `factlog amend` 로 값을 고친 뒤 `factlog accept`(또는 `factlog amend --accept`)로 승인한다
-- 자세한 사용법은 [사실 검토](../reference/review.md#사실-검토-factlog-review--accept--reject) 참고
+- 자세한 사용법은 [사실 검토](../reference/review.md) 참고

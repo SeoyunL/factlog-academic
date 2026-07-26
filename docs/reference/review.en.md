@@ -1,8 +1,6 @@
-# Reviewing facts
+# Reviewing facts (`factlog review` / `accept` / `reject`)
 
 > 🌐 **English** | [한국어](review.md)
-
-## Reviewing facts (`factlog review` / `accept` / `reject`)
 
 Extraction marks facts `candidate` or `needs_review`; only `confirmed`/`accepted`
 facts become engine input. Promote or retire them without hand-editing
