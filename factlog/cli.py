@@ -3253,10 +3253,15 @@ def _select_eject_facts(args, rows, fact_specs, target, nfc):
     return _EjectSelection(match_row, run_match, [], [], args.purge, [])
 
 
-def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
+def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs):
     """Source / --orphans mode: select source refs to retire (and their on-disk
     conversions/originals). Returns an _EjectSelection, or an int exit code when
-    nothing matches. Prints the plan exactly as cmd_eject used to inline."""
+    nothing matches. Prints the plan exactly as cmd_eject used to inline.
+
+    *csv_refs* is the cited set BEFORE the runs/*.json union — the refs
+    candidates.csv itself carries. Only the report reads it, so a ref whose rows
+    merge already dropped is not announced as "cited" when the table holds nothing
+    for it: that label is what sends a reader to grep candidates.csv."""
     import re
     from pathlib import Path, PurePosixPath
 
@@ -3600,7 +3605,16 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     matched_sorted = sorted(matched)
     print(f"factlog eject (KB: {target}): {len(matched_sorted)} matched source ref(s):")
     for ref in matched_sorted:
-        print(f"  - {ref}  [{'on disk' if ref in disk_refs else 'cited only (no file)'}]")
+        if ref in disk_refs:
+            where = "on disk"
+        elif ref in csv_refs:
+            where = "cited only (no file)"
+        else:
+            # candidates.csv holds nothing for it: the rows are in runs/*.json and
+            # merge drops them on every rebuild. Saying "cited" unqualified sent the
+            # reader to grep a table that does not mention this ref.
+            where = "cited only by runs/*.json (no file)"
+        print(f"  - {ref}  [{where}]")
 
     conv_to_delete = [r for r in matched_sorted if r.startswith("runs/sources/") and r in disk_refs]
     orig_on_disk = [r for r in matched_sorted if not r.startswith("runs/sources/") and r in disk_refs]
@@ -3696,7 +3710,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import FACT_HEADER, is_hidden_source
+    from factlog.common import FACT_HEADER, is_hidden_source, run_cited_sources
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -3722,6 +3736,21 @@ def cmd_eject(args: argparse.Namespace) -> int:
             ref = nfc((row.get("source") or "").partition("#")[0])
             if ref:
                 cited_refs.add(ref)
+
+    # A source cited ONLY by runs/*.json is invisible to the loop above, and that
+    # was the whole of #559: merge drops a row whose source is gone BEFORE writing
+    # candidates.csv, so eject built its cited set from a file the ghost had already
+    # been erased from, reported "no orphaned sources found", and every later merge
+    # dropped and warned about the same rows. The loop never closed.
+    #
+    # Keyed by common.run_cited_sources rather than a local walk of runs/*.json:
+    # that helper IS merge's rule — NFC(strip(raw)) cut at '#', plus merge's
+    # row-completeness test — it is what the orphan scan's idempotency filter
+    # already asks the same question of, and it skips a run file whose bytes do not
+    # decode. A fourth open-coded copy of this key is exactly how the run/csv drift
+    # #562 fixed got in.
+    _csv_refs = set(cited_refs)  # what candidates.csv alone knows about
+    cited_refs |= set(run_cited_sources(target))
 
     disk_refs: dict[str, Path] = {}  # KB-relative ref -> path
     for base in ("sources", "runs/sources"):
@@ -3757,7 +3786,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
     if fact_mode:
         sel = _select_eject_facts(args, rows, fact_specs, target, nfc)
     else:
-        sel = _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc)
+        sel = _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, _csv_refs)
     if isinstance(sel, int):
         return sel  # nothing matched / orphan scan empty — code already printed
     match_row, run_match, conv_to_delete, orig_on_disk, strip_runs, synthesized = sel
