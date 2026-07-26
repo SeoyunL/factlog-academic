@@ -339,6 +339,25 @@ set +e; wmerge="$("$PYTHON" "$PLUGIN_ROOT/tools/merge_candidates.py" --wiki "$WS
 grep -qF "Ghosty,founded_in,2019,sources/ghosty.md,confirmed," "$WSKB/facts/candidates.csv" \
   && ok "the human's decision survived the whole round trip" || bad "decision lost: $(cat "$WSKB/facts/candidates.csv")"
 
+# ...and the OTHER end of the same rule: whitespace is not what blocks, the PREFIX
+# TEST is. A TRAILING pad still starts with 'sources/', so the orphan scan matches
+# that ref on its own and retires the row — an ordinary cleanup at rc 0. Filing it
+# as blocked sent the reader off to hand-edit candidates.csv for a state one command
+# already fixes: the #558 fault again, in the harmless direction.
+TWKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$TWKB" >/dev/null
+printf '%s\n%s\n' "$HEADER" 'B,rel,VB,"sources/ghosty.md  ",confirmed,0.90,' > "$TWKB/facts/candidates.csv"
+printf '%s' '[{"subject":"B","relation":"rel","object":"VB","source":"sources/ghosty.md","status":"confirmed","confidence":"0.9","note":""}]' > "$TWKB/runs/2026-01-01-tw.json"
+set +e; tout="$("$PYTHON" "$COV" --wiki "$TWKB" 2>&1)"; set -e
+printf '%s' "$tout" | grep -qF "candidates.csv still carries rows for it" \
+  && ok "a trailing-pad ref is reported as one candidates.csv carries" || bad "trailing-pad ref misfiled: $tout"
+printf '%s' "$tout" | grep -qF "whitespace-differing source" \
+  && bad "called it blocked when eject retires it in one run: $tout" || ok "no blocked verdict for a ref the scan matches"
+set +e; tej="$("$PYTHON" -m factlog eject --orphans --target "$TWKB" 2>&1)"; tej_rc=$?; set -e
+[ "$tej_rc" -eq 0 ] && ok "and the remedy it names exits 0" || bad "trailing-pad eject exited $tej_rc: $tej"
+printf '%s' "$tej" | grep -qF "1 candidate row(s) superseded" \
+  && ok "the padded row is retired, not held back" || bad "trailing-pad row not retired: $tej"
+
 # --- a run row citing an ingest CONVERSION on disk is not a missing source -----
 # "On disk" spans BOTH source roots (common.source_file_refs walks sources/ and
 # runs/sources/). Restricting it to sources/ passed every other assertion here

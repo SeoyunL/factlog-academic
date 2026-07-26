@@ -276,32 +276,59 @@ def eject_visible_refs(root: Path) -> dict[str, str]:
     get. Measured before it was split out: hint said "writing a `superseded`
     tombstone first", command said `0 tombstone(s) written`.
 
-    EJECT_BLOCKED is decided per REF, while eject decides per FACT, so a ref holding
-    both a padded row (fact A) and a run-only fact B is filed blocked even though B
-    would be tombstoned. The hint that class prints — fix the whitespace, then
-    re-run — is true and sufficient for both facts, and the alternative is a
-    fact-level index this report has no other use for.
+    Only a LEADING pad blocks, and the difference is the prefix test, not the
+    whitespace. eject's cited set keeps the raw value, so `"sources/x.md  "` still
+    starts with `sources/`: the orphan scan matches that ref in its own right and
+    `match_row` retires the row. Measured — `1 run row(s) stripped, 1 candidate
+    row(s) superseded` at rc 0, i.e. an ordinary cleanup — while a blocked verdict
+    was telling the reader to go hand-edit the table. So the stripped view is only
+    consulted for raw refs the prefix test REJECTS; a padded ref that passes it is a
+    row this command retires, which is what EJECT_CSV_ROW says.
+
+    EJECT_BLOCKED is decided per REF, while eject decides per FACT, so both
+    directions of that approximation exist. A ref holding a leading-padded row
+    (fact A) and a run-only fact B is filed blocked though B would be tombstoned;
+    a ref holding an ordinary row (fact A) and a leading-padded row (fact B) is
+    filed csv-row though B's run rows are held back. Neither sends the reader to a
+    wrong action — both hints name `factlog eject --orphans`, and the blocked one
+    names the whitespace the command itself names on stderr — and the alternative is
+    a fact-level index this report has no other use for.
     """
     csv_refs: set[str] = set()
-    csv_stripped: set[str] = set()
+    csv_blocked: set[str] = set()   # under merge's key: rows the orphan scan cannot see
+    csv_retiring: set[str] = set()  # under merge's key: rows it sees and retires
     csv_path = root / "facts" / "candidates.csv"
     if csv_path.is_file():
         for row in read_csv(csv_path):
             raw = row.get("source") or ""
             ref = unicodedata.normalize("NFC", raw.partition("#")[0])
-            if ref:
-                csv_refs.add(ref)
-                # The same value under MERGE's key (fact_key strips), which is the
-                # key eject's runs matcher and this report's run side both use.
-                csv_stripped.add(fact_key("", "", "", raw)[3])
+            if not ref:
+                continue
+            csv_refs.add(ref)
+            # Keyed the way MERGE keys it (fact_key strips), which is what eject's
+            # runs matcher and this report's run side both use — so a run-side ref
+            # can be asked whether the table holds it at all. The prefix test on the
+            # RAW value is what decides which way that answer cuts: pass it and the
+            # scan matches the row under its own value and retires it; fail it and
+            # the row is invisible there, and eject holds its run rows back instead.
+            key = fact_key("", "", "", raw)[3]
+            if ref.startswith(("sources/", "runs/sources/")):
+                csv_retiring.add(key)
+            else:
+                csv_blocked.add(key)
     routes: dict[str, str] = {}
     for ref in csv_refs | set(run_cited_sources(root)):
         if not ref.startswith(("sources/", "runs/sources/")):
             routes[ref] = EJECT_BY_NAME
         elif ref in csv_refs:
             routes[ref] = EJECT_CSV_ROW
-        elif ref in csv_stripped:
+        elif ref in csv_blocked:
+            # Checked BEFORE csv_retiring: a ref with one row of each kind does have
+            # run rows held back, and that hint (exit 1, fix the whitespace) is the
+            # one that describes the run the user is about to get.
             routes[ref] = EJECT_BLOCKED
+        elif ref in csv_retiring:
+            routes[ref] = EJECT_CSV_ROW
         else:
             routes[ref] = EJECT_RUN_ONLY
     return routes

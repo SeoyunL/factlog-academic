@@ -127,11 +127,29 @@ class TestEjectVisibleRefs:
             "sources/ghost.md": EJECT_BLOCKED,
         }
 
-    def test_a_trailing_space_lands_in_the_blocked_class_too(self, tmp_path):
-        """merge strips both ends, and so does fact_key. Only the leading case was
-        ever argued about, because that one also fails the prefix test."""
+    def test_a_trailing_pad_is_a_row_the_scan_retires(self, tmp_path):
+        """Whitespace is not what blocks — the PREFIX TEST is, and only a LEADING pad
+        breaks it. eject keeps the raw value in its cited set, so 'sources/x.md  '
+        still starts with 'sources/': the orphan scan matches that ref in its own
+        right and `match_row` retires the row. Measured `1 run row(s) stripped, 1
+        candidate row(s) superseded` at rc 0 — an ordinary cleanup — while this
+        report was calling it blocked and sending the reader to hand-edit the table
+        for nothing."""
         root = write_run(
             write_csv(tmp_path, "A,rel,B,sources/ghost.md ,confirmed,0.90,\n"),
+            "sources/ghost.md",
+        )
+        assert eject_visible_refs(root)["sources/ghost.md"] == EJECT_CSV_ROW
+
+    def test_one_blocked_row_decides_a_ref_that_also_has_a_retiring_one(self, tmp_path):
+        """Some run rows ARE held back on such a ref, so the blocked hint — exit 1,
+        fix the whitespace — is the one that describes the run the user gets."""
+        root = write_run(
+            write_csv(
+                tmp_path,
+                "A,rel,B,sources/ghost.md ,confirmed,0.90,\n",
+                "C,rel,D, sources/ghost.md,confirmed,0.90,\n",
+            ),
             "sources/ghost.md",
         )
         assert eject_visible_refs(root)["sources/ghost.md"] == EJECT_BLOCKED
