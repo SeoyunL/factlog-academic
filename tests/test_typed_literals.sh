@@ -172,6 +172,7 @@ assert ("Beta", 'amount(1000,"억")') in objs, objs
 PY
 then ok "always-quote: comma stripped from amount number (amount(1000,\"억\"))"; else bad "comma not stripped from amount number"; fi
 printf '// gen\n.decl requires_review(entity: symbol, reason: symbol)\n' > "$AKB/policy/logic-policy.dl"
+"$PYTHON" -m factlog accept Acme valuation 'amount(7,"억")' --target "$AKB" >/dev/null
 FACTLOG_ROOT="$AKB" "$PYTHON" "$PLUGIN_ROOT/tools/compile_facts.py" >/dev/null 2>&1
 if grep -qF 'relation("Acme", "valuation", "amount(7,\"억\")").' "$AKB/facts/accepted.dl"; then ok "always-quote: accepted.dl carries the escaped quoted unit"; else bad "accepted.dl missing escaped quoted amount"; fi
 if "$PYTHON" -c 'import pyrewire' 2>/dev/null; then
