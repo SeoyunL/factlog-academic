@@ -1328,13 +1328,34 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
     for jp in sorted(runs_dir.glob("*.json")):
         try:
             data = json.loads(jp.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
             # merge fails loudly on a corrupt run file; here, skipping it silently would
             # let accept report success while the decision never reached the file that
             # holds this triple -- the durability the change promises, quietly lost.
+            # Bytes that do not decode are unreadable in exactly the same way as invalid
+            # JSON, so they get the same answer -- the rule common.run_cited_sources
+            # already states. Letting UnicodeDecodeError escape was not a stricter safety
+            # net: _apply_review_status writes candidates.csv BEFORE calling this, so the
+            # crash landed a TORN write (decision in the CSV, never in runs/*.json) whose
+            # outcome hung on the glob order of an unrelated file name (#563).
+            # State only what is true. "Re-run after fixing the file" was a false
+            # remedy: the CSV row is no longer pending after this run, so the same
+            # command reports "nothing to change" and the run row keeps its old
+            # status forever. Repairing two stores that already drifted apart is a
+            # separate command's job, not this one's -- as the docstring above says
+            # about #477. No such command exists yet (#566).
+            # "can take", not "would take": whether the stale row actually wins a
+            # from-scratch rebuild depends on glob order. Measured -- an unreadable
+            # zzz_bin.json alongside a readable aaa_good.json that DID take the
+            # decision rebuilds as `accepted`; the same file named aaa_bin.json
+            # rebuilds as `candidate`. Stating it unconditionally would be the same
+            # class of unverified promise as the re-run remedy this replaced, so the
+            # rule merge actually applies is named instead of a guaranteed outcome.
             print(
                 f"factlog: warning — could not read {jp.name} to record the decision "
-                f"({exc}); if it holds this fact, re-run after fixing the file.",
+                f"({exc}); any row it holds for this fact keeps its old status, and a "
+                "candidates.csv rebuilt from runs/*.json alone can take that old status "
+                "(merge keeps whichever run file comes first in glob order).",
                 file=sys.stderr,
             )
             continue
@@ -1688,12 +1709,37 @@ def cmd_amend(args: argparse.Namespace) -> int:
     # accepted). A note-only / --accept-only edit has no triple change and is
     # applied in place as before.
     runs_changed = 0
+    runs_unreadable = False
     runs_dir = target / "runs"
     if runs_dir.is_dir():
         for jp in sorted(runs_dir.glob("*.json")):
             try:
                 data = json.loads(jp.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+                # Bytes that do not decode are unreadable in the same way invalid JSON
+                # is -- the rule common.run_cited_sources already states -- and letting
+                # UnicodeDecodeError escape here was no safety net: candidates.csv is
+                # written above, so the crash landed a TORN write whose outcome hung on
+                # the glob order of an unrelated file name (#563). But this pass is the
+                # DURABILITY path, the same kind of path _apply_status_to_runs guards,
+                # so a silent skip is the other half of the bug: amend would report
+                # success while the edit never reached the file holding this fact. Name
+                # the file. (The wording says "the edit", not "the decision": an
+                # `--accept` does not reach the run row's status at all -- #565.)
+                runs_unreadable = True
+                # No "re-run after fixing the file" here either, and amend is the
+                # blunter case: candidates.csv already carries the NEW triple, so the
+                # same command comes back `no fact matches` on the old one (#566).
+                # "can take", not "would take", for the reason spelled out in
+                # _apply_status_to_runs: the stale row only wins a from-scratch
+                # rebuild when it sorts first.
+                print(
+                    f"factlog: warning — could not read {jp.name} to record the edit "
+                    f"({exc}); any row it holds for this fact keeps its old value, and a "
+                    "candidates.csv rebuilt from runs/*.json alone can take that old value "
+                    "(merge keeps whichever run file comes first in glob order).",
+                    file=sys.stderr,
+                )
                 continue
             if not isinstance(data, list):
                 continue
@@ -1748,8 +1794,13 @@ def cmd_amend(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     if changed and not runs_changed:
+        # "no backing was found" is false when the backing exists but could not be read,
+        # and it is a costly lie right next to the per-file warning above: a user who
+        # believes it creates fresh run backing and duplicates the row. The edit is
+        # still not durable either way, so only the reason is qualified (#563).
+        found = "no readable runs/*.json backing" if runs_unreadable else "no runs/*.json backing"
         print(
-            "factlog amend: note — no runs/*.json backing was found; the edit will NOT survive a "
+            f"factlog amend: note — {found} was found; the edit will NOT survive a "
             "re-merge (/factlog sync rebuilds candidates.csv from runs/*.json).",
             file=sys.stderr,
         )

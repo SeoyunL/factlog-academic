@@ -108,6 +108,72 @@ printf '%s\n%s\n' "$H" 'Solo,rel,Old,sources/a.md,confirmed,0.9,' > "$KB/facts/c
 out="$("$PYTHON" -m factlog amend Solo rel Old --set-object New --target "$KB" 2>&1)"
 printf '%s' "$out" | grep -qF "0 runs/*.json row(s) updated" && printf '%s' "$out" | grep -qF "will NOT survive a re-merge" \
   && ok "candidates-only edit warns it won't survive re-merge" || bad "no-runs durability warning missing"
+# ...and it says the backing is MISSING, not merely unreadable. Without this positive
+# pin, qualifying the note to "no readable ... backing" unconditionally would blur the
+# common genuinely-no-backing case and nothing would go red (the #563 fixture below
+# only checks that the unqualified wording is ABSENT when a file was unreadable).
+printf '%s' "$out" | grep -qF "no runs/*.json backing was found" \
+  && ok "the no-backing note names a missing backing, not an unreadable one" \
+  || bad "the no-backing note lost its unqualified wording: $out"
+
+# --- #563: an undecodable runs/*.json must neither kill amend nor be skipped --
+# --- in silence, and the no-backing note must not lie about it ----------------
+# Uses --set-* ONLY. `amend --accept` does not write the accepted status into the
+# run row at all (a separate defect, #565), so pinning a run-row status here would
+# go red for a reason this fixture is not about.
+KB="$(mktemp -d)/wiki"; seed "$KB"
+printf '\377\376\000binary' > "$KB/runs/bin.json"   # sorts before r.json; r.json holds the fact
+rc=0
+err="$("$PYTHON" -m factlog amend Widget codename Draft --set-object Falcon --target "$KB" 2>&1 >/dev/null)" || rc=$?
+[ "$rc" -eq 0 ] && ok "#563 amend survives an undecodable run file (rc 0)" || bad "#563 amend died on an undecodable run file (rc $rc)"
+printf '%s' "$err" | grep -q "Traceback" && bad "#563 amend printed a traceback: $err" || ok "#563 amend printed no traceback"
+grep -qF '"object": "Falcon"' "$KB/runs/r.json" && ok "#563 the edit still reached the readable run file" || bad "#563 the edit never reached the readable run file"
+# the pre-existing `changed and not runs_changed` note cannot cover this: r.json DID
+# take the edit, so runs_changed == 1 and the note stays quiet. Only a per-file
+# warning tells the user bin.json was left behind.
+# the wording is pinned too: amend records an EDIT, not a decision. `--accept` never
+# reaches the run row's status (#565), so borrowing accept's "record the decision"
+# here would promise something amend does not do.
+printf '%s' "$err" | grep -q "could not read bin.json to record the edit" \
+  && ok "#563 the undecodable file is named on stderr even when another run file took the edit" \
+  || bad "#563 the undecodable file was skipped silently or misworded: $err"
+# the CONSEQUENCE clause is pinned too, not just the prefix -- docs/ and SKILL.md quote
+# it as "what the warning says", so deleting it would gut the user-facing half of this
+# fix with every other assertion still green. "can take", not "would take": the stale
+# row only wins a from-scratch rebuild when it sorts first (pinned in
+# tests/test_accept_durable.sh).
+printf '%s' "$err" | grep -q "keeps its old value" \
+  && printf '%s' "$err" | grep -qF "rebuilt from runs/*.json alone can take that old value" \
+  && printf '%s' "$err" | grep -q "whichever run file comes first in glob order" \
+  && ok "#563 the amend warning states the consequence, conditionally" \
+  || bad "#563 the amend warning lost or overstated its consequence clause: $err"
+# --- #566: no false re-run remedy. Measured: candidates.csv already carries the NEW
+# triple, so re-running the same command answers `no fact matches` on the old one.
+# This deliberately pins DEFECTIVE behaviour: it is why the warning is worded as it is.
+# If #566 adds a recovery path, these assertions and the warning text must be revised
+# TOGETHER -- do not just delete the asserts to get back to green.
+printf '%s' "$err" | grep -q "re-run after fixing" \
+  && bad "#566 the warning promises a re-run remedy amend does not perform: $err" \
+  || ok "#566 the warning makes no re-run promise"
+rc=0
+out2="$("$PYTHON" -m factlog amend Widget codename Draft --set-object Falcon --target "$KB" 2>&1)" || rc=$?
+printf '%s' "$out2" | grep -q "no fact matches" && [ "$rc" -eq 1 ] \
+  && ok "#566 re-running the same amend cannot find the old triple (why the promise was false)" \
+  || bad "#566 re-running behaved differently than measured (rc $rc): $out2"
+
+# when the ONLY file backing the fact is the unreadable one, the durability note must
+# not claim there is no backing -- believing that, a user would create fresh run
+# backing and duplicate the row. The backing exists; it could not be read.
+KB="$(mktemp -d)/wiki"; seed "$KB"
+printf '\377\376\000binary' > "$KB/runs/r.json"     # the sole backing file, now unreadable
+rc=0
+err="$("$PYTHON" -m factlog amend Widget codename Draft --set-object Falcon --target "$KB" 2>&1 >/dev/null)" || rc=$?
+[ "$rc" -eq 0 ] && ok "#563 amend survives when the sole backing file is undecodable" || bad "#563 amend died on the sole backing file (rc $rc)"
+printf '%s' "$err" | grep -q "could not read r.json to record the edit" && ok "#563 the sole unreadable backing file is named" || bad "#563 the sole unreadable backing file was not named: $err"
+printf '%s' "$err" | grep -qF "no runs/*.json backing was found" \
+  && bad "#563 the note falsely claims there is no runs backing: $err" \
+  || ok "#563 the note does not claim the backing is missing"
+printf '%s' "$err" | grep -qF "will NOT survive a re-merge" && ok "#563 the note still warns the edit is not durable" || bad "#563 the durability warning disappeared: $err"
 
 # --- #220: amend leaves a superseded tombstone so a re-extraction of the ------
 # --- ORIGINAL (uncorrected) source does NOT revive the old value -------------

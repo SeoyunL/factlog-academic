@@ -32,6 +32,33 @@ row untouched, and rows reported as "non-pending skipped" stay as they are in
 `runs/*.json` too. An `amount` object is compared in merge's canonical form
 `amount(N,"unit")`, so `amount(7,억)` and `amount(7,"억")` are one fact.
 
+One unreadable `runs/*.json` — bytes that do not decode, or invalid JSON — does not
+kill `accept`/`reject`/`amend`. That one file is skipped, its **name is reported in a
+warning** (on stderr), and the decision still reaches every file that does read. The
+warning claims exactly three things and no more:
+
+- that file was not updated;
+- if it held a row for this fact, that row keeps its **old status (or old value)**;
+- a `candidates.csv` rebuilt from `runs/*.json` alone **can** let that old status
+  win — it does when **that file comes first in glob order**, because when two run
+  files claim one fact merge keeps whichever comes first, not the one with the
+  strongest status. If it sorts later and an earlier file did take the decision, the
+  decision survives. The outcome therefore turns on an unrelated file name, which is
+  why it is better to repair the file than to work out which case you are in.
+
+The last point is why the warning matters. While the old `candidates.csv` is still
+there merge preserves the human decision from it and nothing looks wrong; the moment
+that file is deleted and re-merged — i.e. exactly the case where `runs/*.json` is the
+only evidence, the case this dual write exists for — the `accepted` row can be
+silently downgraded to `candidate`, or the fact you rejected can come back.
+
+**Re-running the same command does not reach that row.** The first run already moved
+the `candidates.csv` row out of pending, so `accept`/`reject` report `nothing to
+change` and `amend` cannot find the old triple (`no fact matches`, exit code 1).
+Reconciling two stores that have already drifted apart is not these commands' job
+(see "Boundary" below), and no command does it yet (#566). So repair an unreadable
+run file **before** rebuilding `candidates.csv`.
+
 Subject, relation, object and source are all **normalised to NFC** for both
 comparison and storage. Two values that look identical but differ only in Unicode
 form (NFC vs NFD) are therefore **one fact**: accepting one reaches the evidence
@@ -63,10 +90,12 @@ factlog amend Acme uses FastApi --set-object FastAPI    # fix a typo
 
 The positional triple identifies the fact (exact match); `--set-subject` /
 `--set-relation` / `--set-object` / `--set-note` give the new values (at least
-one, or `--accept`). amend updates **both** `candidates.csv` and the backing
-`runs/*.json` so the edit survives `/factlog sync` (a fact's value lives in
-`runs/*.json` — merge rebuilds `candidates.csv` from it). `--accept` also
-promotes to `accepted`. Confidence is not editable. `--dry-run` previews.
+one, or `--accept`). amend writes the **value** `--set-*` gives to **both**
+`candidates.csv` and the backing `runs/*.json`, so the edit survives `/factlog sync`
+(a fact's value lives in `runs/*.json` — merge rebuilds `candidates.csv` from it).
+`--accept` also promotes to `accepted`, but that **status** is written to
+`candidates.csv` only: the `runs/*.json` row stays pending (#565). Confidence is not
+editable. `--dry-run` previews.
 
 ### Kinds of status
 
@@ -126,6 +155,9 @@ arguments are wrong are as follows.
 Even when the recompile fails, **the status change itself has already been saved
 to `candidates.csv`**; just rebuild `accepted.dl` with `/factlog check`.
 
-> **Durability:** a human `accept` (and `amend --accept`) is preserved across
-> re-merge the same way `reject`/`superseded` is — `/factlog sync` will not
-> revert your decisions.
+> **Durability:** a human `accept` is preserved across re-merge the same way
+> `reject`/`superseded` is — `/factlog sync` will not revert your decisions.
+> `amend --accept` is the exception: its promotion is written to `candidates.csv`
+> only, so merge preserves it while that file is around but has nothing to go on
+> once `candidates.csv` is rebuilt from `runs/*.json` from scratch (#565). Use
+> `factlog accept` to raise a status durably.

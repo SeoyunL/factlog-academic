@@ -726,12 +726,53 @@ matching pending rows to `accepted`, and `factlog reject ...` sets them to
 `superseded` (both recompile `accepted.dl`; `-` wildcards a position). To
 correct a fact's value, `factlog amend <subject> <relation> <object>
 --set-object ... [--set-subject/--set-relation/--set-note] [--accept]` rewrites
-it durably (updates both `candidates.csv` and the backing `runs/*.json`). These
-human decisions are preserved across re-merge. `accept`/`reject` also write into
-`runs/*.json`, but only for the rows the gate actually changed, keyed like merge
-on `(subject, relation, object, source file)` — a decision on one source's row
-never moves another source's row, and repairing rows whose two stores already
-drifted apart is a separate command's job, not theirs.
+it durably: the **value** `--set-*` gives goes into both `candidates.csv` and the
+backing `runs/*.json`, so it survives a re-merge. `--accept` is narrower — its
+promotion is written to `candidates.csv` only, and the run row stays pending
+(#565), so use `factlog accept` when the status itself has to be durable.
+`accept`/`reject` do write into `runs/*.json`, but only for the rows the gate
+actually changed, keyed like merge on `(subject, relation, object, source file)` —
+a decision on one source's row never moves another source's row, and repairing
+rows whose two stores already drifted apart is a separate command's job, not
+theirs.
+
+**Unreadable run file contract (do not skip).** A `runs/*.json` the CLI cannot
+read — bytes that do not decode, or invalid JSON — is skipped rather than fatal,
+and `accept`/`reject`/`amend` name it:
+
+```text
+factlog: warning — could not read <file> to record the decision (...); any row it
+holds for this fact keeps its old status, and a candidates.csv rebuilt from
+runs/*.json alone can take that old status (merge keeps whichever run file comes
+first in glob order).
+```
+
+(`amend` prints the same line with "to record the edit" / "old value".)
+
+- That line goes to **stderr**, so the "Show the stdout" instruction above will not
+  surface it. Capture stderr for these commands and **relay the warning line to the
+  user verbatim**, the same way you relay `CHANGED active KB`. It is the only
+  signal that the decision did not reach that file.
+- Do not report the command as clean because it exited 0. Exit 0 here means "the
+  readable files were updated", not "every file holding this fact was updated".
+- **Do not tell the user to re-run the command after fixing the file.** It does not
+  work and no other recovery command exists yet (#566): the first run already moved
+  the `candidates.csv` row out of pending, so a second `accept`/`reject` answers
+  `nothing to change` and a second `amend` answers `no fact matches` (exit code 1),
+  while the repaired file's row keeps its old status. Reconciling two stores that
+  have already drifted apart is out of scope for these commands by design.
+- What you may say is what the warning says: that file was not updated, its row (if
+  any) still holds the old status, and merge settles a fact claimed by two run files
+  by **glob order, not status** — so once `candidates.csv` is rebuilt from
+  `runs/*.json` alone, the stale row **can** win and silently downgrade the accept or
+  revive the rejected fact. Say "can", not "will": it wins only if that file sorts
+  first, and the decision survives if an earlier file already took it. Do not compute
+  which case the user is in and declare them safe — the answer hinges on an unrelated
+  file name. The safe ordering is to repair unreadable run files **before** any
+  rebuild.
+- The `--dry-run` preview does not run this pass at all, so it never reports an
+  unreadable file. A clean `--dry-run` is not evidence that the real run will be
+  clean.
 
 ### Step 2 — Run the logic check
 

@@ -33,6 +33,34 @@ factlog accept Acme uses FastAPI --dry-run
 남습니다. `amount` 객체는 merge 와 같은 정규 형태 `amount(N,"단위")` 로 비교되므로
 `amount(7,억)` 과 `amount(7,"억")` 은 한 사실입니다.
 
+읽을 수 없는 `runs/*.json`(바이트가 디코딩되지 않거나 JSON 이 깨진 파일)이 하나
+있다고 해서 `accept`/`reject`/`amend` 가 죽지는 않습니다. 그 파일만 건너뛰되 **이름을
+경고로 알리며**(stderr), 읽히는 나머지 파일에는 결정이 그대로 기록됩니다. 그 경고가
+말하는 바는 다음 세 가지가 전부입니다.
+
+- 그 파일은 갱신되지 않았습니다.
+- 그 파일이 이 사실의 행을 갖고 있었다면, 그 행은 **옛 상태(또는 옛 값) 그대로**
+  남습니다.
+- `candidates.csv` 를 `runs/*.json` 만으로 **처음부터** 다시 만들 때, **그 파일이 glob
+  순서에서 앞선다면** 옛 상태가 **이길 수 있습니다.** 같은 사실을 여러 run 파일이
+  주장할 때 merge 가 남기는 쪽은 상태 우선순위가 아니라 **glob 순서로 먼저 나온
+  파일**이기 때문입니다. 뒤쪽에 있고 앞선 파일이 결정을 받았다면 결정이 살아남습니다 —
+  즉 결과가 무관한 파일 이름에 좌우되므로, 어느 쪽인지 확인하지 말고 그냥 고치는 편이
+  낫습니다.
+
+마지막 항목이 이 경고가 중요한 이유입니다. 기존 `candidates.csv` 가 남아 있는 동안에는
+merge 가 거기서 사람의 결정을 보존하므로 아무 증상이 없고, 그 파일을 지우고 재-merge
+하는 순간 — 즉 `runs/*.json` 이 유일한 근거가 되는, 바로 이 이중 기록이 존재하는 이유가
+되는 상황 — 에서 `accepted` 가 조용히 `candidate` 로 강등되거나 `reject` 한 사실이
+되살아날 수 있습니다.
+
+**같은 명령을 다시 실행해도 그 행에는 닿지 않습니다.** 첫 실행에서 `candidates.csv`
+행이 이미 대기 상태를 벗어났으므로 `accept`/`reject` 는 `nothing to change` 로,
+`amend` 는 옛 트리플을 못 찾아 `no fact matches`(종료 코드 1)로 끝납니다. 두 저장소가
+이미 어긋난 상태를 되돌리는 일은 `accept`/`reject`/`amend` 의 몫이 아니며(아래 "경계"
+항목 참고), 이를 위한 명령은 아직 없습니다(#566). 그러므로 읽을 수 없는 run 파일은
+`candidates.csv` 를 재구성하기 **전에** 고쳐 두는 편이 안전합니다.
+
 주어·관계·목적어·source 는 모두 **NFC 로 정규화**해 비교하고 저장합니다. 그래서
 눈에 같아 보이지만 유니코드 표기(NFC/NFD)만 다른 한글 값은 **하나의 사실**입니다 —
 한쪽을 `accept` 하면 다른 표기의 근거 행에도 결정이 닿고, `candidates.csv` 에는 NFC
@@ -64,10 +92,12 @@ factlog amend Acme uses FastApi --set-object FastAPI    # fix a typo
 
 위치 트리플이 사실을 식별하고(정확히 일치), `--set-subject` / `--set-relation` /
 `--set-object` / `--set-note` 가 새 값을 줍니다(최소 하나, 또는 `--accept`). amend
-는 `candidates.csv` **와** 그 근거가 되는 `runs/*.json` 을 **둘 다** 갱신하므로
-편집이 `/factlog sync` 후에도 살아남습니다(사실의 값은 `runs/*.json` 에 있으며,
-merge 가 그로부터 `candidates.csv` 를 재구성합니다). `--accept` 는 `accepted` 로
-승격까지 합니다. 신뢰도는 편집할 수 없습니다. `--dry-run` 으로 미리 볼 수 있습니다.
+는 `--set-*` 가 쓰는 **값**을 `candidates.csv` **와** 그 근거가 되는 `runs/*.json` 에
+**둘 다** 기록하므로 편집이 `/factlog sync` 후에도 살아남습니다(사실의 값은
+`runs/*.json` 에 있으며, merge 가 그로부터 `candidates.csv` 를 재구성합니다).
+`--accept` 는 `accepted` 로 승격까지 하지만, 그 **상태**는 `candidates.csv` 에만
+기록되고 `runs/*.json` 의 행은 대기 상태 그대로 남습니다(#565). 신뢰도는 편집할 수
+없습니다. `--dry-run` 으로 미리 볼 수 있습니다.
 
 ### 상태의 종류
 
@@ -124,6 +154,9 @@ merge 가 그로부터 `candidates.csv` 를 재구성합니다). `--accept` 는 
 재컴파일이 실패해도 **상태 변경 자체는 이미 `candidates.csv` 에 저장된 뒤**이며,
 `/factlog check` 로 `accepted.dl` 만 다시 만들면 됩니다.
 
-> **내구성(durability):** 사람이 한 `accept`(및 `amend --accept`)는 `reject`/
-> `superseded` 와 같은 방식으로 재머지 후에도 보존됩니다 — `/factlog sync` 가
-> 여러분의 결정을 되돌리지 않습니다.
+> **내구성(durability):** 사람이 한 `accept` 는 `reject`/`superseded` 와 같은 방식으로
+> 재머지 후에도 보존됩니다 — `/factlog sync` 가 여러분의 결정을 되돌리지 않습니다.
+> `amend --accept` 의 승격은 여기서 예외입니다: `candidates.csv` 에만 기록되므로 그
+> 파일이 남아 있는 동안에는 merge 가 보존하지만, `candidates.csv` 를 `runs/*.json`
+> 에서 처음부터 재구성하면 근거가 없습니다(#565). 상태를 내구적으로 올리려면
+> `factlog accept` 를 쓰십시오.
