@@ -110,6 +110,7 @@ from common import (  # noqa: E402
     classify_query,
     ensure_dirs,
     engine_facts,
+    fact_key,
     identity_relations,
     is_quoted_string,
     is_sync_ignored,
@@ -217,10 +218,11 @@ def coverage_rows(root: Path, facts: list[dict[str, str]]) -> tuple[list[dict[st
     return rows, orphans
 
 
-# Which `factlog eject` route retires a ref — the three the command actually has.
+# Which `factlog eject` route retires a ref — the ones the command actually has.
 EJECT_CSV_ROW = "csv-row"    # --orphans retires a row candidates.csv still carries
 EJECT_RUN_ONLY = "run-only"  # --orphans retires it, writing a tombstone first (#559)
 EJECT_BY_NAME = "by-name"    # --orphans will not auto-select it; naming it works
+EJECT_BLOCKED = "blocked"    # candidates.csv holds it under a whitespace-differing source
 
 
 def eject_visible_refs(root: Path) -> dict[str, str]:
@@ -265,24 +267,41 @@ def eject_visible_refs(root: Path) -> dict[str, str]:
 
     The CSV side is read RAW (`read_csv`, not `load_facts`) because eject's
     candidates.csv matcher does not strip: a hand-edited row whose source carries a
-    leading space is a row that matcher cannot retire. That asymmetry with the run
-    side (which strips, as merge does) no longer decides whether the ref is
-    ejectable — the union covers it either way — only WHICH of the two retiring
-    routes is named, and both of those routes run the same command.
+    leading space is a row that matcher cannot retire. The run side strips, as merge
+    does. Where those two disagree — a padded CSV source and a clean run row — eject
+    neither retires the row nor writes a tombstone, and (since it would otherwise
+    delete the only artifact merge can rebuild from) it now leaves the run rows in
+    place and exits 1. That is a FOURTH answer, EJECT_BLOCKED, and it must not be
+    filed under run-only: the run-only hint promises a tombstone this KB does not
+    get. Measured before it was split out: hint said "writing a `superseded`
+    tombstone first", command said `0 tombstone(s) written`.
+
+    EJECT_BLOCKED is decided per REF, while eject decides per FACT, so a ref holding
+    both a padded row (fact A) and a run-only fact B is filed blocked even though B
+    would be tombstoned. The hint that class prints — fix the whitespace, then
+    re-run — is true and sufficient for both facts, and the alternative is a
+    fact-level index this report has no other use for.
     """
     csv_refs: set[str] = set()
+    csv_stripped: set[str] = set()
     csv_path = root / "facts" / "candidates.csv"
     if csv_path.is_file():
         for row in read_csv(csv_path):
-            ref = unicodedata.normalize("NFC", (row.get("source") or "").partition("#")[0])
+            raw = row.get("source") or ""
+            ref = unicodedata.normalize("NFC", raw.partition("#")[0])
             if ref:
                 csv_refs.add(ref)
+                # The same value under MERGE's key (fact_key strips), which is the
+                # key eject's runs matcher and this report's run side both use.
+                csv_stripped.add(fact_key("", "", "", raw)[3])
     routes: dict[str, str] = {}
     for ref in csv_refs | set(run_cited_sources(root)):
         if not ref.startswith(("sources/", "runs/sources/")):
             routes[ref] = EJECT_BY_NAME
         elif ref in csv_refs:
             routes[ref] = EJECT_CSV_ROW
+        elif ref in csv_stripped:
+            routes[ref] = EJECT_BLOCKED
         else:
             routes[ref] = EJECT_RUN_ONLY
     return routes
@@ -358,7 +377,13 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: dict[str, 
     * ref outside sources/ and runs/sources/ -> the scan will not auto-select it
       (that safety rule is what keeps a malformed citation from being ejected by a
       command nobody aimed), but naming it works. Measured: `factlog eject
-      ghosty.md` matches and strips those rows.
+      ghosty.md` matches and strips those rows — with no tombstone, since
+      candidates.csv cannot hold such a source, which is why the hint says the fact
+      is gone and the command exits 1.
+    * candidates.csv holds the ref under a whitespace-differing `source` -> eject
+      neither retires that row (its matcher does not strip) nor tombstones the fact
+      (the table does hold it), so it leaves the run rows alone and exits 1. The
+      remedy is the whitespace, not the command.
 
     A KB can hold all three at once, which is why the split is per-ref rather than
     a single verdict for the report. A ref the map does not mention at all falls to
@@ -384,9 +409,10 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: dict[str, 
     # tests/test_coverage.sh and tests/test_drop_visibility.sh.
     kept = [(ref, n) for ref, n in run_orphans if ejectable.get(ref) == EJECT_CSV_ROW]
     dropped = [(ref, n) for ref, n in run_orphans if ejectable.get(ref) == EJECT_RUN_ONLY]
+    blocked = [(ref, n) for ref, n in run_orphans if ejectable.get(ref) == EJECT_BLOCKED]
     by_name = [
         (ref, n) for ref, n in run_orphans
-        if ejectable.get(ref) not in (EJECT_CSV_ROW, EJECT_RUN_ONLY)
+        if ejectable.get(ref) not in (EJECT_CSV_ROW, EJECT_RUN_ONLY, EJECT_BLOCKED)
     ]
     for ref, count in dropped:
         print(
@@ -397,6 +423,12 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: dict[str, 
         print(
             f"  RUN ROWS cite a missing source (dropped at merge, {count} row(s); "
             f"outside the source roots): {ref}",
+            file=sys.stderr,
+        )
+    for ref, count in blocked:
+        print(
+            f"  RUN ROWS cite a missing source ({count} row(s); candidates.csv holds "
+            f"it under a whitespace-differing source): {ref}",
             file=sys.stderr,
         )
     for ref, count in kept:
@@ -418,7 +450,19 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: dict[str, 
         print(
             f"  run rows cite {len(by_name)} missing source(s) ({total} row(s) total) "
             "that --orphans will not auto-select (the ref is outside sources/ and "
-            "runs/sources/); name each one: `factlog eject <ref>`",
+            "runs/sources/); name each one: `factlog eject <ref>` — which strips "
+            "those rows with NO tombstone, since candidates.csv cannot hold such a "
+            "source, and exits 1 to say the fact is gone",
+            file=sys.stderr,
+        )
+    if blocked:
+        total = sum(count for _ref, count in blocked)
+        print(
+            f"  run rows cite {len(blocked)} missing source(s) ({total} row(s) total) "
+            "that candidates.csv holds under a `source` differing only by whitespace; "
+            "`factlog eject --orphans` LEAVES those run rows in place (exit 1) rather "
+            "than delete what merge rebuilds from — fix the whitespace in "
+            "candidates.csv, then re-run it",
             file=sys.stderr,
         )
     if kept:

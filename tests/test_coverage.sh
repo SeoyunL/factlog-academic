@@ -295,17 +295,49 @@ printf '%s' "$bej" | grep -qF "no orphaned sources found" \
 grep -qF "ghosty.md" "$BYNAMEKB/runs/2026-01-01-outside.json" \
   && ok "its run row is still there after --orphans" || bad "--orphans stripped it anyway"
 set +e; bnamed="$("$PYTHON" -m factlog eject ghosty.md --target "$BYNAMEKB" 2>&1)"; bnamed_rc=$?; set -e
-[ "$bnamed_rc" -eq 0 ] && ok "naming the ref exits 0" || bad "eject ghosty.md exited $bnamed_rc: $bnamed"
 [ ! -f "$BYNAMEKB/runs/2026-01-01-outside.json" ] \
   && ok "naming the ref strips its run row" || bad "naming the ref did not strip its run row: $bnamed"
-# ...and it is stripped with NO tombstone, said out loud: validate rejects a
-# candidates.csv source outside the two roots, so writing one would leave the KB
-# permanently failing validation (#562).
+# ...and it is stripped with NO tombstone, said out loud AND at a non-zero exit.
+# validate rejects a candidates.csv source outside the two roots, so no row can be
+# left behind (#562) and the fact is simply gone. This is the one route through
+# eject that still loses a last copy — reporting success for it while REFUSING
+# --purge for the class that CAN be tombstoned had the guard exactly backwards.
+[ "$bnamed_rc" -eq 1 ] && ok "a last copy dropped with no tombstone exits 1" \
+  || bad "eject ghosty.md exited $bnamed_rc, hiding a destroyed fact: $bnamed"
 printf '%s' "$bnamed" | grep -qF "stripped with no tombstone" \
   && ok "the one route that still drops a last copy says so" || bad "silent last-copy drop: $bnamed"
 grep -qF "ghosty.md" "$BYNAMEKB/facts/candidates.csv" \
   && bad "wrote a tombstone validate would reject: $(cat "$BYNAMEKB/facts/candidates.csv")" \
   || ok "no unvalidatable tombstone written"
+
+# --- the class the run-only hint must NOT claim: a whitespace-differing source ---
+# eject's candidates.csv matcher does not strip while merge (and its runs matcher)
+# does, so on this KB it retires nothing AND writes no tombstone. Filed as run-only,
+# the report promised "writing a `superseded` tombstone first" while the command
+# printed `0 tombstone(s) written` — so the hint is checked here by RUNNING it.
+WSKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$WSKB" >/dev/null
+printf '%s\n%s\n' "$HEADER" 'Ghosty,founded_in,2019,"  sources/ghosty.md",confirmed,0.90,' > "$WSKB/facts/candidates.csv"
+printf '%s' '[{"subject":"Ghosty","relation":"founded_in","object":"2019","source":"sources/ghosty.md","status":"confirmed","confidence":"0.9","note":""}]' > "$WSKB/runs/2026-01-01-ws.json"
+set +e; wout="$("$PYTHON" "$COV" --wiki "$WSKB" 2>&1)"; set -e
+printf '%s' "$wout" | grep -qF "candidates.csv holds it under a whitespace-differing source" \
+  && ok "a whitespace-blocked ref gets its own line" || bad "whitespace-blocked line missing: $wout"
+printf '%s' "$wout" | grep -qF "writing a \`superseded\` tombstone" \
+  && bad "promised a tombstone this KB does not get: $wout" \
+  || ok "the run-only tombstone promise is not made for a blocked ref"
+set +e; wej="$("$PYTHON" -m factlog eject --orphans --target "$WSKB" 2>&1)"; wej_rc=$?; set -e
+printf '%s' "$wej" | grep -qF "0 tombstone(s) written" \
+  && ok "the command indeed writes no tombstone here (the hint would have lied)" || bad "tombstone written after all: $wej"
+grep -qF "ghosty.md" "$WSKB/runs/2026-01-01-ws.json" \
+  && ok "the run row merge rebuilds from is left in place" || bad "the last recoverable copy was stripped: $wej"
+[ "$wej_rc" -eq 1 ] && ok "and the command exits 1 rather than report a clean sweep" \
+  || bad "held-back rows reported as success (rc=$wej_rc): $wej"
+# The property behind all of it: restoring the source still brings the fact back.
+printf 'ghost\n' > "$WSKB/sources/ghosty.md"
+set +e; wmerge="$("$PYTHON" "$PLUGIN_ROOT/tools/merge_candidates.py" --wiki "$WSKB" 2>&1)"; wmerge_rc=$?; set -e
+[ "$wmerge_rc" -eq 0 ] && ok "after restoring the source, merge rebuilds normally" || bad "merge blocked after eject: $wmerge"
+grep -qF "Ghosty,founded_in,2019,sources/ghosty.md,confirmed," "$WSKB/facts/candidates.csv" \
+  && ok "the human's decision survived the whole round trip" || bad "decision lost: $(cat "$WSKB/facts/candidates.csv")"
 
 # --- a run row citing an ingest CONVERSION on disk is not a missing source -----
 # "On disk" spans BOTH source roots (common.source_file_refs walks sources/ and

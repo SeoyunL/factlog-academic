@@ -33,6 +33,7 @@ import unicodedata
 
 import pytest
 from source_coverage import (
+    EJECT_BLOCKED,
     EJECT_BY_NAME,
     EJECT_CSV_ROW,
     EJECT_RUN_ONLY,
@@ -111,20 +112,29 @@ class TestEjectVisibleRefs:
         root = write_csv(tmp_path, "A,rel,B,ghost.md,confirmed,0.90,\n")
         assert eject_visible_refs(root) == {"ghost.md": EJECT_BY_NAME}
 
-    def test_leading_whitespace_still_lands_in_a_retiring_class(self, tmp_path):
+    def test_leading_whitespace_is_its_own_class(self, tmp_path):
         """cmd_eject does not strip the CSV value, so ' sources/x.md' is not a row
-        its candidates.csv matcher retires. The run side (which strips, as merge
-        does) puts the same ref in the cited set anyway, so `--orphans` still acts on
-        it — as the run-only class, whose hint promises exactly the tombstone that
-        run gets."""
+        its candidates.csv matcher retires — and because the table DOES hold the
+        fact, no tombstone is written for it either. Filing this under run-only made
+        the report promise a tombstone the command measurably does not write (it
+        holds the run rows back and exits 1 instead), so it is a class of its own."""
         root = write_run(
             write_csv(tmp_path, "A,rel,B, sources/ghost.md,confirmed,0.90,\n"),
             "sources/ghost.md",
         )
         assert eject_visible_refs(root) == {
             " sources/ghost.md": EJECT_BY_NAME,
-            "sources/ghost.md": EJECT_RUN_ONLY,
+            "sources/ghost.md": EJECT_BLOCKED,
         }
+
+    def test_a_trailing_space_lands_in_the_blocked_class_too(self, tmp_path):
+        """merge strips both ends, and so does fact_key. Only the leading case was
+        ever argued about, because that one also fails the prefix test."""
+        root = write_run(
+            write_csv(tmp_path, "A,rel,B,sources/ghost.md ,confirmed,0.90,\n"),
+            "sources/ghost.md",
+        )
+        assert eject_visible_refs(root)["sources/ghost.md"] == EJECT_BLOCKED
 
     def test_empty_kb_is_empty(self, tmp_path):
         assert eject_visible_refs(write_csv(tmp_path)) == {}
@@ -181,8 +191,27 @@ class TestRemedyBranches:
         assert lines[1] == (
             "  run rows cite 1 missing source(s) (2 row(s) total) that --orphans will not "
             "auto-select (the ref is outside sources/ and runs/sources/); name each one: "
-            "`factlog eject <ref>`"
+            "`factlog eject <ref>` — which strips those rows with NO tombstone, since "
+            "candidates.csv cannot hold such a source, and exits 1 to say the fact is gone"
         )
+
+    def test_a_blocked_ref_is_sent_to_the_whitespace_not_to_the_command(self, capsys):
+        """The run-only hint asserts a tombstone. On this KB the command writes none
+        and holds the rows back, so the class needs its own sentence — and the fix is
+        in candidates.csv, not in another flag."""
+        report_run_orphans([("sources/ghost.md", 2)], {"sources/ghost.md": EJECT_BLOCKED})
+        lines = stderr_lines(capsys)
+        assert lines[0] == (
+            "  RUN ROWS cite a missing source (2 row(s); candidates.csv holds it under a "
+            "whitespace-differing source): sources/ghost.md"
+        )
+        assert lines[1] == (
+            "  run rows cite 1 missing source(s) (2 row(s) total) that candidates.csv holds "
+            "under a `source` differing only by whitespace; `factlog eject --orphans` LEAVES "
+            "those run rows in place (exit 1) rather than delete what merge rebuilds from — "
+            "fix the whitespace in candidates.csv, then re-run it"
+        )
+        assert "writing a `superseded` tombstone" not in "\n".join(lines)
 
     def test_an_unknown_ref_falls_to_the_route_that_always_works(self, capsys):
         """Naming a ref holds whatever the two stores say, so an unclassified ref is
