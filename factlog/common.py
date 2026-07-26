@@ -1763,7 +1763,12 @@ def _relation_match_count(
         canonical_variants: set[str] = set()
         if _is_quoted_string(rel_arg):
             _aliases = relation_aliases() if aliases is None else aliases
-            canonical_variants = canonical_variants_of(_arg_value(rel_arg), _aliases)
+            # Folded so a stored surface variant in the other normal form still
+            # counts: the alias keys are NFC, a stored row need not be (#213).
+            canonical_variants = {
+                _canonical_value(v)
+                for v in canonical_variants_of(_arg_value(rel_arg), _aliases)
+            }
         count = 0
         for row in facts:
             s_arg, r_arg, o_arg = args
@@ -1773,7 +1778,7 @@ def _relation_match_count(
             # Relation: match exact canonical name OR any surface variant.
             if not (_is_variable(r_arg) or
                     _canonical_value(_arg_value(r_arg)) == _canonical_value(r_val) or
-                    r_val in canonical_variants):
+                    _canonical_value(r_val) in canonical_variants):
                 continue
             if not (_is_variable(o_arg) or _canonical_value(_arg_value(o_arg)) == _canonical_value(o_val)):
                 continue
@@ -1854,10 +1859,20 @@ def classify_query(
         # accepted.dl, so which queries can trigger its raise-on-malformed-file is
         # unchanged (a variable/known-variant relation never reads it here).
         _rel_aliases: dict[str, str] | None = None
-        if not _is_variable(relation) and _arg_value(relation) not in relations:
+        # Membership goes through _canonical_value on BOTH sides, like the object
+        # check below: allowed_relations() returns raw stored names, so an
+        # NFD-stored relation would otherwise miss an NFC-typed query and be
+        # rejected here — before _relation_match_count (which does fold) is ever
+        # reached (#213).
+        if not _is_variable(relation) and _canonical_value(_arg_value(relation)) not in {
+            _canonical_value(r) for r in relations
+        }:
             # A declared canonical name (one whose surface_variants is non-empty)
             # counts as accepted even though the canonical itself may not appear
             # literally in accepted.dl — the stored facts use surface variants.
+            # canonical_variants_of NFC-normalizes its argument and relation_aliases()
+            # NFC-normalizes both the keys and the canonical targets on load, so this
+            # lookup is already form-insensitive.
             _rel_aliases = relation_aliases()
             if not canonical_variants_of(_arg_value(relation), _rel_aliases):
                 return False, QUERY_RELATION_NOT_ACCEPTED, f"relation name is not accepted: {_arg_value(relation)}"
@@ -1890,7 +1905,11 @@ def classify_query(
         subject, relation = args
         if not _is_variable(subject) and _arg_value(subject) not in entities:
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"count subject is not an accepted entity: {_arg_value(subject)}"
-        if not _is_variable(relation) and _arg_value(relation) not in relations:
+        # Same folded membership as the relation branch above — a count over an
+        # NFD-stored relation must accept an NFC-typed query name (#213).
+        if not _is_variable(relation) and _canonical_value(_arg_value(relation)) not in {
+            _canonical_value(r) for r in relations
+        }:
             # A declared canonical name (one whose surface_variants is non-empty)
             # counts as accepted even though the canonical itself may not appear
             # literally in accepted.dl — the stored facts use surface variants.

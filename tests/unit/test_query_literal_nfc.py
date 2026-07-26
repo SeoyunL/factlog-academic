@@ -10,6 +10,14 @@ report/ask returned nothing about a fact that was right there. Folding NFC once 
 that chokepoint makes both directions meet without touching any per-path code, and is
 a no-op on NFC-only data.
 
+The chokepoint only covers a comparison that actually routes through it. Two relation-
+name membership tests did not: the ``classify_query`` acceptance gate compared the raw
+query name against the raw ``allowed_relations()`` names (in the ``relation`` branch and
+in the ``count`` branch), and ``_relation_match_count`` compared a raw stored name against
+the NFC alias keys. The gate ran first, so an NFD-stored relation queried in NFC was
+turned away with QUERY_RELATION_NOT_ACCEPTED and never reached the folding match count.
+Both now compare canonicalised values.
+
 Scope note: ``path`` queries answer against the engine's interned pairs, a raw
 comparison that does NOT pass through ``_canonical_value``; that engine-intern path is
 a separate concern and is not covered here.
@@ -18,6 +26,7 @@ from __future__ import annotations
 
 import unicodedata
 
+from factlog import common
 from factlog.common import _canonical_value, _relation_match_count, classify_query
 
 nfc = lambda s: unicodedata.normalize("NFC", s)  # noqa: E731
@@ -26,6 +35,8 @@ nfd = lambda s: unicodedata.normalize("NFD", s)  # noqa: E731
 REL = "연구유형"
 OBJ = "관찰연구"
 SUBJ = "P1"
+CANONICAL = "출판연도"
+SURFACE = "게재연도"
 
 
 def _fact(subject, relation, object_):
@@ -34,6 +45,10 @@ def _fact(subject, relation, object_):
 
 def _relation_query(subject, relation, object_):
     return f'relation("{subject}", "{relation}", "{object_}")?'
+
+
+def _count_query(subject, relation):
+    return f'count("{subject}", "{relation}")?'
 
 
 class TestRelationMatchCountFoldsForms:
@@ -94,6 +109,155 @@ class TestGateDoesNotReject:
         assert ok, code
 
 
+class TestRelationNameGateFoldsForms:
+    """The relation-name acceptance gate must fold too, not just the object check.
+
+    ``allowed_relations()`` returns the raw stored ``row["relation"]`` strings, so a
+    membership test against the raw query name rejects an NFD-stored relation queried
+    in NFC with QUERY_RELATION_NOT_ACCEPTED — and returns before
+    ``_relation_match_count`` (which does fold) is ever consulted. The gate must
+    compare canonicalised values on both sides, in the ``relation`` branch and in the
+    ``count`` branch alike.
+    """
+
+    def test_nfd_stored_relation_passes_an_nfc_relation_query(self):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        ok, code, _reason = classify_query(
+            _relation_query(SUBJ, nfc(REL), nfc(OBJ)), facts, policy_program=""
+        )
+        assert ok, code
+
+    def test_nfc_stored_relation_passes_an_nfd_relation_query(self):
+        facts = [_fact(SUBJ, nfc(REL), nfc(OBJ))]
+        ok, code, _reason = classify_query(
+            _relation_query(SUBJ, nfd(REL), nfd(OBJ)), facts, policy_program=""
+        )
+        assert ok, code
+
+    def test_nfd_stored_relation_passes_an_nfc_count_query(self):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        ok, code, _reason = classify_query(_count_query(SUBJ, nfc(REL)), facts, policy_program="")
+        assert ok, code
+
+    def test_nfc_stored_relation_passes_an_nfd_count_query(self):
+        facts = [_fact(SUBJ, nfc(REL), nfc(OBJ))]
+        ok, code, _reason = classify_query(_count_query(SUBJ, nfd(REL)), facts, policy_program="")
+        assert ok, code
+
+
+class TestUnacceptedRelationIsStillRejected:
+    """Folding widens which forms of the SAME name are accepted — never which names.
+    A relation nobody stored must still be turned away with QUERY_RELATION_NOT_ACCEPTED
+    by both branches, in either normal form."""
+
+    def test_unknown_relation_is_rejected_by_the_relation_branch(self):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        ok, code, _reason = classify_query(
+            _relation_query(SUBJ, nfc("혈액형"), nfc(OBJ)), facts, policy_program=""
+        )
+        assert not ok
+        assert code == common.QUERY_RELATION_NOT_ACCEPTED
+
+    def test_unknown_relation_is_rejected_by_the_count_branch(self):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        ok, code, _reason = classify_query(
+            _count_query(SUBJ, nfc("혈액형")), facts, policy_program=""
+        )
+        assert not ok
+        assert code == common.QUERY_RELATION_NOT_ACCEPTED
+
+    def test_a_variable_relation_still_skips_the_check(self):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        ok, code, _reason = classify_query(
+            f'count("{SUBJ}", R)?', facts, policy_program=""
+        )
+        assert ok, code
+
+
+class TestAliasReadStaysGated:
+    """The #242 optimisation must survive the fold: relation_aliases() is read at most
+    once per relation query, and the gate itself reads it only when the name is not
+    already an accepted relation — so a variable or known relation never reaches its
+    raise-on-malformed-file through the gate.
+
+    The read counts pinned here are the pre-fold ones: a relation query costs exactly one
+    read (the lazy fetch inside _relation_match_count for a quoted relation argument), a
+    count query on a known relation costs none. Folding the membership test must not add
+    a read, and must not make a previously-known relation fall through to the gate's own
+    read.
+    """
+
+    def _reader(self, monkeypatch, aliases=None):
+        reads = []
+
+        def _counting(*_args, **_kwargs):
+            reads.append(1)
+            return {} if aliases is None else aliases
+
+        monkeypatch.setattr(common, "relation_aliases", _counting)
+        return reads
+
+    def test_a_known_nfd_relation_count_query_never_reads_the_alias_file(self, monkeypatch):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        reads = self._reader(monkeypatch)
+        ok, code, _reason = classify_query(_count_query(SUBJ, nfc(REL)), facts, policy_program="")
+        assert ok, code
+        assert reads == []
+
+    def test_a_known_nfd_relation_query_reads_no_more_than_before(self, monkeypatch):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        reads = self._reader(monkeypatch)
+        ok, code, _reason = classify_query(
+            _relation_query(SUBJ, nfc(REL), nfc(OBJ)), facts, policy_program=""
+        )
+        assert ok, code
+        assert len(reads) == 1  # the lazy fetch in _relation_match_count, as before
+
+    def test_a_variable_relation_never_reads_the_alias_file(self, monkeypatch):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        reads = self._reader(monkeypatch)
+        ok, code, _reason = classify_query(
+            f'relation("{SUBJ}", R, "{nfc(OBJ)}")?', facts, policy_program=""
+        )
+        assert ok, code
+        assert reads == []
+
+    def test_a_canonical_relation_reads_the_alias_file_exactly_once(self, monkeypatch):
+        facts = [_fact(SUBJ, nfd(SURFACE), nfc("2019"))]
+        reads = []
+
+        def _counting(*_args, **_kwargs):
+            reads.append(1)
+            return {nfc(SURFACE): nfc(CANONICAL)}
+
+        monkeypatch.setattr(common, "relation_aliases", _counting)
+        # CANONICAL is a declared canonical, so the gate accepts via the alias lookup
+        # and hands the same map to _relation_match_count instead of re-reading it.
+        ok, code, _reason = classify_query(
+            _relation_query(SUBJ, nfc(CANONICAL), nfc("2019")), facts, policy_program=""
+        )
+        assert ok, code
+        assert len(reads) == 1
+
+
+class TestSurfaceVariantMatchFoldsForms:
+    """A canonical-name query counts rows stored under a surface alias. The alias map is
+    NFC on load (relation_aliases() normalizes keys and canonical targets), but a stored
+    row need not be — so that membership test folds as well."""
+
+    def test_nfd_stored_surface_variant_matches_a_canonical_query(self):
+        aliases = {nfc(SURFACE): nfc(CANONICAL)}
+        facts = [_fact(SUBJ, nfd(SURFACE), nfc("2019"))]
+        query = _relation_query(SUBJ, nfc(CANONICAL), nfc("2019"))
+        assert _relation_match_count(query, facts, aliases) == 1
+
+    def test_an_unrelated_relation_is_still_not_counted(self):
+        aliases = {nfc(SURFACE): nfc(CANONICAL)}
+        facts = [_fact(SUBJ, nfd(REL), nfc("2019"))]
+        query = _relation_query(SUBJ, nfc(CANONICAL), nfc("2019"))
+        assert _relation_match_count(query, facts, aliases) == 0
+
+
 class TestAmountRegression:
     """The amount canonicalisation this function already did must be unchanged, and it
     must now also fold an NFD-authored unit."""
@@ -132,3 +296,19 @@ class TestFoldIsLoadBearing:
         pre_fix = lambda v: literal_types.canonical_amount(v) or v  # noqa: E731
         assert pre_fix(nfd(OBJ)) != pre_fix(nfc(OBJ))  # the bug: forms did not meet
         assert _canonical_value(nfd(OBJ)) == _canonical_value(nfc(OBJ))  # the fix
+
+
+class TestRelationGateFoldIsLoadBearing:
+    """Red/green guard for the gate itself: the raw membership test the gate used to do
+    rejects the NFD-stored relation, so without the fold classify_query could never have
+    reached the (already folding) match count. Pinned by reproducing the raw comparison
+    against the same allowed_relations() the gate reads."""
+
+    def test_the_raw_membership_test_would_have_rejected_the_nfd_relation(self):
+        facts = [_fact(SUBJ, nfd(REL), nfd(OBJ))]
+        relations = common.allowed_relations(facts)
+        assert nfc(REL) not in relations  # the bug: the raw test turned the query away
+        assert _canonical_value(nfc(REL)) in {_canonical_value(r) for r in relations}
+        for query in (_relation_query(SUBJ, nfc(REL), nfc(OBJ)), _count_query(SUBJ, nfc(REL))):
+            ok, code, _reason = classify_query(query, facts, policy_program="")
+            assert ok, code  # the fix
