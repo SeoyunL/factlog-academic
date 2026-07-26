@@ -56,8 +56,9 @@ KB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$KB" >/dev/null
 printf 'a\n' > "$KB/sources/a.md"
 printf '[{"subject":"Gizmo","relation":"codename","object":"Nova","source":"sources/a.md","status":"accepted","confidence":0.9,"note":""}]\n' \
-  > "$KB/runs/r.json"  # runs/*.json carries the fact as accepted (e.g. an earlier accept)
+  > "$KB/runs/r.json"  # stale run status must not bypass review
 "$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
+"$PYTHON" -m factlog accept Gizmo codename Nova --target "$KB" >/dev/null 2>&1
 grep -q "Gizmo,codename,Nova,sources/a.md,accepted," "$KB/facts/candidates.csv" && ok "seed: fact merges as accepted" || bad "seed merge failed"
 # human pulls it back for re-review in candidates.csv ONLY (runs/*.json untouched)
 "$PYTHON" - "$KB/facts/candidates.csv" <<'PY'
