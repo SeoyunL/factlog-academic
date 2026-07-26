@@ -32,6 +32,20 @@ row untouched, and rows reported as "non-pending skipped" stay as they are in
 `runs/*.json` too. An `amount` object is compared in merge's canonical form
 `amount(N,"unit")`, so `amount(7,억)` and `amount(7,"억")` are one fact.
 
+One unreadable `runs/*.json` — bytes that do not decode, or invalid JSON — does not
+kill `accept`/`reject`/`amend`. That one file is skipped, its **name is reported in a
+warning** (on stderr), and the decision still reaches every file that does read. Fix
+the file and **re-run the same command** to let the decision reach it too.
+
+Re-running matters because of how merge deduplicates one fact across run files: the
+winner is **whichever file comes first in glob order**, not the one with the strongest
+status. So if the unreadable file is restored to its pre-decision contents, a merge
+that rebuilds `candidates.csv` **from scratch** — delete it and re-merge, i.e. exactly
+the case where `runs/*.json` is the only evidence — silently downgrades the `accepted`
+row back to `candidate`, or revives the fact you rejected. While the old
+`candidates.csv` is still there merge preserves the human decision from it, so nothing
+looks wrong, which is why this surfaces late.
+
 Subject, relation, object and source are all **normalised to NFC** for both
 comparison and storage. Two values that look identical but differ only in Unicode
 form (NFC vs NFD) are therefore **one fact**: accepting one reaches the evidence
@@ -63,10 +77,12 @@ factlog amend Acme uses FastApi --set-object FastAPI    # fix a typo
 
 The positional triple identifies the fact (exact match); `--set-subject` /
 `--set-relation` / `--set-object` / `--set-note` give the new values (at least
-one, or `--accept`). amend updates **both** `candidates.csv` and the backing
-`runs/*.json` so the edit survives `/factlog sync` (a fact's value lives in
-`runs/*.json` — merge rebuilds `candidates.csv` from it). `--accept` also
-promotes to `accepted`. Confidence is not editable. `--dry-run` previews.
+one, or `--accept`). amend writes the **value** `--set-*` gives to **both**
+`candidates.csv` and the backing `runs/*.json`, so the edit survives `/factlog sync`
+(a fact's value lives in `runs/*.json` — merge rebuilds `candidates.csv` from it).
+`--accept` also promotes to `accepted`, but that **status** is written to
+`candidates.csv` only: the `runs/*.json` row stays pending (#565). Confidence is not
+editable. `--dry-run` previews.
 
 ### Kinds of status
 
@@ -126,6 +142,9 @@ arguments are wrong are as follows.
 Even when the recompile fails, **the status change itself has already been saved
 to `candidates.csv`**; just rebuild `accepted.dl` with `/factlog check`.
 
-> **Durability:** a human `accept` (and `amend --accept`) is preserved across
-> re-merge the same way `reject`/`superseded` is — `/factlog sync` will not
-> revert your decisions.
+> **Durability:** a human `accept` is preserved across re-merge the same way
+> `reject`/`superseded` is — `/factlog sync` will not revert your decisions.
+> `amend --accept` is the exception: its promotion is written to `candidates.csv`
+> only, so merge preserves it while that file is around but has nothing to go on
+> once `candidates.csv` is rebuilt from `runs/*.json` from scratch (#565). Use
+> `factlog accept` to raise a status durably.
