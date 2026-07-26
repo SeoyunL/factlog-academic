@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "factlog"
 version = "0.7.0"
-description = "A Claude Code skill that turns markdown sources into verifiable, source-backed facts: the LLM extracts, a Datalog/wirelog engine verifies."
+description = "A Claude Code plugin that turns markdown sources into verifiable, source-backed facts: the LLM extracts, a Datalog/wirelog engine verifies."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
