@@ -166,11 +166,24 @@ def heading_slugs(text: str) -> set[str]:
     return slugs
 
 
-def validate_source_ref(root: Path, source_ref: str) -> str | None:
+def validate_source_ref(root: Path, source_ref: str, *, allow_missing_file: bool = False) -> str | None:
+    """What is wrong with *source_ref*, or None.
+
+    ``allow_missing_file`` waives ONLY the file-existence branch. A ``superseded``
+    candidate row is a tombstone: it points, by definition, at a source that is
+    gone — that is what `eject`/`eject --orphans` leaves behind, on purpose, for
+    audit. Reporting it as an error made every cleanup put the KB into a permanent
+    "validation failed" state, which merge then printed on every run (#562).
+
+    The waiver is deliberately narrow. This same function checks the ``#anchor``,
+    and that check is still meaningful for a tombstone whose FILE survives (the
+    row was retired by `eject --fact`, or the file came back): waiving the whole
+    call would silently drop it. So a present file is validated exactly as before.
+    """
     filename, _, section = source_ref.partition("#")
     path = root / filename
     if not path.is_file():
-        return f"source file does not exist: {source_ref}"
+        return None if allow_missing_file else f"source file does not exist: {source_ref}"
     if section:
         # Strip front matter before asking md_lines for headings: its closing ``---``
         # is a Setext-underline shape and would otherwise anchor the whole block.
@@ -348,7 +361,12 @@ def validate(root: Path) -> list[str]:
                     f"facts/candidates.csv line {idx} source must start with sources/ or runs/sources/"
                 )
             else:
-                source_error = validate_source_ref(root, source)
+                # A superseded row is a tombstone whose source is meant to be gone
+                # (that is what eject leaves behind), so it is exempt from the
+                # file-existence check only — never from the #anchor check.
+                source_error = validate_source_ref(
+                    root, source, allow_missing_file=row.get("status") == "superseded"
+                )
                 if source_error:
                     errors.append(f"facts/candidates.csv line {idx} {source_error}")
 
