@@ -3310,6 +3310,32 @@ def _scan_run_strip(target, run_match, rows, *, unreadable: list[str] | None = N
     return rows_to_strip, files_emptied, last_copies, sorted(unretirable)
 
 
+def _refuse_purge_last_copy(last_copies: list[dict[str, str]], remedy: str) -> int:
+    """Refuse a --purge that would destroy a fact's last copy. Returns rc 1.
+
+    Every other --purge removes a row that candidates.csv holds — a decision the
+    user can see before they destroy it, and re-derive from runs/*.json afterwards.
+    A run-only ghost has neither: the row is in no table, and --purge deletes the
+    run row that IS the fact. There is no undo, and no `--force` here on purpose —
+    the two-pass route below is a complete workaround, and its point is that the
+    fact becomes VISIBLE in candidates.csv, once, before anyone deletes it.
+    """
+    print(
+        f"factlog eject: refusing --purge — {len(last_copies)} fact(s) exist ONLY in "
+        "runs/*.json (candidates.csv carries no row for them), so this would delete "
+        "the last copy with nothing left for audit:",
+        file=sys.stderr,
+    )
+    for row in last_copies:
+        print(
+            f"    ({row['subject']}, {row['relation']}, {row['object']})  "
+            f"[source: {row['source']}]",
+            file=sys.stderr,
+        )
+    print(remedy, file=sys.stderr)
+    return 1
+
+
 def _report_unretirable(refs: list[str]) -> None:
     """Name every ref whose run rows are stripped with no tombstone."""
     for ref in refs:
@@ -3383,8 +3409,23 @@ def _select_eject_facts(args, rows, fact_specs, target, nfc):
     # run row of a fact candidates.csv never carried (this mode keys on the TRIPLE,
     # across every source).
     if args.purge:
-        to_strip, to_empty, _last, _unretirable = _scan_run_strip(target, run_match, rows)
+        to_strip, to_empty, last_copies, unretirable = _scan_run_strip(target, run_match, rows)
         print(f"  runs/*.json: {to_strip} row(s) to strip ({to_empty} file(s) would be emptied)")
+        _report_unretirable(unretirable)
+        if last_copies:
+            # This mode keys on the TRIPLE across every source, so a --purge here can
+            # reach the run rows of a source candidates.csv never carried — the same
+            # last-copy destruction as the source mode, arriving from the other axis.
+            # The route out depends on why the table is missing the fact, so name
+            # both: a source still on disk means candidates.csv is merely stale.
+            return _refuse_purge_last_copy(
+                last_copies,
+                "Get the fact into candidates.csv first, then re-run this purge:\n"
+                f"    python3 tools/merge_candidates.py --wiki {target}"
+                "   # source still on disk: the table is merely stale\n"
+                f"    factlog eject --orphans --target {target}"
+                "   # source gone: retires it as a superseded tombstone",
+            )
     return _EjectSelection(match_row, run_match, [], [], args.purge, [])
 
 
@@ -3812,11 +3853,20 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs
         # counts that quietly exclude a file.
         for name in scan_unreadable:
             print(f"factlog eject: skipping unreadable {name}", file=sys.stderr)
-    # --purge destroys rather than retires, so a last copy has nowhere to go; the
-    # caller refuses that combination instead of writing a tombstone it is about to
-    # delete.
-    synthesized = [] if args.purge else last_copies
-    return _EjectSelection(match_row, run_match, conv_to_delete, orig_on_disk, True, synthesized)
+    # --purge destroys rather than retires, so a last copy has nowhere to go: writing
+    # a tombstone it is about to delete would be theatre. Refuse instead, including
+    # under --dry-run — a preview that hid the refusal would be the same lie the
+    # dry-run figures above exist to remove.
+    if args.purge and last_copies:
+        return _refuse_purge_last_copy(
+            last_copies,
+            "Retire them first, then purge the tombstones in a second pass:\n"
+            f"    factlog eject --orphans --target {target}"
+            "            # writes superseded tombstones\n"
+            f"    factlog eject --orphans --purge --target {target}"
+            "    # removes them",
+        )
+    return _EjectSelection(match_row, run_match, conv_to_delete, orig_on_disk, True, last_copies)
 
 
 def cmd_eject(args: argparse.Namespace) -> int:
@@ -3854,6 +3904,23 @@ def cmd_eject(args: argparse.Namespace) -> int:
     row, and citing rows that are all already `superseded` — is skipped, so
     re-running --orphans reaches "no orphaned sources found" instead of re-retiring
     its own tombstones forever. Naming such a ref explicitly still matches it.
+
+    A source cited ONLY by runs/*.json is in scope for both selectors: merge drops
+    such a row before writing candidates.csv, so the table cannot report it and eject
+    used to be blind to it too (#559). It is the one class whose fact may have NO
+    candidates.csv row, so the retirement step WRITES a `superseded` tombstone for
+    each last copy — before the run rows are stripped — instead of letting the strip
+    delete the fact outright. Two shapes get no tombstone and are stripped anyway,
+    because a tombstone made from them would fail `validate`: a run row missing one
+    of subject/relation/object/source (merge drops it too), and a ref outside the two
+    source roots (candidates.csv sources must start with sources/ or runs/sources/).
+    Both are named on stderr.
+
+    --purge is REFUSED for such a fact, in either mode, at exit 1 with nothing
+    changed. There is deliberately no --force/--yes: the two-pass route the refusal
+    prints (retire, then purge the tombstones) is a complete workaround, and the step
+    it forces — the fact appearing in candidates.csv once, where a human can see it —
+    is the entire reason for the refusal.
 
     Fact mode (`eject --fact SUBJECT RELATION OBJECT`, repeatable) — retires
     candidate rows matching the given (subject, relation, object) triple(s)

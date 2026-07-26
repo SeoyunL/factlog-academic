@@ -406,6 +406,22 @@ class TestPurgeRefusesTheLastCopy:
         assert len(read_rows(kb)) == 1
         assert (kb / "runs" / "r.json").read_text(encoding="utf-8") == before
 
+    def test_the_fact_mode_refusal_names_a_route_that_works(self, tmp_path):
+        """A refusal is only legitimate if the way out it prints actually works."""
+        kb = init_kb(tmp_path)
+        (kb / "sources" / "a.md").write_text("a\n", encoding="utf-8")
+        write_csv(kb, "X,rel,Y,sources/a.md,confirmed,0.90,\n")
+        write_run(kb, "r.json",
+                  run_row(subject="X", relation="rel", object_="Y", source="sources/a.md"),
+                  run_row(subject="X", relation="rel", object_="Y", source="sources/b.md"))
+        assert eject(tmp_path, kb, "--fact", "X", "rel", "Y", "--purge").returncode == 1
+        # sources/b.md is gone from disk, so --orphans is the route the message names.
+        assert eject(tmp_path, kb, "--orphans").returncode == 0
+        assert {r["source"] for r in read_rows(kb)} == {"sources/a.md", "sources/b.md"}
+        second = eject(tmp_path, kb, "--fact", "X", "rel", "Y", "--purge")
+        assert second.returncode == 0, second.stderr
+        assert read_rows(kb) == []
+
     def test_purge_proceeds_when_every_run_row_has_a_candidates_row(self, tmp_path):
         kb = init_kb(tmp_path)
         (kb / "sources" / "a.md").write_text("a\n", encoding="utf-8")
