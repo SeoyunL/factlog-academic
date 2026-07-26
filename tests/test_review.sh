@@ -125,6 +125,14 @@ KB="$(mktemp -d)/wiki"; seed "$KB"
 "$PYTHON" -m factlog accept X --target "$KB" >/dev/null 2>&1
 [ "$(grep -c ",accepted," "$KB/facts/candidates.csv")" -eq 2 ] && ok "subject-only accept promotes all pending for X" || bad "partial accept count wrong"
 
+# A numeric-looking subject remains the legacy positional selector unless
+# --number is explicitly present.
+KB="$(mktemp -d)/wiki"; seed "$KB"
+printf '%s\n%s\n' "$H" '1,rel,Y,sources/a.md,candidate,0.8,numeric subject' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog accept 1 --target "$KB" >/dev/null 2>&1
+grep -q '1,rel,Y,sources/a.md,accepted,' "$KB/facts/candidates.csv" \
+  && ok "numeric subject keeps the legacy positional accept syntax" || bad "numeric subject was misread as review number"
+
 # --- error paths -------------------------------------------------------------
 set +e
 "$PYTHON" -m factlog accept nope nope nope --target "$KB" >/dev/null 2>&1; [ $? -eq 1 ] && ok "no-match accept rc 1" || bad "no-match rc wrong"
