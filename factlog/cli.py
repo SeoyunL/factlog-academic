@@ -1338,6 +1338,28 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_status_after_decision(item_status, from_statuses: set, new_status: str) -> str | None:
+    """The status a run row must take for a decision, or None to leave it alone.
+
+    Mirrors merge's normalization: a blank or unrecognized status is coerced to
+    needs_review (PENDING) when candidates.csv is rebuilt, so a run item merge will
+    treat as pending has to move here too -- otherwise the decision vanishes on the
+    next re-merge, in a row the extractor mis-stamped or an edit left blank. A run row
+    already carrying a decided status (confirmed/accepted/superseded) is left alone.
+
+    Shared by _apply_status_to_runs (accept/reject) and cmd_amend (--accept) instead of
+    being restated at each call site: a copy is how the CLI and merge drifted apart in
+    the first place (#477), and the same drift between two CLI paths is what let
+    `accept` and `amend --accept` disagree about the very same row (#565).
+    """
+    from factlog.common import KNOWN_STATUSES
+
+    st = str(item_status or "").strip()
+    if st not in from_statuses and st in KNOWN_STATUSES:
+        return None
+    return new_status
+
+
 def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: str) -> int:
     """Write a status decision into runs/*.json, so accept/reject are durable.
 
@@ -1363,7 +1385,7 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
     """
     import json
 
-    from factlog.common import KNOWN_STATUSES, fact_key
+    from factlog.common import fact_key
 
     runs_dir = target / "runs"
     if not runs_dir.is_dir():
@@ -1417,21 +1439,18 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             )
             if key not in decided:
                 continue
-            st = str(item.get("status", "")).strip()
             # This run row IS the row the CSV gate just changed (same fact identity as
-            # merge uses), so the decision is real. Mirror merge's normalization: a blank
-            # or unrecognized status is coerced to needs_review (PENDING) when
-            # candidates.csv is rebuilt, so the run item merge will treat as pending must
-            # be flipped here too -- otherwise the decision vanishes on the next
-            # re-merge, the exact silent downgrade this fix is about, in a row the
-            # extractor mis-stamped or an edit left blank. A run row already carrying a
-            # decided status (confirmed/accepted/superseded) is left alone: the CSV row
-            # this decision moved was pending, so a non-pending run row for the same
-            # fact is drift between the two stores, not something this decision decided.
-            # Repairing that drift is a separate command's job, not accept/reject's.
-            if st not in from_statuses and st in KNOWN_STATUSES:
+            # merge uses), so the decision is real -- but only for a row merge still
+            # sees as pending. A run row already carrying a decided status
+            # (confirmed/accepted/superseded) is left alone: the CSV row this decision
+            # moved was pending, so a non-pending run row for the same fact is drift
+            # between the two stores, not something this decision decided. Repairing
+            # that drift is a separate command's job, not accept/reject's. The rule
+            # itself lives in _run_status_after_decision -- shared, not copied (#477).
+            st = _run_status_after_decision(item.get("status", ""), from_statuses, new_status)
+            if st is None:
                 continue
-            item["status"] = new_status
+            item["status"] = st
             dirty = True
             changed += 1
         if dirty:
@@ -1645,15 +1664,16 @@ def cmd_amend(args: argparse.Namespace) -> int:
     fact's values live in runs/*.json (merge rebuilds candidates.csv from it), so
     amend updates BOTH the matching candidates.csv rows AND their backing
     runs/*.json rows — otherwise the edit would vanish on the next sync.
-    --accept also promotes to accepted (durable via the merge engine-preservation
-    pass). confidence is intentionally not editable. --dry-run previews.
+    --accept also promotes to accepted, in both stores, following the same
+    pending-only rule accept/reject follow in runs/*.json (#565). confidence is
+    intentionally not editable. --dry-run previews.
     """
     import csv
     import json
     import unicodedata
     from pathlib import Path
 
-    from factlog.common import FACT_HEADER, fact_key
+    from factlog.common import FACT_HEADER, REVIEW_STATUSES, fact_key
 
     def nfc(s: str) -> str:
         return unicodedata.normalize("NFC", s)
@@ -1822,8 +1842,9 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 # DURABILITY path, the same kind of path _apply_status_to_runs guards,
                 # so a silent skip is the other half of the bug: amend would report
                 # success while the edit never reached the file holding this fact. Name
-                # the file. (The wording says "the edit", not "the decision": an
-                # `--accept` does not reach the run row's status at all -- #565.)
+                # the file. (The wording says "the edit", not "the decision": amend's
+                # subject is the value, and `--accept` rides along with it -- both are
+                # lost together when the file cannot be read.)
                 runs_unreadable = True
                 # No "re-run after fixing the file" here either, and amend is the
                 # blunter case: candidates.csv already carries the NEW triple, so the
@@ -1859,15 +1880,45 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 )
                 if ikey not in decided:
                     continue
+                # `--accept` is a DECISION, so it follows the same pending-only rule
+                # accept/reject follow -- the shared _run_status_after_decision, not a
+                # restatement of it. Evaluated here, BEFORE the tombstone rewrite below
+                # turns this item into SUPERSEDED, so a triple change is judged on the
+                # status the row actually had.
+                #
+                # Why a non-pending run row is spared even though the CSV gate above
+                # flipped its CSV row unconditionally: that is exactly the reason.
+                # Measured -- `confirmed` + `amend --accept` writes `accepted` into
+                # candidates.csv (the transition docs/reference/review.md pins), and a
+                # plain re-merge then makes it stick, because merge rebuilds the run
+                # status from candidates.csv when that file is present. The ruling is
+                # only recoverable by deleting candidates.csv and merging from
+                # runs/*.json alone. So the run row is the LAST surviving copy of a
+                # judgement the CSV has already overwritten; promoting it here would
+                # burn the only backup.
+                promoted = (
+                    _run_status_after_decision(item.get("status", ""), REVIEW_STATUSES, "accepted")
+                    if args.accept
+                    else None
+                )
                 if triple_changed:
                     corrected = dict(item)
                     for k, v in sets.items():
                         corrected[k] = v
+                    if promoted:
+                        corrected["status"] = promoted
                     new_items.append(corrected)
+                    # Only the corrected row may be promoted. Raising the tombstone too
+                    # would revive the retired value as engine input (#220 defect 2), so
+                    # the old triple stays SUPERSEDED whatever --accept says. A tombstone
+                    # plus a new item is always a real change; never make this
+                    # conditional, or new_items below is dropped along with the write.
                     item["status"] = SUPERSEDED
                 else:
                     for k, v in sets.items():
                         item[k] = v
+                    if promoted:
+                        item["status"] = promoted
                 dirty = True
                 runs_changed += 1
             if new_items:
