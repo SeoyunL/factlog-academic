@@ -3178,13 +3178,18 @@ class _EjectSelection(NamedTuple):
     — so a run row whose source carries stray whitespace is alive to merge and was
     invisible to an unstripped matcher (#562). run_match therefore keys on
     common.fact_key's source component; match_row deliberately does not (the
-    asymmetry is load-bearing — see _select_eject_sources)."""
+    asymmetry is load-bearing — see _select_eject_sources).
+
+    synthesized carries rows to ADD to candidates.csv (empty for every mode that
+    only retires what is already there). Decided during selection, not during the
+    write, so --dry-run prints the same figure the real run acts on."""
 
     match_row: Callable[[dict], bool]
     run_match: Callable[[dict], bool]
     conv_to_delete: list[str]
     orig_on_disk: list[str]
     strip_runs: bool
+    synthesized: list[dict[str, str]]
 
 
 def _select_eject_facts(args, rows, fact_specs, target, nfc):
@@ -3245,7 +3250,7 @@ def _select_eject_facts(args, rows, fact_specs, target, nfc):
     # Keep runs/*.json on a supersede: the source stays, so the run keeps
     # re-asserting the fact and merge_candidates' superseded-preservation holds the
     # retirement durably across the next sync. Only --purge strips the run row too.
-    return _EjectSelection(match_row, run_match, [], [], args.purge)
+    return _EjectSelection(match_row, run_match, [], [], args.purge, [])
 
 
 def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
@@ -3637,7 +3642,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
-    return _EjectSelection(match_row, run_match, conv_to_delete, orig_on_disk, True)
+    return _EjectSelection(match_row, run_match, conv_to_delete, orig_on_disk, True, [])
 
 
 def cmd_eject(args: argparse.Namespace) -> int:
@@ -3755,7 +3760,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
         sel = _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc)
     if isinstance(sel, int):
         return sel  # nothing matched / orphan scan empty — code already printed
-    match_row, run_match, conv_to_delete, orig_on_disk, strip_runs = sel
+    match_row, run_match, conv_to_delete, orig_on_disk, strip_runs, synthesized = sel
 
     if args.dry_run:
         print("factlog eject: --dry-run, no changes made")
@@ -3800,15 +3805,23 @@ def cmd_eject(args: argparse.Namespace) -> int:
                     removed_files += 1
 
     # 3. retire candidate rows: supersede (default) or purge
+    #
+    # Guard the supersede path against a malformed/legacy header missing the status
+    # column — without this, DictWriter would raise mid-write on a truncated ("w")
+    # file and lose every row. Fall back to the canonical FACT_HEADER, and ensure
+    # 'status' exists when we set it. Computed OUTSIDE the write condition: the
+    # rows this step writes are no longer only the rows it read, so the header has
+    # to be known even when candidates.csv had none of its own.
+    out_fields = fieldnames or list(FACT_HEADER)
+    if not args.purge and "status" not in out_fields:
+        out_fields = [*out_fields, "status"]
     changed = 0
-    if rows:
-        # Guard the supersede path against a malformed/legacy header missing the
-        # status column — without this, DictWriter would raise mid-write on a
-        # truncated ("w") file and lose every row. Fall back to the canonical
-        # FACT_HEADER, and ensure 'status' exists when we set it.
-        out_fields = fieldnames or list(FACT_HEADER)
-        if not args.purge and "status" not in out_fields:
-            out_fields = [*out_fields, "status"]
+    # `synthesized` is what this command MAKES, as opposed to what it retires
+    # (always empty today; the run-only ghost class fills it). It is why the write
+    # is no longer gated on `rows`: a KB whose candidates.csv is header-only —
+    # the ordinary shape once merge has dropped a ghost's rows — never entered
+    # this step at all, so nothing could be written for it.
+    if rows or synthesized:
         new_rows: list[dict[str, str]] = []
         for r in rows:
             if match_row(r):
@@ -3817,6 +3830,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
                     continue  # drop the row entirely
                 r["status"] = "superseded"
             new_rows.append(r)
+        new_rows.extend(synthesized)
         # Atomic temp+replace (see _atomic_write_csv) so an interrupted run can't
         # leave a half-written candidates.csv.
         _atomic_write_csv(csv_path, new_rows, out_fields)
