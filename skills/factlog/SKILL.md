@@ -385,8 +385,9 @@ Sources matching `policy/sync-ignore.md` are skipped. Then extract from **both**
 source whose path matches one of its glob patterns — by full ref (`sources/...`
 or `runs/sources/...`) or by the path within the source root (so `drafts/*.md`
 matches `sources/drafts/x.md`). These sources are excluded from re-extraction on
-purpose; their already-merged facts are left as-is. (Manage the list with
-`factlog ignore`.)
+purpose and are also excluded from `/factlog ask` wiki-exploration evidence;
+their already-merged facts are left as-is. (Manage the list with `factlog
+ignore`.)
 
 For each *non-ignored* file under `sources/<name>` **and** `runs/sources/<name>`
 in the KB root:

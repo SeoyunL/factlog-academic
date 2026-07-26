@@ -472,9 +472,10 @@ explanation of its purpose.
 # Sync-ignore list
 #
 # Source files matching these glob patterns are SKIPPED by `/factlog sync`
-# (re-extraction), `factlog ingest --scan`, and coverage gap reporting — even
-# when modified. Their already-merged facts are KEPT (use `factlog eject` to
-# remove those). Manage with `factlog ignore [--remove] <pattern>`.
+# (re-extraction), `factlog ingest --scan`, coverage gap reporting, and
+# `/factlog ask` wiki exploration — even when modified. Their already-merged
+# facts are KEPT (use `factlog eject` to remove those). Manage with
+# `factlog ignore [--remove] <pattern>`.
 #
 # One pattern per line; '#' comments and '-' bullets allowed; quote a pattern
 # with spaces (or one starting with '#') in `backticks`. A pattern matches a
@@ -1373,12 +1374,13 @@ def cmd_provenance(args: argparse.Namespace) -> int:
 
 
 def cmd_ignore(args: argparse.Namespace) -> int:
-    """Manage policy/sync-ignore.md — glob patterns of sources excluded from sync.
+    """Manage policy/sync-ignore.md — sources excluded from sync and wiki evidence.
 
     No patterns: list current entries and the on-disk sources each matches.
     With pattern(s): add them, or remove them with --remove. Excluding a source
-    only stops its re-extraction (ingest --scan / sync / coverage); its already-
-    merged facts are untouched (use `factlog eject` to remove those).
+    stops its re-extraction (ingest --scan / sync / coverage) and keeps it out
+    of `/factlog ask` wiki evidence; its already-merged facts are untouched
+    (use `factlog eject` to remove those).
     """
     import re
     import unicodedata
@@ -2760,7 +2762,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ignore = sub.add_parser(
         "ignore",
-        help="manage policy/sync-ignore.md: glob patterns of sources excluded from sync",
+        help="manage policy/sync-ignore.md: glob patterns excluded from sync and wiki evidence",
     )
     ignore.add_argument("patterns", nargs="*", help="glob/path pattern(s) to add (omit to list)")
     ignore.add_argument("--remove", action="store_true", help="remove the given pattern(s) instead of adding")
