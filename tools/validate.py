@@ -12,9 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from common import FACT_HEADER, KNOWN_STATUSES
 
-FACT_HEADER = ["subject", "relation", "object", "source", "status", "confidence", "note"]
-VALID_STATUSES = {"confirmed", "accepted", "needs_review", "candidate", "superseded"}
 
 
 def read(path: Path) -> str:
@@ -189,7 +188,7 @@ def validate(root: Path) -> list[str]:
         if reader.fieldnames != FACT_HEADER:
             errors.append(f"facts/candidates.csv header must be {','.join(FACT_HEADER)}")
         for idx, row in enumerate(rows, start=2):
-            if row.get("status") not in VALID_STATUSES:
+            if row.get("status") not in KNOWN_STATUSES:
                 errors.append(f"facts/candidates.csv line {idx} invalid status: {row.get('status')!r}")
             confidence_error = validate_confidence(row.get("confidence", ""))
             if confidence_error:

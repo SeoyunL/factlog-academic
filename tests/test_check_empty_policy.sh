@@ -21,6 +21,7 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON="${PYTHON:-python3}"
 RLC="$PLUGIN_ROOT/tools/run_logic_check.py"
+COMPILE="$PLUGIN_ROOT/tools/compile_facts.py"
 
 pass=0
 fail=0
@@ -52,6 +53,27 @@ out="$(FACTLOG_ROOT="$KB" "$PYTHON" "$RLC" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "run_logic_check exits 0 on a no-policy KB (#190)" || bad "run_logic_check exited $rc: $out"
 [ -f "$KB/facts/logic_report.txt" ] && ok "logic_report.txt produced" || bad "logic_report.txt missing"
 grep -qF "policy findings: 0" "$KB/facts/logic_report.txt" && ok "report shows 'policy findings: 0'" || bad "report missing 'policy findings: 0'"
+
+# --- 1a. lifecycle status contract: retired is known, invalid still warns ----
+# `superseded` is a durable audit row, not engine input.  It must not be
+# reported as unknown merely because it is intentionally excluded from
+# accepted.dl; a genuinely unrecognised value must remain visible.
+printf '%s\n%s\n%s\n%s\n' \
+  'subject,relation,object,source,status,confidence,note' \
+  'A,uses,B,sources/x.md,confirmed,0.9,' \
+  'Old,uses,C,sources/x.md,superseded,0.9,retired' \
+  'Broken,uses,D,sources/x.md,not_a_status,0.9,' > "$KB/facts/candidates.csv"
+out_compile="$(FACTLOG_ROOT="$KB" "$PYTHON" "$COMPILE" 2>&1)"; rc_compile=$?
+[ "$rc_compile" -eq 0 ] && ok "compile_facts accepts known retired status" || bad "compile_facts exited $rc_compile: $out_compile"
+grep -qF '"Old"' "$KB/facts/accepted.dl" && bad "superseded row leaked into accepted.dl" || ok "superseded row remains outside accepted.dl"
+out_status="$(FACTLOG_ROOT="$KB" "$PYTHON" "$RLC" 2>&1)"; rc_status=$?
+[ "$rc_status" -eq 0 ] && ok "run_logic_check accepts lifecycle statuses" || bad "run_logic_check exited $rc_status: $out_status"
+grep -qF 'unknown status treated as non-engine input: superseded' "$KB/facts/logic_report.txt" \
+  && bad "superseded is still reported as unknown" \
+  || ok "superseded is recognised as a retired lifecycle status"
+grep -qF 'unknown status treated as non-engine input: not_a_status' "$KB/facts/logic_report.txt" \
+  && ok "unrecognised status still produces a warning" \
+  || bad "unrecognised status warning disappeared"
 
 # --- 2. ask/check consistency: 0 policy predicates on the same KB -------------
 preds="$(FACTLOG_ROOT="$KB" "$PYTHON" -c "from factlog import common; print(len(common.policy_predicates(common.load_logic_policy())))" 2>&1)"
