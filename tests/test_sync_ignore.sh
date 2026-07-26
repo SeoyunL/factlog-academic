@@ -114,7 +114,9 @@ set +e; "$PYTHON" tools/coverage.py --wiki "$KB" --strict >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && ok "coverage --strict does not fail on an ignored text source" || bad "--strict failed on ignored source"
 
 # --- an ignored source's existing facts are retained across re-merge -----------
-grep -q "W,rel,V,sources/wip.md,confirmed" "$KB/facts/candidates.csv" && ok "ignored source's facts retained after merge" || bad "ignored source's facts lost"
+# New extraction rows enter the review queue, but sync-ignore must not delete
+# their source-backed candidate row.
+grep -q "W,rel,V,sources/wip.md,needs_review" "$KB/facts/candidates.csv" && ok "ignored source's facts retained in review queue" || bad "ignored source's facts lost"
 
 echo ""
 echo "========================================"
