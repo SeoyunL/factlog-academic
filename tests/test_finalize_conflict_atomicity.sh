@@ -41,6 +41,11 @@ new_conflict_kb() {
   printf '# src\n\nProjectX is owned by Alice. ProjectX is owned by Bob.\n' > "$kb/sources/p.md"
   printf '# single-valued relations\n\n- owner\n' > "$kb/policy/single-valued.md"
   printf '[{"subject":"ProjectX","relation":"owner","object":"Alice","source":"sources/p.md","status":"confirmed","confidence":0.95,"note":""},{"subject":"ProjectX","relation":"owner","object":"Bob","source":"sources/p.md","status":"confirmed","confidence":0.95,"note":""}]' > "$kb/runs/r1.json"
+  # Extraction statuses enter the review queue. The conflicting engine input is
+  # created only through the two explicit human acceptance commands below.
+  "$PYTHON" "$FINALIZE" --target "$kb" >/dev/null
+  "$PYTHON" -m factlog accept ProjectX owner Alice --target "$kb" >/dev/null
+  "$PYTHON" -m factlog accept ProjectX owner Bob --target "$kb" >/dev/null
 }
 
 # accepted.dl must not hold BOTH contradictory facts at once (absent counts as clean).
@@ -119,6 +124,8 @@ KB4="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$KB4" >/dev/null
 printf '# src\n\nAcme API uses FastAPI.\n' > "$KB4/sources/a.md"
 printf '[{"subject":"Acme API","relation":"uses","object":"FastAPI","source":"sources/a.md","status":"confirmed","confidence":0.95,"note":""}]' > "$KB4/runs/r1.json"
+"$PYTHON" "$FINALIZE" --target "$KB4" >/dev/null
+"$PYTHON" -m factlog accept "Acme API" uses FastAPI --target "$KB4" >/dev/null
 rc4=0; "$PYTHON" "$FINALIZE" --target "$KB4" >/dev/null 2>&1 || rc4=$?
 [ "$rc4" -eq 0 ] && ok "no-conflict path: finalize exits 0" || bad "no-conflict path: finalize exited $rc4"
 [ -f "$KB4/facts/accepted.dl" ] && grep -q 'relation("Acme API", "uses", "FastAPI")' "$KB4/facts/accepted.dl" \
