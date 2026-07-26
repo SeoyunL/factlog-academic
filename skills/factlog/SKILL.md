@@ -741,11 +741,12 @@ read — bytes that do not decode, or invalid JSON — is skipped rather than fa
 and `accept`/`reject`/`amend` name it:
 
 ```text
-factlog: warning — could not read <file> to record the decision (...); if it holds
-this fact, re-run after fixing the file.
+factlog: warning — could not read <file> to record the decision (...); any row it
+holds for this fact keeps its old status, and a candidates.csv rebuilt from
+runs/*.json alone would take that old status.
 ```
 
-(`amend` prints the same line with "to record the edit".)
+(`amend` prints the same line with "to record the edit" / "old value".)
 
 - That line goes to **stderr**, so the "Show the stdout" instruction above will not
   surface it. Capture stderr for these commands and **relay the warning line to the
@@ -753,11 +754,21 @@ this fact, re-run after fixing the file.
   signal that the decision did not reach that file.
 - Do not report the command as clean because it exited 0. Exit 0 here means "the
   readable files were updated", not "every file holding this fact was updated".
-- Tell the user to fix the file and re-run the same command, and not to leave it
-  restored to its pre-decision contents: merge settles a fact claimed by two run
-  files by **glob order, not status**, so a later rebuild of `candidates.csv` from
-  `runs/*.json` would take the stale row and silently downgrade the accept or
-  revive the rejected fact.
+- **Do not tell the user to re-run the command after fixing the file.** It does not
+  work and no other recovery command exists yet (#566): the first run already moved
+  the `candidates.csv` row out of pending, so a second `accept`/`reject` answers
+  `nothing to change` and a second `amend` answers `no fact matches` (exit code 1),
+  while the repaired file's row keeps its old status. Reconciling two stores that
+  have already drifted apart is out of scope for these commands by design.
+- What you may say is what the warning says: that file was not updated, its row (if
+  any) still holds the old status, and merge settles a fact claimed by two run files
+  by **glob order, not status** — so once `candidates.csv` is rebuilt from
+  `runs/*.json` alone, the stale row wins and silently downgrades the accept or
+  revives the rejected fact. The safe ordering is to repair unreadable run files
+  **before** any rebuild.
+- The `--dry-run` preview does not run this pass at all, so it never reports an
+  unreadable file. A clean `--dry-run` is not evidence that the real run will be
+  clean.
 
 ### Step 2 — Run the logic check
 

@@ -34,17 +34,27 @@ row untouched, and rows reported as "non-pending skipped" stay as they are in
 
 One unreadable `runs/*.json` — bytes that do not decode, or invalid JSON — does not
 kill `accept`/`reject`/`amend`. That one file is skipped, its **name is reported in a
-warning** (on stderr), and the decision still reaches every file that does read. Fix
-the file and **re-run the same command** to let the decision reach it too.
+warning** (on stderr), and the decision still reaches every file that does read. The
+warning claims exactly three things and no more:
 
-Re-running matters because of how merge deduplicates one fact across run files: the
-winner is **whichever file comes first in glob order**, not the one with the strongest
-status. So if the unreadable file is restored to its pre-decision contents, a merge
-that rebuilds `candidates.csv` **from scratch** — delete it and re-merge, i.e. exactly
-the case where `runs/*.json` is the only evidence — silently downgrades the `accepted`
-row back to `candidate`, or revives the fact you rejected. While the old
-`candidates.csv` is still there merge preserves the human decision from it, so nothing
-looks wrong, which is why this surfaces late.
+- that file was not updated;
+- if it held a row for this fact, that row keeps its **old status (or old value)**;
+- a `candidates.csv` rebuilt from `runs/*.json` alone would let that old status
+  **win**, because when two run files claim one fact merge keeps **whichever comes
+  first in glob order**, not the one with the strongest status.
+
+The last point is why the warning matters. While the old `candidates.csv` is still
+there merge preserves the human decision from it and nothing looks wrong; the moment
+that file is deleted and re-merged — i.e. exactly the case where `runs/*.json` is the
+only evidence, the case this dual write exists for — the `accepted` row is silently
+downgraded to `candidate`, or the fact you rejected comes back.
+
+**Re-running the same command does not reach that row.** The first run already moved
+the `candidates.csv` row out of pending, so `accept`/`reject` report `nothing to
+change` and `amend` cannot find the old triple (`no fact matches`, exit code 1).
+Reconciling two stores that have already drifted apart is not these commands' job
+(see "Boundary" below), and no command does it yet (#566). So repair an unreadable
+run file **before** rebuilding `candidates.csv`.
 
 Subject, relation, object and source are all **normalised to NFC** for both
 comparison and storage. Two values that look identical but differ only in Unicode

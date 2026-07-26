@@ -1338,9 +1338,16 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             # net: _apply_review_status writes candidates.csv BEFORE calling this, so the
             # crash landed a TORN write (decision in the CSV, never in runs/*.json) whose
             # outcome hung on the glob order of an unrelated file name (#563).
+            # State only what is true. "Re-run after fixing the file" was a false
+            # remedy: the CSV row is no longer pending after this run, so the same
+            # command reports "nothing to change" and the run row keeps its old
+            # status forever. Repairing two stores that already drifted apart is a
+            # separate command's job, not this one's -- as the docstring above says
+            # about #477. No such command exists yet (#566).
             print(
                 f"factlog: warning — could not read {jp.name} to record the decision "
-                f"({exc}); if it holds this fact, re-run after fixing the file.",
+                f"({exc}); any row it holds for this fact keeps its old status, and a "
+                "candidates.csv rebuilt from runs/*.json alone would take that old status.",
                 file=sys.stderr,
             )
             continue
@@ -1712,9 +1719,13 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 # the file. (The wording says "the edit", not "the decision": an
                 # `--accept` does not reach the run row's status at all -- #565.)
                 runs_unreadable = True
+                # No "re-run after fixing the file" here either, and amend is the
+                # blunter case: candidates.csv already carries the NEW triple, so the
+                # same command comes back `no fact matches` on the old one (#566).
                 print(
                     f"factlog: warning — could not read {jp.name} to record the edit "
-                    f"({exc}); if it holds this fact, re-run after fixing the file.",
+                    f"({exc}); any row it holds for this fact keeps its old value, and a "
+                    "candidates.csv rebuilt from runs/*.json alone would take that old value.",
                     file=sys.stderr,
                 )
                 continue
