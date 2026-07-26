@@ -17,6 +17,28 @@ factlog reject Acme uses Datadog     # pending → superseded (retired, kept for
 factlog accept Acme uses FastAPI --dry-run
 ```
 
+### 검토한 사실을 번호로 선택하기
+
+`factlog review` 는 대기 트리플에 안정적인 번호를 붙이고 전체 큐의 `sha256:`
+스냅샷 다이제스트를 출력합니다. 사람이 그 출력 자체를 검토한 뒤에는 트리플을
+다시 입력하지 않고 하나 이상을 선택할 수 있습니다.
+
+```bash
+factlog review
+#   [1] Acme / uses / FastAPI
+#   [2] Acme / uses / PostgreSQL
+#   snapshot: sha256:...
+factlog accept --number 1 --number 2 --from sha256:...
+factlog reject --number 2 --from sha256:... --dry-run
+```
+
+`--number` 는 반복할 수 있으며 `review` 가 출력한 다이제스트가 반드시 필요합니다.
+다이제스트는 정규화된 대기 큐 전체를 포함하므로, 없거나 형식이 잘못됐거나 큐가
+바뀌었으면 명령은 아무것도 변경하지 않고 다시 검토하라고 안내합니다. 번호 선택은
+`--from` 과 함께만 가능하므로 기존 위치 트리플과 `-` 와일드카드 문법은 변하지 않으며
+번호와 한 명령에서 섞을 수 없습니다. 새 스냅샷은 사람이 이 큐를 보았다는 근거이지,
+모델이 사람의 결정 없이 사실을 승격할 권한은 아닙니다.
+
 `accept`/`reject` 는 **대기(pending) 행만** 변경합니다. `confirmed`/`accepted`/
 `superseded` 와 일치하는 항목은 보고만 되고 그대로 유지됩니다(대기 상태가 아닌
 사실을 폐기하려면 `factlog eject` 를 사용). 둘 다 `accepted.dl` 을 재컴파일합니다.

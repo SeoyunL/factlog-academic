@@ -15,6 +15,29 @@ factlog reject Acme uses Datadog     # pending → superseded (retired, kept for
 factlog accept Acme uses FastAPI --dry-run
 ```
 
+### Selecting reviewed facts by number
+
+`factlog review` assigns stable numbers to the pending triples and prints a
+full `sha256:` snapshot digest. After a person has reviewed that exact output,
+they can select one or more items without retyping a triple:
+
+```bash
+factlog review
+#   [1] Acme / uses / FastAPI
+#   [2] Acme / uses / PostgreSQL
+#   snapshot: sha256:...
+factlog accept --number 1 --number 2 --from sha256:...
+factlog reject --number 2 --from sha256:... --dry-run
+```
+
+`--number` is repeatable and requires the digest printed by `review`. The
+digest covers the complete normalized pending queue; if it is missing,
+malformed, or stale, the command changes nothing and asks you to review again.
+Numbers are only available with `--from`, so the existing positional triple
+and `-` wildcard syntax remains unchanged and cannot be mixed with numbered
+selection. A fresh snapshot proves that the human saw this queue; it is not an
+authorization for a model to promote facts without a human decision.
+
 `accept`/`reject` change **only pending rows**; a `confirmed`/`accepted`/
 `superseded` match is reported and left untouched (use `factlog eject` to retire
 a non-pending fact). Both recompile `accepted.dl`.

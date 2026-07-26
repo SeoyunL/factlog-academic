@@ -542,7 +542,14 @@ without hand-editing `candidates.csv`, use the review CLI: `factlog review`
 lists the pending queue, `factlog accept <subject> <relation> <object>` sets
 matching pending rows to `accepted`, and `factlog reject ...` sets them to
 `superseded` (both recompile `accepted.dl`; `-` wildcards a position). To
-correct a fact's value, `factlog amend <subject> <relation> <object>
+select facts a human has just reviewed without retyping a triple, copy the
+`sha256:` snapshot printed by `factlog review` into
+`factlog accept --number N --from sha256:...` (repeat `--number` as needed).
+The snapshot must still match and is evidence of the human's explicit choice;
+it never authorizes the model to promote a fact on its own. Keep using the
+triple form for any decision the human has not explicitly made.
+
+To correct a fact's value, `factlog amend <subject> <relation> <object>
 --set-object ... [--set-subject/--set-relation/--set-note] [--accept]` rewrites
 it durably (updates both `candidates.csv` and the backing `runs/*.json`). These
 human decisions are preserved across re-merge.
