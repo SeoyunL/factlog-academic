@@ -84,6 +84,25 @@ so it would be re-converted on the next `/factlog sync`; pass `--delete-original
 to remove it too. `accepted.dl` is recompiled so the engine input drops the
 retired facts immediately.
 
+#### Exit codes
+
+`eject`'s exit 1 covers **several states, two of which are opposites** — "nothing
+was destroyed" (held back) and "a fact's last copy was destroyed" (no tombstone
+possible). Read this table before chaining on it in a script. It can also accompany
+a successful cleanup: one held-back fact makes the run exit 1 even though a
+tombstone was written and run rows were stripped.
+
+| rc | State | What happened to the KB |
+|---|---|---|
+| 0 | Completed (including `no orphaned sources found`) | Cleaned as asked; a last copy is kept as a `superseded` tombstone |
+| 1 | `nothing to eject` / `no candidate fact matches ...` | **Nothing changed** |
+| 1 | `refusing --purge` (a last copy) | **Nothing changed** |
+| 1 | `refusing --delete-original` (unattributable conversions) | **Nothing changed** |
+| 1 | `NOT stripping the run row(s) ...` (held back, case (4)) | The rest was cleaned; the **held-back run rows are intact** — restore the source and the fact comes back |
+| 1 | `... stripped with no tombstone.` (case (3)) | Cleaned, and **that fact left the KB** — not recoverable |
+| 1 | `compile_facts failed` | The table changed but `accepted.dl` is stale — re-run |
+| 2 | Usage error (mode mixing, no selector, `--delete-original` in fact mode) | **Nothing changed** |
+
 A `runs/sources/` conversion is tied to the original that produced it via the
 ingest provenance header, so even when two originals share a stem,
 `eject report.docx` never disturbs `report.pptx`'s conversion. `pages/` are not

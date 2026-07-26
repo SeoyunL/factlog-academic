@@ -82,6 +82,24 @@ source 모드는 상호 배타적이며, `--delete-original` 은 `--fact` 와 �
 넘기십시오. `accepted.dl` 은 재컴파일되어 엔진 입력에서 폐기된 사실이 즉시
 빠집니다.
 
+#### 종료 코드
+
+`eject` 의 rc 1 은 **여러 상태를 함께 가리키며, 그중 둘은 정반대입니다** — "아무것도
+파괴하지 않았다"(보류)와 "사실의 마지막 사본을 파괴했다"(툼스톤 불가). 스크립트에서
+체이닝하기 전에 이 표를 보십시오. 정상 정리와 같이 일어날 수도 있습니다 — 툼스톤을
+쓰고 run 행을 지운 뒤에도 보류가 하나 있으면 rc 1 입니다.
+
+| rc | 상태 | KB 에 무슨 일이 있었나 |
+|---|---|---|
+| 0 | 정상 완료 (`no orphaned sources found` 포함) | 요청대로 정리됨. 마지막 사본은 `superseded` 툼스톤으로 남음 |
+| 1 | `nothing to eject` / `no candidate fact matches ...` | **무변경** |
+| 1 | `refusing --purge` (마지막 사본) | **무변경** |
+| 1 | `refusing --delete-original` (귀속 불가 변환본) | **무변경** |
+| 1 | `NOT stripping the run row(s) ...` (보류, 위 (4)) | 나머지는 정리됨. **보류된 run 행은 온전** — 소스를 되돌리면 복구됨 |
+| 1 | `... stripped with no tombstone.` (위 (3)) | 정리됨. **그 사실은 KB 에서 사라짐** — 되돌릴 수 없음 |
+| 1 | `compile_facts failed` | 표는 바뀌었으나 `accepted.dl` 이 낡음 — 재실행 필요 |
+| 2 | 사용법 오류(모드 혼용, 선택자 없음, fact 모드의 `--delete-original`) | **무변경** |
+
 `runs/sources/` 변환본은 적재 출처 헤더를 통해 그것을 만들어 낸 원본과 묶여
 있으므로, 두 원본이 어간을 공유하더라도 `eject report.docx` 가 `report.pptx` 의
 변환본을 건드리지 않습니다. `pages/` 는 `eject` 로 재생성되지 않습니다 —
