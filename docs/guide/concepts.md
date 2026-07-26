@@ -132,11 +132,13 @@ factlog에는 두 종류의 사실이 있습니다.
 
 - **candidate(후보)** — 문서에서 추출된 *주장*일 뿐입니다. `sync` 는 후보를 만들어
   낼 뿐, 그 자체로 신뢰할 수 있는 사실을 만들지는 **않습니다**.
-- **accepted(승인됨)** — 사람이 후보를 검토해 받아들인 사실입니다. **오직 accepted
-  사실만 엔진의 입력**이 되고, 질문에 대한 답변의 근거가 됩니다.
+- **accepted(승인됨)** — 사람이 후보를 검토해 받아들인 사실입니다. accepted 사실은
+  엔진의 입력이 되어 질문 답변의 근거가 됩니다. 기존 `confirmed` 행도 호환성을 위해
+  엔진 입력으로 유지되지만, 새 추출 run은 어느 엔진 상태도 만들 수 없습니다.
 
 이 사람의 검토 단계가 factlog의 **신뢰 경계**입니다. 모델이 만들어 낸 것은 무엇이든
-사람이 accepted로 확정하기 전까지는 후보일 뿐입니다.
+검토 대기열로 들어가며, 사람의 `accept`/`reject` 결정만 사실을 승격하거나 폐기할 수
+있습니다.
 
 ## 명령 한눈에 보기 — slash command · CLI command · KB 파일
 
@@ -152,7 +154,8 @@ factlog의 명령은 **어디서 실행하느냐**에 따라 두 계층으로 �
 이 표가 위 [신뢰 경계](#candidate-vs-accepted--신뢰-경계)와 맞물립니다. slash command
 (`/factlog sync`)는 **후보**를 만들 뿐이고, accepted로의 확정은 사람이 직접
 입력해 실행하는 CLI 게이트(`factlog accept` / `factlog reject` / `factlog amend --accept`)를
-거칩니다. 오직 그렇게 확정된 `accepted.dl` 만 엔진 입력이 됩니다.
+거칩니다. 그렇게 확정된 사실이 `accepted.dl`의 엔진 입력이 됩니다(기존
+`confirmed` 행은 호환성 예외로 유지).
 
 ## 동작 방식
 
@@ -163,8 +166,8 @@ factlog의 명령은 **어디서 실행하느냐**에 따라 두 계층으로 �
 
 ```
 sources/        →  Claude extracts        →  facts/candidates.csv, pages/, decisions/
-candidates       →  human review           →  confirmed facts
-confirmed        →  compile (deterministic) →  facts/accepted.dl
+candidates       →  human review           →  accepted facts
+accepted         →  compile (deterministic) →  facts/accepted.dl
 questions        →  Claude drafts query     →  facts/query.dl
 accepted + query →  wirelog logic check     →  facts/logic_report.txt   ← 검증 가능한 리포트
 review_required  →  Claude repairs (gated)  →  decisions/correction_trace.md

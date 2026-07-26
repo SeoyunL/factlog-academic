@@ -42,7 +42,7 @@ A fact's `status` falls into three classes.
 | Class | Status values | Meaning |
 |-------|---------------|---------|
 | **pending** | `candidate`, `needs_review` | Extracted, but still waiting on a human decision. Shows up in the `factlog review` queue. |
-| **engine input** | `accepted`, `confirmed` | A fact a human confirmed. **Only these two statuses compile into `accepted.dl`** and become engine input. |
+| **engine input** | `accepted`, `confirmed` | `accepted` is a fact a human accepted with the review CLI. `confirmed` is a legacy compatible engine status. **Only these two statuses compile into `accepted.dl`** and become engine input; a new extraction run cannot assign either status. |
 | **retired** | `superseded` | A fact that has stepped down. Kept in `candidates.csv` for audit, but it is not engine input and is ignored by conflict detection. |
 
 ### Status transition table
@@ -96,3 +96,7 @@ to `candidates.csv`**; just rebuild `accepted.dl` with `/factlog check`.
 > **Durability:** a human `accept` (and `amend --accept`) is preserved across
 > re-merge the same way `reject`/`superseded` is — `/factlog sync` will not
 > revert your decisions.
+
+> **Migration:** Existing `confirmed` rows remain engine input for compatibility.
+> New extraction runs are always placed in the pending queue, even if they claim
+> an engine or retired status; review them with `factlog accept` or `factlog reject`.

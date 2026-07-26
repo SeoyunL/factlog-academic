@@ -423,8 +423,11 @@ in the KB root:
    `object`, `source`. Rows with any of these four empty are dropped.
 
    - `source` MUST be `"sources/<name>"` (sources/-prefixed, KB-root-relative).
-   - `status` is `"candidate"` for uncertain rows, `"needs_review"` if a human
-     must decide, `"confirmed"` only when a prior human has marked it.
+   - `status` is `"candidate"` for ordinary extracted rows or `"needs_review"`
+     when a human decision needs emphasis. Never emit `"confirmed"`,
+     `"accepted"`, or `"superseded"`: merge treats any such model-supplied
+     decision as `"needs_review"`. Only the human review CLI can accept or retire
+     a fact.
    - `confidence` may be a JSON number (e.g. `0.90`) or a quoted string
      (e.g. `"0.90"`) — both are accepted because `merge_candidates.py`
      coerces the value via `str()` before normalisation.

@@ -46,7 +46,7 @@ merge 가 그로부터 `candidates.csv` 를 재구성합니다). `--accept` 는 
 | 부류 | 상태 값 | 의미 |
 |------|---------|------|
 | **대기(pending)** | `candidate`, `needs_review` | 추출됐지만 아직 사람의 결정을 기다리는 중. `factlog review` 큐에 뜹니다. |
-| **엔진 입력** | `accepted`, `confirmed` | 사람이 확정한 사실. **이 두 상태만 `accepted.dl` 로 컴파일**되어 엔진 입력이 됩니다. |
+| **엔진 입력** | `accepted`, `confirmed` | `accepted` 는 사람이 review CLI로 승인한 사실입니다. `confirmed` 는 호환성을 위해 유지하는 기존 엔진 상태입니다. **이 두 상태만 `accepted.dl` 로 컴파일**되어 엔진 입력이 되며, 새 추출 run은 어느 쪽도 지정할 수 없습니다. |
 | **폐기(retired)** | `superseded` | 물러난 사실. 감사(audit)를 위해 `candidates.csv` 에 남지만 엔진 입력이 아니며, 모순 검출에서도 무시됩니다. |
 
 ### 상태 전이표
@@ -97,3 +97,7 @@ merge 가 그로부터 `candidates.csv` 를 재구성합니다). `--accept` 는 
 > **내구성(durability):** 사람이 한 `accept`(및 `amend --accept`)는 `reject`/
 > `superseded` 와 같은 방식으로 재머지 후에도 보존됩니다 — `/factlog sync` 가
 > 여러분의 결정을 되돌리지 않습니다.
+
+> **이행:** 기존 `confirmed` 행은 호환성을 위해 엔진 입력으로 유지됩니다. 새 추출
+> run이 엔진·폐기 상태를 주장해도 모두 대기열로 들어가므로, `factlog accept` 또는
+> `factlog reject`로 사람이 검토해야 합니다.

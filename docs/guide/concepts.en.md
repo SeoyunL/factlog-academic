@@ -110,7 +110,7 @@ was** — not even conversions are written there.
 │   └── <extraction run records>.json    ← (generated) where a fact's value lives
 ├── facts/
 │   ├── candidates.csv                   ← (generated) candidate facts — the review targets
-│   └── accepted.dl                      ← (generated) confirmed facts only. Engine input
+│   └── accepted.dl                      ← (generated) accepted facts (plus legacy confirmed rows). Engine input
 └── pages/ · decisions/                  ← (generated) not hand-edited
 ```
 
@@ -138,11 +138,14 @@ factlog has two kinds of facts.
 
 - **candidate** — only a *claim* extracted from a document. `sync` produces
   candidates; it does **not** by itself produce facts you can trust.
-- **accepted** — a fact a human reviewed and accepted. **Only accepted facts are
-  engine input**, and only they back the answers to your questions.
+- **accepted** — a fact a human reviewed and accepted. Accepted facts are engine
+  input and back the answers to your questions. Legacy `confirmed` rows also
+  remain engine input for compatibility, but new extraction runs cannot create
+  either engine status.
 
-This human review step is factlog's **trust boundary**. Anything the model
-produces is only a candidate until a human confirms it as accepted.
+This human review step is factlog's **trust boundary**. Anything a model
+produces enters the pending review queue; only a human `accept`/`reject` decision
+can promote or retire it.
 
 ## Commands at a glance — slash command · CLI command · KB file
 
@@ -171,8 +174,8 @@ confirmation as accepted goes through the CLI gate a human runs by typing it
 
 ```
 sources/        →  Claude extracts        →  facts/candidates.csv, pages/, decisions/
-candidates       →  human review           →  confirmed facts
-confirmed        →  compile (deterministic) →  facts/accepted.dl
+candidates       →  human review           →  accepted facts
+accepted         →  compile (deterministic) →  facts/accepted.dl
 questions        →  Claude drafts query     →  facts/query.dl
 accepted + query →  wirelog logic check     →  facts/logic_report.txt   ← the verifiable report
 review_required  →  Claude repairs (gated)  →  decisions/correction_trace.md

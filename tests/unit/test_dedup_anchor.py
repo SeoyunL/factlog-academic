@@ -78,3 +78,28 @@ class TestAnchorInsensitiveDedup:
         ]
         out = mc.normalize_rows(root, rows)
         assert len(out) == 2
+
+
+class TestNewRunStatusGate:
+    """A model-authored run can add review items, never decide their outcome."""
+
+    def test_engine_and_retired_statuses_become_needs_review(self, tmp_path):
+        root = _root_with_source(tmp_path)
+        rows = [
+            _row("confirmed", "rel", "value", "sources/a.md", status="confirmed"),
+            _row("accepted", "rel", "value", "sources/a.md", status="accepted"),
+            _row("retired", "rel", "value", "sources/a.md", status="superseded"),
+        ]
+        out = mc.normalize_rows(root, rows)
+        assert {row["status"] for row in out} == {"needs_review"}
+
+    def test_review_statuses_remain_review_statuses(self, tmp_path):
+        root = _root_with_source(tmp_path)
+        out = mc.normalize_rows(
+            root,
+            [
+                _row("candidate", "rel", "value", "sources/a.md", status="candidate"),
+                _row("review", "rel", "value", "sources/a.md", status="needs_review"),
+            ],
+        )
+        assert {row["status"] for row in out} == {"candidate", "needs_review"}
