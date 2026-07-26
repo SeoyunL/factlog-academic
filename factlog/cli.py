@@ -960,8 +960,9 @@ def cmd_reject(args: argparse.Namespace) -> int:
 def cmd_amend(args: argparse.Namespace) -> int:
     """Correct a fact's subject / relation / object / note (durable).
 
-    The positional triple identifies the fact (exact NFC match, any status); the
-    --set-* flags give the new values (at least one required, or --accept). A
+    The positional triple identifies a live fact (exact NFC match); superseded
+    tombstones are never matched. The --set-* flags give the new values (at
+    least one required, or --accept). A
     fact's values live in runs/*.json (merge rebuilds candidates.csv from it), so
     amend updates BOTH the matching candidates.csv rows AND their backing
     runs/*.json rows — otherwise the edit would vanish on the next sync.

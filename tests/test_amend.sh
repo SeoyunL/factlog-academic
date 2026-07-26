@@ -197,7 +197,12 @@ printf '[{"subject":"Lib","relation":"name","object":"Numpy","source":"sources/a
   > "$KB/runs/T1.json"
 "$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
 "$PYTHON" -m factlog amend Lib name Numpy --set-object NumPy --accept --target "$KB" >/dev/null 2>&1
-"$PYTHON" -m factlog amend Lib name Numpy --set-object NumPy --accept --target "$KB" >/dev/null 2>&1 || true
+set +e
+out="$("$PYTHON" -m factlog amend Lib name Numpy --set-object NumPy --accept --target "$KB" 2>&1)"; rc=$?
+set -e
+[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qF "no fact matches" \
+  && ok "#220 d2: superseded tombstone is not an amend target (rc 1)" \
+  || bad "#220 d2: superseded tombstone amend contract wrong (rc=$rc, out=$out)"
 n_acc=$(grep -c "Lib,name,NumPy,sources/a.md,accepted," "$KB/facts/candidates.csv" || true)
 [ "$n_acc" -eq 1 ] && ok "#220 d2: repeated amend keeps exactly one accepted row (no duplicate)" || bad "#220 d2: duplicate accepted rows ($n_acc): $(grep name "$KB/facts/candidates.csv")"
 n_tomb=$(grep -c "Lib,name,Numpy,sources/a.md,superseded," "$KB/facts/candidates.csv" || true)
