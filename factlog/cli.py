@@ -3320,6 +3320,9 @@ def _refuse_purge_last_copy(last_copies: list[dict[str, str]], remedy: str) -> i
     the two-pass route below is a complete workaround, and its point is that the
     fact becomes VISIBLE in candidates.csv, once, before anyone deletes it.
     """
+    # Flush the plan first: stdout is block-buffered under a pipe while stderr is
+    # not, so without this the refusal lands ABOVE the plan it refuses (#457, #472).
+    sys.stdout.flush()
     print(
         f"factlog eject: refusing --purge — {len(last_copies)} fact(s) exist ONLY in "
         "runs/*.json (candidates.csv carries no row for them), so this would delete "
@@ -3642,9 +3645,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs
         # Which source refs still have a live run row behind them. Feeds the
         # "nothing left to do" filter below, and comes from common.run_cited_sources
         # rather than a local loop: that helper already IS this rule — NFC(strip(raw))
-        # cut at '#', plus merge's row-completeness test — and an open-coded third
-        # copy is how the run/csv key drift this very commit set fixes got in. It
-        # also skips a run file whose BYTES do not decode, which a hand-rolled
+        # cut at '#', plus merge's row-completeness test — and an open-coded copy is
+        # how the run/csv key drift #562 fixed got in. cmd_eject's cited set is built
+        # from the same helper (#559), so the two agree by construction. It also
+        # skips a run file whose BYTES do not decode, which a hand-rolled
         # `except (JSONDecodeError, OSError)` does not: such a file made this scan
         # die with a UnicodeDecodeError traceback.
         #
@@ -3657,7 +3661,8 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs
         # an incomplete row before writing candidates.csv (`skip incomplete row in
         # ...`), so the honest answer is no. The rows are still reachable — `eject
         # <ref>` and `eject --orphans --purge` both strip them, because neither goes
-        # through this filter.
+        # through this filter. A ref with NO csv rows at all and only incomplete run
+        # rows is not cited by either store's key, so it is not scanned at all.
         #
         # An unreadable run file makes the answer unknown, so the filter is skipped
         # entirely rather than guessed at — under-reporting an orphan whose run
@@ -3707,11 +3712,14 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs
         # only thing that keeps an on-disk orphan whose rows are ALL already
         # superseded — measured: removing it alone fails "on-disk orphan conversion
         # skipped by the idempotency filter". Given it, `bool(cited)` is redundant by
-        # construction: every ref reaching it came from cited_refs, which is built
-        # from these same rows under the same key, so `cited` cannot be empty. It
-        # stays because the emptiness is what makes the `all(...)` below meaningless,
-        # and a later change to how `matched` is seeded (e.g. #559's run-only ghost
-        # sources, which are NOT in cited_refs) would make it load-bearing again.
+        # construction, and #559's run-only ghosts did NOT change that (an earlier
+        # note here predicted they would): cited_refs is now candidates.csv UNION
+        # run_cited_sources, so a ref reaching the `cited` computation is neither on
+        # disk nor in run_source_keys, which leaves only the csv side it could have
+        # come from — and that is the very list `cited` re-derives, under the same
+        # key. It stays because the emptiness is what makes the `all(...)` below
+        # meaningless, and because a third seeding source for `matched` would make it
+        # load-bearing again.
         if not runs_unreadable:
             def _nothing_to_do(ref: str) -> bool:
                 if args.purge:
@@ -3760,11 +3768,12 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs
     def match_row(d: dict) -> bool:
         # candidates.csv: NFC-fold and cut the #anchor, but do NOT strip. The raw
         # read is deliberate and documented against: source_coverage's
-        # eject_visible_refs derives the set of refs this command can act on from
-        # THIS rule, and reasons explicitly about the whitespace gap ("eject does
-        # not [strip] ... the error runs in the SAFE direction"). Stripping here
-        # would silently widen what eject retires in candidates.csv beyond what
-        # that report promises. runs/*.json is the opposite case — see run_match.
+        # eject_visible_refs classifies each ref by THIS rule (which of the command's
+        # routes retires it), so stripping here would silently widen what eject
+        # retires in candidates.csv beyond what that report promises. runs/*.json is
+        # the opposite case — see run_match. The tombstone lookup in _scan_run_strip
+        # is a THIRD question ("does the KB hold this fact anywhere") and is keyed
+        # wider than either, on purpose: see its docstring.
         return nfc(str(d.get("source", "")).partition("#")[0]) in matched
 
     def run_match(d: dict) -> bool:
@@ -3836,7 +3845,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc, csv_refs
     action = "purge" if args.purge else "supersede"
     print(f"  candidates.csv: {len(affected)} row(s) to {action}")
     print(f"  runs/*.json: {to_strip} row(s) to strip ({to_empty} file(s) would be emptied)")
-    if last_copies:
+    if last_copies and not args.purge:
         print(
             f"  LAST COPY: {len(last_copies)} fact(s) have no candidates.csv row — "
             "a `superseded` tombstone is written for each BEFORE the strip"

@@ -69,6 +69,15 @@ re-extracts it, so use the default to retire a fact for good. Fact mode and
 source mode are mutually exclusive, and `--delete-original` is not valid with
 `--fact`.
 
+`--purge` is **refused** (exit 1, nothing changed) when a run row it would strip
+belongs to a fact `facts/candidates.csv` carries no row for — the fact's last
+copy, which `--purge` would remove with no tombstone. Fact mode reaches such a row
+because it matches the triple across every source. The refusal names the way out:
+merge first if the source is still on disk (the table is merely stale), or
+`factlog eject --orphans` if it is gone (that retires it as a tombstone), then
+re-run the purge. There is no `--force`: the point of the refusal is that the fact
+becomes visible in the table once, before anyone deletes it.
+
 By default the retired facts are marked `superseded` (kept in
 `facts/candidates.csv` for audit) and the original under `sources/` is **kept** —
 so it would be re-converted on the next `/factlog sync`; pass `--delete-original`
@@ -106,9 +115,9 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 The field is omitted from the summary line when there is nothing to report, and
 it never affects the exit code (`--strict` still fires on text gaps only).
 
-#### How you clean it up depends on whether the row survived in `candidates.csv`
+#### How you clean it up depends on which eject route retires the ref
 
-The report says which of the two each source is, so follow the line it prints.
+The report says which of the three each source is, so follow the line it prints.
 
 **(1) The row is still in `candidates.csv`.** A row a human has ruled on
 (`confirmed`/`accepted`/`needs_review`) makes the
@@ -134,8 +143,11 @@ source and retires it in one command.
 > or name the ref directly — an explicitly named ref always matches.
 
 **(2) The row is already gone.** An unruled (`candidate`) row is usually rebuilt
-away silently. `eject` builds its cited set from `facts/candidates.csv`, so it
-cannot see that source either and ends with "no orphaned sources found".
+away silently. `eject` builds its cited set from `facts/candidates.csv` **and**
+`runs/*.json`, so `--orphans` cleans this source too. Because the table holds no
+row for it, the run row IS the fact's last copy: eject writes a `superseded`
+tombstone into `candidates.csv` BEFORE stripping that row. The row you find in the
+table afterwards is one this command created, not one that survived.
 
 > What decides the class is whether the ROW SURVIVED, not the status itself. The
 > ratchet refuses the WHOLE rebuild rather than a row, so one ruled-on ghost in
@@ -145,15 +157,38 @@ cannot see that source either and ends with "no orphaned sources found".
 
 ```
   RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md
-  run rows cite 1 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)
+  run rows cite 1 missing source(s) (3 row(s) total) whose only copy is in runs/*.json; `factlog eject --orphans` retires them, writing a `superseded` tombstone into candidates.csv first
 ```
 
-> **Case (2) is not cleaned by `factlog eject --orphans`** (fixing it is tracked
-> separately in
-> [#559](https://github.com/SeoyunL/factlog-academic/issues/559)). Inspect
-> `runs/*.json` directly — or restore the deleted file under `sources/`, re-run
-> the merge, and remove it properly with
-> `factlog eject <source> --purge --delete-original`.
+> Because this is the last copy, **`--purge` is refused** (exit 1, nothing
+> changed): it is the one route that would delete the fact leaving not even a
+> tombstone. To remove it from the table as well, go in two passes — the fact
+> being visible in `candidates.csv` in between is the point of the refusal.
+>
+> ```
+> factlog eject --orphans --target <kb>            # writes superseded tombstones
+> factlog eject --orphans --purge --target <kb>    # removes them
+> ```
+>
+> Restoring the deleted file under `sources/` and re-running the merge still works
+> as a recovery path — and it is the only one that brings the fact back, so try it
+> first if the deletion was a mistake.
+
+**(3) The ref is outside the two source roots.** A path under neither `sources/`
+nor `runs/sources/` (a malformed citation such as `ghosty.md` or `/etc/passwd`) is
+never auto-selected by `--orphans`. That rule stays: a command nobody aimed must
+not delete a file nobody named. Naming the ref cleans it.
+
+```
+  RUN ROWS cite a missing source (dropped at merge, 2 row(s); outside the source roots): ghosty.md
+  run rows cite 1 missing source(s) (2 row(s) total) that --orphans will not auto-select (the ref is outside sources/ and runs/sources/); name each one: `factlog eject <ref>`
+```
+
+> This class is stripped with **no tombstone**: a `candidates.csv` source has to
+> start with one of the two roots or `validate` rejects the row, so there is no row
+> to leave behind. eject says so on stderr. An INCOMPLETE run row (one of subject,
+> relation, object, source empty) is stripped without a tombstone for the same
+> reason — merge discards such a row too.
 
 A `runs/*.json` that cannot be read is left out of the counts, and the report
 says so on stderr rather than skipping it in silence (merge cannot read it

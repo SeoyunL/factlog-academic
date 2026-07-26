@@ -68,6 +68,14 @@ factlog eject --fact "을서비스" "정식_운영" "2030.1" --purge   # delete 
 source 모드는 상호 배타적이며, `--delete-original` 은 `--fact` 와 함께 쓸 수
 없습니다.
 
+`--purge` 는 스트립할 run 행이 `facts/candidates.csv` 에 행이 없는 사실의 것일 때
+**거부됩니다**(rc 1, 무변경). 그 run 행이 그 사실의 마지막 사본이고, `--purge` 는
+툼스톤조차 남기지 않기 때문입니다. fact 모드는 트리플로 모든 소스를 가로질러
+매칭하므로 그런 행에 닿을 수 있습니다. 거부 메시지가 우회로를 알려줍니다 — 소스가
+아직 디스크에 있으면 merge 를 먼저 돌리고(표가 낡았을 뿐입니다), 소스가 없으면
+`factlog eject --orphans` 로 툼스톤을 남긴 뒤 다시 purge 하십시오. `--force` 는
+없습니다. 그 사실이 표에 한 번 눈에 보이는 것이 이 거부의 존재 이유입니다.
+
 기본적으로 폐기된 사실은 `superseded` 로 표시되어(감사 목적으로
 `facts/candidates.csv` 에 남음) `sources/` 아래 원본은 **유지**됩니다 — 따라서 다음
 `/factlog sync` 때 다시 변환됩니다. 원본까지 제거하려면 `--delete-original` 을
@@ -105,9 +113,9 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 이 필드는 해당 상태가 없으면 요약 줄에 출력되지 않으며, 종료 코드에도 영향을 주지
 않습니다(`--strict` 는 여전히 텍스트 누락에만 반응합니다).
 
-#### 정리 방법은 행이 `candidates.csv` 에 남았는지에 달려 있습니다
+#### 정리 방법은 그 ref 를 어느 경로로 은퇴시킬 수 있는지에 달려 있습니다
 
-리포트가 소스별로 둘 중 하나를 알려주므로 출력 문구를 그대로 따르면 됩니다.
+리포트가 소스별로 셋 중 하나를 알려주므로 출력 문구를 그대로 따르면 됩니다.
 
 **(1) 행이 `candidates.csv` 에 남아 있는 경우** — 사람이 판정한 행
 (`confirmed`/`accepted`/`needs_review`)은 [#218](https://github.com/SeoyunL/factlog-academic/issues/218)
@@ -132,8 +140,11 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 > ref 는 언제나 매칭됩니다.
 
 **(2) 행이 이미 사라진 경우** — 미판정(`candidate`) 행은 보통 조용히 rebuild 되어
-표에서 사라집니다. `eject` 는 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에
-이 소스를 보지 못하고 `no orphaned sources found` 로 끝납니다.
+표에서 사라집니다. `eject` 는 인용 집합을 `facts/candidates.csv` **와**
+`runs/*.json` 양쪽에서 만들므로 이 소스도 `--orphans` 로 정리됩니다. 다만 이 부류는
+표에 행이 없으므로 run 행이 그 사실의 **마지막 사본**입니다. 그래서 eject 는 run 행을
+스트립하기 **전에** `superseded` 툼스톤을 `candidates.csv` 에 새로 씁니다 — 정리 후
+표에서 보게 되는 그 행은 살아남은 행이 아니라 이 명령이 만든 행입니다.
 
 > 부류를 정하는 것은 status 자체가 아니라 **그 행이 표에 남았는지**입니다. 래칫은
 > 행 단위가 아니라 rebuild **전체**를 거부하므로, 같은 merge 에 판정된 유령이 하나라도
@@ -142,14 +153,38 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 
 ```
   RUN ROWS cite a missing source (dropped at merge, 3 row(s)): sources/doomed.md
-  run rows cite 1 missing source(s) (3 row(s) total); inspect runs/*.json — `factlog eject --orphans` does not cover these (see #559)
+  run rows cite 1 missing source(s) (3 row(s) total) whose only copy is in runs/*.json; `factlog eject --orphans` retires them, writing a `superseded` tombstone into candidates.csv first
 ```
 
-> **(2) 는 `factlog eject --orphans` 로 정리되지 않습니다**(수정은
-> [#559](https://github.com/SeoyunL/factlog-academic/issues/559) 에서 별도로
-> 다룹니다). `runs/*.json` 을 직접 확인하거나, 지운 파일을 `sources/` 에 되돌린 뒤
-> merge 를 다시 돌리고 `factlog eject <source> --purge --delete-original` 로 정식
-> 제거하십시오.
+> 마지막 사본이므로 **`--purge` 는 거부됩니다**(rc 1, 무변경). 툼스톤조차 남기지 않고
+> 사실을 지우는 유일한 경로이기 때문입니다. 굳이 표에서까지 지우려면 2단계로
+> 진행하십시오 — 중간에 그 사실이 `candidates.csv` 에 한 번 눈에 보이는 것이 이
+> 거부의 목적입니다.
+>
+> ```
+> factlog eject --orphans --target <kb>            # superseded 툼스톤을 씁니다
+> factlog eject --orphans --purge --target <kb>    # 그 툼스톤을 지웁니다
+> ```
+>
+> 지운 파일을 `sources/` 에 되돌리고 merge 를 다시 돌리는 복구 경로도 그대로
+> 유효합니다 — 그 편이 사실을 살릴 수 있는 유일한 방법이므로, 삭제가 실수였다면
+> eject 보다 먼저 시도하십시오.
+
+**(3) ref 가 두 소스 루트 밖인 경우** — `sources/` 도 `runs/sources/` 도 아닌
+경로(`ghosty.md`, `/etc/passwd` 같은 잘못된 인용)는 `--orphans` 가 **자동으로
+고르지 않습니다**. 아무도 지목하지 않은 파일을 자동 삭제하지 않기 위한 규칙이며
+유지됩니다. 이름을 직접 대면 정리됩니다.
+
+```
+  RUN ROWS cite a missing source (dropped at merge, 2 row(s); outside the source roots): ghosty.md
+  run rows cite 1 missing source(s) (2 row(s) total) that --orphans will not auto-select (the ref is outside sources/ and runs/sources/); name each one: `factlog eject <ref>`
+```
+
+> 이 부류는 **툼스톤 없이** 스트립됩니다 — `candidates.csv` 의 source 는 두 루트 중
+> 하나로 시작해야 하므로(그렇지 않으면 `validate` 가 거부합니다) 남길 행을 만들 수
+> 없습니다. eject 는 그 사실을 stderr 에 한 줄로 알립니다. subject·relation·object·
+> source 중 하나가 빈 **불완전한 run 행**도 같은 이유로 툼스톤 없이 스트립됩니다
+> (merge 도 그런 행은 버립니다).
 
 읽을 수 없는 `runs/*.json` 이 있으면 그 파일은 집계에서 빠지며, 빠졌다는 사실을
 stderr 에 한 줄로 알립니다(merge 역시 그 파일을 읽지 못합니다).

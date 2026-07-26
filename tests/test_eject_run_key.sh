@@ -13,9 +13,13 @@
 #   - after --purge the fact does NOT come back on the next merge (no #480 revival)
 #   - the OPPOSITE direction is unchanged: a candidates.csv row whose source
 #     carries whitespace is still NOT matched. That asymmetry is deliberate and
-#     documented — source_coverage.eject_visible_refs derives what this command
-#     can act on from the unstripped CSV rule, so widening it there would break a
-#     promise that report makes. Only the runs side moved.
+#     documented — source_coverage.eject_visible_refs classifies each ref by the
+#     unstripped CSV rule, so widening it there would break a promise that report
+#     makes. Only the runs side moved. (#559's tombstone LOOKUP asks a third,
+#     wider question — "does candidates.csv hold this fact at all", keyed on
+#     common.fact_key — so such a row is not tombstoned a second time and demoted
+#     from the human's decision. That is a different question from what this
+#     command RETIRES.)
 #   - an NFD run source (run / csv / disk in different Unicode forms) is matched
 #
 # Deterministic; no pyrewire required. Usage: bash tests/test_eject_run_key.sh
