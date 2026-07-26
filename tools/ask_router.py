@@ -84,6 +84,8 @@ from common import (  # noqa: E402
     policy_predicates,
     relation_aliases,
     run_wirelog,
+    is_sync_ignored,
+    sync_ignore_patterns,
 )
 from factlog import literal_types  # noqa: E402
 
@@ -653,6 +655,7 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
     if not patterns:
         return []
     scored: list[tuple[tuple[int, int], dict[str, object]]] = []
+    ignored_patterns = sync_ignore_patterns(root)
     for rel, label in _wiki_corpus():
         base = root / rel
         if not base.is_dir():
@@ -661,6 +664,12 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
         for path in sorted(p for p in base.rglob("*") if p.is_file()):
             # Stay within the corpus root: never follow a symlink out of the KB.
             if not path.resolve().is_relative_to(base_resolved):
+                continue
+            ref = path.relative_to(root).as_posix()
+            # Sync-ignore means this primary source is not evidence for wiki
+            # exploration either. Supplementary decisions remain searchable:
+            # they are explicitly labeled and are not source files.
+            if rel in WIKI_SOURCE_DIRS and is_sync_ignored(ref, ignored_patterns):
                 continue
             try:
                 text = path.read_text(encoding="utf-8")
@@ -681,7 +690,7 @@ def search(question: str, root: Path, *, limit: int = 10) -> list[dict[str, obje
                 last_end = end - 1
                 excerpt = "\n".join(_sanitize(line_text) for line_text in lines[start:end])
                 result = {
-                    "file": path.relative_to(root).as_posix(),
+                    "file": ref,
                     "line": i + 1,
                     "excerpt": excerpt,
                     "dir": label,

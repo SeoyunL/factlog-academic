@@ -193,6 +193,21 @@ if router search "WidgetX ToolA" | "$PYTHON" -c "import json,sys; d=json.load(sy
 # pages/ candidate content must never appear in search citations
 if router search "Datadog may_use" | grep -qE 'pages/|may_use|confidence=0\.40'; then bad "pages/ candidate content leaked into search results"; else ok "pages/ excluded from search (no candidate leak)"; fi
 
+# Sync-ignored primary sources are deliberately excluded from wiki evidence;
+# non-ignored sources and supplementary decisions retain their normal behavior.
+mkdir -p "$KB/sources/drafts" "$KB/runs/sources/drafts"
+printf 'syncignoretoken appears only in an ignored original.\n' > "$KB/sources/drafts/ignored.md"
+printf 'syncignoretoken appears only in an ignored conversion.\n' > "$KB/runs/sources/drafts/ignored.md"
+printf 'syncignoretoken appears in the retained source.\n' > "$KB/sources/retained.md"
+printf -- '- drafts/**\n' >> "$KB/policy/sync-ignore.md"
+ignored_search="$(router search "syncignoretoken")"
+if printf '%s' "$ignored_search" | grep -qE 'sources/drafts/ignored\.md|runs/sources/drafts/ignored\.md'; then bad "sync-ignored sources leaked into search results"; else ok "sync-ignored sources excluded from search results"; fi
+if printf '%s' "$ignored_search" | grep -qF 'sources/retained.md'; then ok "non-ignored source remains in search results"; else bad "non-ignored source missing from search results"; fi
+if router wiki "syncignoretoken" | grep -qE 'sources/drafts/ignored\.md|runs/sources/drafts/ignored\.md'; then bad "sync-ignored sources leaked into rendered wiki evidence"; else ok "sync-ignored sources excluded from rendered wiki evidence"; fi
+rm -rf "$KB/sources/drafts" "$KB/runs/sources/drafts" "$KB/sources/retained.md"
+# Keep later search cases independent from this filtering fixture.
+sed -i.bak '/^- drafts\/\*\*$/d' "$KB/policy/sync-ignore.md" && rm -f "$KB/policy/sync-ignore.md.bak"
+
 wiki_out="$(router wiki "what uses FastAPI" --reason "unknown entity")"
 if printf '%s' "$wiki_out" | grep -qF "UNVERIFIED — wiki exploration"; then ok "wiki answer carries UNVERIFIED marker"; else bad "wiki answer missing UNVERIFIED marker"; fi
 if printf '%s' "$wiki_out" | grep -qF "sources/acme.md:"; then ok "wiki answer cites a source path:line"; else bad "wiki answer missing citation"; fi
