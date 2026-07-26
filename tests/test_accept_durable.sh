@@ -97,7 +97,7 @@ printf '[{"subject":"A","relation":"knows","object":"B","source":"sources/a.md",
 FACTLOG_ROOT="$KB7" "$PY" tools/merge_candidates.py --wiki "$KB7" >/dev/null 2>&1
 printf 'not json{' > "$KB7/runs/broken.json"
 ERR="$(FACTLOG_ROOT="$KB7" "$PY" -m factlog accept A knows B 2>&1 >/dev/null)"
-printf '%s' "$ERR" | grep -q "could not read broken.json"   && ok "(i) a corrupt run file is warned about, not silently skipped"   || bad "(i) a corrupt run file was skipped silently"
+printf '%s' "$ERR" | grep -q "could not read broken.json to record the decision"   && ok "(i) a corrupt run file is warned about, not silently skipped"   || bad "(i) a corrupt run file was skipped silently"
 
 # --- #563: a run file whose BYTES do not decode gets the same treatment -------------
 # (i) above only covers a file that decodes but is not JSON, so it stays green even
@@ -129,7 +129,7 @@ ERR11="$(FACTLOG_ROOT="$KB11" "$PY" -m factlog accept A knows B 2>&1 >/dev/null)
   || bad "(m) accept died on an undecodable run file (rc $RC11)"
 printf '%s' "$ERR11" | grep -q "Traceback" && bad "(m) accept printed a traceback: $ERR11" \
   || ok "(m) accept printed no traceback"
-printf '%s' "$ERR11" | grep -q "could not read bin.json" \
+printf '%s' "$ERR11" | grep -q "could not read bin.json to record the decision" \
   && ok "(m) the undecodable file is named on stderr" \
   || bad "(m) the undecodable file was skipped silently: $ERR11"
 [ "$(status_in "$KB11/runs/good.json" A)" = "accepted" ] \
@@ -142,12 +142,30 @@ ERR12="$(FACTLOG_ROOT="$KB12" "$PY" -m factlog reject A knows B 2>&1 >/dev/null)
   || bad "(m) reject died on an undecodable run file (rc $RC12)"
 printf '%s' "$ERR12" | grep -q "Traceback" && bad "(m) reject printed a traceback: $ERR12" \
   || ok "(m) reject printed no traceback"
-printf '%s' "$ERR12" | grep -q "could not read bin.json" \
+printf '%s' "$ERR12" | grep -q "could not read bin.json to record the decision" \
   && ok "(m) reject names the undecodable file on stderr" \
   || bad "(m) reject skipped the undecodable file silently: $ERR12"
 [ "$(status_in "$KB12/runs/good.json" A)" = "superseded" ] \
   && ok "(m) the rejection still reached the readable run file" \
   || bad "(m) the rejection never reached the readable run file"
+
+# --- #566: the warning must not promise a repair the CLI does not perform ----------
+# It used to say "re-run after fixing the file". Measured: after the run above the CSV
+# row is no longer pending, so the same command answers "nothing to change" and the
+# restored file's row stays `candidate` -- the decision never arrives. Pin the absence
+# of the promise AND the behaviour that makes it false, so nobody re-adds the text.
+printf '%s' "$ERR11" | grep -q "re-run after fixing" \
+  && bad "(n) the warning promises a re-run remedy the CLI does not perform: $ERR11" \
+  || ok "(n) the warning makes no re-run promise"
+# the user "fixes" bin.json back to its pre-decision contents, as the old text invited
+printf '[{"subject":"A","relation":"knows","object":"B","source":"sources/a.md","status":"candidate","confidence":0.9,"note":""}]' > "$KB11/runs/bin.json"
+OUT_N="$(FACTLOG_ROOT="$KB11" "$PY" -m factlog accept A knows B 2>&1)"
+printf '%s' "$OUT_N" | grep -q "not pending" \
+  && ok "(n) re-running the same command changes nothing (why the promise was false)" \
+  || bad "(n) re-running behaved differently than measured: $OUT_N"
+[ "$(status_in "$KB11/runs/bin.json" A)" = "candidate" ] \
+  && ok "(n) the repaired file's row is still NOT reached by a re-run" \
+  || bad "(n) a re-run did reach the repaired file -- re-check the docs' claim"
 
 # merge itself still refuses this KB, which is why accept must not rely on merge as a
 # backstop: while the undecodable file is there, candidates.csv is never rebuilt.
