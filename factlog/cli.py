@@ -3767,9 +3767,14 @@ def cmd_eject(args: argparse.Namespace) -> int:
         for jp in sorted(runs_dir.glob("*.json")):
             try:
                 data = json.loads(jp.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as exc:
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
                 # surface it: a corrupt run file left behind could still hold the
                 # retired rows and resurrect them on a later merge.
+                # UnicodeDecodeError belongs here for the same reason
+                # common.run_cited_sources lists it: a runs/*.json whose BYTES do
+                # not decode is one more shape of "unreadable", and leaving it out
+                # made the whole eject die with a traceback on such a file instead
+                # of naming it and finishing the rest of the job.
                 print(f"factlog eject: skipping unreadable {jp.name}: {exc}", file=sys.stderr)
                 continue
             if not isinstance(data, list):

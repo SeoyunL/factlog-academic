@@ -386,6 +386,21 @@ printf '%s' "$out" | grep -qF "1 orphaned source(s)" \
   && ok "a needs_review ghost row is still an orphan to clean" || bad "needs_review row treated as already retired: $out"
 grep -q "sources/ghosty.md,superseded," "$KB/facts/candidates.csv" && ok "the needs_review row is retired" || bad "needs_review row left alone"
 
+# --- an undecodable runs/*.json does not crash the scan ------------------------
+# The filter's run-row lookup goes through common.run_cited_sources, which skips
+# a file whose BYTES do not decode; a local `except (JSONDecodeError, OSError)`
+# let that raise UnicodeDecodeError straight out of the command.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/ghosty.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+printf '\377\376\000binary' > "$KB/runs/bin.json"
+set +e; out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -qF "Traceback" \
+  && ok "an undecodable runs/*.json does not crash --orphans" || bad "undecodable run file crashed the scan (rc=$rc): $out"
+grep -q "sources/ghosty.md,superseded," "$KB/facts/candidates.csv" \
+  && ok "the orphan is still retired alongside an unreadable run file" \
+  || bad "unreadable run file blocked the retirement"
+
 # --- validation: --orphans cannot mix with source(s) or --fact ----------------
 KB="$(mktemp -d)/wiki"; seed_orphans "$KB"
 set +e
