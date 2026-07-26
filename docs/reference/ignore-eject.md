@@ -133,7 +133,7 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 
 #### 정리 방법은 그 ref 를 어느 경로로 은퇴시킬 수 있는지에 달려 있습니다
 
-리포트가 소스별로 셋 중 하나를 알려주므로 출력 문구를 그대로 따르면 됩니다.
+리포트가 소스별로 넷 중 하나를 알려주므로 출력 문구를 그대로 따르면 됩니다.
 
 **(1) 행이 `candidates.csv` 에 남아 있는 경우** — 사람이 판정한 행
 (`confirmed`/`accepted`/`needs_review`)은 [#218](https://github.com/SeoyunL/factlog-academic/issues/218)

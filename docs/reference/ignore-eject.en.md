@@ -136,7 +136,7 @@ it never affects the exit code (`--strict` still fires on text gaps only).
 
 #### How you clean it up depends on which eject route retires the ref
 
-The report says which of the three each source is, so follow the line it prints.
+The report says which of the four each source is, so follow the line it prints.
 
 **(1) The row is still in `candidates.csv`.** A row a human has ruled on
 (`confirmed`/`accepted`/`needs_review`) makes the
