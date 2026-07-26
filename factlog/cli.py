@@ -3252,6 +3252,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     """Source / --orphans mode: select source refs to retire (and their on-disk
     conversions/originals). Returns an _EjectSelection, or an int exit code when
     nothing matches. Prints the plan exactly as cmd_eject used to inline."""
+    import json
     import re
     from pathlib import Path, PurePosixPath
 
@@ -3453,6 +3454,28 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         #    erring toward retention.
         from pathlib import PurePosixPath
 
+        # Which source refs still have a live run row behind them, keyed the way the
+        # runs matcher (and merge) keys them. Feeds the "nothing left to do" filter
+        # below. An unreadable run file makes the answer unknown, so the filter is
+        # skipped entirely rather than guessed at — under-reporting an orphan whose
+        # run backing we cannot see would be the same silent gap #562 is about. The
+        # retirement tail reports the unreadable file itself.
+        run_source_keys: set[str] = set()
+        runs_unreadable = False
+        runs_dir_ = target / "runs"
+        if runs_dir_.is_dir():
+            for jp in sorted(runs_dir_.glob("*.json")):
+                try:
+                    data = json.loads(jp.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    runs_unreadable = True
+                    continue
+                if not isinstance(data, list):
+                    continue  # non-candidate run JSON (e.g. a policy-gen object)
+                for item in data:
+                    if isinstance(item, dict):
+                        run_source_keys.add(fact_key("", "", "", str(item.get("source", "")))[3])
+
         src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
         for ref in all_refs:
             if ref.startswith("runs/sources/"):
@@ -3474,10 +3497,47 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                     matched.add(ref)  # cited conversion whose file is already gone
             elif ref.startswith("sources/") and ref not in disk_refs:
                 matched.add(ref)  # a directly-cited source whose file is gone
+        # Drop refs this command has NOTHING left to do for. A retired orphan is
+        # cited only by its own tombstones, and the scan above re-matched those
+        # forever: `eject --orphans` re-reported and re-superseded the same rows on
+        # every run, so a user could never reach "the KB is clean" (#562). This is a
+        # filter on the AUTOMATIC selection only — an explicit `eject <ref>` still
+        # matches, because naming a ref is a deliberate request, not a scan result.
+        #
+        # The predicate has to be NARROW. "no run rows and every csv row superseded"
+        # alone is VACUOUSLY true of a ref with NO csv rows, which is the commonest
+        # --orphans case: an uncited conversion still on disk whose original was
+        # deleted. Measured with both guards below removed, test_eject_cmd fails
+        # "uncited orphan conversion kept" — the exact regression this shape avoids.
+        #
+        # Two guards cover that one shape, on purpose. The on-disk check is the wider
+        # statement (a file left to delete IS work, whatever the rows say) and is the
+        # only thing that keeps an on-disk orphan whose rows are ALL already
+        # superseded — measured: removing it alone fails "on-disk orphan conversion
+        # skipped by the idempotency filter". Given it, `bool(cited)` is redundant by
+        # construction: every ref reaching it came from cited_refs, which is built
+        # from these same rows under the same key, so `cited` cannot be empty. It
+        # stays because the emptiness is what makes the `all(...)` below meaningless,
+        # and a later change to how `matched` is seeded (e.g. #559's run-only ghost
+        # sources, which are NOT in cited_refs) would make it load-bearing again.
+        if not runs_unreadable:
+            def _nothing_to_do(ref: str) -> bool:
+                if ref in disk_refs:
+                    return False  # a conversion/original is still there to delete
+                if ref in run_source_keys:
+                    return False  # a live run row would re-assert it on the next merge
+                cited = [
+                    r for r in rows
+                    if nfc(str(r.get("source", "")).partition("#")[0]) == ref
+                ]
+                return bool(cited) and all(r.get("status") == "superseded" for r in cited)
+
+            matched = {ref for ref in matched if not _nothing_to_do(ref)}
         if not matched:
             print(
                 "factlog eject: no orphaned sources found "
-                "(every cited source's original is present)."
+                "(every cited source's original is present, or its rows are "
+                "already retired)."
             )
             return 0
         print(f"factlog eject (KB: {target}): orphan scan — {len(matched)} orphaned source(s)")
@@ -3597,6 +3657,10 @@ def cmd_eject(args: argparse.Namespace) -> int:
     flat conversion (runs/sources/report.md) keeps the legacy basename match since
     its path records no subdir. Either way it errs toward keeping. Renaming an
     original on disk without re-ingesting counts as orphaning its old conversion.
+    A ref the command has nothing left to do for — no file on disk, no runs/*.json
+    row, and citing rows that are all already `superseded` — is skipped, so
+    re-running --orphans reaches "no orphaned sources found" instead of re-retiring
+    its own tombstones forever. Naming such a ref explicitly still matches it.
 
     Fact mode (`eject --fact SUBJECT RELATION OBJECT`, repeatable) — retires
     candidate rows matching the given (subject, relation, object) triple(s)

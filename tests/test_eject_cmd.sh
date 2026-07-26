@@ -289,6 +289,60 @@ set +e; out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF "no orphaned sources found" && ok "clean KB: orphan scan finds none (rc 0)" || bad "clean KB orphan scan misbehaved (rc=$rc)"
 grep -q "sources/ok.md,confirmed," "$KB/facts/candidates.csv" && ok "clean KB: rows untouched" || bad "clean KB rows changed"
 
+# --- --orphans is IDEMPOTENT: a retired orphan is not re-reported (#562) -------
+# The scan used to re-match its own tombstones forever, so a user could never see
+# "the KB is clean". A ref with nothing left to do — no file on disk, no run row,
+# every citing row already superseded — is skipped by the AUTOMATIC selection.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/ghosty.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out1="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out1" | grep -qF "1 orphaned source(s)" && ok "first --orphans retires the ghost citation" || bad "first --orphans did not find the ghost"
+grep -q "sources/ghosty.md,superseded," "$KB/facts/candidates.csv" && ok "ghost row superseded" || bad "ghost row not superseded"
+set +e; out2="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 0 ] && printf '%s' "$out2" | grep -qF "no orphaned sources found" \
+  && ok "re-running --orphans on a tombstone-only KB reports none (idempotent)" \
+  || bad "--orphans re-reported its own tombstone (rc=$rc): $out2"
+grep -q "sources/ghosty.md,superseded," "$KB/facts/candidates.csv" && ok "tombstone kept for audit" || bad "tombstone lost on the second run"
+
+# The filter is on the SCAN only: naming the ref explicitly still matches it.
+set +e; out3="$("$PYTHON" -m factlog eject sources/ghosty.md --purge --target "$KB" 2>&1)"; rc=$?; set -e
+[ "$rc" -eq 0 ] && printf '%s' "$out3" | grep -qF "1 matched source ref(s)" \
+  && ok "an explicitly named retired ref still matches" || bad "explicit eject of a tombstoned ref stopped working (rc=$rc)"
+grep -q "sources/ghosty.md" "$KB/facts/candidates.csv" && bad "explicit --purge left the tombstone" || ok "explicit --purge removes the tombstone"
+
+# --- boundary: a LIVE run row means there IS work to do, so still an orphan ----
+# (otherwise the next merge rebuilds the very row the tombstone retires)
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/ghosty.md,superseded,0.9,' > "$KB/facts/candidates.csv"
+printf '[{"subject":"A","relation":"rel","object":"B","source":"sources/ghosty.md","status":"candidate","confidence":0.9,"note":""}]\n' \
+  > "$KB/runs/r.json"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "1 orphaned source(s)" && ok "a tombstoned ref with a live run row is still scanned" || bad "run-backed tombstone wrongly skipped: $out"
+[ ! -f "$KB/runs/r.json" ] && ok "its run row is stripped" || bad "run row survived"
+
+# --- boundary: a mix of tombstoned and live rows is still an orphan ------------
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '%s\n%s\n%s\n' "$H" \
+  'A,rel,B,sources/ghosty.md,superseded,0.9,' \
+  'C,rel,D,sources/ghosty.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog eject --orphans --target "$KB" >/dev/null 2>&1
+grep -q "C,rel,D,sources/ghosty.md,superseded," "$KB/facts/candidates.csv" \
+  && ok "a ref with one live row among tombstones is still retired" || bad "live row left un-retired beside a tombstone"
+
+# --- boundary: an orphaned conversion still ON DISK is cleaned up even when ----
+# --- every citing row is already superseded (there is a FILE left to delete) ---
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '<!-- ingested-by-factlog | source: gone.pdf | converter: pdftotext | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/gone.md"   # sources/gone.pdf never exists -> orphan
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/gone.md,superseded,0.9,' > "$KB/facts/candidates.csv"
+"$PYTHON" -m factlog eject --orphans --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/gone.md" ] && ok "orphan conversion on disk is deleted even with only superseded rows" \
+  || bad "on-disk orphan conversion skipped by the idempotency filter"
+
 # --- validation: --orphans cannot mix with source(s) or --fact ----------------
 KB="$(mktemp -d)/wiki"; seed_orphans "$KB"
 set +e
