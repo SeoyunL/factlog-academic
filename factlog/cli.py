@@ -859,7 +859,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     pending = [r for r in rows if (r.get("status") or "").strip() in want]
     if not pending:
         print(f"factlog review (KB: {target}): no pending facts ({'/'.join(sorted(want))})")
-        print(f"  snapshot: {digest}")
+        if args.status is None:
+            print(f"  snapshot: {digest}")
         return 0
 
     def fld(r: dict, k: str) -> str:
@@ -873,7 +874,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     print(f"factlog review (KB: {target}): {len(groups)} pending fact(s), {len(pending)} row(s)")
     for (s, rel, o) in sorted(groups):
         grp = groups[(s, rel, o)]
-        print(f"  [{number[(s, rel, o)]}] {s} / {rel} / {o}")
+        prefix = f"[{number[(s, rel, o)]}] " if args.status is None else ""
+        print(f"  {prefix}{s} / {rel} / {o}")
         for r in sorted(grp, key=lambda r: fld(r, "source")):
             src = fld(r, "source")
             status = (r.get("status") or "").strip()
@@ -882,9 +884,10 @@ def cmd_review(args: argparse.Namespace) -> int:
             print(f"    ← {src or '(no source)'}  [{status}, conf {conf}]")
             if note:
                 print(f"        note: {note}")
-    print(f"  snapshot: {digest}")
     print("  decide with: factlog accept <subject> <relation> <object>   (or: factlog reject ...)")
-    print(f"  or by reviewed number: factlog accept --number 1 --from {digest}")
+    if args.status is None:
+        print(f"  snapshot: {digest}")
+        print(f"  or by reviewed number: factlog accept --number 1 --from {digest}")
     return 0
 
 

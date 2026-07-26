@@ -33,6 +33,8 @@ factlog reject --number 2 --from sha256:... --dry-run
 `--number` is repeatable and requires the digest printed by `review`. The
 digest covers the complete normalized pending queue; if it is missing,
 malformed, or stale, the command changes nothing and asks you to review again.
+Only the default all-pending `factlog review` prints numbers and a digest;
+`review --status ...` is a display filter and is not numeric approval evidence.
 Numbers are only available with `--from`, so the existing positional triple
 and `-` wildcard syntax remains unchanged and cannot be mixed with numbered
 selection. A fresh snapshot proves that the human saw this queue; it is not an

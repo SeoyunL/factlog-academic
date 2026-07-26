@@ -98,6 +98,10 @@ KB="$(mktemp -d)/wiki"; seed "$KB"
 out="$("$PYTHON" -m factlog review --status candidate --target "$KB" 2>&1)"
 printf '%s' "$out" | grep -qF "X / rel / Y" && ! printf '%s' "$out" | grep -qF "X / rel / Z" \
   && ok "review --status candidate shows only candidate rows" || bad "--status filter wrong"
+before="$(cat "$KB/facts/candidates.csv")"
+! printf '%s' "$out" | grep -qF "snapshot:" && ! printf '%s' "$out" | grep -qF "[1] X / rel / Y" \
+  && [ "$(cat "$KB/facts/candidates.csv")" = "$before" ] \
+  && ok "filtered review cannot serve as numbered approval evidence" || bad "filtered review exposed numbered approval evidence"
 
 # --- accept --dry-run changes nothing ----------------------------------------
 before="$(cat "$KB/facts/candidates.csv")"
