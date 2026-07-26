@@ -3252,11 +3252,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     """Source / --orphans mode: select source refs to retire (and their on-disk
     conversions/originals). Returns an _EjectSelection, or an int exit code when
     nothing matches. Prints the plan exactly as cmd_eject used to inline."""
-    import json
     import re
     from pathlib import Path, PurePosixPath
 
-    from factlog.common import fact_key
+    from factlog.common import fact_key, run_cited_sources
 
     # Tie each runs/sources/ conversion to the original it was made from, read
     # from the ingest provenance header ("... | source: <name> | ..."). Two
@@ -3454,27 +3453,22 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         #    erring toward retention.
         from pathlib import PurePosixPath
 
-        # Which source refs still have a live run row behind them, keyed the way the
-        # runs matcher (and merge) keys them. Feeds the "nothing left to do" filter
-        # below. An unreadable run file makes the answer unknown, so the filter is
-        # skipped entirely rather than guessed at — under-reporting an orphan whose
-        # run backing we cannot see would be the same silent gap #562 is about. The
+        # Which source refs still have a live run row behind them. Feeds the
+        # "nothing left to do" filter below, and comes from common.run_cited_sources
+        # rather than a local loop: that helper already IS this rule — NFC(strip(raw))
+        # cut at '#', plus merge's row-completeness test — and an open-coded third
+        # copy is how the run/csv key drift this very commit set fixes got in. It
+        # also skips a run file whose BYTES do not decode, which a hand-rolled
+        # `except (JSONDecodeError, OSError)` does not: such a file made this scan
+        # die with a UnicodeDecodeError traceback.
+        #
+        # An unreadable run file makes the answer unknown, so the filter is skipped
+        # entirely rather than guessed at — under-reporting an orphan whose run
+        # backing we cannot see would be the same silent gap #562 is about. The
         # retirement tail reports the unreadable file itself.
-        run_source_keys: set[str] = set()
-        runs_unreadable = False
-        runs_dir_ = target / "runs"
-        if runs_dir_.is_dir():
-            for jp in sorted(runs_dir_.glob("*.json")):
-                try:
-                    data = json.loads(jp.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    runs_unreadable = True
-                    continue
-                if not isinstance(data, list):
-                    continue  # non-candidate run JSON (e.g. a policy-gen object)
-                for item in data:
-                    if isinstance(item, dict):
-                        run_source_keys.add(fact_key("", "", "", str(item.get("source", "")))[3])
+        runs_unreadable_names: list[str] = []
+        run_source_keys = set(run_cited_sources(target, unreadable=runs_unreadable_names))
+        runs_unreadable = bool(runs_unreadable_names)
 
         src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
         for ref in all_refs:
@@ -3507,8 +3501,9 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # The predicate has to be NARROW. "no run rows and every csv row superseded"
         # alone is VACUOUSLY true of a ref with NO csv rows, which is the commonest
         # --orphans case: an uncited conversion still on disk whose original was
-        # deleted. Measured with both guards below removed, test_eject_cmd fails
-        # "uncited orphan conversion kept" — the exact regression this shape avoids.
+        # deleted. Measured with both guards below removed, test_eject_cmd fails BOTH
+        # "on-disk orphan conversion skipped by the idempotency filter" AND "uncited
+        # orphan conversion kept" — the two regressions this shape avoids.
         #
         # Two guards cover that one shape, on purpose. The on-disk check is the wider
         # statement (a file left to delete IS work, whatever the rows say) and is the

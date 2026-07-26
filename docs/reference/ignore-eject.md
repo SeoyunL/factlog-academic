@@ -120,6 +120,13 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
   run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv still carries; retire them with `factlog eject --orphans`
 ```
 
+> `--orphans` 는 **할 일이 남지 않은 ref** — 디스크에 지울 파일이 없고, `runs/*.json`
+> 행도 없고, 인용 행이 전부 `superseded` — 를 자동 스캔에서 건너뜁니다. 그래서 같은
+> 명령을 다시 돌리면 `no orphaned sources found` 로 끝나 "이제 깨끗하다" 를 확인할 수
+> 있습니다. 위 (1) 은 run 행이 아직 남아 있으므로 여기에 해당하지 않습니다. 툼스톤까지
+> 없애려면 `--purge` 를 주거나(`--orphans --purge` 도 됩니다) ref 를 직접 이름
+> 대십시오 — 명시적으로 지정한 ref 는 언제나 매칭됩니다.
+
 **(2) 행이 이미 사라진 경우** — 미판정(`candidate`) 행은 보통 조용히 rebuild 되어
 표에서 사라집니다. `eject` 는 인용 집합을 `facts/candidates.csv` 에서 만들기 때문에
 이 소스를 보지 못하고 `no orphaned sources found` 로 끝납니다.

@@ -363,6 +363,29 @@ set +e; out="$("$PYTHON" -m factlog eject --orphans --purge --target "$KB" 2>&1)
 [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF "no orphaned sources found" \
   && ok "a second --orphans --purge reports none (idempotent)" || bad "--orphans --purge is not idempotent (rc=$rc): $out"
 
+# --- the filter's run-row check uses MERGE's key, so a padded run source counts -
+# Same defect class as the runs matcher (#562): keyed without strip, this ghost
+# looks row-less, the ref is skipped, and the live run row survives to be merged.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/ghosty.md,superseded,0.9,' > "$KB/facts/candidates.csv"
+printf '[{"subject":"A","relation":"rel","object":"B","source":"sources/ghosty.md  ","status":"candidate","confidence":0.9,"note":""}]\n' \
+  > "$KB/runs/r.json"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "1 orphaned source(s)" \
+  && ok "a PADDED live run row keeps the ref in the scan (merge's key)" || bad "padded run source made the filter skip a live ref: $out"
+[ ! -f "$KB/runs/r.json" ] && ok "the padded run row is stripped" || bad "padded run row survived: $(cat "$KB/runs/r.json")"
+
+# --- only 'superseded' counts as retired: a needs_review ghost is still cleaned -
+# docs/reference/ignore-eject.md class (1) promises this ref gets tidied up.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/ghosty.md,needs_review,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "1 orphaned source(s)" \
+  && ok "a needs_review ghost row is still an orphan to clean" || bad "needs_review row treated as already retired: $out"
+grep -q "sources/ghosty.md,superseded," "$KB/facts/candidates.csv" && ok "the needs_review row is retired" || bad "needs_review row left alone"
+
 # --- validation: --orphans cannot mix with source(s) or --fact ----------------
 KB="$(mktemp -d)/wiki"; seed_orphans "$KB"
 set +e

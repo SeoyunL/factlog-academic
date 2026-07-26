@@ -1315,7 +1315,11 @@ the human the planned changes whenever the triple is not fully specified.
   retires one fact by triple (repeatable) and leaves the source in place;
   `--orphans` auto-detects
   every orphaned source (a conversion whose original is gone, or a cited source
-  with no file). By default retired rows are marked `superseded` and the user's
+  with no file) — except one it has nothing left to do for (no file on disk, no
+  `runs/*.json` row, every citing row already `superseded`), so re-running it
+  reaches `no orphaned sources found` instead of re-retiring its own tombstones;
+  `--purge` and an explicitly named ref still act on such a ref.
+  By default retired rows are marked `superseded` and the user's
   original under `sources/` is left alone — **`--purge` deletes the rows outright
   and `--delete-original` deletes the user's file**, so use `--dry-run` and get
   explicit human agreement before either.
