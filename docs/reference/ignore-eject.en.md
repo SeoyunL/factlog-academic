@@ -181,14 +181,32 @@ not delete a file nobody named. Naming the ref cleans it.
 
 ```
   RUN ROWS cite a missing source (dropped at merge, 2 row(s); outside the source roots): ghosty.md
-  run rows cite 1 missing source(s) (2 row(s) total) that --orphans will not auto-select (the ref is outside sources/ and runs/sources/); name each one: `factlog eject <ref>`
+  run rows cite 1 missing source(s) (2 row(s) total) that --orphans will not auto-select (the ref is outside sources/ and runs/sources/); name each one: `factlog eject <ref>` — which strips those rows with NO tombstone, since candidates.csv cannot hold such a source, and exits 1 to say the fact is gone
 ```
 
-> This class is stripped with **no tombstone**: a `candidates.csv` source has to
-> start with one of the two roots or `validate` rejects the row, so there is no row
-> to leave behind. eject says so on stderr. An INCOMPLETE run row (one of subject,
-> relation, object, source empty) is stripped without a tombstone for the same
-> reason — merge discards such a row too.
+> This class is stripped with **no tombstone**, and the command **exits 1**: a
+> `candidates.csv` source has to start with one of the two roots or `validate`
+> rejects the row, so there is no row to leave behind and the fact is simply gone.
+> eject says so on stderr and in the exit code. An INCOMPLETE run row (one of
+> subject, relation, object, source empty) is stripped without a tombstone for the
+> same reason — merge discards such a row too.
+
+**(4) `candidates.csv` holds the ref under a whitespace-differing `source`.**
+eject's `candidates.csv` matcher does not strip that value, while merge and eject's
+own runs matcher do. On a row where those two disagree, eject neither retires the
+row (no match) nor writes a tombstone (the table does hold the fact) — so it
+**leaves the run rows in place and exits 1**.
+
+```
+  RUN ROWS cite a missing source (1 row(s); candidates.csv holds it under a whitespace-differing source): sources/ghosty.md
+  run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv holds under a `source` differing only by whitespace; `factlog eject --orphans` LEAVES those run rows in place (exit 1) rather than delete what merge rebuilds from — fix the whitespace in candidates.csv, then re-run it
+```
+
+> Stripping those rows would delete the artifact
+> [#218](https://github.com/SeoyunL/factlog-academic/issues/218) names as the
+> recovery path, leaving no way to re-assert a row a human ruled on: every later
+> merge REFUSES the rebuild, and the only exit is `--allow-delete`, which kills the
+> row. What needs fixing is the whitespace in `candidates.csv`, not the command.
 
 A `runs/*.json` that cannot be read is left out of the counts, and the report
 says so on stderr rather than skipping it in silence (merge cannot read it

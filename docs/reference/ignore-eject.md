@@ -177,14 +177,31 @@ coverage: 12 source(s); 11 covered, 1 text gap(s), 0 binary needing conversion, 
 
 ```
   RUN ROWS cite a missing source (dropped at merge, 2 row(s); outside the source roots): ghosty.md
-  run rows cite 1 missing source(s) (2 row(s) total) that --orphans will not auto-select (the ref is outside sources/ and runs/sources/); name each one: `factlog eject <ref>`
+  run rows cite 1 missing source(s) (2 row(s) total) that --orphans will not auto-select (the ref is outside sources/ and runs/sources/); name each one: `factlog eject <ref>` — which strips those rows with NO tombstone, since candidates.csv cannot hold such a source, and exits 1 to say the fact is gone
 ```
 
-> 이 부류는 **툼스톤 없이** 스트립됩니다 — `candidates.csv` 의 source 는 두 루트 중
-> 하나로 시작해야 하므로(그렇지 않으면 `validate` 가 거부합니다) 남길 행을 만들 수
-> 없습니다. eject 는 그 사실을 stderr 에 한 줄로 알립니다. subject·relation·object·
-> source 중 하나가 빈 **불완전한 run 행**도 같은 이유로 툼스톤 없이 스트립됩니다
-> (merge 도 그런 행은 버립니다).
+> 이 부류는 **툼스톤 없이** 스트립되고 **rc 1** 로 끝납니다 — `candidates.csv` 의
+> source 는 두 루트 중 하나로 시작해야 하므로(그렇지 않으면 `validate` 가 거부합니다)
+> 남길 행을 만들 수 없고, 그래서 그 사실은 KB 에서 사라집니다. eject 는 stderr 한
+> 줄과 종료 코드 양쪽으로 알립니다. subject·relation·object·source 중 하나가 빈
+> **불완전한 run 행**도 같은 이유로 툼스톤 없이 스트립됩니다(merge 도 그런 행은
+> 버립니다).
+
+**(4) `candidates.csv` 가 공백만 다른 source 로 그 ref 를 들고 있는 경우** — eject 의
+`candidates.csv` 매처는 값을 strip 하지 않는데 merge 와 eject 의 runs 매처는 합니다.
+그 차이로 갈리는 행에서는 eject 가 그 행을 은퇴시키지도(매칭 실패), 툼스톤을 쓰지도
+(표가 이미 그 사실을 들고 있음) 못합니다. 그래서 run 행을 **그대로 두고 rc 1** 로
+끝냅니다.
+
+```
+  RUN ROWS cite a missing source (1 row(s); candidates.csv holds it under a whitespace-differing source): sources/ghosty.md
+  run rows cite 1 missing source(s) (1 row(s) total) that candidates.csv holds under a `source` differing only by whitespace; `factlog eject --orphans` LEAVES those run rows in place (exit 1) rather than delete what merge rebuilds from — fix the whitespace in candidates.csv, then re-run it
+```
+
+> run 행까지 지우면 [#218](https://github.com/SeoyunL/factlog-academic/issues/218) 이
+> "복구 아티팩트"로 지목한 바로 그 행이 사라져, 사람이 판정한 행을 다시 주장할 방법이
+> 없어집니다 — 이후 merge 가 **영구히 rebuild 를 거부**하고 탈출구는 그 행을 죽이는
+> `--allow-delete` 뿐입니다. 고칠 곳은 명령이 아니라 `candidates.csv` 의 공백입니다.
 
 읽을 수 없는 `runs/*.json` 이 있으면 그 파일은 집계에서 빠지며, 빠졌다는 사실을
 stderr 에 한 줄로 알립니다(merge 역시 그 파일을 읽지 못합니다).

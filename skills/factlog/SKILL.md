@@ -801,14 +801,18 @@ it is correctly reported as a gap, not "covered":
   This category reads the run files directly and surfaces the path with its row
   count on stderr (`RUN ROWS cite a missing source (dropped at merge, N
   row(s)): ...`), plus one summary field that is omitted entirely when the count
-  is 0. The remedy printed with it depends on the source, in three classes: a ghost
+  is 0. The remedy printed with it depends on the source, in four classes: a ghost
   row a human has ruled on survives in `candidates.csv` (the #218 ratchet refuses
   the rebuild), so `factlog eject --orphans` retires that row; an unruled row is
   rebuilt away, and the same command still retires it because it reads
   `runs/*.json` too — writing a `superseded` tombstone into `candidates.csv` first,
   since that run row is the fact's last copy; a ref that is not under `sources/` or
   `runs/sources/` is never auto-selected (a malformed citation must not be ejected
-  by a command nobody aimed), so the hint says to name it: `factlog eject <ref>`.
+  by a command nobody aimed), so the hint says to name it: `factlog eject <ref>`,
+  which strips those rows with no tombstone and exits 1; and a ref `candidates.csv`
+  holds under a `source` differing only by whitespace, where eject retires nothing,
+  writes no tombstone, and deliberately leaves the run rows in place (exit 1) — the
+  fix there is the whitespace, not the command.
   A run file that cannot be read is left out of the counts and named on stderr
   rather than skipped in silence. See `docs/reference/ignore-eject.md`.
 
@@ -1329,7 +1333,12 @@ the human the planned changes whenever the triple is not fully specified.
   that row is the last copy. Two shapes get no tombstone and are stripped anyway,
   because `validate` would reject the row: an incomplete run row (one of
   subject/relation/object/source empty — merge drops it too) and a ref outside
-  `sources/`/`runs/sources/`. Both are named on stderr.
+  `sources/`/`runs/sources/`; both are named on stderr, and the second **exits 1**
+  because the fact leaves the KB. A run row is instead HELD BACK (also exit 1) when
+  `candidates.csv` holds its fact under a `source` differing only by whitespace:
+  eject's table matcher does not strip while merge does, so nothing would retire
+  that row, and stripping the run row would delete the only artifact merge can
+  rebuild from (#218). Fix the whitespace, then re-run.
   By default retired rows are marked `superseded` and the user's
   original under `sources/` is left alone — **`--purge` deletes the rows outright
   and `--delete-original` deletes the user's file**, so use `--dry-run` and get
