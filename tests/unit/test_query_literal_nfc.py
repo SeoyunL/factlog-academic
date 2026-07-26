@@ -109,6 +109,38 @@ class TestGateDoesNotReject:
         assert ok, code
 
 
+class TestSubjectGateFoldsForms:
+    """Subject membership must fold before relation/count matching runs."""
+
+    def test_nfd_stored_subject_passes_an_nfc_relation_query(self):
+        subject = "연구자"
+        facts = [_fact(nfd(subject), nfc(REL), nfc(OBJ))]
+        ok, code, _reason = classify_query(
+            _relation_query(nfc(subject), nfc(REL), nfc(OBJ)), facts, policy_program=""
+        )
+        assert ok, code
+
+    def test_nfc_stored_subject_passes_an_nfd_relation_query(self):
+        subject = "연구자"
+        facts = [_fact(nfc(subject), nfc(REL), nfc(OBJ))]
+        ok, code, _reason = classify_query(
+            _relation_query(nfd(subject), nfc(REL), nfc(OBJ)), facts, policy_program=""
+        )
+        assert ok, code
+
+    def test_nfd_stored_subject_passes_an_nfc_count_query(self):
+        subject = "연구자"
+        facts = [_fact(nfd(subject), nfc(REL), nfc(OBJ))]
+        ok, code, _reason = classify_query(_count_query(nfc(subject), nfc(REL)), facts, policy_program="")
+        assert ok, code
+
+    def test_nfc_stored_subject_passes_an_nfd_count_query(self):
+        subject = "연구자"
+        facts = [_fact(nfc(subject), nfc(REL), nfc(OBJ))]
+        ok, code, _reason = classify_query(_count_query(nfd(subject), nfc(REL)), facts, policy_program="")
+        assert ok, code
+
+
 class TestRelationNameGateFoldsForms:
     """The relation-name acceptance gate must fold too, not just the object check.
 

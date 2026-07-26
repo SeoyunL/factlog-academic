@@ -1850,7 +1850,12 @@ def classify_query(
         if not all(_is_valid_arg(arg) for arg in args):
             return False, QUERY_MALFORMED, "relation arguments must be variables or quoted strings"
         subject, relation, object_ = args
-        if not _is_variable(subject) and _arg_value(subject) not in entities:
+        # Entity membership must fold on both sides too: accepted facts can carry
+        # an NFD-authored subject, while an NFC query must still reach the folded
+        # relation/object match below.
+        if not _is_variable(subject) and _canonical_value(_arg_value(subject)) not in {
+            _canonical_value(entity) for entity in entities
+        }:
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation subject is not an accepted entity: {_arg_value(subject)}"
         # Read relation_aliases() at most once per relation query and hand it to
         # _relation_match_count below: the canonical-acceptance check here and the
@@ -1903,7 +1908,11 @@ def classify_query(
         if not all(_is_valid_arg(arg) for arg in args):
             return False, QUERY_MALFORMED, "count arguments must be variables or quoted strings"
         subject, relation = args
-        if not _is_variable(subject) and _arg_value(subject) not in entities:
+        # Keep count aligned with relation queries: a subject is accepted across
+        # NFC/NFD forms before the relation-name check runs.
+        if not _is_variable(subject) and _canonical_value(_arg_value(subject)) not in {
+            _canonical_value(entity) for entity in entities
+        }:
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"count subject is not an accepted entity: {_arg_value(subject)}"
         # Same folded membership as the relation branch above — a count over an
         # NFD-stored relation must accept an NFC-typed query name (#213).
