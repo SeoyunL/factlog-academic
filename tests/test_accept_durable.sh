@@ -99,6 +99,70 @@ printf 'not json{' > "$KB7/runs/broken.json"
 ERR="$(FACTLOG_ROOT="$KB7" "$PY" -m factlog accept A knows B 2>&1 >/dev/null)"
 printf '%s' "$ERR" | grep -q "could not read broken.json"   && ok "(i) a corrupt run file is warned about, not silently skipped"   || bad "(i) a corrupt run file was skipped silently"
 
+# --- #563: a run file whose BYTES do not decode gets the same treatment -------------
+# (i) above only covers a file that decodes but is not JSON, so it stays green even
+# with UnicodeDecodeError missing from the except tuple. Crashing is not a safety net:
+# candidates.csv is written BEFORE runs are touched, so the traceback lands a TORN
+# write -- the decision in the CSV, never in runs/*.json -- and which way it goes is
+# decided by the glob order of an unrelated file name. Pin all three: rc 0, the file
+# named on stderr, and the decision still reaching the run files that DO read.
+status_in() {  # $1=run file $2=subject -> that file's status for the subject
+  "$PY" -c "
+import json, sys
+for it in json.load(open(sys.argv[1], encoding='utf-8')):
+    if it.get('subject') == sys.argv[2]: print(it['status']); raise SystemExit
+print('MISSING')" "$1" "$2"
+}
+undecodable_kb() {  # a merged KB, then an undecodable run file sorting BEFORE good.json
+  local kb; kb="$(mktemp -d)/kb"
+  "$PY" -m factlog init --target "$kb" >/dev/null
+  printf 'a\n' > "$kb/sources/a.md"
+  printf '[{"subject":"A","relation":"knows","object":"B","source":"sources/a.md","status":"candidate","confidence":0.9,"note":""}]' > "$kb/runs/good.json"
+  FACTLOG_ROOT="$kb" "$PY" tools/merge_candidates.py --wiki "$kb" >/dev/null 2>&1
+  printf '\377\376\000binary' > "$kb/runs/bin.json"
+  echo "$kb"
+}
+
+KB11="$(undecodable_kb)"
+ERR11="$(FACTLOG_ROOT="$KB11" "$PY" -m factlog accept A knows B 2>&1 >/dev/null)"; RC11=$?
+[ "$RC11" -eq 0 ] && ok "(m) accept survives an undecodable run file (rc 0)" \
+  || bad "(m) accept died on an undecodable run file (rc $RC11)"
+printf '%s' "$ERR11" | grep -q "Traceback" && bad "(m) accept printed a traceback: $ERR11" \
+  || ok "(m) accept printed no traceback"
+printf '%s' "$ERR11" | grep -q "could not read bin.json" \
+  && ok "(m) the undecodable file is named on stderr" \
+  || bad "(m) the undecodable file was skipped silently: $ERR11"
+[ "$(status_in "$KB11/runs/good.json" A)" = "accepted" ] \
+  && ok "(m) the decision still reached the readable run file" \
+  || bad "(m) the decision never reached the readable run file"
+
+KB12="$(undecodable_kb)"
+ERR12="$(FACTLOG_ROOT="$KB12" "$PY" -m factlog reject A knows B 2>&1 >/dev/null)"; RC12=$?
+[ "$RC12" -eq 0 ] && ok "(m) reject survives an undecodable run file (rc 0)" \
+  || bad "(m) reject died on an undecodable run file (rc $RC12)"
+printf '%s' "$ERR12" | grep -q "Traceback" && bad "(m) reject printed a traceback: $ERR12" \
+  || ok "(m) reject printed no traceback"
+printf '%s' "$ERR12" | grep -q "could not read bin.json" \
+  && ok "(m) reject names the undecodable file on stderr" \
+  || bad "(m) reject skipped the undecodable file silently: $ERR12"
+[ "$(status_in "$KB12/runs/good.json" A)" = "superseded" ] \
+  && ok "(m) the rejection still reached the readable run file" \
+  || bad "(m) the rejection never reached the readable run file"
+
+# merge itself still refuses this KB, which is why accept must not rely on merge as a
+# backstop: while the undecodable file is there, candidates.csv is never rebuilt.
+# Pin ONLY the failure and the untouched CSV. Do NOT pin a traceback or a message
+# shape: load_candidate_files raising raw instead of its intended SystemExit is a
+# separate follow-up, and pinning the current form would force that fix to edit this.
+KB13="$(undecodable_kb)"
+BEFORE13="$(cat "$KB13/facts/candidates.csv")"
+FACTLOG_ROOT="$KB13" "$PY" tools/merge_candidates.py --wiki "$KB13" >/dev/null 2>&1; RC13=$?
+[ "$RC13" -ne 0 ] && ok "(m) merge still fails on an undecodable run file" \
+  || bad "(m) merge unexpectedly succeeded on an undecodable run file"
+[ "$(cat "$KB13/facts/candidates.csv")" = "$BEFORE13" ] \
+  && ok "(m) the failed merge left candidates.csv untouched" \
+  || bad "(m) the failed merge rewrote candidates.csv"
+
 # --- #477: a decision must not retire a CONFIRMED fact through runs/*.json ----------
 # A KB predating #233 holds the human decision in candidates.csv while runs/*.json still
 # says `candidate`. If reject writes its decision into run rows it did not decide, the

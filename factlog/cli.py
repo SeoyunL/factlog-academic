@@ -1328,10 +1328,16 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
     for jp in sorted(runs_dir.glob("*.json")):
         try:
             data = json.loads(jp.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
             # merge fails loudly on a corrupt run file; here, skipping it silently would
             # let accept report success while the decision never reached the file that
             # holds this triple -- the durability the change promises, quietly lost.
+            # Bytes that do not decode are unreadable in exactly the same way as invalid
+            # JSON, so they get the same answer -- the rule common.run_cited_sources
+            # already states. Letting UnicodeDecodeError escape was not a stricter safety
+            # net: _apply_review_status writes candidates.csv BEFORE calling this, so the
+            # crash landed a TORN write (decision in the CSV, never in runs/*.json) whose
+            # outcome hung on the glob order of an unrelated file name (#563).
             print(
                 f"factlog: warning — could not read {jp.name} to record the decision "
                 f"({exc}); if it holds this fact, re-run after fixing the file.",
