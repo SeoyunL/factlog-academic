@@ -1344,10 +1344,18 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             # status forever. Repairing two stores that already drifted apart is a
             # separate command's job, not this one's -- as the docstring above says
             # about #477. No such command exists yet (#566).
+            # "can take", not "would take": whether the stale row actually wins a
+            # from-scratch rebuild depends on glob order. Measured -- an unreadable
+            # zzz_bin.json alongside a readable aaa_good.json that DID take the
+            # decision rebuilds as `accepted`; the same file named aaa_bin.json
+            # rebuilds as `candidate`. Stating it unconditionally would be the same
+            # class of unverified promise as the re-run remedy this replaced, so the
+            # rule merge actually applies is named instead of a guaranteed outcome.
             print(
                 f"factlog: warning — could not read {jp.name} to record the decision "
                 f"({exc}); any row it holds for this fact keeps its old status, and a "
-                "candidates.csv rebuilt from runs/*.json alone would take that old status.",
+                "candidates.csv rebuilt from runs/*.json alone can take that old status "
+                "(merge keeps whichever run file comes first in glob order).",
                 file=sys.stderr,
             )
             continue
@@ -1722,10 +1730,14 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 # No "re-run after fixing the file" here either, and amend is the
                 # blunter case: candidates.csv already carries the NEW triple, so the
                 # same command comes back `no fact matches` on the old one (#566).
+                # "can take", not "would take", for the reason spelled out in
+                # _apply_status_to_runs: the stale row only wins a from-scratch
+                # rebuild when it sorts first.
                 print(
                     f"factlog: warning — could not read {jp.name} to record the edit "
                     f"({exc}); any row it holds for this fact keeps its old value, and a "
-                    "candidates.csv rebuilt from runs/*.json alone would take that old value.",
+                    "candidates.csv rebuilt from runs/*.json alone can take that old value "
+                    "(merge keeps whichever run file comes first in glob order).",
                     file=sys.stderr,
                 )
                 continue

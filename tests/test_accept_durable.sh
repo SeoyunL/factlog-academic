@@ -132,6 +132,18 @@ printf '%s' "$ERR11" | grep -q "Traceback" && bad "(m) accept printed a tracebac
 printf '%s' "$ERR11" | grep -q "could not read bin.json to record the decision" \
   && ok "(m) the undecodable file is named on stderr" \
   || bad "(m) the undecodable file was skipped silently: $ERR11"
+# The CONSEQUENCE clause is pinned too, not just the prefix. It is what docs/ and
+# SKILL.md quote as "what the warning says" and build a paragraph on, so deleting it
+# would gut the user-facing half of this fix while every other assertion here stayed
+# green. "can take", not "would take": measured, the stale row only wins a rebuild
+# when it sorts first (an unreadable zzz_bin.json next to a readable aaa_good.json
+# that took the decision rebuilds as `accepted`), so the guarantee is conditional and
+# the wording names merge's actual rule instead.
+printf '%s' "$ERR11" | grep -q "keeps its old status" \
+  && printf '%s' "$ERR11" | grep -q "rebuilt from runs/\*.json alone can take that old status" \
+  && printf '%s' "$ERR11" | grep -q "whichever run file comes first in glob order" \
+  && ok "(m) the warning states the consequence, conditionally" \
+  || bad "(m) the warning lost or overstated its consequence clause: $ERR11"
 [ "$(status_in "$KB11/runs/good.json" A)" = "accepted" ] \
   && ok "(m) the decision still reached the readable run file" \
   || bad "(m) the decision never reached the readable run file"
@@ -149,11 +161,40 @@ printf '%s' "$ERR12" | grep -q "could not read bin.json to record the decision" 
   && ok "(m) the rejection still reached the readable run file" \
   || bad "(m) the rejection never reached the readable run file"
 
+# the "can take ... whichever comes first in glob order" clause above is a claim about
+# merge, so pin the behaviour it rests on: the SAME repair loses or survives purely by
+# the unreadable file's name. If merge's tie-break ever stops being glob order, this
+# goes red and the warning has to be reworded with it.
+glob_order_case() {  # $1 = name of the unreadable file -> rebuilt status
+  local kb row; kb="$(mktemp -d)/kb"
+  "$PY" -m factlog init --target "$kb" >/dev/null
+  printf 'a\n' > "$kb/sources/a.md"
+  row='[{"subject":"A","relation":"knows","object":"B","source":"sources/a.md","status":"candidate","confidence":0.9,"note":""}]'
+  printf '%s' "$row" > "$kb/runs/aaa_good.json"
+  printf '%s' "$row" > "$kb/runs/$1"
+  FACTLOG_ROOT="$kb" "$PY" tools/merge_candidates.py --wiki "$kb" >/dev/null 2>&1
+  printf '\377\376\000binary' > "$kb/runs/$1"
+  FACTLOG_ROOT="$kb" "$PY" -m factlog accept A knows B >/dev/null 2>&1
+  printf '%s' "$row" > "$kb/runs/$1"          # user restores pre-decision contents
+  rm "$kb/facts/candidates.csv"               # rebuild from runs/*.json alone
+  FACTLOG_ROOT="$kb" "$PY" tools/merge_candidates.py --wiki "$kb" >/dev/null 2>&1
+  csv_status "$kb" A
+}
+[ "$(glob_order_case aaa_bin.json)" = "candidate" ] \
+  && ok "(m) a stale row sorting FIRST does take over a from-scratch rebuild" \
+  || bad "(m) the stale row did not win despite sorting first -- reword the warning"
+[ "$(glob_order_case zzz_bin.json)" = "accepted" ] \
+  && ok "(m) sorting later, it does not -- which is why the warning says 'can', not 'will'" \
+  || bad "(m) the decision was lost even though the stale row sorted later"
+
 # --- #566: the warning must not promise a repair the CLI does not perform ----------
 # It used to say "re-run after fixing the file". Measured: after the run above the CSV
 # row is no longer pending, so the same command answers "nothing to change" and the
 # restored file's row stays `candidate` -- the decision never arrives. Pin the absence
 # of the promise AND the behaviour that makes it false, so nobody re-adds the text.
+# This deliberately pins DEFECTIVE behaviour: it is the whole reason the warning is
+# worded the way it is. If #566 adds a recovery path, these assertions and the warning
+# text must be revised TOGETHER -- do not just delete the asserts to get back to green.
 printf '%s' "$ERR11" | grep -q "re-run after fixing" \
   && bad "(n) the warning promises a re-run remedy the CLI does not perform: $ERR11" \
   || ok "(n) the warning makes no re-run promise"

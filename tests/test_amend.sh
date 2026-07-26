@@ -137,8 +137,21 @@ grep -qF '"object": "Falcon"' "$KB/runs/r.json" && ok "#563 the edit still reach
 printf '%s' "$err" | grep -q "could not read bin.json to record the edit" \
   && ok "#563 the undecodable file is named on stderr even when another run file took the edit" \
   || bad "#563 the undecodable file was skipped silently or misworded: $err"
+# the CONSEQUENCE clause is pinned too, not just the prefix -- docs/ and SKILL.md quote
+# it as "what the warning says", so deleting it would gut the user-facing half of this
+# fix with every other assertion still green. "can take", not "would take": the stale
+# row only wins a from-scratch rebuild when it sorts first (pinned in
+# tests/test_accept_durable.sh).
+printf '%s' "$err" | grep -q "keeps its old value" \
+  && printf '%s' "$err" | grep -qF "rebuilt from runs/*.json alone can take that old value" \
+  && printf '%s' "$err" | grep -q "whichever run file comes first in glob order" \
+  && ok "#563 the amend warning states the consequence, conditionally" \
+  || bad "#563 the amend warning lost or overstated its consequence clause: $err"
 # --- #566: no false re-run remedy. Measured: candidates.csv already carries the NEW
 # triple, so re-running the same command answers `no fact matches` on the old one.
+# This deliberately pins DEFECTIVE behaviour: it is why the warning is worded as it is.
+# If #566 adds a recovery path, these assertions and the warning text must be revised
+# TOGETHER -- do not just delete the asserts to get back to green.
 printf '%s' "$err" | grep -q "re-run after fixing" \
   && bad "#566 the warning promises a re-run remedy amend does not perform: $err" \
   || ok "#566 the warning makes no re-run promise"

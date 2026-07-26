@@ -743,7 +743,8 @@ and `accept`/`reject`/`amend` name it:
 ```text
 factlog: warning — could not read <file> to record the decision (...); any row it
 holds for this fact keeps its old status, and a candidates.csv rebuilt from
-runs/*.json alone would take that old status.
+runs/*.json alone can take that old status (merge keeps whichever run file comes
+first in glob order).
 ```
 
 (`amend` prints the same line with "to record the edit" / "old value".)
@@ -763,9 +764,12 @@ runs/*.json alone would take that old status.
 - What you may say is what the warning says: that file was not updated, its row (if
   any) still holds the old status, and merge settles a fact claimed by two run files
   by **glob order, not status** — so once `candidates.csv` is rebuilt from
-  `runs/*.json` alone, the stale row wins and silently downgrades the accept or
-  revives the rejected fact. The safe ordering is to repair unreadable run files
-  **before** any rebuild.
+  `runs/*.json` alone, the stale row **can** win and silently downgrade the accept or
+  revive the rejected fact. Say "can", not "will": it wins only if that file sorts
+  first, and the decision survives if an earlier file already took it. Do not compute
+  which case the user is in and declare them safe — the answer hinges on an unrelated
+  file name. The safe ordering is to repair unreadable run files **before** any
+  rebuild.
 - The `--dry-run` preview does not run this pass at all, so it never reports an
   unreadable file. A clean `--dry-run` is not evidence that the real run will be
   clean.

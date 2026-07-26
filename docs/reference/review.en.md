@@ -39,15 +39,18 @@ warning claims exactly three things and no more:
 
 - that file was not updated;
 - if it held a row for this fact, that row keeps its **old status (or old value)**;
-- a `candidates.csv` rebuilt from `runs/*.json` alone would let that old status
-  **win**, because when two run files claim one fact merge keeps **whichever comes
-  first in glob order**, not the one with the strongest status.
+- a `candidates.csv` rebuilt from `runs/*.json` alone **can** let that old status
+  win — it does when **that file comes first in glob order**, because when two run
+  files claim one fact merge keeps whichever comes first, not the one with the
+  strongest status. If it sorts later and an earlier file did take the decision, the
+  decision survives. The outcome therefore turns on an unrelated file name, which is
+  why it is better to repair the file than to work out which case you are in.
 
 The last point is why the warning matters. While the old `candidates.csv` is still
 there merge preserves the human decision from it and nothing looks wrong; the moment
 that file is deleted and re-merged — i.e. exactly the case where `runs/*.json` is the
-only evidence, the case this dual write exists for — the `accepted` row is silently
-downgraded to `candidate`, or the fact you rejected comes back.
+only evidence, the case this dual write exists for — the `accepted` row can be
+silently downgraded to `candidate`, or the fact you rejected can come back.
 
 **Re-running the same command does not reach that row.** The first run already moved
 the `candidates.csv` row out of pending, so `accept`/`reject` report `nothing to
