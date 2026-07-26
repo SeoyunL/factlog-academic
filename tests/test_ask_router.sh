@@ -643,6 +643,65 @@ if hrouter render 'relation("존재안함", "게재연도", O)?' | grep -qF "pos
 if [ -f "$HKB/facts/query.dl" ]; then bad "#189: coverage-hint path wrote facts/query.dl"; else ok "#189: coverage-hint path never writes facts/query.dl"; fi
 if [ "$(cat "$HKB/facts/accepted.dl")" = "$HACCEPTED_BEFORE" ]; then ok "#189: coverage-hint path leaves accepted.dl unchanged"; else bad "#189: coverage-hint path mutated accepted.dl"; fi
 
+# --- #279: renderer row caps are explicit and escapable ---------------------
+# Test below / at / above the same small cap directly.  This keeps the boundary
+# deterministic without making the fixture depend on the production default.
+if "$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+from ask_router import render_engine_answer, render_wiki_answer
+
+rows = [['S1', 'rel', 'O1'], ['S2', 'rel', 'O2'], ['S3', 'rel', 'O3']]
+for count in (1, 2):
+    out = render_engine_answer('relation(S, rel, O)?', rows[:count], limit=2)
+    assert f'rows: {count}' in out, out
+    assert 'more rows' not in out, out
+out = render_engine_answer('relation(S, rel, O)?', rows, limit=2)
+assert 'rows: 3' in out, out
+assert 'S1, rel, O1' in out and 'S2, rel, O2' in out and 'S3, rel, O3' not in out, out
+assert '… 1 more rows (full output: --all)' in out, out
+all_out = render_engine_answer('relation(S, rel, O)?', rows, limit=None)
+assert all(row[0] in all_out for row in rows), all_out
+assert 'more rows' not in all_out, all_out
+
+# One varying column is an indexed, lossless projection: the fixed positions and
+# every varying value are printed, so the displayed triples can be reconstructed.
+same_tail = [['S1', 'rel', 'O'], ['S2', 'rel', 'O'], ['S3', 'rel', 'O']]
+signals = {('S1', 'rel', 'O'): {'sources': 1, 'source_paths': ['sources/a.md'], 'confidence': '0.90', 'stale': False}}
+compact = render_engine_answer('relation(S, rel, O)?', same_tail, signals, limit=None)
+assert 'rows differ only at column 0; fixed: [1] rel, [2] O' in compact, compact
+assert all(f'    - S{i}' in compact for i in range(1, 4)), compact
+assert '← sources/a.md' in compact, compact
+
+results = [
+    {'file': 'sources/a.md', 'line': 1, 'dir': 'sources', 'excerpt': 'alpha'},
+    {'file': 'sources/b.md', 'line': 2, 'dir': 'sources', 'excerpt': 'beta'},
+    {'file': 'sources/c.md', 'line': 3, 'dir': 'sources', 'excerpt': 'gamma'},
+]
+grounding = [
+    {'subject': 'S1', 'relation': 'rel', 'object': 'O1'},
+    {'subject': 'S2', 'relation': 'rel', 'object': 'O2'},
+    {'subject': 'S3', 'relation': 'rel', 'object': 'O3'},
+]
+wiki = render_wiki_answer('question', 'reason', results, grounding, limit=2, total_results=3)
+assert 'UNVERIFIED — wiki exploration' in wiki, wiki
+assert 'WARNING: unverified candidates' in wiki, wiki
+assert wiki.index('WARNING: unverified candidates') < wiki.index('VERIFIED — engine (grounding'), wiki
+assert 'grounding facts: 3' in wiki and 'S3, rel, O3' not in wiki, wiki
+assert '[sources/a.md:1] (sources)' in wiki and '[sources/b.md:2] (sources)' in wiki and '[sources/c.md:3]' not in wiki, wiki
+assert wiki.count('… 1 more rows (full output: --all)') == 2, wiki
+" 2>/dev/null; then ok "#279: engine/wiki caps retain totals, citations, warning, and explicit truncation"; else bad "#279: renderer cap contract failed"; fi
+
+# JSON search keeps its existing `results` array and adds an explicit total and
+# truncation flag. --all is the lossless escape hatch for the same corpus.
+LKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$LKB" >/dev/null
+for n in $(seq 1 11); do printf 'limitprobe item %s\n' "$n" > "$LKB/sources/$n.md"; done
+limited_search="$("$PYTHON" "$ROUTER" search limitprobe --target "$LKB")"
+all_search="$("$PYTHON" "$ROUTER" search limitprobe --all --target "$LKB")"
+if printf '%s' "$limited_search" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); assert len(d['results']) == 10 and d['total'] == 11 and d['truncated'] is True"; then ok "#279: JSON search exposes capped total and truncation"; else bad "#279: JSON search cap metadata missing/wrong"; fi
+if printf '%s' "$all_search" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); assert len(d['results']) == 11 and d['total'] == 11 and d['truncated'] is False"; then ok "#279: JSON search --all returns every excerpt"; else bad "#279: JSON search --all is not lossless"; fi
+
 echo ""
 echo "========================================"
 echo "test_ask_router: $pass passed, $fail failed"

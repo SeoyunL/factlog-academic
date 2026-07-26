@@ -803,6 +803,11 @@ and carry no extraction confidence by construction. The verdict stays binary in
 every case. For an out-of-band trace (any fact, full or partial triple, all
 statuses), use `factlog provenance <subject> [relation] [object]`.
 
+The renderer shows at most 20 answer rows by default and explicitly reports any
+omitted rows as `… N more rows (full output: --all)` while keeping `rows: N` as
+the real total. When the full audit trail is needed, rerun the same command with
+`--all`; do not ask the model to select or summarize omitted rows.
+
 A verified-negative relation query may additionally carry an informational
 `note: ... (possible predicate mismatch): ...` line (#189). It appears **only**
 when the queried subject is an accepted entity that has **no** fact under the
@@ -827,6 +832,10 @@ about those entities — verified anchors beside the unverified prose. The
 unverified excerpts cite only source text, never `facts/accepted.dl`. Do NOT
 present wiki excerpts as confirmed facts. Optionally record the unanswered
 question for later review (a non-engine-input sink, never `facts/query.dl`):
+
+The wiki renderer applies the same explicit row cap to cited excerpts and
+engine-grounding rows. Its warning is printed before those rows, and `--all`
+returns every available excerpt and grounding fact for audit.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
