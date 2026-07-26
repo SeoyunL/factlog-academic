@@ -3172,8 +3172,13 @@ class _EjectSelection(NamedTuple):
     runs/*.json items are stripped, keyed on common.fact_key — merge's own fact
     identity — so the CLI and merge agree which run row IS this fact and a decision
     reaches the source of truth merge rebuilds candidates.csv from (#480). Source
-    mode passes the same predicate for both (it keys on the source ref, which both
-    stores already normalise identically)."""
+    mode keys both on the source ref but still passes two DIFFERENT predicates: the
+    two stores do not normalise it identically. merge strips a run row's source (its
+    loader and clean_row both do), while candidates.csv is read raw here on purpose
+    — so a run row whose source carries stray whitespace is alive to merge and was
+    invisible to an unstripped matcher (#562). run_match therefore keys on
+    common.fact_key's source component; match_row deliberately does not (the
+    asymmetry is load-bearing — see _select_eject_sources)."""
 
     match_row: Callable[[dict], bool]
     run_match: Callable[[dict], bool]
@@ -3249,6 +3254,8 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     nothing matches. Prints the plan exactly as cmd_eject used to inline."""
     import re
     from pathlib import Path, PurePosixPath
+
+    from factlog.common import fact_key
 
     # Tie each runs/sources/ conversion to the original it was made from, read
     # from the ingest provenance header ("... | source: <name> | ..."). Two
@@ -3491,7 +3498,25 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             return 1
 
     def match_row(d: dict) -> bool:
+        # candidates.csv: NFC-fold and cut the #anchor, but do NOT strip. The raw
+        # read is deliberate and documented against: source_coverage's
+        # eject_visible_refs derives the set of refs this command can act on from
+        # THIS rule, and reasons explicitly about the whitespace gap ("eject does
+        # not [strip] ... the error runs in the SAFE direction"). Stripping here
+        # would silently widen what eject retires in candidates.csv beyond what
+        # that report promises. runs/*.json is the opposite case — see run_match.
         return nfc(str(d.get("source", "")).partition("#")[0]) in matched
+
+    def run_match(d: dict) -> bool:
+        # runs/*.json: key on common.fact_key's source component — NFC-folded,
+        # STRIPPED, cut at '#' — because that is exactly what merge does to a run
+        # row's source on the way in (its loader and clean_row both strip). A run
+        # row written with a padded source ("sources/live.md  ") is therefore a
+        # LIVE row to merge, and the unstripped matcher missed it: eject reported
+        # success (and with --delete-original removed the original) while the run
+        # row survived, so the next merge either skipped it as a missing source or
+        # resurrected a purged fact (#480 shape, #562).
+        return fact_key("", "", "", str(d.get("source", "")))[3] in matched
 
     matched_sorted = sorted(matched)
     print(f"factlog eject (KB: {target}): {len(matched_sorted)} matched source ref(s):")
@@ -3538,10 +3563,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
-    # Source mode keys both stores on the source ref, which candidates.csv and
-    # runs/*.json store identically (both NFC-fold + drop the #anchor here), so the
-    # same predicate serves as the runs matcher.
-    return _EjectSelection(match_row, match_row, conv_to_delete, orig_on_disk, True)
+    return _EjectSelection(match_row, run_match, conv_to_delete, orig_on_disk, True)
 
 
 def cmd_eject(args: argparse.Namespace) -> int:
