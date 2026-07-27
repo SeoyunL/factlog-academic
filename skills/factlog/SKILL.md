@@ -324,6 +324,11 @@ source ~/.factlog-venv/bin/activate
 "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" -m factlog setup --target <kb>
 ```
 
+`~/.factlog-venv` is not just an example path: the launcher looks there by name
+when nothing on PATH carries the engine, so a later session that has lost the
+`activate` still finds the venv created here. It prints one stderr line saying so.
+No other venv location is searched.
+
 After `setup` succeeds, use the four operating commands — `/factlog sync`,
 `/factlog query`, `/factlog check`, `/factlog repair` — in that order.
 
