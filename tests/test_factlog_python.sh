@@ -347,6 +347,24 @@ case "$second" in
   *) report "second call announces it too" "named" "[$second]" ;;
 esac
 
+# The counter-example, without which the notice has no falsifiable boundary:
+# an interpreter that IS on PATH must be selected in silence.
+#
+# `source .venv/bin/activate` produces exactly this shape — VIRTUAL_ENV set AND
+# its bin/ prepended to PATH — so the branch is the common case, not an edge one.
+# The selection still carries a reason ("activated virtualenv"), so only the PATH
+# guard inside _announce_off_path keeps it quiet. Delete that guard and the two
+# assertions above still pass while every activated-venv user gets a line of
+# stderr on every plugin command.
+ONPATH="$TMP/onpath-venv"
+make_venv "$ONPATH" "onpath" "1.0.3"
+
+export PATH="$ONPATH/bin:/usr/bin:/bin"
+export VIRTUAL_ENV="$ONPATH"
+report "an on-PATH selection is made" "onpath" "$(launcher_pick)"
+report "an on-PATH selection says nothing on stderr" "" "$(launcher_stderr)"
+unset VIRTUAL_ENV
+
 # ---------------------------------------------------------------------------
 # CASE 16: the Windows `py` launcher — the version flag survives probe AND exec
 #
@@ -394,6 +412,47 @@ PYSHIM
 chmod +x "$PY_BIN/py"
 
 report "the py table ends with bare py" "engine" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 17: the Windows venv layout — `Scripts/python.exe`, not `bin/python`
+#
+# _venv_interpreter is the only reader of both fixed venv paths, and on Windows
+# it is the ONLY row that can match: `python3 -m venv` there writes
+# Scripts/python.exe and no bin/. Dropping that row leaves docs/reference/
+# windows.md documenting a path the launcher never looks at, and the whole
+# Windows story (Git Bash + $FACTLOG_PYTHON on .venv\Scripts\python.exe) rests on
+# it. Every other case here builds POSIX venvs, so the row had no coverage at all.
+#
+# Reproduced on POSIX rather than skipped: the layout is just a directory shape,
+# so a root carrying ONLY Scripts/python.exe (no bin/, so the first two rows
+# cannot match) forces the third row or nothing.
+# ---------------------------------------------------------------------------
+WIN_PAYLOAD="$TMP/win-payload"
+make_venv "$WIN_PAYLOAD" "windows-layout" "1.0.3"
+
+WIN_ROOT="$TMP/win-venv"
+mkdir -p "$WIN_ROOT/Scripts"
+cat > "$WIN_ROOT/Scripts/python.exe" <<WINPY
+#!/bin/sh
+exec "$(venv_python "$WIN_PAYLOAD")" "\$@"
+WINPY
+chmod +x "$WIN_ROOT/Scripts/python.exe"
+# No bin/ here — assert it, or a stray directory would let this case pass on the
+# POSIX rows and prove nothing.
+[ ! -e "$WIN_ROOT/bin" ] || exit 1
+
+export PATH="$DOC_BIN:/usr/bin:/bin"   # engine-less python3, so PATH cannot win
+export VIRTUAL_ENV="$WIN_ROOT"
+report "an activated venv is found through Scripts/python.exe" "windows-layout" "$(launcher_pick)"
+unset VIRTUAL_ENV
+
+# The same layout at the other fixed path, reached by a different caller.
+rm -rf "$DOC_VENV"
+mkdir -p "$DOC_VENV/Scripts"
+cp "$WIN_ROOT/Scripts/python.exe" "$DOC_VENV/Scripts/python.exe"
+chmod +x "$DOC_VENV/Scripts/python.exe"
+report "~/.factlog-venv is found through Scripts/python.exe" "windows-layout" "$(launcher_pick)"
+rm -rf "$DOC_VENV"
 
 # ---------------------------------------------------------------------------
 echo "----"
