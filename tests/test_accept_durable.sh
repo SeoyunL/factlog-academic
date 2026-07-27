@@ -205,7 +205,7 @@ glob_order_case() {  # $1 = name of the unreadable file -> rebuilt status
 # of the promise AND the behaviour that makes it false, so nobody re-adds the text.
 # These assertions pin behaviour that STAYS defective on purpose, and they survive the
 # #566 recovery path unchanged: that path is a SEPARATE command (`repair-runs`, block
-# (o) below), not a new side effect of re-running accept. Teaching accept to reconcile
+# (p) below), not a new side effect of re-running accept. Teaching accept to reconcile
 # two drifted stores is the design its own docstring refuses -- a wildcard would then
 # reach rows the gate reported as "non-pending skipped" and silently retire a confirmed
 # fact (#477). Do not "fix" these by making a re-run work.

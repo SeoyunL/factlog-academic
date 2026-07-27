@@ -1417,11 +1417,8 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             # separate command's job, not this one's -- as the docstring above says
             # about #477. That command is `factlog repair-runs` (#566): it compares the
             # two stores instead of deciding, so a CSV row that already carries the
-            # decision is its input, not its dead end. Deliberately NOT named in the
-            # warning as an unconditional remedy -- whether it reaches this row is
-            # conditional (the row must still be pending once the file is readable, the
-            # fact's CSV rows must be unambiguous, and the row must have a source file),
-            # and an unconditional promise is the class of claim this text replaced.
+            # decision is its input, not its dead end -- which is why the warning may
+            # name it where it could not name a re-run (see the fourth clause below).
             # "can take", not "would take": whether the stale row actually wins a
             # from-scratch rebuild depends on glob order. Measured -- an unreadable
             # zzz_bin.json alongside a readable aaa_good.json that DID take the
