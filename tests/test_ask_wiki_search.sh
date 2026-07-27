@@ -289,23 +289,28 @@ fi
 ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
 [ -n "$ko_answer" ] || bad "PIN2 wiki 렌더가 아무것도 출력하지 않았다"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #575 가 이를 바꾼다. 렌더된 답변에는 어떤
-# 키워드가 몇 건 매치됐는지, 리콜이 낮은지에 대한 진단이 전혀 없다 — 키워드 4개 중
-# 코퍼스에 닿은 것은 3개뿐이라는 사실이 사용자에게 보이지 않는다.
+# #575 가 이 pin 을 갱신했다 (값 갱신, pin 유지). 이전 값은 매치 실적 진단이 전혀 없는
+# 머리 블록이었다 — 키워드 4개 중 코퍼스에 닿은 것이 3개뿐이라는 사실이 사용자에게
+# 보이지 않았고, 그래서 '근거가 없다' 와 '검색이 질문을 못 알아들었다' 가 구분되지 않았다.
+# 이제 그 두 줄이 발췌 앞에 온다. 저리콜 경고는 여기 없다 — 3/4 는 임계(절반 미만)를
+# 넘지 않는다. 즉 이 pin 은 "진단이 있다" 와 "정상 리콜에서는 경고하지 않는다" 를 함께
+# 고정한다.
 #
-# 어휘 화이트리스트('keyword|키워드|recall|...')로 부재를 확인하지 않는다. 그건 진단
-# 문구가 어떤 단어를 쓰느냐에 걸린 운이고, 예상 못 한 표현이면 조용히 통과한다. 대신
-# 첫 인용 줄([ 로 시작) 이전의 머리 블록을 통째로 고정한다 — 어떤 문구로 한 줄이
-# 추가되든 형태가 달라지므로 반드시 트립한다. 이 pin 은 블록 순서 계약(마커 ->
-# question -> reason -> WARNING -> corpus 라벨 -> 발췌 수)과 발췌 수도 함께 고정한다.
+# 어휘 화이트리스트('keyword|키워드|recall|...')로 확인하지 않는다. 그건 진단 문구가
+# 어떤 단어를 쓰느냐에 걸린 운이고, 예상 못 한 표현이면 조용히 통과한다. 대신 첫 인용
+# 줄([ 로 시작) 이전의 머리 블록을 통째로 고정한다 — 어떤 문구로 한 줄이 추가되든
+# 형태가 달라지므로 반드시 트립한다. 이 pin 은 블록 순서 계약(마커 -> question ->
+# reason -> WARNING -> corpus 라벨 -> 발췌 수 -> 매치 실적)과 발췌 수도 함께 고정한다.
 ko_head="$(printf '%s\n' "$ko_answer" | awk '/^\[/{exit} {print}')"
-same "PIN2 답변 머리 블록 전체 — 매치 실적 진단이 없다 (#575 가 바꾼다)" \
+same "PIN2 답변 머리 블록 전체 — 매치 실적 진단이 붙는다 (#575 가 바꿨다)" \
   "UNVERIFIED — wiki exploration
 question: $Q_KO
 reason: unknown entity
 WARNING: unverified candidates — do not treat as confirmed facts.
 sources searched: sources, runs/sources, decisions (supplementary)
-source excerpts: 3" \
+source excerpts: 3
+keywords matched: 3/4 — 신경기호, 추론의, 근거를
+keywords unmatched: 제시하는가" \
   "$ko_head"
 
 # 진단이 인용 뒤에 덧붙는 형태여도 트립하도록 꼬리도 고정한다: 답변은 마지막 발췌의

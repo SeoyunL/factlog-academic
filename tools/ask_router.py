@@ -802,14 +802,21 @@ _ASCII_FUNCTION_WORDS = frozenset(
 )
 
 
-def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]]:
-    """Token→pattern pass shared by both stages of _keyword_patterns.
+def _tokenize_keywords(question: str, *, ascii_min: int) -> list[tuple[str, re.Pattern[str]]]:
+    """Token→(term, matcher) pass shared by both stages of _keywords.
 
     *ascii_min* is the minimum ASCII token length. Korean question function words
     are always dropped — there is no mode that keeps them (#571 기준 2).
+
+    The surface term is carried ALONGSIDE its compiled matcher, never re-derived
+    from `pattern.pattern`: the ASCII branch wraps the token in lookarounds and
+    both branches re-escape it, so unwrapping that string back into what the user
+    typed is a parser for this function's own output. The recall report (#575)
+    prints these terms, and printing `(?<!\\w)neurosymbolic(?!\\w)` at a human is
+    not a report.
     """
     seen: set[str] = set()
-    patterns: list[re.Pattern[str]] = []
+    keywords: list[tuple[str, re.Pattern[str]]] = []
     # Tokenizer captures programming-term punctuation: internal '.'/'-' (node.js,
     # 도구가) and trailing '+'/'#' (c++, c#, f#), while excluding trailing
     # sentence punctuation. Plain \w runs (incl. CJK) still tokenize as before.
@@ -828,14 +835,14 @@ def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]
                 continue
             if len(word) >= 2:
                 seen.add(word)
-                patterns.append(re.compile(re.escape(word)))
+                keywords.append((word, re.compile(re.escape(word))))
         elif len(word) >= ascii_min and word not in _ASCII_FUNCTION_WORDS:
             seen.add(word)
             # Lookaround boundaries (not \b) so punctuation-edged tokens like
             # 'c++' / 'c#' match while 'api' still does not match inside
             # 'therapist'.
-            patterns.append(re.compile(rf"(?<!\w){re.escape(word)}(?!\w)"))
-    return patterns
+            keywords.append((word, re.compile(rf"(?<!\w){re.escape(word)}(?!\w)")))
+    return keywords
 
 
 # Emitted when the question yields no keyword at all. It must NOT read like the
@@ -858,8 +865,8 @@ NO_QUERY_TERM_NOTE = (
 )
 
 
-def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
-    """Keyword matchers for the question, bilingual:
+def _keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
+    """The question's keywords as (surface term, matcher) pairs, bilingual:
 
     - ASCII words (len>2): word-boundary match — avoids substring false positives
       (e.g. 'api' in 'therapist').
@@ -879,15 +886,20 @@ def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
     on the real KB, '이 논문은?' came back citing a retracted trial as its only
     evidence, because that notice is the one file in 186 containing '논문은'.
     """
-    patterns = _tokenize_patterns(question, ascii_min=_ASCII_MIN)
-    if not patterns:
+    keywords = _tokenize_keywords(question, ascii_min=_ASCII_MIN)
+    if not keywords:
         # Recovery stage — usually it is the ASCII floor, not the stop-word list,
         # that emptied the set: 'AI 논문은 어디에 있나' loses 'ai' to len>2 and
         # everything else to the filter. Relax the floor and KEEP the filter, so
         # the question is answered by its own short content word. This is the only
         # widening; there is no stage that gives the function words back.
-        patterns = _tokenize_patterns(question, ascii_min=_ASCII_MIN_RELAXED)
-    return patterns
+        keywords = _tokenize_keywords(question, ascii_min=_ASCII_MIN_RELAXED)
+    return keywords
+
+
+def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
+    """The matchers of :func:`_keywords`, for callers that only match, never report."""
+    return [pattern for _term, pattern in _keywords(question)]
 
 
 def _sanitize(line: str) -> str:
@@ -1041,7 +1053,29 @@ def _semantic_rerank(question: str, results: list[dict[str, object]]) -> list[di
         return results  # graceful degrade to lexical ranking
 
 
-def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[str, object]]:
+def _fill_recall(
+    recall: dict[str, list[str]] | None,
+    keywords: list[tuple[str, re.Pattern[str]]],
+    pending: set[int],
+) -> None:
+    """Write the keyword recall tally into the caller's *recall* dict (#575).
+
+    Question order is preserved in both lists so the report reads back as the
+    question was typed. *pending* holds the indices still unseen in the corpus.
+    """
+    if recall is None:
+        return
+    recall["matched"] = [term for i, (term, _pat) in enumerate(keywords) if i not in pending]
+    recall["unmatched"] = [term for i, (term, _pat) in enumerate(keywords) if i in pending]
+
+
+def search(
+    question: str,
+    root: Path,
+    *,
+    limit: int | None = 10,
+    recall: dict[str, list[str]] | None = None,
+) -> list[dict[str, object]]:
     """Relevance-ranked search over the wiki corpus (sources/ + runs/sources/).
 
     Collects keyword-matched excerpts, ranks them by (directory grade, keyword
@@ -1050,9 +1084,35 @@ def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[st
     neural backend (graceful degrade when absent), and returns the top *limit*
     cited excerpts: {file, line, excerpt, dir}. Binary files (e.g. an un-converted
     .docx) are skipped.
+
+    When *recall* is given it is filled with {'matched': [...], 'unmatched': [...]}
+    — which of the question's keywords the corpus contains (#575). It is a pure
+    side report: nothing below reads it, so it cannot influence scoring, ordering
+    or the returned rows.
+
+    The tally is taken HERE, per scanned line, because every vantage point outside
+    this loop undercounts and would report a keyword the corpus HAS as absent:
+      - after the `limit` cap: the cap is a RENDER budget; a keyword whose only
+        excerpt ranks 11th disappears from a top-10 answer,
+      - from the returned rows even uncapped: the `last_end` window collapse below
+        drops an excerpt whose window overlaps the previous one, so a keyword
+        confined to those lines is in no row at all.
+    A recall report that understates recall is not a safety net; it is a second,
+    quieter version of the failure #575 exists to expose.
+
+    Being taken in the scan is also what makes the tally independent of the grade
+    key (#572): the grade decides the ORDER of the excerpts and, with the cap,
+    WHICH of them are returned, but a keyword is recorded when a line contains it,
+    before any of that. A keyword whose only occurrence is in a supplementary
+    excerpt pushed below the cap is still reported matched.
     """
-    patterns = _keyword_patterns(question)
+    keywords = _keywords(question)
+    patterns = [pattern for _term, pattern in keywords]
+    # Indices of keywords not yet seen anywhere in the corpus; the scan discharges
+    # them, and whatever remains at the end is the unmatched set.
+    pending = set(range(len(keywords)))
     if not patterns:
+        _fill_recall(recall, keywords, pending)
         return []
     scored: list[tuple[tuple[int, int, int], dict[str, object]]] = []
     ignored_patterns = sync_ignore_patterns(root)
@@ -1081,6 +1141,15 @@ def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[st
             last_end = -1  # collapse overlapping windows within this file
             for i, line in enumerate(lines):
                 low = line.lower()
+                if pending:
+                    # Only the still-unseen keywords are tested, and only until the
+                    # last one is discharged — so the common case (every keyword
+                    # found early) costs nothing, and the worst case is the same
+                    # O(len(patterns)) per line the non-matching branch below
+                    # already pays.
+                    pending.difference_update(
+                        idx for idx in tuple(pending) if keywords[idx][1].search(low)
+                    )
                 if not any(pat.search(low) for pat in patterns):
                     continue
                 start = max(0, i - _EXCERPT_WINDOW)
@@ -1097,6 +1166,9 @@ def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[st
                 }
                 coverage, frequency = _excerpt_score(excerpt, patterns)
                 scored.append(((grade, coverage, frequency), result))
+    # Taken before the sort and the cap below, so neither the grade key (#572) nor
+    # the render budget can make recall look worse than the corpus is (#575).
+    _fill_recall(recall, keywords, pending)
     # Rank by (directory grade, keyword coverage, match frequency), desc; ties keep
     # corpus/line order (stable sort over the already-ordered collection). Then take
     # the cap, then optional neural rerank.
@@ -1186,6 +1258,74 @@ def grounding_facts(question: str, accepted: list[dict[str, str]]) -> list[dict[
     return out
 
 
+# Emitted when most of the question's keywords occur nowhere in the corpus (#575).
+# It is a RETRIEVAL report, not an evidence claim: the excerpts above it are real
+# matches, but they were selected by a minority of what the user asked. Read without
+# this line, that answer is indistinguishable from "the KB has nothing on this" —
+# and for a Korean question over English sources the two are opposite conclusions,
+# one of which sends the reader away from a KB that does hold the answer.
+#
+# Distinct from the two neighbouring notices, and never a substitute for either:
+#   - 'WARNING: unverified candidates' qualifies the STANDING of what was found;
+#     this qualifies the COVERAGE of the search that found it. Both can be true.
+#   - NO_QUERY_TERM_NOTE (#571) covers the disjoint case of zero keywords, where
+#     there is no ratio to report; _recall_lines returns nothing there.
+LOW_RECALL_NOTE = (
+    "NOTE: low keyword recall — most of the question's keywords occur nowhere in "
+    "the corpus, so any excerpt above was matched by a minority of what you asked. "
+    "This is NOT 'no such source': the search may simply have missed wording the "
+    "sources use (e.g. a Korean question over English sources). Retry with terms "
+    "the sources would use."
+)
+
+
+def _recall_lines(recall: dict[str, list[str]] | None) -> list[str]:
+    """The keyword match record for the rendered block (#575).
+
+    Pure formatting over the tally :func:`search` collected; it reads nothing from
+    the corpus and decides nothing about the rows shown above it (수용 기준 6).
+
+    THRESHOLD — warn when fewer than half the keywords reached the corpus.
+    Measured on the reference KB (187 source files) to bound the choice from both
+    sides rather than tune a constant:
+      - control, every source's own title asked as the question (59 titles with
+        front-matter `title:`): 59/59 at ratio 1.00, zero unmatched keywords. That
+        control is near-tautological — the words are literally in the file — so it
+        only RULES OUT thresholds, it cannot pick one.
+      - a good question can still carry a term the search cannot reach: 'what
+        evaluation benchmarks are used for retrieval augmented generation'
+        measures 8/9. Warning on any unmatched keyword would fire here, so 'any'
+        is out. ('augmented' is not missing from the KB — it is in 5 files, all
+        under a sync-ignored path. The denominator is the SEARCHABLE corpus:
+        search() skips those files, so no excerpt can ever cite them, and calling
+        the term matched would promise evidence that cannot be produced.)
+      - the failures #575 exists to expose measure far lower: the issue's own
+        question is 2/8 (0.25) and '신경기호 추론의 근거를 어떻게 제시하는가' is
+        1/4 (0.25) — both cross-lingual, both returning excerpts that look like an
+        answer.
+    Half is the only point in the measured gap [0.25, 0.89] that states something
+    instead of fitting something: the corpus lacks more of your terms than it has,
+    so the minority is driving the answer. Integer arithmetic, no float rounding at
+    the boundary — exactly half (1/2, 2/4) does NOT warn.
+    """
+    if not recall:
+        return []
+    matched = recall.get("matched") or []
+    unmatched = recall.get("unmatched") or []
+    total = len(matched) + len(unmatched)
+    if total == 0:
+        # No keywords at all: NO_QUERY_TERM_NOTE (#571) is the diagnostic for that
+        # case and says something this one cannot. Reporting '0/0' beside it would
+        # imply a search happened.
+        return []
+    lines = [f"keywords matched: {len(matched)}/{total}" + (f" — {', '.join(matched)}" if matched else "")]
+    if unmatched:
+        lines.append(f"keywords unmatched: {', '.join(unmatched)}")
+    if len(matched) * 2 < total:
+        lines.append(LOW_RECALL_NOTE)
+    return lines
+
+
 def render_wiki_answer(
     question: str,
     reason: str,
@@ -1194,6 +1334,7 @@ def render_wiki_answer(
     did_you_mean: list[dict[str, object]] | None = None,
     limit: int | None = DEFAULT_RENDER_ROW_LIMIT,
     total_results: int | None = None,
+    recall: dict[str, list[str]] | None = None,
 ) -> str:
     """Render the UNVERIFIED — wiki exploration answer block.
 
@@ -1202,6 +1343,11 @@ def render_wiki_answer(
     *grounding* is given, the answer additionally shows a clearly-separated
     'VERIFIED — engine' block of accepted facts about the entities the question
     mentions, so verified anchors sit beside the unverified prose.
+
+    *recall* is the keyword tally from :func:`search`; when given, the block also
+    reports which of the question's keywords the corpus contains (#575). Omitting
+    it renders exactly the block this function rendered before — the match record
+    is additive, so a caller that has no tally never prints a wrong one.
     """
     lines = [
         "UNVERIFIED — wiki exploration",
@@ -1223,6 +1369,11 @@ def render_wiki_answer(
     lines.append(f"sources searched: {', '.join(label for _rel, label, _grade in _wiki_corpus())}")
     result_total = len(results) if total_results is None else total_results
     lines.append(f"source excerpts: {result_total}")
+    # Placed with 'sources searched' / 'source excerpts' — the three lines together
+    # say where the search looked, what of the question it looked for, and what it
+    # got — and BEFORE the excerpts, so the coverage caveat is read before the
+    # excerpts it qualifies, not after the reader has already drawn a conclusion.
+    lines.extend(_recall_lines(recall))
     visible_results = results if limit is None else results[:_render_limit(limit)]
     if visible_results:
         for r in visible_results:
@@ -1394,11 +1545,17 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 def cmd_wiki(args: argparse.Namespace) -> int:
     root = Path(os.environ["FACTLOG_ROOT"])
+    # The tally is corpus-wide whichever call fills it: search() records a keyword
+    # the moment a scanned line contains it, and `limit` is applied after the scan
+    # ends. So the capped call below reports the same recall the uncapped one does —
+    # the render cap cannot make recall look worse than it is (#575), which would
+    # have turned this diagnostic into the false alarm it exists to prevent.
+    recall: dict[str, list[str]] = {}
     if args.all:
-        results = search(args.text, root, limit=None)
+        results = search(args.text, root, limit=None, recall=recall)
         total_results = len(results)
     else:
-        results = search(args.text, root)
+        results = search(args.text, root, recall=recall)
         total_results = len(search(args.text, root, limit=None))
     # Grounding: accepted facts about mentioned entities (empty if not compiled yet).
     accepted = load_accepted_facts() if ACCEPTED_DL.is_file() else []
@@ -1412,6 +1569,7 @@ def cmd_wiki(args: argparse.Namespace) -> int:
         hints,
         limit=None if args.all else DEFAULT_RENDER_ROW_LIMIT,
         total_results=total_results,
+        recall=recall,
     ))
     # A wiki answer is already UNVERIFIED, but an uncompiled-but-authored policy
     # is a separate, actionable defect the author should fix — surface it (#193).
