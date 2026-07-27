@@ -117,9 +117,11 @@ factlog amend Acme uses FastApi --set-object FastAPI    # fix a typo
 는 `--set-*` 가 쓰는 **값**을 `candidates.csv` **와** 그 근거가 되는 `runs/*.json` 에
 **둘 다** 기록하므로 편집이 `/factlog sync` 후에도 살아남습니다(사실의 값은
 `runs/*.json` 에 있으며, merge 가 그로부터 `candidates.csv` 를 재구성합니다).
-`--accept` 는 `accepted` 로 승격까지 하지만, 그 **상태**는 `candidates.csv` 에만
-기록되고 `runs/*.json` 의 행은 대기 상태 그대로 남습니다(#565). 신뢰도는 편집할 수
-없습니다. `--dry-run` 으로 미리 볼 수 있습니다.
+`--accept` 는 `accepted` 로 승격까지 하며, 그 **상태**도 두 저장소에 모두 기록되므로
+`accept` 와 같은 방식으로 재머지 후에도 살아남습니다(#565). 다만 `runs/*.json` 쪽은
+`accept`/`reject` 와 같은 규칙을 따라 **대기 상태인 행만** 승격합니다 — run 행이 이미
+`confirmed` 면 그대로 둡니다. 신뢰도는 편집할 수 없습니다. `--dry-run` 으로 미리 볼
+수 있습니다.
 
 ### 상태의 종류
 
@@ -178,7 +180,11 @@ factlog amend Acme uses FastApi --set-object FastAPI    # fix a typo
 
 > **내구성(durability):** 사람이 한 `accept` 는 `reject`/`superseded` 와 같은 방식으로
 > 재머지 후에도 보존됩니다 — `/factlog sync` 가 여러분의 결정을 되돌리지 않습니다.
-> `amend --accept` 의 승격은 여기서 예외입니다: `candidates.csv` 에만 기록되므로 그
-> 파일이 남아 있는 동안에는 merge 가 보존하지만, `candidates.csv` 를 `runs/*.json`
-> 에서 처음부터 재구성하면 근거가 없습니다(#565). 상태를 내구적으로 올리려면
-> `factlog accept` 를 쓰십시오.
+> `amend --accept` 의 승격도 같습니다 — `candidates.csv` 를 지우고 `runs/*.json` 에서
+> 처음부터 재구성해도 `accepted` 로 남습니다(#565).
+>
+> 다만 `runs/*.json` 에 기록되는 것은 **대기 상태였던 행의 승격뿐**입니다. run 행이
+> 이미 `confirmed` 면 `amend --accept` 는 `candidates.csv` 만 `accepted` 로 바꾸고
+> (위 전이표) run 행은 건드리지 않습니다. 그래서 `confirmed` 판정은 `runs/*.json` 에
+> 남아 있으며, 되살리려면 `candidates.csv` 를 지우고 재머지해야 합니다. 그냥
+> 재머지하면 남아 있는 `candidates.csv` 쪽이 이겨 `accepted` 로 굳습니다.

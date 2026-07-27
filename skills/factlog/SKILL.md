@@ -735,9 +735,10 @@ triple form for any decision the human has not explicitly made.
 To correct a fact's value, `factlog amend <subject> <relation> <object>
 --set-object ... [--set-subject/--set-relation/--set-note] [--accept]` rewrites
 it durably: the **value** `--set-*` gives goes into both `candidates.csv` and the
-backing `runs/*.json`, so it survives a re-merge. `--accept` is narrower — its
-promotion is written to `candidates.csv` only, and the run row stays pending
-(#565), so use `factlog accept` when the status itself has to be durable.
+backing `runs/*.json`, so it survives a re-merge. `--accept` goes into both stores
+too and is durable the same way (#565), but in `runs/*.json` it promotes pending
+rows only — a run row already `confirmed` keeps that ruling while `candidates.csv`
+moves to `accepted`.
 `accept`/`reject` do write into `runs/*.json`, but only for the rows the gate
 actually changed, keyed like merge on `(subject, relation, object, source file)` —
 a decision on one source's row never moves another source's row, and repairing
