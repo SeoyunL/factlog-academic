@@ -67,6 +67,13 @@ KB="$_TMP_KB/wiki"
 # PIN2/PIN3/PIN6 for a reason that lives outside this file — the hardest kind of pin
 # failure to diagnose.
 rm -f "$KB"/sources/* "$KB"/decisions/*
+# The same determinism applied to policy/, which shapes the answer's TAIL: cmd_wiki
+# appends POLICY_UNCOMPILED_WARNING after the rendered block when logic-policy.md
+# defines rules and logic-policy.dl is absent. Today init's seeded logic-policy.md
+# carries no compilable rule so the warning stays silent — but that is init's seed
+# deciding this file's pinned geometry. An empty .dl makes _policy_uncompiled() False
+# unconditionally, so the tail pin below can only be tripped by the answer itself.
+: > "$KB/policy/logic-policy.dl"
 
 # --- fixture -----------------------------------------------------------------
 # Bibliographic sources are written in the exact shape `factlog zotero-import`
@@ -297,8 +304,10 @@ source excerpts: 4" \
   "$ko_head"
 
 # 진단이 인용 뒤에 덧붙는 형태여도 트립하도록 꼬리도 고정한다: 답변은 마지막 발췌의
-# 마지막 줄로 끝나고, 그 뒤에는 아무것도 없다.
-same "PIN2 답변은 마지막 발췌 줄로 끝난다 (#575 가 바꾼다)" \
+# 마지막 줄로 끝나고, 그 뒤에는 아무것도 없다. 이 pin 을 트립시키는 것은 #575 의 진단만이
+# 아니다 — cmd_wiki 는 POLICY_UNCOMPILED_WARNING 도 렌더 뒤에 덧붙일 수 있다(위 픽스처가
+# 그 경로를 닫아 두었다). 그래서 설명 문구는 원인을 #575 로 단정하지 않는다.
+same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄이 없다" \
   "    이 논문은 더 이상 인용해서는 안 된다." \
   "$(printf '%s\n' "$ko_answer" | tail -1)"
 
