@@ -187,14 +187,17 @@ glob_order_case() {  # $1 = name of the unreadable file -> rebuilt status
   && ok "(m) sorting later, it does not -- which is why the warning says 'can', not 'will'" \
   || bad "(m) the decision was lost even though the stale row sorted later"
 
-# --- #566: the warning must not promise a repair the CLI does not perform ----------
+# --- #566: the warning must not promise a repair ACCEPT does not perform -----------
 # It used to say "re-run after fixing the file". Measured: after the run above the CSV
 # row is no longer pending, so the same command answers "nothing to change" and the
 # restored file's row stays `candidate` -- the decision never arrives. Pin the absence
 # of the promise AND the behaviour that makes it false, so nobody re-adds the text.
-# This deliberately pins DEFECTIVE behaviour: it is the whole reason the warning is
-# worded the way it is. If #566 adds a recovery path, these assertions and the warning
-# text must be revised TOGETHER -- do not just delete the asserts to get back to green.
+# These assertions pin behaviour that STAYS defective on purpose, and they survive the
+# #566 recovery path unchanged: that path is a SEPARATE command (`repair-runs`, block
+# (o) below), not a new side effect of re-running accept. Teaching accept to reconcile
+# two drifted stores is the design its own docstring refuses -- a wildcard would then
+# reach rows the gate reported as "non-pending skipped" and silently retire a confirmed
+# fact (#477). Do not "fix" these by making a re-run work.
 printf '%s' "$ERR11" | grep -q "re-run after fixing" \
   && bad "(n) the warning promises a re-run remedy the CLI does not perform: $ERR11" \
   || ok "(n) the warning makes no re-run promise"
@@ -207,6 +210,35 @@ printf '%s' "$OUT_N" | grep -q "not pending" \
 [ "$(status_in "$KB11/runs/bin.json" A)" = "candidate" ] \
   && ok "(n) the repaired file's row is still NOT reached by a re-run" \
   || bad "(n) a re-run did reach the repaired file -- re-check the docs' claim"
+
+# --- #566: what DOES reach the repaired file's row ---------------------------------
+# End-to-end recovery, on the very KB block (n) left stranded: an unreadable run file at
+# decision time, the file restored afterwards, and a candidates.csv row that is no longer
+# pending. `repair-runs` does not decide anything -- it compares the two stores -- so a
+# CSV row already carrying the decision is precisely its input, where it is accept's dead
+# end. This is the loop #563 could not close and #566 opened.
+OUT_P1="$(FACTLOG_ROOT="$KB11" "$PY" -m factlog repair-runs A knows B 2>&1)"; RC_P1=$?
+[ "$RC_P1" -eq 3 ] \
+  && ok "(p) reporting alone finds the drift and says so with exit code 3" \
+  || bad "(p) the report did not signal drift (rc $RC_P1): $OUT_P1"
+[ "$(status_in "$KB11/runs/bin.json" A)" = "candidate" ] \
+  && ok "(p) reporting wrote nothing (there is no --dry-run because this IS the default)" \
+  || bad "(p) the report mode wrote to runs/*.json"
+OUT_P2="$(FACTLOG_ROOT="$KB11" "$PY" -m factlog repair-runs A knows B --apply 2>&1)"; RC_P2=$?
+[ "$RC_P2" -eq 0 ] \
+  && ok "(p) --apply exits 0 once every drifted row is repaired" \
+  || bad "(p) --apply did not report a clean repair (rc $RC_P2): $OUT_P2"
+[ "$(status_in "$KB11/runs/bin.json" A)" = "accepted" ] \
+  && ok "(p) the decision finally reaches the repaired file's row" \
+  || bad "(p) repair-runs did not reach the repaired file's row"
+# The write is not the payoff. merge settles a fact claimed by two run files by glob
+# order, not by status, and bin.json sorts BEFORE good.json -- which is exactly how block
+# (m) showed the decision being lost. Only a from-scratch rebuild proves it now survives.
+rm "$KB11/facts/candidates.csv"
+FACTLOG_ROOT="$KB11" "$PY" tools/merge_candidates.py --wiki "$KB11" >/dev/null 2>&1
+[ "$(csv_status "$KB11" A)" = "accepted" ] \
+  && ok "(p) and it survives a candidates.csv rebuilt from runs/*.json alone" \
+  || bad "(p) the repaired decision was still lost on a from-scratch rebuild"
 
 # merge itself still refuses this KB, which is why accept must not rely on merge as a
 # backstop: while the undecodable file is there, candidates.csv is never rebuilt.

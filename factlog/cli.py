@@ -1415,7 +1415,13 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             # command reports "nothing to change" and the run row keeps its old
             # status forever. Repairing two stores that already drifted apart is a
             # separate command's job, not this one's -- as the docstring above says
-            # about #477. No such command exists yet (#566).
+            # about #477. That command is `factlog repair-runs` (#566): it compares the
+            # two stores instead of deciding, so a CSV row that already carries the
+            # decision is its input, not its dead end. Deliberately NOT named in the
+            # warning as an unconditional remedy -- whether it reaches this row is
+            # conditional (the row must still be pending once the file is readable, the
+            # fact's CSV rows must be unambiguous, and the row must have a source file),
+            # and an unconditional promise is the class of claim this text replaced.
             # "can take", not "would take": whether the stale row actually wins a
             # from-scratch rebuild depends on glob order. Measured -- an unreadable
             # zzz_bin.json alongside a readable aaa_good.json that DID take the
@@ -1862,6 +1868,10 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 # No "re-run after fixing the file" here either, and amend is the
                 # blunter case: candidates.csv already carries the NEW triple, so the
                 # same command comes back `no fact matches` on the old one (#566).
+                # `factlog repair-runs` is not the answer here and must not be offered:
+                # it reconciles a STATUS by comparing the two stores, and what this
+                # warning is about is a VALUE, which candidates.csv alone now holds.
+                # Naming it would be the same shape of false remedy, one command over.
                 # "can take", not "would take", for the reason spelled out in
                 # _apply_status_to_runs: the stale row only wins a from-scratch
                 # rebuild when it sorts first.

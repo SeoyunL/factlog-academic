@@ -177,12 +177,20 @@ printf '%s' "$err" | grep -q "keeps its old value" \
   || bad "#563 the amend warning lost or overstated its consequence clause: $err"
 # --- #566: no false re-run remedy. Measured: candidates.csv already carries the NEW
 # triple, so re-running the same command answers `no fact matches` on the old one.
-# This deliberately pins DEFECTIVE behaviour: it is why the warning is worded as it is.
-# If #566 adds a recovery path, these assertions and the warning text must be revised
-# TOGETHER -- do not just delete the asserts to get back to green.
+# These pin behaviour that stays this way on purpose, and #566's recovery command does
+# not change them: `repair-runs` restores a STATUS by comparing the two stores, and this
+# warning is about a VALUE, which it does not carry. So the remedy this KB needs still
+# does not exist, and the honest thing to say is nothing.
 printf '%s' "$err" | grep -q "re-run after fixing" \
   && bad "#566 the warning promises a re-run remedy amend does not perform: $err" \
   || ok "#566 the warning makes no re-run promise"
+# ...and specifically not repair-runs. The grep above matches ONE literal string, so it
+# stays green while a different false remedy is bolted on next to it -- this is the net
+# for that. amend's subject is the value; pointing a user at a status-only repair here
+# would send them off to run a command that cannot restore what they just lost.
+printf '%s' "$err" | grep -q "repair-runs" \
+  && bad "#566 the amend warning offers repair-runs, which does not restore a value: $err" \
+  || ok "#566 the amend warning names no status-repair command"
 rc=0
 out2="$("$PYTHON" -m factlog amend Widget codename Draft --set-object Falcon --target "$KB" 2>&1)" || rc=$?
 printf '%s' "$out2" | grep -q "no fact matches" && [ "$rc" -eq 1 ] \
