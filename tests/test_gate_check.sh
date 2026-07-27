@@ -683,7 +683,16 @@ touch_file "$KB_SHAPE/facts/accepted.dl"
 touch_file "$KB_SHAPE/facts/query.dl"
 clear_config
 
-# The real thing. Reverting the extraction to top-level-only kills this row.
+# The real thing, stated as the headline of the contract.
+#
+# These two rows are DOUBLE-DEFENCE rows, not discriminating ones: revert the
+# extraction to top-level-only and they still PASS, because the raw-text probe
+# below catches the same payload and denies it for the other reason. Only
+# breaking BOTH the nested read and the probe turns them red. That is a real
+# property worth pinning — the two layers back each other — but it is not what a
+# reader assumes from "REAL envelope … deny", so it is written down here. The
+# discriminating rows for the nested read are the bootstrap pair right below,
+# where the probe cannot stand in.
 run_payload_case "REAL envelope, Write — deny" \
   "$KB_SHAPE" "$(envelope "$KB_SHAPE/facts/accepted.dl" Write)" 2
 
@@ -696,6 +705,26 @@ run_payload_case "REAL envelope, Edit — same tool_input.file_path key — deny
   "$(printf '{"session_id":"s0","cwd":"/","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"},"tool_use_id":"u0"}' \
      "$KB_SHAPE/facts/query.dl")" \
   2
+
+# The discriminating pair: the same real envelope against a BOOTSTRAP KB.
+#
+# Bootstrap needs a RESOLVED target — it asks whether that one named file exists
+# on disk — so the raw-text probe cannot produce this verdict. Read the nested
+# key and the answer is ALLOW; miss it and the payload falls to the probe, which
+# skips bootstrap and DENIES. So an implementation that stops reading
+# tool_input.file_path flips these two rows on its own, with no help from any
+# other case in this file. Write and Edit are covered separately: nothing
+# guarantees a future extractor treats the two tools' payloads alike.
+KB_SHAPE_BOOT2="$(mktemp -d)"
+make_kb "$KB_SHAPE_BOOT2"
+run_payload_case "REAL envelope, Write, bootstrap KB — allow (nested read, probe cannot fake it)" \
+  "$KB_SHAPE_BOOT2" "$(envelope "$KB_SHAPE_BOOT2/facts/query.dl" Write)" 0
+run_payload_case "REAL envelope, Edit, bootstrap KB — allow (Edit's key genuinely read)" \
+  "$KB_SHAPE_BOOT2" \
+  "$(printf '{"session_id":"s0","cwd":"/","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"},"tool_use_id":"u0"}' \
+     "$KB_SHAPE_BOOT2/facts/accepted.dl")" \
+  0
+rm -rf "$KB_SHAPE_BOOT2"
 
 # tool_name is NOT part of the predicate. hooks.json's matcher decides what is
 # routed here; the gate judges whatever arrives by its target alone. Two rows: a
