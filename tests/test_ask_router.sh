@@ -610,6 +610,98 @@ dout="$(router search "widgetterm")"
 if printf '%s' "$dout" | grep -qF 'decisions (supplementary)'; then ok "decisions/ searched as labeled supplementary"; else bad "decisions/ supplementary not surfaced"; fi
 rm -f "$KB/decisions/open-questions.md"
 
+# --- #572: directory grade is the TOP sort key -------------------------------
+# The label alone used to be the only place the grade existed, so a decisions/
+# excerpt outranked the source text it reviews. These cases pin the ordering.
+printf '# notes\n\nwidgetterm widgetterm widgetterm gadgetterm.\n' > "$KB/decisions/open-questions.md"
+printf '# paper\n\nwidgetterm appears once.\n' > "$KB/sources/grade-primary.md"
+# (a) the load-bearing case: supplementary wins on BOTH score components
+#     (coverage 2 vs 1, frequency 4 vs 1) and still ranks below primary. A tie-only
+#     case cannot prove this — ties already fell primary-first from corpus order.
+g_dirs="$(router search "widgetterm gadgetterm" | "$PYTHON" -c "
+import json, sys
+print(','.join(r['dir'] for r in json.load(sys.stdin)['results']))")"
+if [ "$g_dirs" = "sources,decisions (supplementary)" ]; then
+  ok "#572 등급이 최상위 정렬 키다 — 점수가 더 높은 supplementary 가 primary 뒤로 간다"
+else
+  bad "#572 등급 정렬이 적용되지 않았다 (got [$g_dirs])"
+fi
+# (b) the acceptance-criterion case as written: at an exact score TIE primary wins.
+#     Measured to have NO unique kill — every mutant it catches, (a) catches too.
+#     The reason is structural, not fixture luck: once the grade is in the key AT ALL,
+#     a primary/supplementary pair is never a full-key tie, so this case cannot tell
+#     "grade is the TOP key" from "grade is anywhere in the key", and a mutation that
+#     only reorders full-key ties cannot reach this pair either. Kept because the
+#     acceptance criterion asks for it literally; (a) carries the contract and (e)
+#     below covers the tie-order half.
+printf '# paper\n\nwidgetterm appears once.\n' > "$KB/sources/grade-tie.md"
+printf '# notes\n\nwidgetterm appears once.\n' > "$KB/decisions/tie-notes.md"
+rm -f "$KB/decisions/open-questions.md" "$KB/sources/grade-primary.md"
+t_dirs="$(router search "widgetterm" | "$PYTHON" -c "
+import json, sys
+print(','.join(r['dir'] for r in json.load(sys.stdin)['results']))")"
+if [ "$t_dirs" = "sources,decisions (supplementary)" ]; then
+  ok "#572 동점일 때 primary 가 supplementary 를 이긴다"
+else
+  bad "#572 동점 순서가 뒤집혔다 (got [$t_dirs])"
+fi
+# (c) the grade is DERIVED from WIKI_SUPPLEMENTARY_DIRS, not a second hardcoded
+#     list: moving a dir between the two constants moves its grade with it.
+if "$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a
+base = {rel: grade for rel, _label, grade in a._wiki_corpus()}
+assert base['sources'] > base['decisions'], base
+a.WIKI_SUPPLEMENTARY_DIRS = ('decisions', 'reviews')
+moved = {rel: grade for rel, _label, grade in a._wiki_corpus()}
+assert moved['reviews'] == moved['decisions'] < moved['sources'], moved
+a.WIKI_SOURCE_DIRS = ('sources', 'runs/sources', 'reviews')
+a.WIKI_SUPPLEMENTARY_DIRS = ('decisions',)
+promoted = {rel: grade for rel, _label, grade in a._wiki_corpus()}
+assert promoted['reviews'] == promoted['sources'] > promoted['decisions'], promoted
+" 2>/dev/null; then
+  ok "#572 등급은 WIKI_SUPPLEMENTARY_DIRS 에서 파생된다 (하드코딩 없음)"
+else
+  bad "#572 등급이 상수와 따로 논다 — 디렉터리를 옮겨도 등급이 따라오지 않는다"
+fi
+# (d) the documented rerank interaction: an opt-in neural backend is allowed to
+#     override the grade. The stub reverses lexical order, so supplementary — last
+#     under the grade key — becomes first. This is the choice recorded in
+#     _semantic_rerank's docstring, so the guarantee in (a)/(b) is scoped to the
+#     bundled lexical path (FACTLOG_EMBED_MODULE unset).
+GEMB="$(mktemp -d)"; printf 'def rank(q, texts):\n    return [float(i) for i in range(len(texts))]\n' > "$GEMB/grade_stub.py"
+r_dir="$(FACTLOG_EMBED_MODULE=grade_stub PYTHONPATH="$PLUGIN_ROOT:$GEMB" "$PYTHON" "$ROUTER" search "widgetterm" --target "$KB" | "$PYTHON" -c "
+import json, sys
+res = json.load(sys.stdin)['results']
+print(res[0]['dir'] if res else '')")"
+if [ "$r_dir" = "decisions (supplementary)" ]; then
+  ok "#572 재랭크는 등급을 보존하지 않는다 — 백엔드가 supplementary 를 1위로 올릴 수 있다 (문서화된 선택)"
+else
+  bad "#572 재랭크 상호작용이 문서와 다르다 (got [$r_dir]) — _semantic_rerank 주석을 갱신하라"
+fi
+rm -rf "$GEMB"
+rm -f "$KB/sources/grade-tie.md" "$KB/decisions/tie-notes.md"
+# (e) the OTHER half of the sort statement #572 rewrote: ties keep corpus/line order
+#     (stable sort). This needs a SAME-grade tie — (b)'s primary/supplementary pair is
+#     split by the grade key and so is blind to tie reordering. Measured: a mutant that
+#     sorts ascending and then reverses the list (flipping full-key ties while keeping
+#     the descending key order) passes (a)-(d) and is caught only here and by
+#     tests/test_ask_wiki_search.sh's PIN3. PIN3 alone is not enough cover — it is a
+#     characterization pin that #574/#576/#581 are each expected to rewrite, and the
+#     tie-order guarantee would then lose its last guard silently.
+printf '# a\n\nwidgetterm appears once.\n' > "$KB/sources/aaa-tie.md"
+printf '# z\n\nwidgetterm appears once.\n' > "$KB/sources/zzz-tie.md"
+s_files="$(router search "widgetterm" | "$PYTHON" -c "
+import json, sys
+print(','.join(r['file'] for r in json.load(sys.stdin)['results']))")"
+if [ "$s_files" = "sources/aaa-tie.md,sources/zzz-tie.md" ]; then
+  ok "#572 완전 동점은 코퍼스/행 순서를 유지한다 (안정 정렬)"
+else
+  bad "#572 동점 안정성이 깨졌다 (got [$s_files])"
+fi
+rm -f "$KB/sources/aaa-tie.md" "$KB/sources/zzz-tie.md"
+
 # --- #31: relevance ranking + optional embedding rerank seam ---
 printf '# hi\n\n검색 문서 자료 항목 모두 포함.\n' > "$KB/sources/rank-hi.md"
 printf '# lo\n\n검색 만 언급.\n' > "$KB/sources/rank-lo.md"

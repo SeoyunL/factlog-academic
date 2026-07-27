@@ -613,15 +613,29 @@ def render_engine_answer(
 WIKI_SOURCE_DIRS = ("sources", "runs/sources")
 # decisions/ (human review notes / open questions) is searched as clearly-labeled
 # SUPPLEMENTARY context — useful for an unanswered question, but tagged so it is
-# never conflated with source ground truth. pages/ stays excluded entirely.
+# never conflated with source ground truth, and ranked below every primary excerpt
+# (see _GRADE_* below). pages/ stays excluded entirely.
 WIKI_SUPPLEMENTARY_DIRS = ("decisions",)
 _EXCERPT_WINDOW = 3
 
+# Directory grade — the TOP element of the ranking key (#572). Before this the
+# grade lived only in the display label, so a review note could (and on the
+# reference KB did) take rank 1 over the source text it was reviewing. Only the
+# ORDER of these two values matters; neither is ever displayed.
+_GRADE_PRIMARY = 1
+_GRADE_SUPPLEMENTARY = 0
 
-def _wiki_corpus() -> list[tuple[str, str]]:
-    """(relative dir, display label) pairs for the wiki search, primary first."""
-    corpus = [(rel, rel) for rel in WIKI_SOURCE_DIRS]
-    corpus += [(rel, f"{rel} (supplementary)") for rel in WIKI_SUPPLEMENTARY_DIRS]
+
+def _wiki_corpus() -> list[tuple[str, str, int]]:
+    """(relative dir, display label, ranking grade) for the wiki search, primary
+    first.
+
+    The grade is derived here, from the same two constants that build the labels,
+    so adding a directory to WIKI_SUPPLEMENTARY_DIRS moves its RANKING together
+    with its label — there is no second list of directory names to keep in sync.
+    """
+    corpus = [(rel, rel, _GRADE_PRIMARY) for rel in WIKI_SOURCE_DIRS]
+    corpus += [(rel, f"{rel} (supplementary)", _GRADE_SUPPLEMENTARY) for rel in WIKI_SUPPLEMENTARY_DIRS]
     return corpus
 
 
@@ -989,7 +1003,27 @@ def _semantic_rerank(question: str, results: list[dict[str, object]]) -> list[di
     more similar), results are reordered by it. Any absence/failure → unchanged
     (graceful degrade). The backend reorders only the already-capped top lexical
     candidates; it cannot widen recall beyond lexical matches. The module runs
-    with full process privileges (it is opt-in by the KB operator)."""
+    with full process privileges (it is opt-in by the KB operator).
+
+    The re-rank does NOT preserve the directory grade (#572): a backend may put a
+    supplementary decisions/ excerpt above a primary one. Measured with a stub
+    backend (`rank` returning ascending scores, i.e. an exact reversal), the top
+    result flips from `sources` to `decisions (supplementary)`. That is the chosen
+    behaviour, for two reasons. (a) ON THE CAPPED PATH the grade key has already
+    done its decisive work by this point: search() sorts by grade FIRST and slices
+    to `limit` BEFORE calling here, so the grade decides WHICH excerpts a backend
+    ever sees and the backend only orders that set — re-sorting within grade groups
+    would buy a guarantee the caller mostly already has, at the cost of overruling
+    the one signal the operator opted in to get. This reason does NOT hold under
+    `--all` (limit=None): there is no cap, so the backend sees every excerpt and
+    the grade constrains nothing. (b) alone decides that case, and it is the one
+    that carries the choice. (b) Enabling a backend is an explicit,
+    KB-operator-level statement that semantic similarity should decide order;
+    silently pinning grade above it would make the backend's effect depend on a
+    directory layout it cannot see. The guarantee "supplementary never ranks first
+    while a primary excerpt exists" is therefore scoped to the bundled lexical
+    path, i.e. FACTLOG_EMBED_MODULE unset — which is what CI and every default
+    install run, and what tests/test_ask_wiki_search.sh pins."""
     module_name = os.environ.get("FACTLOG_EMBED_MODULE")
     if not module_name or not results:
         return results
@@ -1010,17 +1044,19 @@ def _semantic_rerank(question: str, results: list[dict[str, object]]) -> list[di
 def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[str, object]]:
     """Relevance-ranked search over the wiki corpus (sources/ + runs/sources/).
 
-    Collects keyword-matched excerpts, ranks them by relevance (keyword coverage,
-    then frequency), optionally re-ranks via a neural backend (graceful degrade
-    when absent), and returns the top *limit* cited excerpts: {file, line,
-    excerpt, dir}. Binary files (e.g. an un-converted .docx) are skipped.
+    Collects keyword-matched excerpts, ranks them by (directory grade, keyword
+    coverage, match frequency) — primary source text ahead of supplementary
+    decisions/ notes at every relevance level (#572) — optionally re-ranks via a
+    neural backend (graceful degrade when absent), and returns the top *limit*
+    cited excerpts: {file, line, excerpt, dir}. Binary files (e.g. an un-converted
+    .docx) are skipped.
     """
     patterns = _keyword_patterns(question)
     if not patterns:
         return []
-    scored: list[tuple[tuple[int, int], dict[str, object]]] = []
+    scored: list[tuple[tuple[int, int, int], dict[str, object]]] = []
     ignored_patterns = sync_ignore_patterns(root)
-    for rel, label in _wiki_corpus():
+    for rel, label, grade in _wiki_corpus():
         base = root / rel
         if not base.is_dir():
             continue
@@ -1059,9 +1095,27 @@ def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[st
                     "excerpt": excerpt,
                     "dir": label,
                 }
-                scored.append((_excerpt_score(excerpt, patterns), result))
-    # Rank by relevance (desc); ties keep corpus/line order (stable sort over the
-    # already-ordered collection). Then take the cap, then optional neural rerank.
+                coverage, frequency = _excerpt_score(excerpt, patterns)
+                scored.append(((grade, coverage, frequency), result))
+    # Rank by (directory grade, keyword coverage, match frequency), desc; ties keep
+    # corpus/line order (stable sort over the already-ordered collection). Then take
+    # the cap, then optional neural rerank.
+    #
+    # Grade leads (#572). SKILL.md defines the wiki block as cited sources/ and
+    # runs/sources/ excerpts with decisions/ as supplementary, so a supplementary
+    # excerpt must never displace a primary one no matter how many times it repeats
+    # a keyword. The consequence is deliberate: because grade is the top key and the
+    # cap is applied to the SORTED list, a KB whose primary excerpts alone fill the
+    # cap shows no supplementary excerpt at all. Measured on the reference KB with
+    # the query '오메가-3 보충이 COPD 환자에게 효과있음을 보인 연구는?', which returns
+    # 134 excerpts — 124 primary, 10 supplementary: before this change the top 10
+    # held 4 supplementary excerpts INCLUDING rank 1; after it the 10 supplementary
+    # excerpts occupy ranks 125-134, none inside the default cap. That is the
+    # intended reading of "supplementary": context for a question the sources do
+    # not answer, not a competitor to them.
+    # Supplementary excerpts are never FILTERED — they are collected and ranked as
+    # before and reappear as soon as primary matches run short (or under `--all`,
+    # which passes limit=None).
     scored.sort(key=lambda item: item[0], reverse=True)
     ranked = [result for _score, result in scored]
     if limit is not None:
@@ -1166,7 +1220,7 @@ def render_wiki_answer(
         if truncation:
             lines.append(truncation)
         lines.append("")
-    lines.append(f"sources searched: {', '.join(label for _rel, label in _wiki_corpus())}")
+    lines.append(f"sources searched: {', '.join(label for _rel, label, _grade in _wiki_corpus())}")
     result_total = len(results) if total_results is None else total_results
     lines.append(f"source excerpts: {result_total}")
     visible_results = results if limit is None else results[:_render_limit(limit)]

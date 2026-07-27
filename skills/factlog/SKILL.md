@@ -1148,8 +1148,9 @@ the relation, just not that object). Show it verbatim beneath the verdict block.
 ```
 
 Show the `UNVERIFIED — wiki exploration` block verbatim (cited `sources/` /
-`runs/sources/` excerpts; `decisions/` is supplementary). When the question
-mentions accepted entities, the block also carries a clearly-separated
+`runs/sources/` excerpts; `decisions/` is supplementary and always ranks below
+them — see the row-cap note below). When the question mentions accepted
+entities, the block also carries a clearly-separated
 `VERIFIED — engine (grounding: ...)` section listing the engine-verified facts
 about those entities — verified anchors beside the unverified prose. The
 unverified excerpts cite only source text, never `facts/accepted.dl`. Do NOT
@@ -1165,6 +1166,13 @@ verified negatives, malformed/variable drafts, exact matches, and distant names.
 The wiki renderer applies the same explicit row cap to cited excerpts and
 engine-grounding rows. Its warning is printed before those rows, and `--all`
 returns every available excerpt and grounding fact for audit.
+
+Excerpts are ranked by directory grade first, then keyword relevance: every
+`decisions/` excerpt sorts below every `sources/` / `runs/sources/` one, however
+many keywords it repeats. So on a KB whose primary sources alone fill the row
+cap, the default block shows **no** `decisions/` excerpt at all — that is
+expected, not a recall failure. Supplementary excerpts are ranked, never
+filtered: use `--all` to see them (and to audit what the cap hid).
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
