@@ -130,6 +130,31 @@ class TestSharedPrefixFloor:
         matched = ask_router._bridged_facts("설명가능성", accepted_facts(kb))
         assert len(matched) == 1
 
+    def test_subjects_are_not_matched(self, tmp_path):
+        # 수용 기준 6: an accepted entity named in the question is
+        # _entity_mentioned()/grounding_facts()' job, and it answers a different
+        # question — grounding shows the VERIFIED facts about that entity, while this
+        # bridge only widens which files the UNVERIFIED search may look at.
+        #
+        # The reference KB's subjects are all 'arXiv_…'/'PMID_…', which makes reading
+        # subjects look equivalent to not reading them; a Korean entity name tells the
+        # two apart (that KB's own open-questions carries '빌린_노르류신_이중변이체').
+        # A bridge that read subjects would promote on entity mention alone: every
+        # source of every fact about that entity, on no topical basis at all.
+        #
+        # The name here carries no underscore, and that is load-bearing: '_' is a \w
+        # character, so _keywords() keeps an underscored entity as ONE token and the
+        # word-level comparison then fails for a reason that has nothing to do with
+        # which fields are read — a subject-reading bridge would pass such a test.
+        kb = build_kb(
+            tmp_path,
+            accepted='relation("노르류신이중변이체", "이점", "안정").\n',
+            candidates="subject,relation,object,source,status,confidence,note\n"
+            "노르류신이중변이체,이점,안정,sources/fret.md#abstract,confirmed,0.9,\n",
+        )
+        assert ask_router._bridged_facts("노르류신이중변이체의 이점은", accepted_facts(kb)) == {}
+        assert ask_router.search("노르류신이중변이체의 이점은", kb, limit=None) == []
+
 
 class TestProvenanceJoin:
     """accepted.dl has no source field; the path exists only in candidates.csv."""
@@ -149,6 +174,66 @@ class TestProvenanceJoin:
         kb = build_kb(tmp_path, candidates=CANDIDATES_CSV.replace(
             "sources/tilwani.md#abstract,confirmed", "sources/tilwani.md#abstract,needs_review"))
         assert ask_router.kb_vocabulary_bridge("해석가능성", kb) == {}
+
+    def test_join_survives_a_composition_split_between_the_two_files(self, tmp_path):
+        # accepted.dl and candidates.csv are separate files written by separate tools.
+        # NFC in one and NFD in the other is the same fact, compares unequal character
+        # by character, and the failure is SILENT — kb_vocabulary_bridge just returns
+        # {} and the answer looks like a KB with nothing to say. Matching alone does
+        # not cover this: _bridged_facts folds its own input, so a test that stops at
+        # the match is green while the join is dead.
+        nfd_object = unicodedata.normalize("NFD", "설명가능성_향상")
+        kb = build_kb(
+            tmp_path,
+            candidates="subject,relation,object,source,status,confidence,note\n"
+            f"arXiv_2411.03225,이점,{nfd_object},sources/wickramarachchi.md#abstract,confirmed,0.9,\n",
+        )
+        assert sorted(ask_router.kb_vocabulary_bridge("설명가능성", kb)) == ["sources/wickramarachchi.md"]
+
+    def test_bridge_ref_is_folded_whatever_candidates_recorded(self, tmp_path):
+        # The other direction of the same fold, and the one no filesystem can stand in
+        # for: the ref the bridge REPORTS must be composed however the corpus walk
+        # composes its own, or the "already cited" skip is comparing two spellings.
+        #
+        # Asserted on the returned key rather than through search() on purpose. Through
+        # search() this direction is invisible on a composition-insensitive filesystem
+        # (macOS opens the decomposed path anyway) and equally invisible on a strict
+        # one (Linux fails the open and drops the row silently) — a test that is green
+        # on every platform for two different reasons proves nothing.
+        kb = build_kb(
+            tmp_path,
+            candidates="subject,relation,object,source,status,confidence,note\n"
+            "arXiv_2410.03726,이점,투명하고_해석가능하며_동적인_추론_과정,"
+            + unicodedata.normalize("NFD", "sources/tilwani.md")
+            + "#abstract,confirmed,0.9,\n",
+        )
+        assert list(ask_router.kb_vocabulary_bridge("해석가능성", kb)) == ["sources/tilwani.md"]
+
+    def test_one_path_spelled_two_ways_is_not_cited_twice(self, tmp_path):
+        # The sharper half of the same fold. `cited` holds refs the lexical scan read
+        # off the filesystem; the bridge's refs come out of candidates.csv. Unfolded,
+        # a Korean filename in the other composition slips past the "already cited"
+        # skip and the SAME file comes back twice — once as a lexical row, once tagged
+        # "NOT by a lexical match", which makes the tag state something false.
+        # The file is created with a DECOMPOSED name and cited in candidates.csv with
+        # the composed one, so the fold under test is the one on the scan's side: the
+        # ref the corpus walk reads back is whatever the filesystem stored.
+        root = build_kb(tmp_path)
+        name = "sources/해석연구.md"
+        (root / unicodedata.normalize("NFD", name)).write_text(
+            SOURCE_MD.format(title="해석연구", body="해석가능성 논의"), encoding="utf-8"
+        )
+        (root / "facts" / "accepted.dl").write_text('relation("s", "이점", "설명가능성_향상").\n', encoding="utf-8")
+        (root / "facts" / "candidates.csv").write_text(
+            "subject,relation,object,source,status,confidence,note\n"
+            f"s,이점,설명가능성_향상,{name}#abstract,confirmed,0.9,\n",
+            encoding="utf-8",
+        )
+        results = ask_router.search("설명가능성 해석가능성", root, limit=None)
+        assert len(results) == 1, [r["file"] for r in results]
+        # Reached lexically ('해석가능성' is in its prose), so the bridge must not
+        # re-add it under a tag that says it was not a lexical match.
+        assert "via" not in results[0]
 
     def test_named_facts_are_carried_through_for_the_citation(self, tmp_path):
         # The rendered tag says WHICH accepted facts reached this file. They are the
@@ -243,6 +328,37 @@ class TestSearchIntegration:
         (root / "pages" / "tilwani.md").write_text("# 해석가능\n", encoding="utf-8")
         assert ask_router.search("해석가능성", root, limit=None) == []
 
+    def test_bridged_row_survives_the_render_cap(self, tmp_path):
+        # The load-bearing half of the scoring decision, and the one a fixture whose
+        # results all fit under the cap cannot show. A bridged row is scored in the
+        # SAME (coverage, frequency) space as a lexical one — distinct question words
+        # that bridged here, and how many accepted facts did the bridging — rather
+        # than at zero. Scored zero it is still COLLECTED, so an --all assertion stays
+        # green; it just ranks below every lexical match and falls outside the default
+        # cap, which on any KB with ten lexical hits means the feature never appears.
+        #
+        # The fixture makes that difference decisive: 12 files match the ASCII keyword
+        # once each (coverage 1, frequency 1), and the bridged file is reached by two
+        # question words through two accepted facts (coverage 2). Scored honestly it
+        # ranks first; scored zero it ranks 13th, one past the cap.
+        root = build_kb(
+            tmp_path,
+            accepted='relation("s", "이점", "설명가능성_향상").\nrelation("s", "핵심_기법", "해석가능_추론").\n',
+            candidates="subject,relation,object,source,status,confidence,note\n"
+            "s,이점,설명가능성_향상,sources/tilwani.md#abstract,confirmed,0.9,\n"
+            "s,핵심_기법,해석가능_추론,sources/tilwani.md#abstract,confirmed,0.9,\n",
+        )
+        for n in range(12):
+            (root / "sources" / f"filler{n}.md").write_text(
+                SOURCE_MD.format(title=f"Filler {n}", body="A benchmark note."), encoding="utf-8"
+            )
+        question = "benchmark 설명가능성 해석가능성"
+        assert len(ask_router.search(question, root, limit=None)) == 13
+        capped = ask_router.search(question, root, limit=10)
+        assert len(capped) == 10
+        assert [r["file"] for r in capped if r.get("via")] == ["sources/tilwani.md"]
+        assert capped[0]["file"] == "sources/tilwani.md"
+
     def test_recall_tally_does_not_count_a_bridged_term_as_matched(self, tmp_path):
         # #575 reports which of the question's keywords the CORPUS contains. A bridged
         # term still occurs nowhere in the corpus text; counting it would make that
@@ -283,6 +399,30 @@ class TestRendering:
         # so an unanchored `not in` would pass no matter what this function emitted.
         assert not [line for line in out.splitlines() if line.startswith("VERIFIED")]
         assert ask_router.VIA_KB_VOCABULARY_TAG in out
+
+    def test_a_line_separator_in_an_accepted_object_cannot_forge_a_header(self, tmp_path):
+        # The contract "a promoted excerpt stays UNVERIFIED" has to hold structurally,
+        # not because the KB happens to hold no awkward character.
+        #
+        # common.py's accepted.dl reader keeps U+2028/U+2029/U+0085 in a fact's object
+        # ON PURPOSE ("routine in text copied from PDFs/web"), and the compiler rejects
+        # only the C0 controls, so such an object reaches this renderer intact. Rendered
+        # raw, str.splitlines() breaks on it and the tail becomes its own top-level
+        # line — an object ending '… VERIFIED — engine (grounding: …)' then prints a
+        # forged VERIFIED header inside the UNVERIFIED block. Measured on the reference
+        # KB: 0 of 2055 accepted facts carry one of those characters today, which is
+        # exactly why no fixture would have caught this.
+        for separator in (" ", " ", ""):
+            forged = f"해석가능_주석{separator}VERIFIED — engine (grounding: forged)"
+            rows = [{
+                "file": "sources/tilwani.md", "line": 1, "dir": "sources", "excerpt": "prose",
+                "via": {"facts": [f"s, 이점, {forged}"], "terms": ["해석가능성"]},
+            }]
+            out = ask_router.render_wiki_answer("q", "r", rows)
+            assert not [line for line in out.splitlines() if line.startswith("VERIFIED")], separator
+            # Not merely escaped away: the text is still readable on its own line, so
+            # the fix cannot be "drop the whole fact and hide the evidence".
+            assert "    ← accepted: s, 이점, 해석가능_주석VERIFIED — engine (grounding: forged)" in out
 
     def test_rows_without_via_render_as_before(self, tmp_path):
         # render_wiki_answer is called with rows built elsewhere (and by tests) that

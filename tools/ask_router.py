@@ -1205,7 +1205,10 @@ def _bridged_facts(
                     if _shared_prefix_len(word.lower(), term) >= _BRIDGE_PREFIX_MIN:
                         hits.add(term)
         if hits:
-            matched[(row["subject"], row["relation"], row["object"])] = sorted(hits)
+            # NFC-folded key: this dict is looked up with a triple read out of
+            # candidates.csv, a different file written by a different tool, and the
+            # two must agree on composition or the join silently finds nothing.
+            matched[(_nfc(row["subject"]), _nfc(row["relation"]), _nfc(row["object"]))] = sorted(hits)
     return matched
 
 
@@ -1276,15 +1279,29 @@ def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, objec
     for row in candidates:
         if row["status"] not in ENGINE_STATUSES:
             continue
-        terms = matched.get((row["subject"], row["relation"], row["object"]))
+        # NFC on BOTH sides of the join. accepted.dl and candidates.csv are separate
+        # files written by separate tools; an NFD-authored triple in one and an
+        # NFC-authored triple in the other are the same fact and compare unequal
+        # character by character, and the whole bridge would then return {} with
+        # nothing logged anywhere. _bridged_facts already folds its side.
+        terms = matched.get((_nfc(row["subject"]), _nfc(row["relation"]), _nfc(row["object"])))
         if not terms:
             continue
-        ref, _sep, fragment = row["source"].partition("#")
+        # Same fold on the path, and for a sharper reason than the join: the ref is
+        # compared against the refs the lexical scan collected (see _bridge_rows'
+        # `cited`), which come from the filesystem. Two spellings of one path make the
+        # same file appear under BOTH banners — a lexical row and a row tagged "not a
+        # lexical match" — so the tag would state something false. This mirrors the
+        # fold every other reader of candidates' `source` already applies
+        # (common.py's cited_source_counts, merge_candidates, source_coverage, cli).
+        ref, _sep, fragment = _nfc(row["source"]).partition("#")
         if not ref:
             continue
         entry = bridged.setdefault(ref, {"fragments": set(), "facts": set(), "terms": set()})
         entry["fragments"].add(fragment)
-        entry["facts"].add(f"{row['subject']}, {row['relation']}, {row['object']}")
+        entry["facts"].add(
+            f"{_nfc(row['subject'])}, {_nfc(row['relation'])}, {_nfc(row['object'])}"
+        )
         entry["terms"].update(terms)
     # Sorted everywhere below: one file can be the source of several bridged facts
     # with different anchors, and this module treats determinism as a contract — the
@@ -1310,7 +1327,9 @@ def _bridge_rows(
     A file the scan already cited is skipped: 수용 기준 2 defines the tag as "reached
     via KB vocabulary and NOT by a lexical match", so tagging a file that WAS matched
     lexically would say something false, and adding a second excerpt from it would
-    duplicate the file under two banners.
+    duplicate the file under two banners. *cited* holds NFC-folded refs and
+    kb_vocabulary_bridge folds its side, so one path spelled two ways cannot slip
+    past that skip.
 
     Every guard the lexical scan applies applies here too — corpus directories only,
     sync-ignored sources excluded (a source not synced is not evidence for wiki
@@ -1469,7 +1488,12 @@ def search(
                 }
                 coverage, frequency = _excerpt_score(excerpt, patterns)
                 scored.append(((grade, coverage, frequency), result))
-                cited.add(ref)
+                # NFC-folded: this set is compared against refs read out of
+                # candidates.csv, and the two spellings of one Korean filename are
+                # equal to every renderer and unequal to `in`. Unfolded, the same
+                # file came back as a lexical row AND as a row tagged "not a lexical
+                # match" (reproduced: sources/해석연구.md at lines 9 and 7).
+                cited.add(_nfc(ref))
     # KB-vocabulary bridge (#576): sources the question reached through the engine's
     # own Korean vocabulary rather than through the corpus text. Appended AFTER the
     # scan and BEFORE the sort, so bridged rows compete on the same ranking key
@@ -1702,8 +1726,19 @@ def render_wiki_answer(
                 # The accepted facts are named individually, not summarized: they are
                 # the entire justification for this file being in the answer, and a
                 # count would leave the reader unable to check the bridge's judgement.
+                #
+                # _sanitize is load-bearing, not hygiene. An accepted OBJECT may hold
+                # U+2028/U+2029/U+0085 — common.py's reader keeps them deliberately
+                # ("routine in text copied from PDFs/web"), and the compiler does not
+                # reject them the way it rejects the C0 controls. Interpolated raw,
+                # str.splitlines() breaks this string on one, and the tail becomes its
+                # own top-level line: an object ending '… VERIFIED — engine (grounding:
+                # …)' then renders a forged VERIFIED header inside the UNVERIFIED
+                # block, which is the one contract this whole feature is built around.
+                # Every other line in this block is either a literal or already went
+                # through _sanitize in search(); this was the only raw KB string.
                 for fact in via.get("facts", []):
-                    lines.append(f"    ← accepted: {fact}")
+                    lines.append(f"    ← accepted: {_sanitize(str(fact))}")
             for excerpt_line in str(r["excerpt"]).splitlines():
                 lines.append(f"    {excerpt_line}")
     elif not _keyword_patterns(question):
