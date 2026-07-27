@@ -32,8 +32,19 @@ $env:FACTLOG_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 플러그인의 hook과 skill 명령은 `${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh`
 를 통해 Python 3.11+ 실행 파일을 찾습니다. `$FACTLOG_PYTHON` 이 설정돼 있으면 그
 값이 유일한 후보입니다 — 그 실행 파일이 Python 3.11+ 가 아니면 `python3`/`python`/
-`py` 로 **폴백하지 않고 즉시 실패**합니다(종료 코드 127). `python3`, `python`, `py`
-순서의 탐색은 `$FACTLOG_PYTHON` 이 설정되지 않았을 때만 적용됩니다.
+`py` 로 **폴백하지 않고 즉시 실패**합니다(종료 코드 127).
+
+`$FACTLOG_PYTHON` 이 설정되지 않았을 때의 선택 순서는 다음과 같습니다.
+
+1. `$VIRTUAL_ENV` 의 인터프리터 — venv를 활성화했다는 명시적 신호
+2. PATH 후보(`python3`, `python`, `py -3.12`/`-3.11`/`-3`, `py`) 중 **pyrewire
+   1.0.3 이상을 가진** 첫 번째
+3. `~/.factlog-venv` 의 인터프리터 — 아래 PEP 668 안내가 만들도록 지시하는 고정 경로
+4. PATH 후보 중 버전 조건만 만족하는 첫 번째 — 엔진이 아직 없는 부트스트랩 상태에서도
+   `doctor` 와 `setup` 이 실행돼야 하므로 여기서 실패하지 않습니다
+
+PATH 밖의 인터프리터가 선택되면 어느 것을 골랐는지 stderr 에 한 줄 출력합니다.
+고정된 이 두 경로 외의 venv는 탐색하지 않습니다.
 
 여러분의 Python이 외부 관리(PEP 668) 상태라면 pip이 그 안으로의 설치를
 거부합니다. 이때 `setup` 은 설치를 강행하는 대신 venv 안내를 출력합니다. venv를

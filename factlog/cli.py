@@ -288,7 +288,10 @@ def _collect_doctor_checks() -> list[Check]:
     perm_hint = "[터미널] 영구 등록: echo 'export FACTLOG_PYTHON=…' >> ~/.zshrc"
     if not fp:
         checks.append(
-            Check("INFO", "FACTLOG_PYTHON 미설정 (시스템 python3 사용)", (perm_hint,))
+            # Not "시스템 python3 사용": since #578 the launcher may also select an
+            # activated virtualenv or ~/.factlog-venv. The interpreter actually in
+            # use is already reported by the Python row above.
+            Check("INFO", "FACTLOG_PYTHON 미설정 (런처가 인터프리터를 선택)", (perm_hint,))
         )
     elif os.path.exists(fp):
         checks.append(Check("OK", f"FACTLOG_PYTHON = {fp} (존재함)"))
