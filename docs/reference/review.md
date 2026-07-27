@@ -80,8 +80,34 @@ merge 가 거기서 사람의 결정을 보존하므로 아무 증상이 없고,
 행이 이미 대기 상태를 벗어났으므로 `accept`/`reject` 는 `nothing to change` 로,
 `amend` 는 옛 트리플을 못 찾아 `no fact matches`(종료 코드 1)로 끝납니다. 두 저장소가
 이미 어긋난 상태를 되돌리는 일은 `accept`/`reject`/`amend` 의 몫이 아니며(아래 "경계"
-항목 참고), 이를 위한 명령은 아직 없습니다(#566). 그러므로 읽을 수 없는 run 파일은
-`candidates.csv` 를 재구성하기 **전에** 고쳐 두는 편이 안전합니다.
+항목 참고), **그 일을 하는 별도 명령이 `factlog repair-runs` 입니다**(#566). 파일을
+고친 뒤 그 사실에 대해 실행하십시오.
+
+```bash
+factlog repair-runs A knows B            # 보고만
+factlog repair-runs A knows B --apply    # runs/*.json 에 기록
+```
+
+`repair-runs` 는 결정을 내리지 않고 **두 저장소를 대조**합니다. 그래서 이미 대기가
+아닌 `candidates.csv` 행이 `accept` 에게는 막다른 길이지만 이 명령에게는 입력입니다.
+`candidates.csv` 의 결정을 **그 파일이 아직 대기로 갖고 있는 행에** 기록하며,
+`--apply` 없이는 아무것도 쓰지 않습니다(`--dry-run` 이 없는 이유입니다 — 보고가 곧
+기본 모드입니다). `candidates.csv` 는 건드리지 않고 `accepted.dl` 도 재컴파일하지
+않습니다. 복구한 행은 다음 재구성부터 효력을 갖습니다. 그래도 읽을 수 없는 run 파일은
+`candidates.csv` 를 재구성하기 **전에** 고쳐 두는 편이 여전히 낫습니다 — 그러면 이
+복구 자체가 필요 없습니다.
+
+`repair-runs` 가 **손대지 않고 보고만 하는** 분류도 있습니다. 한 사실에
+`candidates.csv` 행이 여러 개인 경우(왕복 `amend` 는 한 사실에 살아 있는 행과 묘비를
+함께 남깁니다), 두 저장소가 서로 다른 결정을 갖고 있는 경우, run 백킹이 없는 CSV 행
+(run 항목을 새로 만들면 어떤 추출도 만들지 않은 docspan 과 run_id 를 위조하게 됩니다),
+`candidates.csv` 의 상태 값이 오타인 경우입니다. **값의 드리프트는 범위 밖입니다** —
+그것은 `amend` 의 몫이므로, `amend` 경고문은 이 명령을 가리키지 않습니다.
+
+종료 코드는 `0` 이상 없음, `3` 드리프트 발견(보고 모드이거나 `--apply` 후에도 남은
+것이 있는 경우), `1` run 파일을 읽지 못해 비교가 불완전함, `2` 인자 오류입니다.
+트리플 선택자 없는 `--apply` 는 KB 전체 재작성이므로 `--all` 을 함께 주지 않으면
+거부합니다.
 
 주어·관계·목적어·source 는 모두 **NFC 로 정규화**해 비교하고 저장합니다. 그래서
 눈에 같아 보이지만 유니코드 표기(NFC/NFD)만 다른 한글 값은 **하나의 사실**입니다 —
@@ -100,8 +126,10 @@ priority 는 은퇴된(superseded) 행을 confirmed/accepted 로 덮어 되살�
 
 경계: `candidates.csv` 는 `confirmed` 인데 `runs/*.json` 은 아직 `candidate` 인
 드리프트(#233 이전 KB)를 되돌리는 일은 `accept`/`reject` 의 부수효과가 아닙니다.
-`accept`/`reject` 는 자기가 방금 내린 결정만 기록하며, 드리프트 복구는 별도 명령이
-할 일입니다.
+`accept`/`reject` 는 자기가 방금 내린 결정만 기록하며, 드리프트 복구는 별도 명령
+(`factlog repair-runs`, 위 참고)이 할 일입니다. 이 경계는 안전장치입니다 —
+`accept` 가 드리프트까지 화해시키게 만들면 와일드카드가 게이트가 "건너뜀"이라고
+보고한 행에까지 닿아, `confirmed` 사실이 조용히 은퇴합니다(#477).
 
 상태가 아니라 사실의 **값 자체를 교정**하려면 `factlog amend` 를 사용하십시오.
 

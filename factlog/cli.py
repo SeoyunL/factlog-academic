@@ -1429,11 +1429,20 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             # rebuilds as `candidate`. Stating it unconditionally would be the same
             # class of unverified promise as the re-run remedy this replaced, so the
             # rule merge actually applies is named instead of a guaranteed outcome.
+            # The fourth clause is SELF-LIMITING on purpose. Whether repair-runs reaches
+            # that row is conditional -- the row must still be pending once the file reads
+            # again, the fact's candidates.csv rows must be unambiguous, and the row must
+            # carry a source file -- so the sentence promises only what it can deliver:
+            # what repair-runs records, and into which rows. An unconditional "run this to
+            # fix it" would be the same class of unverified remedy as the "re-run after
+            # fixing" text this warning replaced (#563).
             print(
                 f"factlog: warning — could not read {jp.name} to record the decision "
                 f"({exc}); any row it holds for this fact keeps its old status, and a "
                 "candidates.csv rebuilt from runs/*.json alone can take that old status "
-                "(merge keeps whichever run file comes first in glob order).",
+                "(merge keeps whichever run file comes first in glob order). Once the file "
+                "reads again, `factlog repair-runs` compares the two stores, which records "
+                "the candidates.csv decision into any row that file still holds as pending.",
                 file=sys.stderr,
             )
             continue

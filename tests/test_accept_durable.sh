@@ -144,6 +144,17 @@ printf '%s' "$ERR11" | grep -q "keeps its old status" \
   && printf '%s' "$ERR11" | grep -q "whichever run file comes first in glob order" \
   && ok "(m) the warning states the consequence, conditionally" \
   || bad "(m) the warning lost or overstated its consequence clause: $ERR11"
+# The remedy clause (#566) is pinned in the SAME conditional shape. accept/reject may
+# name repair-runs because the recovery is real, but reaching that row is CONDITIONAL --
+# it must still be pending once the file reads again, its candidates.csv rows must be
+# unambiguous, and it must have a source file. So the sentence is pinned with its own
+# limit ("any row that file still holds as pending"), not as "run this to fix it": an
+# unconditional promise here is the same class of claim as the "re-run after fixing"
+# text this warning replaced. Block (p) below is the measurement behind it.
+printf '%s' "$ERR11" | grep -q "factlog repair-runs" \
+  && printf '%s' "$ERR11" | grep -q "any row that file still holds as pending" \
+  && ok "(m) the warning names the recovery command, with its condition attached" \
+  || bad "(m) the recovery clause is missing or lost its limit: $ERR11"
 [ "$(status_in "$KB11/runs/good.json" A)" = "accepted" ] \
   && ok "(m) the decision still reached the readable run file" \
   || bad "(m) the decision never reached the readable run file"

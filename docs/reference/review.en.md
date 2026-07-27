@@ -79,8 +79,35 @@ silently downgraded to `candidate`, or the fact you rejected can come back.
 the `candidates.csv` row out of pending, so `accept`/`reject` report `nothing to
 change` and `amend` cannot find the old triple (`no fact matches`, exit code 1).
 Reconciling two stores that have already drifted apart is not these commands' job
-(see "Boundary" below), and no command does it yet (#566). So repair an unreadable
-run file **before** rebuilding `candidates.csv`.
+(see "Boundary" below); **the command that does it is `factlog repair-runs`** (#566).
+Once the file is repaired, run it on the fact:
+
+```bash
+factlog repair-runs A knows B            # report only
+factlog repair-runs A knows B --apply    # write into runs/*.json
+```
+
+`repair-runs` decides nothing; it **compares the two stores**. That is why a
+`candidates.csv` row which is no longer pending — a dead end for `accept` — is
+exactly its input. It records the `candidates.csv` decision into any row that file
+still holds as **pending**, and writes nothing without `--apply` (which is why there
+is no `--dry-run`: the report is the default). It never touches `candidates.csv` and
+does not recompile `accepted.dl`; a repaired row takes effect from the next rebuild.
+It is still better to repair an unreadable run file **before** rebuilding
+`candidates.csv` — then this recovery is not needed at all.
+
+Some classes `repair-runs` **reports and does not touch**: a fact with several
+`candidates.csv` rows (a round-trip `amend` leaves a live row and a tombstone on one
+fact), a fact the two stores decided differently, a CSV row with no run backing
+(creating a run item would fabricate a docspan and a run_id that no extraction
+produced), and an unrecognised status in `candidates.csv`. **A drifted value is out
+of scope** — that is `amend`'s subject — which is why the `amend` warning does not
+point at this command.
+
+Exit codes: `0` clean, `3` drift found (in report mode, or left unrepaired after
+`--apply`), `1` a run file could not be read so the comparison is partial, `2` a
+usage error. `--apply` with no triple selector is refused unless `--all` is given,
+since it would rewrite run rows across the whole KB.
 
 Subject, relation, object and source are all **normalised to NFC** for both
 comparison and storage. Two values that look identical but differ only in Unicode
@@ -102,7 +129,9 @@ NFC unification, re-merge (`/factlog sync` or `merge_candidates.py`).
 Boundary: repairing drift — `confirmed` in `candidates.csv` while `runs/*.json`
 still says `candidate`, as in a KB predating #233 — is not a side effect of
 `accept`/`reject`. They write down the decision they just made, nothing else;
-recovering drifted rows is a separate command's job.
+recovering drifted rows is a separate command's job (`factlog repair-runs`, above).
+The boundary is a safeguard: let `accept` reconcile drift too and a wildcard reaches
+rows the gate reported as "skipped", silently retiring a `confirmed` fact (#477).
 
 To **correct** a fact's value (not just its status), use `factlog amend`:
 
