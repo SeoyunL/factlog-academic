@@ -329,26 +329,89 @@ kw_is "a compound ending in a stop word is not filtered" '반박논문은 어디
 kw_is "ASCII questions are untouched by the stop-word list" 'which paper claims this' \
   "['(?<!\\\\w)which(?!\\\\w)', '(?<!\\\\w)paper(?!\\\\w)', '(?<!\\\\w)claims(?!\\\\w)', '(?<!\\\\w)this(?!\\\\w)']"
 
-# The recovery stage: a SHORT ASCII content word ('ai' loses to the len>2 floor)
-# is recovered by relaxing that floor — never by giving the function words back,
-# which would re-cite the retraction notice, the exact defect #571 fixes.
-kw_is "short ASCII content word is recovered when the strict floor empties the set" \
+# A SHORT ASCII content word survives a question whose every other token is a
+# function word — never by giving the function words back, which would re-cite the
+# retraction notice, the exact defect #571 fixes.
+kw_is "short ASCII content word survives an all-function-word frame" \
   'AI 논문은 어디에 있나' "['(?<!\\\\w)ai(?!\\\\w)']"
 if router search 'AI 논문은 어디에 있나' | grep -qF 'sources/571-retraction.md'; then
-  bad "ASCII recovery still cited the unrelated retraction notice"
+  bad "the short ASCII keyword still cited the unrelated retraction notice"
 else
-  ok "ASCII recovery keeps the unrelated retraction notice out (#571)"
+  ok "a short ASCII keyword keeps the unrelated retraction notice out (#571)"
 fi
-# The strict floor itself is a contract, not an accident: relaxing it globally would
-# make 'of'/'in' keywords in EVERY question. Pinned so that change cannot pass quietly.
-kw_is "a 2-char ASCII token is not a keyword on the default path" 'AI 신경기호' "['신경기호']"
-# ...and the recovery stage must not let English GRAMMAR back in while rescuing a
-# short content word. 'of' reaches 182 of 186 source files — promoting it is the same
-# defect as '논문은', in the other language.
-kw_is "the recovery stage does not promote a 2-char English function word" \
+# REVERSED BY #583. #571 pinned the opposite value here ('AI 신경기호' -> ['신경기호']),
+# on the reasoning that a 2-char floor would make 'of'/'in' keywords in every question.
+# Measured, the floor was never what stopped that — the function-word list is, and it
+# still runs. Over the corpus search() actually reads in the reference KB (127 files:
+# sources/ + runs/sources/ + decisions/ less the 60 sync-ignored ones), by PROSE reach,
+# the 3-char tokens the old floor already admitted beat every unlisted 2-char one:
+# and 123, the 120, for 110 vs 10 at 105, 11 at 18, ai at 15. So the initialism is a
+# keyword on the DEFAULT path now, and the pin records that direction instead of being
+# deleted.
+kw_is "a 2-char ASCII content token IS a keyword on the default path (#583)" \
+  'AI 신경기호' "['(?<!\\\\w)ai(?!\\\\w)', '신경기호']"
+# Each initialism the issue names, on the default path — one case per token with the
+# expected set written out, so a floor that regresses for only some of them (a
+# hand-written allowlist, say) names which one. The remaining CJK tokens are pinned
+# alongside: a keyword set is what is checked here, never "did anything come back".
+kw_is "'AI' is a default-path keyword (#583)" 'AI 신경기호 추론' \
+  "['(?<!\\\\w)ai(?!\\\\w)', '신경기호', '추론']"
+kw_is "'ML' is a default-path keyword (#583)" 'ML 모델 평가' \
+  "['(?<!\\\\w)ml(?!\\\\w)', '모델', '평가']"
+kw_is "'RL' is a default-path keyword (#583)" 'RL 정책 학습' \
+  "['(?<!\\\\w)rl(?!\\\\w)', '정책', '학습']"
+kw_is "'QA' is a default-path keyword (#583)" 'QA 데이터셋 구축' \
+  "['(?<!\\\\w)qa(?!\\\\w)', '데이터셋', '구축']"
+kw_is "'NN' is a default-path keyword (#583)" 'NN 구조 설계' \
+  "['(?<!\\\\w)nn(?!\\\\w)', '구조', '설계']"
+# The reported defect verbatim: the initialism used to be dropped and the question was
+# answered by the 총칭명사 left over from its own frame — #571's class in miniature.
+kw_is "the reported case keeps its initialism (#583)" 'QA 방법은 무엇인가' \
+  "['(?<!\\\\w)qa(?!\\\\w)', '방법은']"
+# A 2-char token is admitted for its LENGTH, not for being a known acronym: digits and
+# fragments become keywords too, and that is the measured decision, not an oversight.
+# The unlisted 2-char token with the highest prose reach in the reference KB is '10'
+# at 105 of the 127 searchable files — below 'and' (123) and 'the' (120), which the old
+# 3-char floor already admitted. If a later change adds an acronym allowlist, this case
+# fails and says so.
+kw_is "a numeric 2-char token is a keyword too — length, not an allowlist (#583)" \
+  '19 세기 연구' "['(?<!\\\\w)19(?!\\\\w)', '세기', '연구']"
+# ...and the function-word list must not let English GRAMMAR in on that same path.
+# 'of' reaches 183 of 187 files in prose — promoting it is the same defect as '논문은',
+# in the other language. This check is what makes the list load-bearing rather than
+# decorative: before #583 the floor alone would have dropped 'of'.
+kw_is "a 2-char English function word is NOT a keyword on the default path" \
   '이것은 무엇인가 of 그것은' "[]"
-kw_is "the recovery stage still rescues a short content initialism" 'QA 논문은 어디에 있나' \
+kw_is "a short content initialism outlives an all-function-word frame" 'QA 논문은 어디에 있나' \
   "['(?<!\\\\w)qa(?!\\\\w)']"
+# The keyword set is decided in ONE pass: #571's relaxed-floor recovery stage is gone
+# (#583), because re-running the same floor cannot change a result. Checked by
+# consequence — no floor is looser than the default one, so no question that comes back
+# empty could have been rescued: '이것은 무엇인가 of 그것은' stays [] however often it
+# is asked, and the module carries no second floor constant to diverge from _ASCII_MIN.
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+assert a._ASCII_MIN == 2, a._ASCII_MIN
+assert not [n for n in vars(a) if n.startswith('_ASCII_MIN') and n != '_ASCII_MIN'], \
+    [n for n in vars(a) if n.startswith('_ASCII_MIN')]
+# One pass: the tokenizer takes no floor argument, so there is no second stage to pass
+# a different one to.
+import inspect
+params = list(inspect.signature(a._tokenize_keywords).parameters)
+assert params == ['question'], params
+" 2>/dev/null; then ok "the keyword set is decided in one pass; no relaxed-floor stage remains (#583)"; else bad "a second ASCII floor or tokenizer stage is back: $("$PYTHON" -c "
+import sys, os, inspect
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print(sorted(n for n in vars(a) if n.startswith('_ASCII_MIN')), list(inspect.signature(a._tokenize_keywords).parameters))
+")"; fi
+# 1-character tokens stay out in BOTH scripts. The floor moved to 2, not to 0, and
+# NO_QUERY_TERM_NOTE names 'single-character tokens' as a cause — that claim has to
+# stay true or the diagnostic misdiagnoses the question.
+kw_is "a 1-char ASCII token is still not a keyword" 'a 신경기호' "['신경기호']"
+kw_is "a 1-char CJK token is still not a keyword" '이 신경기호' "['신경기호']"
 printf 'This paper is about retrieval of evidence in a corpus.\n' > "$KB/sources/571-english.md"
 if router search '이것은 무엇인가 of 그것은' | grep -qF 'sources/571-english.md'; then
   bad "an English function word became the entire query"
@@ -372,13 +435,84 @@ if printf '%s' "$noterm_answer" | grep -qF 'no searchable keyword'; then ok "no-
 if printf '%s' "$noterm_answer" | grep -qF '(no matching source excerpts found)'; then bad "no-keyword answer claims the corpus was searched and empty"; else ok "no-keyword answer is not reported as 'no such source'"; fi
 if printf '%s' "$nomatch_answer" | grep -qF '(no matching source excerpts found)'; then ok "a searched-but-unmatched question keeps the 'no such source' wording"; else bad "unmatched question lost its own wording"; fi
 if printf '%s' "$nomatch_answer" | grep -qF 'no searchable keyword'; then bad "unmatched question wrongly reported as unsearchable"; else ok "the two empty-result reasons are not conflated (#571)"; fi
+# #583 does NOT move any question across that boundary, and that is the point worth
+# recording. Before, _keywords returned stage 0 (floor 3), or stage 1 (floor 2) when
+# stage 0 came back empty; stage 0's output is a SUBSET of stage 1's, so the result was
+# empty exactly when stage 1 was — which is precisely what the single floor-2 pass now
+# computes. Measured by running both versions over 32,882 generated questions (every
+# 1- and 2-token combination of function words, 1-char tokens, initialisms and content
+# words, plus 20,000 random longer ones): 0 questions changed empty/non-empty status,
+# 0 lost a keyword, 1,809 gained one. So the no-keyword population is unchanged and the
+# diagnostic contract is carried over intact rather than re-derived.
+#
+# 'zq 무엇인가' pins the searched side of that boundary: its only content token is 2
+# chars, so it is a keyword by the FLOOR now instead of by a fallback, and the corpus
+# not containing it must read as "searched and found nothing" — not "you asked nothing
+# searchable". The two wordings are checked separately below so a regression names which.
+kw_is "a question whose only content token is 2 chars is searchable by the floor (#583)" \
+  'zq 무엇인가' "['(?<!\\\\w)zq(?!\\\\w)']"
+xfer_answer="$(router wiki 'zq 무엇인가' --reason 'unknown entity')"
+if printf '%s' "$xfer_answer" | grep -qF '(no matching source excerpts found)'; then
+  ok "a newly-searchable 2-char question is reported as searched-and-unmatched (#583)"
+else
+  bad "newly-searchable 2-char question lost the 'no such source' wording"
+fi
+if printf '%s' "$xfer_answer" | grep -qF 'no searchable keyword'; then
+  bad "a question WITH a 2-char keyword is still reported as unsearchable (#583)"
+else
+  ok "a question with a 2-char keyword is not reported as unsearchable (#583)"
+fi
+# NO_QUERY_TERM_NOTE names exactly two causes — function words and single-character
+# tokens. With the floor at 2 that claim is checkable EXHAUSTIVELY rather than by
+# sampling: over every 1- to 3-token combination of the four token classes, the keyword
+# set is empty IF AND ONLY IF every token is a listed function word or a single
+# character. A third cause would show up as a question that empties without qualifying,
+# and the note would then be misdiagnosing it.
+if "$PYTHON" -c "
+import sys, os, itertools
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+cjk_fw = sorted(a._CJK_QUESTION_STOPWORDS)[:8]
+en_fw = sorted(a._ASCII_FUNCTION_WORDS)[:8]
+one = ['a', 'z', '왜', '이']
+content = ['ai', '10', 'the', '신경기호', 'c++']
+vocab = cjk_fw + en_fw + one + content
+def excusable(tok):
+    return len(tok) == 1 or tok in a._CJK_QUESTION_STOPWORDS or tok in a._ASCII_FUNCTION_WORDS
+bad = []
+for n in (1, 2, 3):
+    for combo in itertools.product(vocab, repeat=n):
+        empty = not a._keywords(' '.join(combo))
+        if empty != all(excusable(t) for t in combo):
+            bad.append((combo, empty))
+assert not bad, bad[:5]
+print(len(vocab))
+" >/dev/null 2>&1; then ok "the no-keyword diagnostic's two causes are exhaustive (all 1-3 token combinations)"; else bad "a question empties the keyword set for an undocumented reason: $("$PYTHON" -c "
+import sys, os, itertools
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+vocab = sorted(a._CJK_QUESTION_STOPWORDS)[:8] + sorted(a._ASCII_FUNCTION_WORDS)[:8] + ['a', 'z', '왜', '이', 'ai', '10', 'the', '신경기호', 'c++']
+def excusable(t):
+    return len(t) == 1 or t in a._CJK_QUESTION_STOPWORDS or t in a._ASCII_FUNCTION_WORDS
+out = [(c, not a._keywords(' '.join(c))) for n in (1, 2, 3) for c in itertools.product(vocab, repeat=n)
+       if (not a._keywords(' '.join(c))) != all(excusable(t) for t in c)]
+print(out[:5])
+")"; fi
 # The diagnostic must name a cause that is TRUE of every path to an empty keyword
 # set, not just the stop-word path — a user who typed '왜?' used no function word and
-# must not be told to stop using them. One case per cause class, plus a mixed one.
-for probe in '이것은 무엇인가|all function words' \
+# must not be told to stop using them. One case per cause class, plus mixed ones.
+#
+# #583 changed WHICH questions land here, so the classes are re-measured rather than
+# assumed. Lowering the floor to 2 moves questions OUT of this set (any question with a
+# 2-char content token now has a keyword) and moves none in — but it makes the English
+# function-word class reachable on the default path for the first time, so 'of in to'
+# is now a cause class of its own rather than a recovery-stage detail.
+for probe in '이것은 무엇인가|all function words (Korean)' \
+             'of in to we|all function words (2-char English)' \
              '왜?|single-character CJK only' \
              'a b c|single-character ASCII only' \
-             '이 논문은?|mixed: 1-char + function word'; do
+             '이 논문은?|mixed: 1-char + function word' \
+             'of 이것은 a|mixed: English function word + CJK stop word + 1-char'; do
   q="${probe%%|*}"; cls="${probe#*|}"
   ans="$(router wiki "$q" --reason 'unknown entity')"
   if ! printf '%s' "$ans" | grep -qF 'no searchable keyword'; then
@@ -450,9 +584,17 @@ import ask_router as a
 print([(w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]) for w in sorted(a._CJK_QUESTION_STOPWORDS)
        if [p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호']])
 ")"; fi
-# The English list is pinned the same way, and every entry must be EXACTLY 2 chars:
-# that length invariant is what makes it harmless on the default path (a 3-char entry
-# would silently start filtering questions that never reach the recovery stage).
+# The English list is pinned the same way, and every entry must be EXACTLY 2 chars.
+# The invariant is unchanged; its MEANING was reversed by #583. Under the old floor of
+# 3 the length was what made the list harmless on the default path — nothing 2 chars
+# long got that far, so the list only constrained the recovery stage. With the floor at
+# 2 the list is LOAD-BEARING on the default path: it is the only thing keeping 'of'
+# (prose reach 124 of the 127 searchable files) out of an ordinary question, and the
+# drop loop below now exercises that path rather than a fallback.
+#
+# The invariant still earns its place, for the other reason: at exactly 2 characters
+# the list can only remove tokens the floor itself just admitted. A 3-char entry would
+# reach past the floor and silently filter a word no measurement here covers.
 if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
