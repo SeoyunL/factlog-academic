@@ -456,6 +456,49 @@ print(score('sources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.'
       score('- stale_source: pages/widgetterm.md references a removed source'))
 ")"
 if [ "$pc_edges" = "(1, 1) (1, 2) (1, 1) (1, 1) (1, 1) (1, 1) (1, 1) (0, 0) (0, 0)" ]; then ok "#573: damping is bounded — only a root-relative KB path with a source-text extension is masked"; else bad "#573: damping boundaries moved (got $pc_edges)"; fi
+# Every axis of the damping, swept rather than sampled: dropping one directory or one
+# extension from the constants must fail here. The extension list is DERIVED from
+# ingest.INGEST_CONVERTERS + the KB's own file-type constants, so this sweep is also
+# what catches an ingest format joining the repo without joining the damping.
+if "$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a
+pats = a._keyword_patterns('widgetterm')
+for rel in a._CITED_KB_DIRS:                      # every scaffold root is damped
+    text = f'{rel}/x-widgetterm.md 를 봤다'
+    assert a._excerpt_score(text, pats) == (0, 0), (rel, a._excerpt_score(text, pats))
+for ext in a._CITATION_EXTS:                      # every citable extension is damped
+    text = f'sources/x-widgetterm.{ext} 를 봤다'
+    assert a._excerpt_score(text, pats) == (0, 0), (ext, a._excerpt_score(text, pats))
+for ext in ('py', 'exe', 'png', 'zip'):           # non-source extensions are NOT damped
+    text = f'sources/x-widgetterm.{ext} 를 봤다'
+    assert a._excerpt_score(text, pats) == (1, 1), (ext, a._excerpt_score(text, pats))
+# the two axes the reference KB cannot exercise: a decisions/ citation (none in the KB)
+# and a runs/ data file (all real citations are .md/.csv)
+assert a._excerpt_score('decisions/open-questions-widgetterm.md 참고', pats) == (0, 0)
+assert a._excerpt_score('runs/2024-widgetterm.json 로그', pats) == (0, 0)
+# The sweeps above iterate the constants themselves, so they cannot see an entry being
+# DELETED. These membership checks can. INGEST_CONVERTERS is compared live, so a format
+# added to ingest without joining the damping fails here rather than silently regressing
+# a Korean-original KB (.hwp/.hwpx/.pptx/.odt were missed exactly that way).
+from factlog import ingest
+assert {ext.lstrip('.') for ext in ingest.INGEST_CONVERTERS} <= set(a._CITATION_EXTS), (
+    sorted({ext.lstrip('.') for ext in ingest.INGEST_CONVERTERS} - set(a._CITATION_EXTS)))
+assert {'csv', 'dl', 'json', 'md', 'txt', 'yaml', 'yml'} <= set(a._CITATION_EXTS), a._CITATION_EXTS
+assert {'sources', 'runs/sources', 'decisions', 'pages', 'facts', 'policy', 'templates',
+        'runs'} <= set(a._CITED_KB_DIRS), a._CITED_KB_DIRS
+" 2>/dev/null; then ok "#573: damping covers every scaffold dir and every citable extension (derived from INGEST_CONVERTERS)"; else bad "#573: a directory or extension axis of the damping is uncovered — run the sweep by hand"; fi
+# The compiled pattern must be byte-identical across processes: the dir/ext sets are
+# built from set unions, whose iteration order follows PYTHONHASHSEED. Sorting is what
+# makes it stable, and no functional assertion can catch its removal.
+pc_pat_a="$(PYTHONHASHSEED=1 "$PYTHON" -c "
+import sys; sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a; print(a._PATH_CITATION_RE.pattern)")"
+pc_pat_b="$(PYTHONHASHSEED=987654321 "$PYTHON" -c "
+import sys; sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a; print(a._PATH_CITATION_RE.pattern)")"
+if [ -n "$pc_pat_a" ] && [ "$pc_pat_a" = "$pc_pat_b" ]; then ok "#573: the compiled path pattern is deterministic across PYTHONHASHSEED"; else bad "#573: path pattern varies by hash seed — a set is being iterated unsorted"; fi
 rm -f "$KB/sources/pathcite-notes.md" "$KB/sources/graphdb-tuning-widgetterm.md" "$KB/sources/pathcite-mixed.md"
 
 # --- #32: grounded answers (verified facts about mentioned entities) ---
