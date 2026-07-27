@@ -229,20 +229,22 @@ for r in json.load(sys.stdin)['results']:
 py() { "$PYTHON" -c "$1" "${@:2}"; }
 
 # =============================================================================
-# PIN 1 — keyword generation: whole 어절, no particle stripping, no stop words
+# PIN 1 — keyword generation: whole 어절, no particle stripping, stop words dropped
 # =============================================================================
 if py "
 import os, sys
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 got = [p.pattern for p in a._keyword_patterns('''$Q_KO''')]
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #581 이 이를 바꾼다 (조사 분리: '근거를'
-# 은 '근거' 로 줄어야 한다), 이슈 #571 이 이를 바꾼다 (기능어 제거: '논문은',
-# '어떻게', '제시하는가' 는 콘텐츠 키워드가 아니다).
-# 현재는 어절이 통째로 패턴이 되고, 탈락하는 것은 1글자 '이' 뿐이다.
-want = ['논문은', '신경기호', '추론의', '근거를', '어떻게', '제시하는가']
+# #571 이 기능어 '논문은' '어떻게' 를 제거했다 (이 pin 은 그 시점에 갱신됐다).
+# 남은 값은 여전히 현재 결함을 고정한 것이다. 이슈 #581 이 이를 바꾼다 (조사 분리:
+# '근거를' 은 '근거' 로, '추론의' 는 '추론' 으로 줄어야 한다).
+# '제시하는가' 는 #571 이 제거하지 않는다: 불용어 목록은 어절 전체 일치이고
+# '제시하다'(콘텐츠 동사) + 의문 어미이므로 기능어 목록에 넣을 수 없다. 어미 분리는
+# 형태소 처리(#581 계열)의 몫이다.
+want = ['신경기호', '추론의', '근거를', '제시하는가']
 assert got == want, f'got={got}'
-" 2>/dev/null; then ok "PIN1 한국어 질문은 조사 붙은 어절 그대로 키워드가 된다 (#581/#571 이 바꾼다)"; else bad "PIN1 keyword pattern set moved: $(py "
+" 2>/dev/null; then ok "PIN1 기능어는 빠지고 조사 붙은 어절은 그대로 키워드가 된다 (#581 이 바꾼다)"; else bad "PIN1 keyword pattern set moved: $(py "
 import os, sys
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
@@ -259,10 +261,11 @@ print([p.pattern for p in a._keyword_patterns('''$Q_KO''')])
 ko_refs="$(refs "$Q_KO" || true)"
 [ -n "$ko_refs" ] || bad "PIN2 한국어 질문이 발췌를 0건 반환했다 (이후 PIN2/PIN3 는 이 사실의 파생)"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #581 (조사 분리) 이 이를 바꾼다: 6개 키워드
-# 중 코퍼스에 닿는 것은 '논문은' '신경기호' '추론의' '근거를' 뿐이고, 그중 '추론의'
-# '근거를' 는 조사가 붙은 형태를 그대로 담은 문서에만 걸린다.
-same "PIN2 한국어 질문의 발췌 수 (#581/#576 이 바꾼다)" "4" "$(printf '%s\n' "$ko_refs" | grep -c .)"
+# 이 값은 현재 결함을 고정한 것이다. 이슈 #581 (조사 분리) 이 이를 바꾼다: 4개 키워드
+# 중 코퍼스에 닿는 것은 '신경기호' '추론의' '근거를' 뿐이고, 그중 '추론의' '근거를' 는
+# 조사가 붙은 형태를 그대로 담은 문서에만 걸린다.
+# 4 -> 3 은 #571 이 바꿨다: 기능어 '논문은' 만으로 걸리던 철회 공지 발췌가 빠졌다.
+same "PIN2 한국어 질문의 발췌 수 (#581/#576 이 바꾼다)" "3" "$(printf '%s\n' "$ko_refs" | grep -c .)"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #581 이 이를 바꾼다. '근거를' 은 어간 '근거'
 # 를 담은 이 파일을 매치하지 못한다 — 조사가 분리되면 이 파일이 결과에 들어와야 한다.
@@ -285,8 +288,8 @@ ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
 [ -n "$ko_answer" ] || bad "PIN2 wiki 렌더가 아무것도 출력하지 않았다"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #575 가 이를 바꾼다. 렌더된 답변에는 어떤
-# 키워드가 몇 건 매치됐는지, 리콜이 낮은지에 대한 진단이 전혀 없다 — 6개 중 2개만
-# 실질적으로 기여했다는 사실이 사용자에게 보이지 않는다.
+# 키워드가 몇 건 매치됐는지, 리콜이 낮은지에 대한 진단이 전혀 없다 — 키워드 4개 중
+# 코퍼스에 닿은 것은 3개뿐이라는 사실이 사용자에게 보이지 않는다.
 #
 # 어휘 화이트리스트('keyword|키워드|recall|...')로 부재를 확인하지 않는다. 그건 진단
 # 문구가 어떤 단어를 쓰느냐에 걸린 운이고, 예상 못 한 표현이면 조용히 통과한다. 대신
@@ -300,15 +303,16 @@ question: $Q_KO
 reason: unknown entity
 WARNING: unverified candidates — do not treat as confirmed facts.
 sources searched: sources, runs/sources, decisions (supplementary)
-source excerpts: 4" \
+source excerpts: 3" \
   "$ko_head"
 
 # 진단이 인용 뒤에 덧붙는 형태여도 트립하도록 꼬리도 고정한다: 답변은 마지막 발췌의
 # 마지막 줄로 끝나고, 그 뒤에는 아무것도 없다. 이 pin 을 트립시키는 것은 #575 의 진단만이
 # 아니다 — cmd_wiki 는 POLICY_UNCOMPILED_WARNING 도 렌더 뒤에 덧붙일 수 있다(위 픽스처가
 # 그 경로를 닫아 두었다). 그래서 설명 문구는 원인을 #575 로 단정하지 않는다.
+# 마지막 발췌는 #571 이후 철회 공지가 아니라 kim-2024 의 두 번째 발췌다.
 same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄이 없다" \
-  "    이 논문은 더 이상 인용해서는 안 된다." \
+  "    ## Abstract" \
   "$(printf '%s\n' "$ko_answer" | tail -1)"
 
 # =============================================================================
@@ -317,11 +321,12 @@ same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄�
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #572 가 이를 바꾼다. 점수는 (키워드 커버리지,
 # 총 빈도) 뿐이고 디렉터리 등급은 정렬에 전혀 들어가지 않는다. 그래서 사람이 적은
 # 리뷰 노트(decisions/, supplementary)가 원자료(sources/)를 앞선다.
+# 4번째 행(sources/0000_RETRACTION_16354850.md:3)은 #571 이 제거했다 — 기능어
+# '논문은' 이 유일한 접점이었으므로 이제 어떤 키워드에도 걸리지 않는다.
 same "PIN3 한국어 질문의 랭킹 순서 (#572 가 바꾼다)" \
   "decisions/open-questions.md:3
 sources/kim-2024-neurosymbolic-grounding.md:4
-sources/kim-2024-neurosymbolic-grounding.md:14
-sources/0000_RETRACTION_16354850.md:3" \
+sources/kim-2024-neurosymbolic-grounding.md:14" \
   "$ko_refs"
 
 same "PIN3 supplementary 발췌가 1위다 (#572 가 바꾼다)" \
@@ -331,13 +336,16 @@ import json, sys
 print(json.load(sys.stdin)['results'][0]['dir'])
 ")"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #571 이 이를 바꾼다. 철회 공지는 질문과
-# 주제가 전혀 겹치지 않는데도, 기능어 '논문은' 하나만으로 결과에 들어온다.
+# #571 이 이 값을 뒤집었다. 이전에는 철회 공지가 기능어 '논문은' 하나만으로 결과에
+# 올랐다 (주제 접점 0). 이제는 그 어절이 불용어로 빠져 어떤 발췌도 나오지 않는다.
+# 결함 pin 이 아니라 회귀 가드가 됐다: 파일 전체가 질문의 콘텐츠 키워드
+# (신경기호/추론의/근거를)를 한 번도 담지 않으므로, 다시 결과에 오른다면 기능어가
+# 콘텐츠 키워드로 되살아났다는 뜻이다.
 retraction="$(excerpt_of "$Q_KO" 'sources/0000_RETRACTION_16354850.md:3' || true)"
-if [ -n "$retraction" ] && ! printf '%s' "$retraction" | grep -qE '신경기호|추론|근거'; then
-  ok "PIN3 무관 문서가 기능어 '논문은' 단독으로 결과에 오른다 (#571 이 바꾼다)"
+if [ -z "$retraction" ] && ! printf '%s\n' "$ko_refs" | grep -q '0000_RETRACTION'; then
+  ok "PIN3 기능어 '논문은' 만 겹치는 무관 문서는 결과에 오르지 않는다 (#571 이 바꿨다)"
 else
-  bad "PIN3 기능어 케이스가 이동했다 — 발췌: [$retraction]"
+  bad "PIN3 무관 문서가 기능어만으로 다시 결과에 올랐다 — 발췌: [$retraction]"
 fi
 
 # =============================================================================
@@ -409,17 +417,18 @@ same "PIN5 두 번째 발췌는 '## Abstract' 헤딩에서 끝난다 (#574 가 �
 ## Abstract' \
   "$(excerpt_of "$Q_KO" 'sources/kim-2024-neurosymbolic-grounding.md:14')"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #574 가 이를 바꾼다. 초록 문장은 코퍼스에서
-# 키워드 커버리지가 가장 높은 단 하나의 행(논문은/신경기호/근거를 = 3개 매치)인데도,
-# 바로 앞 발췌의 last_end 안에 들어가 억제되어 어떤 발췌에도 나타나지 않는다.
+# 이 값은 현재 결함을 고정한 것이다. 이슈 #574 가 이를 바꾼다. 초록 문장은 이 파일에서
+# 키워드 커버리지가 가장 높은 행(신경기호/근거를 = 2개 매치, 파일 내 최대)인데도, 바로
+# 앞 발췌의 last_end 안에 들어가 억제되어 어떤 발췌에도 나타나지 않는다.
+# (3,3) -> (2,2) 는 #571 이 바꿨다: 이 문장의 '이 논문은' 이 기능어로 빠졌다.
 if py "
 import os, sys
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 line = '이 논문은 신경기호 추론이 산출한 결론의 근거를 역추적하는 절차를 제안한다.'
-assert a._excerpt_score(line, a._keyword_patterns('''$Q_KO''')) == (3, 3), a._excerpt_score(
+assert a._excerpt_score(line, a._keyword_patterns('''$Q_KO''')) == (2, 2), a._excerpt_score(
     line, a._keyword_patterns('''$Q_KO'''))
-" 2>/dev/null; then ok "PIN5 초록 문장은 코퍼스 최고 커버리지 행이다 (3개 키워드 매치)"; else bad "PIN5 초록 문장의 점수가 이동했다 — 픽스처를 확인하라"; fi
+" 2>/dev/null; then ok "PIN5 초록 문장은 파일 내 최고 커버리지 행이다 (2개 키워드 매치)"; else bad "PIN5 초록 문장의 점수가 이동했다 — 픽스처를 확인하라"; fi
 
 if printf '%s\n' "$ko_answer" | grep -qF '역추적하는 절차를 제안한다'; then
   bad "PIN5 초록 문장이 이미 노출된다 — #574 가 머지됐다면 이 pin 을 갱신하라"

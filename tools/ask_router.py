@@ -635,6 +635,137 @@ def _is_cjk(word: str) -> bool:
     )
 
 
+# Korean question function words, as whole 어절 (whitespace-token) SURFACE forms.
+#
+# Why this list exists (#571): every CJK token of length>=2 is promoted to a content
+# keyword, so the grammar of the question becomes search terms. A question ending
+# '…주장하는 논문은?' then substring-matches '이 논문은 …철회(retracted)되었다' in a
+# topically unrelated retraction notice and ranks it as evidence — noise on an
+# exploration surface is tolerable, but citing a retracted trial as a candidate
+# answer is the worst failure mode available to a verification tool. These forms
+# only CONSTRUCT a question; they never name its subject.
+#
+# Membership rule (#571 기준 4): surface forms only, never a bare stem. '논문' and
+# '방법' are legitimate content nouns and stay searchable; only the particle-attached
+# 어절 that a question frame produces ('논문은') is dropped. Matching is therefore on
+# the WHOLE token — a substring or suffix rule would swallow content words, e.g. a
+# query for '반박논문은' ends in '논문은' but names a real subject.
+#
+# Single-character forms ('왜', '이', '그') are deliberately absent: the len>=2 floor
+# below already drops them, so listing them would only imply a guarantee this filter
+# does not provide.
+_CJK_QUESTION_STOPWORDS = frozenset(
+    {
+        # 의문사 + 그 조사/어미 표층형
+        "무엇",
+        "무엇이",
+        "무엇을",
+        "무엇인가",
+        "무엇인지",
+        "무엇인가요",
+        "뭐가",
+        "뭐야",
+        "뭔가",
+        "언제",
+        "언제부터",
+        "언제까지",
+        "어디",
+        "어디에",
+        "어디서",
+        "어디에서",
+        "어디까지",
+        "어떻게",
+        "어떤",
+        "어떠한",
+        "어느",
+        "누가",
+        "누구",
+        "누구인가",
+        "얼마나",
+        # 의문형 종결부 (그 자체로는 술어를 지시하지 않는다)
+        "인가",
+        "인지",
+        "인가요",
+        "있나",
+        "있나요",
+        "있는가",
+        "없나",
+        "없나요",
+        "없는가",
+        "맞나",
+        "맞는가",
+        # 지시/대용어
+        "이것",
+        "이것이",
+        "이것은",
+        "그것",
+        "그것이",
+        "그것은",
+        "저것",
+        "이거",
+        "그거",
+        "여기",
+        "여기서",
+        "거기",
+        "저기",
+        "이런",
+        "그런",
+        "저런",
+        "이렇게",
+        "그렇게",
+        # 질문 틀이 만들어 내는 총칭 명사의 조사 표층형. 어간('논문')은 콘텐츠
+        # 명사이므로 목록에 없다 — 사용자가 '논문' 을 그대로 치면 키워드로 남는다.
+        # 실측한 실제 KB 에서 sources/ 의 읽을 수 있는 파일 186개 중 67개가 '논문' 을
+        # 포함했다. 질문 틀에서 온 이 표층형은 변별력이 사실상 0이다.
+        "논문은",
+        "논문이",
+        "논문을",
+        "논문인가",
+    }
+)
+
+
+def _cjk_stopword(word: str) -> bool:
+    """True if *word* is a Korean question function word (whole-token match).
+
+    Compares precomposed (NFC) forms, matching the rest of the CJK path: _is_cjk
+    tests the 가-힣 syllable block, so a decomposed (NFD) question never reaches
+    this branch at all — that pre-existing gap is not this filter's to close.
+    """
+    return word in _CJK_QUESTION_STOPWORDS
+
+
+def _tokenize_patterns(question: str, *, drop_stopwords: bool) -> list[re.Pattern[str]]:
+    """Token→pattern pass shared by the filtered and the unfiltered fallback run."""
+    seen: set[str] = set()
+    patterns: list[re.Pattern[str]] = []
+    # Tokenizer captures programming-term punctuation: internal '.'/'-' (node.js,
+    # 도구가) and trailing '+'/'#' (c++, c#, f#), while excluding trailing
+    # sentence punctuation. Plain \w runs (incl. CJK) still tokenize as before.
+    for word in re.findall(r"\w+(?:[.+#-]+\w+)*[+#]*", question.lower(), flags=re.UNICODE):
+        if word in seen:
+            continue
+        if _is_cjk(word):
+            # Stop-word removal runs on the RAW 어절 and, when it fires, the token
+            # produces NO pattern at all — not even a derived one. Any future
+            # 조사-stripping step (#581) must be added BELOW this guard: run above
+            # it, '논문은' would first become the stem '논문' (67 of 186 measured
+            # source files), and this defect would get wider instead of fixed.
+            # (#571)
+            if drop_stopwords and _cjk_stopword(word):
+                continue
+            if len(word) >= 2:
+                seen.add(word)
+                patterns.append(re.compile(re.escape(word)))
+        elif len(word) > 2:
+            seen.add(word)
+            # Lookaround boundaries (not \b) so punctuation-edged tokens like
+            # 'c++' / 'c#' match while 'api' still does not match inside
+            # 'therapist'.
+            patterns.append(re.compile(rf"(?<!\w){re.escape(word)}(?!\w)"))
+    return patterns
+
+
 def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
     """Keyword matchers for the question, bilingual:
 
@@ -646,25 +777,16 @@ def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
       query can substring-match inside an unrelated compound; this recall-over-
       precision trade-off is acceptable for the UNVERIFIED exploration surface,
       but do NOT reuse this matcher on a precision-sensitive path.
+    - Korean question function words (_CJK_QUESTION_STOPWORDS) are dropped, so the
+      grammar of the question does not become a search term (#571).
     """
-    seen: set[str] = set()
-    patterns: list[re.Pattern[str]] = []
-    # Tokenizer captures programming-term punctuation: internal '.'/'-' (node.js,
-    # 도구가) and trailing '+'/'#' (c++, c#, f#), while excluding trailing
-    # sentence punctuation. Plain \w runs (incl. CJK) still tokenize as before.
-    for word in re.findall(r"\w+(?:[.+#-]+\w+)*[+#]*", question.lower(), flags=re.UNICODE):
-        if word in seen:
-            continue
-        if _is_cjk(word):
-            if len(word) >= 2:
-                seen.add(word)
-                patterns.append(re.compile(re.escape(word)))
-        elif len(word) > 2:
-            seen.add(word)
-            # Lookaround boundaries (not \b) so punctuation-edged tokens like
-            # 'c++' / 'c#' match while 'api' still does not match inside
-            # 'therapist'.
-            patterns.append(re.compile(rf"(?<!\w){re.escape(word)}(?!\w)"))
+    patterns = _tokenize_patterns(question, drop_stopwords=True)
+    if not patterns:
+        # A question made of nothing but function words ('이것은 무엇인가'). search()
+        # returns [] on an empty pattern list, so filtering to zero would turn the
+        # question into a silent non-answer — strictly worse than the noisy match
+        # this filter exists to remove. Fall back to the unfiltered tokens. (#571)
+        patterns = _tokenize_patterns(question, drop_stopwords=False)
     return patterns
 
 
