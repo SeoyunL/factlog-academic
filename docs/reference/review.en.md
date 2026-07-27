@@ -116,9 +116,12 @@ The positional triple identifies the fact (exact match); `--set-subject` /
 one, or `--accept`). amend writes the **value** `--set-*` gives to **both**
 `candidates.csv` and the backing `runs/*.json`, so the edit survives `/factlog sync`
 (a fact's value lives in `runs/*.json` — merge rebuilds `candidates.csv` from it).
-`--accept` also promotes to `accepted`, but that **status** is written to
-`candidates.csv` only: the `runs/*.json` row stays pending (#565). Confidence is not
-editable. `--dry-run` previews.
+`--accept` also promotes to `accepted`, and that **status** is written to both stores,
+so it survives a re-merge (#565). In `runs/*.json` it follows the same rule
+`accept`/`reject` follow and promotes **pending rows only**. A run row already
+`confirmed` outranks `accepted`, so it is not a promotion target — what the fact ends
+up as then depends on whether `--set-*` came along (see Durability below). Confidence
+is not editable. `--dry-run` previews.
 
 ### Kinds of status
 
@@ -180,7 +183,24 @@ to `candidates.csv`**; just rebuild `accepted.dl` with `/factlog check`.
 
 > **Durability:** a human `accept` is preserved across re-merge the same way
 > `reject`/`superseded` is — `/factlog sync` will not revert your decisions.
-> `amend --accept` is the exception: its promotion is written to `candidates.csv`
-> only, so merge preserves it while that file is around but has nothing to go on
-> once `candidates.csv` is rebuilt from `runs/*.json` from scratch (#565). Use
-> `factlog accept` to raise a status durably.
+> The `amend --accept` promotion is the same — a fact that was pending is still
+> `accepted` after you delete `candidates.csv` and rebuild it from `runs/*.json` from
+> scratch (#565).
+>
+> **A fact that is already `confirmed` is different.** What reaches `runs/*.json` is
+> the promotion of a pending row only, so a `confirmed` run row is not promoted. What
+> happens next depends on whether `--set-*` came along.
+>
+> - **`--accept` alone:** the run row is left alone and only `candidates.csv` moves to
+>   `accepted` (the transition table above). The `confirmed` ruling therefore still
+>   exists in `runs/*.json`, and recovering it takes deleting `candidates.csv` and
+>   re-merging: a plain re-merge lets the surviving `candidates.csv` win and settles
+>   on `accepted`.
+> - **`--set-*` also changes the triple:** the run row is not "left alone" — the old
+>   triple becomes a `superseded` tombstone and the corrected triple is added as a
+>   **new item**. That new item inherits the original row's `confirmed`, so
+>   `candidates.csv` reads `accepted` while a from-scratch rebuild brings the
+>   corrected fact back as `confirmed`, not `accepted`.
+>
+> Either way `confirmed` outranks `accepted` and both compile into `accepted.dl`, so
+> the outcome that matters — the fact is engine input — does not change.

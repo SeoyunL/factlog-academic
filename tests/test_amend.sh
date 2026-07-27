@@ -50,6 +50,34 @@ printf '%s' "$out" | grep -qF "1 runs/*.json row(s) updated" && ok "reports runs
 grep -q "Widget,codename,Falcon,sources/a.md,accepted,0.50,name finalized" "$KB/facts/candidates.csv" \
   && ok "amended value + accepted status survive a re-merge" || bad "amend reverted after re-merge: $(grep codename "$KB/facts/candidates.csv")"
 
+# --- #565: the --accept promotion must reach runs/*.json, not candidates.csv only ---
+# The block above cannot see this defect: it re-merges with candidates.csv still in
+# place, and merge restores the run status FROM that file, so `accepted` comes back
+# whether or not the promotion was ever written to runs. Deleting candidates.csv first
+# is what actually asks runs/*.json to hold the decision -- the same payoff #233 pinned
+# for `accept`, which `amend --accept` did not share.
+KB="$(mktemp -d)/wiki"; seed "$KB"
+"$PYTHON" -m factlog amend Widget codename Draft --accept --target "$KB" >/dev/null 2>&1
+grep -qF '"status": "accepted"' "$KB/runs/r.json" && ok "#565 --accept writes accepted into runs/*.json" || bad "#565 --accept never reached the run row: $(cat "$KB/runs/r.json")"
+rm "$KB/facts/candidates.csv"
+"$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
+grep -q "Widget,codename,Draft,sources/a.md,accepted," "$KB/facts/candidates.csv" \
+  && ok "#565 the promotion survives deleting candidates.csv and re-merging" \
+  || bad "#565 the promotion was silently downgraded on a from-scratch rebuild: $(grep codename "$KB/facts/candidates.csv")"
+
+# ...and with a triple change, where the corrected value arrives as a NEW run item: it
+# is that item, not the tombstone, that has to carry the promotion.
+KB="$(mktemp -d)/wiki"; seed "$KB"
+"$PYTHON" -m factlog amend Widget codename Draft --set-object Falcon --accept --target "$KB" >/dev/null 2>&1
+rm "$KB/facts/candidates.csv"
+"$PYTHON" "$MERGE" --wiki "$KB" >/dev/null 2>&1
+grep -q "Widget,codename,Falcon,sources/a.md,accepted," "$KB/facts/candidates.csv" \
+  && ok "#565 a corrected triple is accepted after a from-scratch rebuild" \
+  || bad "#565 the corrected triple lost its promotion on rebuild: $(grep codename "$KB/facts/candidates.csv")"
+grep -q "Widget,codename,Draft,sources/a.md,superseded," "$KB/facts/candidates.csv" \
+  && ok "#565 the old triple stays retired after a from-scratch rebuild" \
+  || bad "#565 the tombstone did not survive the rebuild: $(grep codename "$KB/facts/candidates.csv")"
+
 # --- #106: a human re-review (accepted -> needs_review in candidates.csv) is ---
 # --- NOT silently re-promoted by a stale 'accepted' left in runs/*.json --------
 KB="$(mktemp -d)/wiki"
@@ -118,9 +146,9 @@ printf '%s' "$out" | grep -qF "no runs/*.json backing was found" \
 
 # --- #563: an undecodable runs/*.json must neither kill amend nor be skipped --
 # --- in silence, and the no-backing note must not lie about it ----------------
-# Uses --set-* ONLY. `amend --accept` does not write the accepted status into the
-# run row at all (a separate defect, #565), so pinning a run-row status here would
-# go red for a reason this fixture is not about.
+# Uses --set-* ONLY, to keep this fixture about the unreadable file: `--accept` now
+# reaches the run row too (#565), and pinning a status here would duplicate coverage
+# that lives with the #565 cases above.
 KB="$(mktemp -d)/wiki"; seed "$KB"
 printf '\377\376\000binary' > "$KB/runs/bin.json"   # sorts before r.json; r.json holds the fact
 rc=0
@@ -128,12 +156,12 @@ err="$("$PYTHON" -m factlog amend Widget codename Draft --set-object Falcon --ta
 [ "$rc" -eq 0 ] && ok "#563 amend survives an undecodable run file (rc 0)" || bad "#563 amend died on an undecodable run file (rc $rc)"
 printf '%s' "$err" | grep -q "Traceback" && bad "#563 amend printed a traceback: $err" || ok "#563 amend printed no traceback"
 grep -qF '"object": "Falcon"' "$KB/runs/r.json" && ok "#563 the edit still reached the readable run file" || bad "#563 the edit never reached the readable run file"
-# the pre-existing `changed and not runs_changed` note cannot cover this: r.json DID
-# take the edit, so runs_changed == 1 and the note stays quiet. Only a per-file
-# warning tells the user bin.json was left behind.
-# the wording is pinned too: amend records an EDIT, not a decision. `--accept` never
-# reaches the run row's status (#565), so borrowing accept's "record the decision"
-# here would promise something amend does not do.
+# the `changed and not runs_matched` note cannot cover this: r.json DID hold a matching
+# row, so runs_matched == 1 and the note stays quiet -- correctly, since the fact does
+# have readable backing. Only a per-file warning tells the user bin.json was left behind.
+# the wording is pinned too: amend records an EDIT. `--accept` rides along with it
+# (#565), but the value is what amend is for and what is lost here, so accept's
+# "record the decision" would narrow the warning to the smaller half.
 printf '%s' "$err" | grep -q "could not read bin.json to record the edit" \
   && ok "#563 the undecodable file is named on stderr even when another run file took the edit" \
   || bad "#563 the undecodable file was skipped silently or misworded: $err"

@@ -317,5 +317,25 @@ grep -q 'relation("A", "costs", "amount(7,' "$KB10/facts/accepted.dl" \
   && ok "(l) the amount fact survives re-merge and is engine input" \
   || bad "(l) the amount accept was downgraded on re-merge (#233 regression)"
 
+# --- #565: `amend --accept` must be as durable as `accept` --------------------------
+# Two ways to say "promote this fact", one outcome. amend wrote the promotion to
+# candidates.csv only, so the two commands agreed for as long as that file existed and
+# split the moment it was rebuilt from runs/*.json alone -- `accept` held, `amend
+# --accept` fell back to candidate. Same seed, same payoff, compared directly: an
+# equivalence is what keeps the two paths from drifting again, since each one on its own
+# looks fine right up until the rebuild.
+KB14="$(new_kb)"
+KB15="$(new_kb)"
+FACTLOG_ROOT="$KB14" "$PY" -m factlog accept A knows B >/dev/null 2>&1
+FACTLOG_ROOT="$KB15" "$PY" -m factlog amend A knows B --accept >/dev/null 2>&1
+rm "$KB14/facts/candidates.csv" "$KB15/facts/candidates.csv"   # rebuild from runs alone
+FACTLOG_ROOT="$KB14" "$PY" tools/merge_candidates.py --wiki "$KB14" >/dev/null 2>&1
+FACTLOG_ROOT="$KB15" "$PY" tools/merge_candidates.py --wiki "$KB15" >/dev/null 2>&1
+S14="$(csv_status "$KB14" A)"; S15="$(csv_status "$KB15" A)"
+[ "$S14" = "$S15" ] && ok "(o) accept and amend --accept agree after a from-scratch rebuild" \
+  || bad "(o) the two promotion paths disagree (#565): accept=$S14 amend=$S15"
+[ "$S15" = "accepted" ] && ok "(o) and both land on accepted, not a downgrade they share" \
+  || bad "(o) amend --accept was downgraded on a from-scratch rebuild (#565): $S15"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "accept durable: all passed"; else echo "accept durable: $fails failed"; exit 1; fi
