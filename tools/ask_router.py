@@ -1292,10 +1292,13 @@ def _recall_lines(recall: dict[str, list[str]] | None) -> list[str]:
         front-matter `title:`): 59/59 at ratio 1.00, zero unmatched keywords. That
         control is near-tautological — the words are literally in the file — so it
         only RULES OUT thresholds, it cannot pick one.
-      - a good question can still carry a term the corpus lacks: 'what evaluation
-        benchmarks are used for retrieval augmented generation' measures 8/9
-        ('augmented' is absent). Warning on any unmatched keyword would fire here,
-        so 'any' is out.
+      - a good question can still carry a term the search cannot reach: 'what
+        evaluation benchmarks are used for retrieval augmented generation'
+        measures 8/9. Warning on any unmatched keyword would fire here, so 'any'
+        is out. ('augmented' is not missing from the KB — it is in 5 files, all
+        under a sync-ignored path. The denominator is the SEARCHABLE corpus:
+        search() skips those files, so no excerpt can ever cite them, and calling
+        the term matched would promise evidence that cannot be produced.)
       - the failures #575 exists to expose measure far lower: the issue's own
         question is 2/8 (0.25) and '신경기호 추론의 근거를 어떻게 제시하는가' is
         1/4 (0.25) — both cross-lingual, both returning excerpts that look like an

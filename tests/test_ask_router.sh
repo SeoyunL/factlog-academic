@@ -610,6 +610,26 @@ same "#575 a keyword only on a collapsed line is still reported matched" \
   "$(rc_line 'anchorterm suppressedterm' 'keywords matched:')"
 rm -f "$KB/sources/575/window.md"
 
+# (c) the DENOMINATOR is the searchable corpus, not the directory tree. A term that
+#     occurs only in a sync-ignored source is reported unmatched: search() skips
+#     those files, so no excerpt can ever cite them, and calling the term matched
+#     would promise evidence that cannot be produced — and would suppress the
+#     low-recall warning that is the honest answer. Not hypothetical: on the
+#     reference KB 'augmented' occurs in 5 files, every one of them sync-ignored.
+mkdir -p "$KB/sources/575/hidden"
+printf 'ignoredonlyterm appears only in a sync-ignored source.\n' > "$KB/sources/575/hidden/x.md"
+printf -- '- 575/hidden/**\n' >> "$KB/policy/sync-ignore.md"
+same "#575 a term only in a sync-ignored source is reported unmatched" \
+  "keywords unmatched: ignoredonlyterm" \
+  "$(rc_line 'neurosymbolic ignoredonlyterm' 'keywords unmatched:')"
+# ...and the SAME term is matched once the ignore is lifted, so the check above
+# pins the sync-ignore rule rather than a misspelled fixture.
+sed -i.bak '/^- 575\/hidden\/\*\*$/d' "$KB/policy/sync-ignore.md" && rm -f "$KB/policy/sync-ignore.md.bak"
+same "#575 the same term is matched once the sync-ignore is lifted" \
+  "keywords matched: 2/2 — neurosymbolic, ignoredonlyterm" \
+  "$(rc_line 'neurosymbolic ignoredonlyterm' 'keywords matched:')"
+rm -rf "$KB/sources/575/hidden"
+
 # PURITY (수용 기준 6): the tally is a side report. Same rows, same order, with and
 # without it — and the `search` JSON contract gains no field (its shape is pinned by
 # the #279/#571 cases above; this states the intent that #575 stays out of it).
