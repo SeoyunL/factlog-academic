@@ -100,6 +100,11 @@ launcher_pick() {
   bash "$LAUNCHER" -c 'import factlog_test_id, sys; sys.stdout.write(factlog_test_id.ID)' 2>/dev/null
 }
 
+# Everything the launcher itself said, with the payload's own stdout discarded.
+launcher_stderr() {
+  bash "$LAUNCHER" -c 'raise SystemExit(0)' 2>&1 >/dev/null || true
+}
+
 launcher_status() {
   local rc=0
   bash "$LAUNCHER" -c 'raise SystemExit(0)' >/dev/null 2>&1 || rc=$?
@@ -205,6 +210,85 @@ make_shim "$FB_BIN" "python" "$(venv_python "$BARE2")"
 
 export PATH="$FB_BIN:/usr/bin:/bin"
 report "engine-less fallback keeps python3 first" "bare" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 8: the reported bug — PATH has no engine, ~/.factlog-venv does
+#
+# SKILL.md's PEP 668 fallback tells the user to create exactly this venv, so a
+# user who followed the documentation must not be stuck on the engine-less
+# python3 that happens to come first on PATH.
+# ---------------------------------------------------------------------------
+DOC_VENV="$HOME/.factlog-venv"
+make_venv "$DOC_VENV" "documented" "1.0.3"
+
+DOC_BIN="$TMP/doc-bin"
+make_shim "$DOC_BIN" "python3" "$(venv_python "$BARE")"
+
+export PATH="$DOC_BIN:/usr/bin:/bin"
+report "engine-less PATH falls through to ~/.factlog-venv" "documented" "$(launcher_pick)"
+
+# The choice leaves PATH, so it must not be silent.
+notice="$(launcher_stderr)"
+case "$notice" in
+  *"$DOC_VENV"*) report "off-PATH choice names the interpreter on stderr" "named" "named" ;;
+  *) report "off-PATH choice names the interpreter on stderr" "named" "[$notice]" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# CASE 9: a PATH candidate that DOES carry the engine outranks ~/.factlog-venv
+#
+# ~/.factlog-venv is a fallback for a PATH that cannot serve, not an override.
+# ---------------------------------------------------------------------------
+PATH_ENGINE_BIN="$TMP/path-engine-bin"
+make_shim "$PATH_ENGINE_BIN" "python3" "$(venv_python "$ENGINE")"
+
+export PATH="$PATH_ENGINE_BIN:/usr/bin:/bin"
+report "PATH candidate with the engine outranks ~/.factlog-venv" "engine" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 10: ~/.factlog-venv is consulted before the engine-less PATH fallback
+#
+# Neither has the engine here. The documented venv still wins, because it is the
+# one `setup` can pip-install into — the PEP 668 interpreter on PATH is not.
+# ---------------------------------------------------------------------------
+rm -rf "$DOC_VENV"
+make_venv "$DOC_VENV" "documented-bare"
+
+export PATH="$DOC_BIN:/usr/bin:/bin"
+report "engine-less ~/.factlog-venv still precedes the PATH fallback" "documented-bare" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 11: an activated virtualenv outranks everything except FACTLOG_PYTHON
+#
+# Activating a venv is an explicit signal, so it wins even without the engine —
+# otherwise `setup` could not install pyrewire into the venv the user activated.
+# ---------------------------------------------------------------------------
+ACTIVE="$TMP/active"
+make_venv "$ACTIVE" "active"
+
+export PATH="$PATH_ENGINE_BIN:/usr/bin:/bin"
+export VIRTUAL_ENV="$ACTIVE"
+report "activated virtualenv outranks a PATH candidate with the engine" "active" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 12: a stale VIRTUAL_ENV pointing nowhere falls through instead of failing
+# ---------------------------------------------------------------------------
+export VIRTUAL_ENV="$TMP/deleted-venv"
+report "stale VIRTUAL_ENV falls through to the normal order" "engine" "$(launcher_pick)"
+unset VIRTUAL_ENV
+
+# ---------------------------------------------------------------------------
+# CASE 13: no venv discovery — a venv that is not one of the fixed paths is
+# invisible, even when it is the only interpreter carrying the engine.
+# ---------------------------------------------------------------------------
+rm -rf "$DOC_VENV"
+mkdir -p "$HOME/.virtualenvs"
+ELSEWHERE="$HOME/.virtualenvs/factlog"
+make_venv "$ELSEWHERE" "elsewhere" "1.0.3"
+
+export PATH="$DOC_BIN:/usr/bin:/bin"
+report "a venv outside the fixed paths is never discovered" "bare" "$(launcher_pick)"
+rm -rf "$HOME/.virtualenvs"
 
 # ---------------------------------------------------------------------------
 echo "----"

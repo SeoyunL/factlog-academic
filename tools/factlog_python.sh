@@ -124,8 +124,53 @@ CANDIDATES
   return 1
 }
 
-if ! _scan_path_candidates; then
-  if [ -n "$_fallback_cmd" ]; then
+# Interpreter inside a venv root, if that root has one. Fixed layouts only —
+# `bin/` on POSIX, `Scripts/` on Windows. No globbing, no walking upwards.
+_venv_interpreter() {
+  local root="$1" relative
+  for relative in bin/python bin/python3 Scripts/python.exe; do
+    if [ -x "$root/$relative" ]; then
+      printf '%s' "$root/$relative"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Never pick an interpreter from outside PATH silently (#578). The two fixed
+# paths below are conventions, not discoveries, but they still shift which engine
+# every subsequent command runs on — so say which one won, once, on stderr.
+_announce_off_path() {
+  local exe="$1" reason="$2" dir="${1%/*}"
+  case ":${PATH:-}:" in
+    *":$dir:"*) return 0 ;;
+  esac
+  echo "[factlog] using $exe ($reason)" >&2
+}
+
+# The activated virtualenv is an explicit user signal, not a search result, so it
+# outranks PATH — and version-only is enough, exactly as for FACTLOG_PYTHON:
+# `setup` has to be able to install the engine INTO the venv the user activated.
+_virtual_env_interpreter=''
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+  _virtual_env_interpreter="$(_venv_interpreter "$VIRTUAL_ENV" || true)"
+fi
+if [ -n "$_virtual_env_interpreter" ] && _version_ok "$_virtual_env_interpreter"; then
+  _select "$_virtual_env_interpreter"
+  _announce_off_path "$_chosen_cmd" "activated virtualenv"
+elif ! _scan_path_candidates; then
+  # skills/factlog/SKILL.md's PEP 668 fallback tells the user to create exactly
+  # this venv, so honouring it is a documented convention rather than a scan. It
+  # is consulted only after PATH failed to produce an engine — and, like the rest
+  # of the fixed paths, it is one hardcoded location: no globbing, no discovery.
+  _documented_venv=''
+  if [ -n "${HOME:-}" ]; then
+    _documented_venv="$(_venv_interpreter "$HOME/.factlog-venv" || true)"
+  fi
+  if [ -n "$_documented_venv" ] && _version_ok "$_documented_venv"; then
+    _select "$_documented_venv"
+    _announce_off_path "$_chosen_cmd" "PATH has no python with pyrewire >= $_PYREWIRE_FLOOR"
+  elif [ -n "$_fallback_cmd" ]; then
     _select "$_fallback_cmd" "$_fallback_arg"
   fi
 fi
