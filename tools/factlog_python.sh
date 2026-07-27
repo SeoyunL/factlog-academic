@@ -81,6 +81,11 @@ py'
 # on macOS makes empty-array expansion under `set -u` a footgun).
 _chosen_cmd=''
 _chosen_arg=''
+# Why an off-PATH interpreter won, for the stderr note. Empty for PATH candidates.
+_chosen_reason=''
+# Set when the selection is the engine-less bootstrap fallback; that outcome is
+# never cached (see below).
+_chosen_is_fallback=0
 # First candidate that runs Python 3.11+ but has no usable engine. Kept as the
 # bootstrap fallback: `doctor` must diagnose and `setup` must install from a state
 # where pyrewire exists nowhere, so "no engine" can never be a hard failure.
@@ -90,6 +95,7 @@ _fallback_arg=''
 _select() {
   _chosen_cmd="$1"
   _chosen_arg="${2:-}"
+  _chosen_reason="${3:-}"
 }
 
 # One pass over the candidates, not two: re-probing to find the fallback would
@@ -151,33 +157,144 @@ _announce_off_path() {
 # The activated virtualenv is an explicit user signal, not a search result, so it
 # outranks PATH — and version-only is enough, exactly as for FACTLOG_PYTHON:
 # `setup` has to be able to install the engine INTO the venv the user activated.
-_virtual_env_interpreter=''
-if [ -n "${VIRTUAL_ENV:-}" ]; then
-  _virtual_env_interpreter="$(_venv_interpreter "$VIRTUAL_ENV" || true)"
-fi
-if [ -n "$_virtual_env_interpreter" ] && _version_ok "$_virtual_env_interpreter"; then
-  _select "$_virtual_env_interpreter"
-  _announce_off_path "$_chosen_cmd" "activated virtualenv"
-elif ! _scan_path_candidates; then
+# ---------------------------------------------------------------------------
+# Resolution cache
+#
+# hooks/gate_check.sh execs this runner up to four times per gate evaluation, and
+# every exec is a fresh process — an in-memory memo would help nothing. So the
+# resolved choice is written to one small file keyed by the inputs that decide it
+# (PATH, VIRTUAL_ENV, HOME, the floor). A hit costs no python spawn at all.
+#
+# Staleness is bounded three ways: the key changes when the environment does, the
+# command must still resolve, and the entry expires after a TTL.
+# ---------------------------------------------------------------------------
+_CACHE_FORMAT=1  # bump when the file layout below changes
+_cache_file=''
+_cache_now=''
+
+_cache_ttl() {
+  local ttl="${FACTLOG_PYTHON_CACHE_TTL:-600}"
+  case "$ttl" in
+    ''|*[!0-9]*) ttl=600 ;;
+  esac
+  printf '%s' "$ttl"
+}
+
+_cache_init() {
+  [ "${FACTLOG_PYTHON_CACHE:-1}" != "0" ] || return 1
+  [ "$(_cache_ttl)" -gt 0 ] || return 1
+  command -v cksum >/dev/null 2>&1 || return 1
+  _cache_now="$(date +%s 2>/dev/null || true)"
+  case "$_cache_now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  local dir key
+  if [ -n "${XDG_CACHE_HOME:-}" ]; then
+    dir="$XDG_CACHE_HOME/factlog"
+  elif [ -n "${HOME:-}" ]; then
+    dir="$HOME/.cache/factlog"
+  else
+    return 1
+  fi
+  key="$(printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$_CACHE_FORMAT" "${PATH:-}" "${VIRTUAL_ENV:-}" "${HOME:-}" "$_PYREWIRE_FLOOR" \
+    | cksum | tr -cd '0-9')"
+  [ -n "$key" ] || return 1
+  _cache_file="$dir/python-$key"
+}
+
+_cache_load() {
+  _cache_init || return 1
+  [ -r "$_cache_file" ] || return 1
+  local line stamp='' cmd='' arg='' reason='' n=0 age
+  while IFS= read -r line; do
+    n=$((n + 1))
+    case "$n" in
+      1) stamp="$line" ;;
+      2) cmd="$line" ;;
+      3) arg="$line" ;;
+      4) reason="$line" ;;
+    esac
+  done < "$_cache_file"
+  [ "$n" -eq 4 ] || return 1
+  case "$stamp" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  age=$((_cache_now - stamp))
+  # A negative age means the clock moved backwards; distrust the entry.
+  [ "$age" -ge 0 ] && [ "$age" -lt "$(_cache_ttl)" ] || return 1
+  [ -n "$cmd" ] || return 1
+  command -v "$cmd" >/dev/null 2>&1 || return 1
+  _select "$cmd" "$arg" "$reason"
+}
+
+_cache_store() {
+  [ -n "$_cache_file" ] || return 0
+  local dir="${_cache_file%/*}" tmp="$_cache_file.$$"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  if printf '%s\n%s\n%s\n%s\n' \
+      "$_cache_now" "$_chosen_cmd" "$_chosen_arg" "$_chosen_reason" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$_cache_file" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  fi
+  return 0
+}
+
+_resolve() {
+  # The activated virtualenv is an explicit user signal, not a search result, so it
+  # outranks PATH — and version-only is enough, exactly as for FACTLOG_PYTHON:
+  # `setup` has to be able to install the engine INTO the venv the user activated.
+  local virtual_env_interpreter='' documented_venv=''
+  if [ -n "${VIRTUAL_ENV:-}" ]; then
+    virtual_env_interpreter="$(_venv_interpreter "$VIRTUAL_ENV" || true)"
+  fi
+  if [ -n "$virtual_env_interpreter" ] && _version_ok "$virtual_env_interpreter"; then
+    _select "$virtual_env_interpreter" '' "activated virtualenv"
+    return 0
+  fi
+
+  _scan_path_candidates && return 0
+
   # skills/factlog/SKILL.md's PEP 668 fallback tells the user to create exactly
   # this venv, so honouring it is a documented convention rather than a scan. It
   # is consulted only after PATH failed to produce an engine — and, like the rest
   # of the fixed paths, it is one hardcoded location: no globbing, no discovery.
-  _documented_venv=''
   if [ -n "${HOME:-}" ]; then
-    _documented_venv="$(_venv_interpreter "$HOME/.factlog-venv" || true)"
+    documented_venv="$(_venv_interpreter "$HOME/.factlog-venv" || true)"
   fi
-  if [ -n "$_documented_venv" ] && _version_ok "$_documented_venv"; then
-    _select "$_documented_venv"
-    _announce_off_path "$_chosen_cmd" "PATH has no python with pyrewire >= $_PYREWIRE_FLOOR"
-  elif [ -n "$_fallback_cmd" ]; then
+  if [ -n "$documented_venv" ] && _version_ok "$documented_venv"; then
+    _select "$documented_venv" '' "PATH has no python with pyrewire >= $_PYREWIRE_FLOOR"
+    return 0
+  fi
+
+  if [ -n "$_fallback_cmd" ]; then
     _select "$_fallback_cmd" "$_fallback_arg"
+    _chosen_is_fallback=1
+    return 0
+  fi
+  return 1
+}
+
+if ! _cache_load; then
+  _resolve || true
+  # The engine-less fallback is never cached. It is the one outcome the user is
+  # expected to leave immediately (`setup` installs pyrewire), and pinning it for
+  # a TTL would keep serving the engine-less interpreter after the install
+  # succeeded. Every other outcome is stable for as long as its key holds.
+  if [ -n "$_chosen_cmd" ] && [ "$_chosen_is_fallback" -eq 0 ]; then
+    _cache_store
   fi
 fi
 
 if [ -z "$_chosen_cmd" ]; then
   echo "[factlog] no usable Python 3.11+ found. Set FACTLOG_PYTHON to a venv/system python." >&2
   exit 127
+fi
+
+# Also fires on a cache hit: the disclosure must not disappear once the choice is
+# remembered, or the second call onwards would be exactly the silent selection
+# this note exists to prevent.
+if [ -n "$_chosen_reason" ]; then
+  _announce_off_path "$_chosen_cmd" "$_chosen_reason"
 fi
 
 if [ -n "$_chosen_arg" ]; then

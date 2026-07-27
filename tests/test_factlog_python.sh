@@ -27,6 +27,12 @@ unset VIRTUAL_ENV
 export HOME="$TMP/home"
 mkdir -p "$HOME"
 
+# Resolution caching is memoisation, not selection. Switch it off so every case
+# measures the decision itself, and turn it back on only where the cache is the
+# subject — otherwise a case could be answered by the previous case's entry.
+export XDG_CACHE_HOME="$TMP/cache"
+export FACTLOG_PYTHON_CACHE=0
+
 pass=0
 fail=0
 
@@ -109,6 +115,15 @@ launcher_status() {
   local rc=0
   bash "$LAUNCHER" -c 'raise SystemExit(0)' >/dev/null 2>&1 || rc=$?
   printf '%s' "$rc"
+}
+
+# How many times did a shimmed interpreter run? One line per invocation, so a
+# cold resolution reads 2 (one probe + the exec) and a cache hit reads 1.
+count_calls() {
+  : > "$TMP/calls"
+  export FACTLOG_TEST_CALLS="$TMP/calls"
+  "$@" >/dev/null 2>&1 || true
+  wc -l < "$TMP/calls" | tr -d ' '
 }
 
 # ---------------------------------------------------------------------------
@@ -289,6 +304,84 @@ make_venv "$ELSEWHERE" "elsewhere" "1.0.3"
 export PATH="$DOC_BIN:/usr/bin:/bin"
 report "a venv outside the fixed paths is never discovered" "bare" "$(launcher_pick)"
 rm -rf "$HOME/.virtualenvs"
+
+# ---------------------------------------------------------------------------
+# CASE 14: the resolution is cached across processes
+#
+# hooks/gate_check.sh execs this launcher up to four times per gate evaluation and
+# each exec is a fresh process, so the memo has to survive on disk or it saves
+# nothing. Cold: one probe plus the exec. Warm: the exec alone.
+# ---------------------------------------------------------------------------
+CACHE_BIN="$TMP/cache-bin"
+make_shim "$CACHE_BIN" "python3" "$(venv_python "$ENGINE")"
+
+export PATH="$CACHE_BIN:/usr/bin:/bin"
+export FACTLOG_PYTHON_CACHE=1
+rm -rf "$XDG_CACHE_HOME"
+
+report "cold resolution probes the candidate" "2" "$(count_calls launcher_pick)"
+report "warm resolution spawns no probe" "1" "$(count_calls launcher_pick)"
+report "the cached choice is the same interpreter" "engine" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 15: the cache is switchable off, and a zero TTL means never trust it
+# ---------------------------------------------------------------------------
+export FACTLOG_PYTHON_CACHE=0
+report "FACTLOG_PYTHON_CACHE=0 re-resolves" "2" "$(count_calls launcher_pick)"
+
+export FACTLOG_PYTHON_CACHE=1
+export FACTLOG_PYTHON_CACHE_TTL=0
+report "a zero TTL re-resolves" "2" "$(count_calls launcher_pick)"
+unset FACTLOG_PYTHON_CACHE_TTL
+
+# ---------------------------------------------------------------------------
+# CASE 16: PATH is part of the cache key
+# ---------------------------------------------------------------------------
+CACHE_BIN2="$TMP/cache-bin2"
+make_shim "$CACHE_BIN2" "python3" "$(venv_python "$ENGINE2")"
+
+export PATH="$CACHE_BIN2:/usr/bin:/bin"
+report "a different PATH is not answered from the old entry" "engine2" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 17: the engine-less fallback is never cached
+#
+# It is the one outcome the user is expected to leave immediately — `setup`
+# installs pyrewire into it — and a cached fallback would keep serving the
+# engine-less interpreter for a TTL after that install succeeded.
+# ---------------------------------------------------------------------------
+FB_CACHE_BIN="$TMP/fb-cache-bin"
+make_shim "$FB_CACHE_BIN" "python3" "$(venv_python "$BARE")"
+
+export PATH="$FB_CACHE_BIN:/usr/bin:/bin"
+rm -rf "$XDG_CACHE_HOME"
+report "engine-less fallback, first run" "2" "$(count_calls launcher_pick)"
+report "engine-less fallback is re-resolved, not remembered" "2" "$(count_calls launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 18: a cache hit still discloses an off-PATH choice
+#
+# Announcing only on the cold run would make every call after the first exactly
+# the silent selection the note exists to prevent.
+# ---------------------------------------------------------------------------
+make_venv "$DOC_VENV" "documented" "1.0.3"
+
+export PATH="$DOC_BIN:/usr/bin:/bin"
+rm -rf "$XDG_CACHE_HOME"
+report "off-PATH choice survives caching" "documented" "$(launcher_pick)"
+
+# Prove the next call is a hit, not a second cold resolution.
+if ls "$XDG_CACHE_HOME"/factlog/python-* >/dev/null 2>&1; then
+  report "the off-PATH choice was written to the cache" "cached" "cached"
+else
+  report "the off-PATH choice was written to the cache" "cached" "missing"
+fi
+
+notice="$(launcher_stderr)"
+case "$notice" in
+  *"$DOC_VENV"*) report "cached off-PATH choice is still announced" "named" "named" ;;
+  *) report "cached off-PATH choice is still announced" "named" "[$notice]" ;;
+esac
 
 # ---------------------------------------------------------------------------
 echo "----"
