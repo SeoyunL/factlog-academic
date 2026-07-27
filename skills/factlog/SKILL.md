@@ -786,10 +786,27 @@ is a value.)
   ```
 
   Say what it does, not "this fixes it": it **compares** `candidates.csv` against
-  `runs/*.json` and records the CSV decision into any row that file still holds as
-  **pending**. It writes nothing without `--apply` (there is no `--dry-run` — the
+  `runs/*.json`. It writes nothing without `--apply` (there is no `--dry-run` — the
   report is the default), it never touches `candidates.csv`, and it does not
-  recompile `accepted.dl`. It also refuses several classes, prints them under their
+  recompile `accepted.dl`. `--apply` writes in **exactly two cases**:
+
+  1. `candidates.csv` holds a decision and the run row is still **pending** (blank
+     and unrecognised statuses included — merge reads all three as pending) → the
+     decision is recorded into the run row.
+  2. `candidates.csv` holds `superseded` while the run row holds
+     `accepted`/`confirmed` → **the run row is lowered to `superseded`.**
+
+  **Warn the human before `--apply` on a KB where case 2 applies.** It retires a run
+  row that was engine input — the shape drift takes after `eject` retires a fact and
+  the run row does not follow. Lowering is the only way to repair it, and it aligns
+  with merge rather than overriding it (merge's `existing_superseded_keys` pass keeps
+  a `candidates.csv` `superseded` over a re-asserted engine status on every rebuild)
+  — but rows do drop out of engine input as a result. Show the human the report
+  first, especially with `--all`. The invariant is "never write against merge's own
+  precedence", **not** "never lower a run row": the latter would leave this drift
+  permanently unrepairable.
+
+  It also refuses several classes, prints them under their
   own headings, and leaves them to the human: a fact whose `candidates.csv` rows are
   ambiguous (a round-trip `amend` leaves two rows on one fact), a fact both stores
   decided differently, a CSV row with no run backing (creating one would fabricate a

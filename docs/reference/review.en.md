@@ -89,12 +89,33 @@ factlog repair-runs A knows B --apply    # write into runs/*.json
 
 `repair-runs` decides nothing; it **compares the two stores**. That is why a
 `candidates.csv` row which is no longer pending — a dead end for `accept` — is
-exactly its input. It records the `candidates.csv` decision into any row that file
-still holds as **pending**, and writes nothing without `--apply` (which is why there
-is no `--dry-run`: the report is the default). It never touches `candidates.csv` and
-does not recompile `accepted.dl`; a repaired row takes effect from the next rebuild.
+exactly its input. It writes nothing without `--apply` (which is why there is no
+`--dry-run`: the report is the default). It never touches `candidates.csv` and does
+not recompile `accepted.dl`; a repaired row takes effect from the next rebuild.
 It is still better to repair an unreadable run file **before** rebuilding
 `candidates.csv` — then this recovery is not needed at all.
+
+`--apply` writes in **exactly two cases**:
+
+1. `candidates.csv` holds a decision and the run row is still **pending** (blank and
+   unrecognised statuses included — merge reads all three as pending) → the decision
+   is recorded into the run row.
+2. `candidates.csv` holds `superseded` while the run row holds `accepted`/`confirmed`
+   → **the run row is lowered to `superseded`.**
+
+> ⚠️ **The second rule retires a run row that was engine input.** It is the shape drift
+> takes after `eject` retires a fact and the run row does not follow, and lowering is
+> the only way to fix it. It is not an arbitrary ranking but an alignment with **merge's
+> own precedence**: merge's `existing_superseded_keys` pass keeps a `candidates.csv`
+> `superseded` over a re-asserted engine status on every rebuild. Writing `superseded`
+> here therefore lands on the same result merge would reach anyway, and it is *leaving*
+> the run row alone that disagrees with merge. Even so, **rows do drop out of engine
+> input as a result**, so run the report first before combining `--apply` with `--all`
+> and no triple.
+
+The invariant this command keeps is **not** "never lower a run row" but "never write
+against merge's own precedence". Under the former, the second kind of drift above could
+never be repaired at all.
 
 Some classes `repair-runs` **reports and does not touch**: a fact with several
 `candidates.csv` rows (a round-trip `amend` leaves a live row and a tombstone on one
