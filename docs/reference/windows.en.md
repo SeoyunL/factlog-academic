@@ -37,17 +37,22 @@ falling back** to `python3`/`python`/`py` (exit code 127).
 
 When `$FACTLOG_PYTHON` is unset, the selection order is:
 
-1. the interpreter in `$VIRTUAL_ENV` — an explicit "I activated a venv" signal
+1. the interpreter in `$VIRTUAL_ENV` — an explicit "I activated a venv" signal.
+   Checked for **version only**; pyrewire is not required
 2. the first PATH candidate (`python3`, `python`, `py -3.12`/`-3.11`/`-3`, `py`)
    that **carries pyrewire 1.0.3 or newer**
 3. the interpreter in `~/.factlog-venv` — the fixed path the PEP 668 guidance
-   below tells you to create
+   below tells you to create. Also checked for **version only**, so someone who
+   created the venv but has not installed into it yet can still run `setup` and
+   have pyrewire land inside that venv
 4. the first PATH candidate that meets the version requirement alone — `doctor`
    and `setup` must still run in a bootstrap state where no engine exists yet, so
    this is never a hard failure
 
 Picking an interpreter from outside PATH prints one line to stderr naming it. No
-venv other than those two fixed paths is ever searched for.
+venv other than those two fixed paths is ever searched for. The result is **not
+cached**: every call re-executes its candidate, so a change to an interpreter
+takes effect immediately.
 
 If your Python is externally managed (PEP 668), pip will refuse to install into it; `setup` prints venv guidance instead of forcing the install. Create and activate a venv, then re-run `setup`:
 
