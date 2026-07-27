@@ -539,6 +539,121 @@ class TestUnreadableRunFiles:
         assert "could not read broken.json" in capsys.readouterr().err
 
 
+class TestABlankCandidatesCsvStatus:
+    """A blank/whitespace status is what the engine-status whitelist UNIQUELY defends.
+
+    An unrecognised status (`aceptd`) is caught twice over -- by the whitelist AND by the
+    unrecognised-status class -- so a mutation to either alone leaves the suite green. A
+    BLANK status slips past the unrecognised class on purpose (`if st and ...`: an empty
+    field is a normal shape merge coerces, not a typo), so the whitelist is the only thing
+    between it and the run rows.
+
+    Measured with the whitelist flipped to `not in REVIEW_STATUSES` at both gates: a blank
+    CSV status is read as a DECISION and written into the run row -- `r1.json
+    [candidate → ]`, an empty string as a status. merge coerces that to needs_review on the
+    next rebuild, so the run row's real `candidate` is destroyed by the command asked to
+    protect it.
+    """
+
+    def test_a_blank_status_is_pending_not_a_decision(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            ["A,R,X,sources/note.md,,0.90,", "Q,rel,Z,sources/note.md,candidate,0.90,"],
+            {"r1.json": [_run_row(status="candidate"), _unrelated_run_row()]},
+        )
+        assert _repair(kb, "A", "R", "X") == 3
+
+        out = capsys.readouterr().out
+        body = _section(out, "both stores pending, with different pending statuses — NOT repaired")
+        assert "A / R / X  ← sources/note.md" in body
+        # the report describes the FILE, so it shows the blank -- not merge's needs_review
+        # fallback, which would send a user grepping candidates.csv for a word it lacks.
+        assert "candidates.csv: (blank)" in body
+        assert "r1.json: candidate" in body
+        assert "0 run row(s) repairable in 0 file(s), 1 fact(s) left for a human" in out
+        # ...and it is never offered as something to write
+        assert "→ ]" not in out
+        assert _section(out, "decided in candidates.csv, still pending in the run row").strip() == "(none)"
+
+    def test_a_whitespace_only_status_is_the_same_case(self, tmp_path, capsys):
+        kb = _kb(
+            tmp_path,
+            ['A,R,X,sources/note.md,"   ",0.90,'],
+            {"r1.json": [_run_row(status="candidate"), _unrelated_run_row()]},
+        )
+        assert _repair(kb, "A", "R", "X") == 3
+
+        body = _section(
+            capsys.readouterr().out,
+            "both stores pending, with different pending statuses — NOT repaired",
+        )
+        assert "candidates.csv: (blank)" in body
+
+    def test_a_blank_status_agreeing_with_the_run_row_is_clean(self, tmp_path, capsys):
+        """The counter-example: blank means needs_review to merge, so a `needs_review` run
+        row AGREES and there is no drift at all. Without this, a rule that flagged every
+        blank status as drift would look correct."""
+        kb = _kb(
+            tmp_path,
+            ["A,R,X,sources/note.md,,0.90,"],
+            {"r1.json": [_run_row(status="needs_review"), _unrelated_run_row()]},
+        )
+        assert _repair(kb, "A", "R", "X") == 0
+
+        assert "0 run row(s) repairable in 0 file(s), 0 fact(s) left for a human" in (
+            capsys.readouterr().out
+        )
+
+
+class TestAnAbsenceIsProvisionalWhileAFileCannotBeRead:
+    """`csv-only` and `run-only` are the only classes whose verdict is an ABSENCE.
+
+    Every other class names rows it actually saw, so an unreadable file can only add to it.
+    These two it can falsify: the row said to be missing may be sitting in the file that
+    would not open -- which is #566's own scenario, where the sole backing was unreadable.
+    """
+
+    def test_a_csv_only_verdict_is_marked_provisional(self, tmp_path, capsys):
+        kb = _kb(tmp_path, ["A,R,X,sources/note.md,accepted,0.90,"], {})
+        (kb / "runs" / "bin.json").write_bytes(b"\xff\xfe\x00binary")
+        assert _repair(kb, "A", "R", "X") == 1
+
+        body = _section(capsys.readouterr().out, "candidates.csv row with no run backing — NOT repaired")
+        assert "PROVISIONAL" in body
+        assert "the backing this row appears to lack may be inside one of them" in body
+        # and the flat claim is gone: it is "none I could read", not "none".
+        assert "runs/*.json: (no readable row)" in body
+        assert "runs/*.json: (no row)\n" not in body
+
+    def test_a_run_only_verdict_is_marked_provisional_too(self, tmp_path, capsys):
+        """Its `no candidates.csv row` half IS sound -- the CSV is read whole or not at all
+        -- so that line stays flat. What an unreadable file hides here is the fact's OTHER
+        run rows, and the note says exactly that rather than hedging the wrong half."""
+        kb = _kb(tmp_path, [], {"good.json": [_run_row(status="candidate")]})
+        (kb / "runs" / "bin.json").write_bytes(b"\xff\xfe\x00binary")
+        assert _repair(kb, "A", "R", "X") == 1
+
+        body = _section(capsys.readouterr().out, "run row with no candidates.csv row — NOT repaired")
+        assert "PROVISIONAL" in body
+        assert "this fact's other run rows may be inside one of them" in body
+        assert "candidates.csv: (no row)" in body
+
+    def test_a_readable_kb_states_the_absence_flatly(self, tmp_path, capsys):
+        """The counter-example. With every file readable the hedge must NOT appear, or it
+        becomes noise the reader learns to skip -- and then it says nothing when it matters.
+        """
+        kb = _kb(
+            tmp_path,
+            ["A,R,X,sources/note.md,accepted,0.90,"],
+            {"r1.json": [_unrelated_run_row()]},
+        )
+        assert _repair(kb, "A", "R", "X") == 3
+
+        body = _section(capsys.readouterr().out, "candidates.csv row with no run backing — NOT repaired")
+        assert "PROVISIONAL" not in body
+        assert "runs/*.json: (no row)" in body
+
+
 class TestUsage:
     def test_more_than_three_terms_is_a_usage_error(self, tmp_path, capsys):
         kb = _kb(tmp_path, [], {})

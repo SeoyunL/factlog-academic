@@ -2272,7 +2272,11 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
         for bucket, jp, item in key_reports:
             by_bucket.setdefault(bucket, []).append((jp, item))
         for bucket, rows in by_bucket.items():
-            report(bucket, key, [csv_status], rows, partial=partial)
+            # The RAW statuses, not the `csv_status` the comparison ran on. They differ for
+            # a blank/absent status, where the comparison uses merge's needs_review fallback:
+            # printing that fallback would tell a user to grep candidates.csv for a word it
+            # does not contain. The report describes the file; the rules act on the fallback.
+            report(bucket, key, csv_statuses, rows, partial=partial)
 
     return {
         "repairs": repairs,
@@ -2469,21 +2473,39 @@ def _repair_runs_print(plan: dict) -> None:
                     "candidates.csv rebuilt from runs/*.json alone is still a lottery here."
                 )
 
+    # `csv-only` and `run-only` are the two classes whose verdict is an ABSENCE -- "there is
+    # no row on the other side". Every other class names rows it actually saw, so an
+    # unreadable file can only add to it; these two it can falsify outright. And this is the
+    # #566 scenario itself: the file that could not be read was the sole backing. Saying
+    # "(no row)" flatly there would be the command telling the user a fact has no evidence
+    # while the evidence sits in the file it just refused to open.
+    unreadable = len(plan["unreadable"])
+    provisional = {
+        "csv-only": "the backing this row appears to lack may be inside one of them",
+        "run-only": "this fact's other run rows may be inside one of them",
+    }
+
     for name, heading in _REPAIR_RUNS_REPORTED:
         print(f"\n{heading}:")
         entries = plan["reports"][name]
         if not entries:
             print("  (none)")
             continue
+        if unreadable and name in provisional:
+            print(
+                f"  note: PROVISIONAL — {unreadable} run file(s) could not be read; "
+                f"{provisional[name]}."
+            )
         for entry in entries:
             partial = " — PARTIAL" if entry["partial"] else ""
             print(f"  {label(entry['key'])}{partial}")
             if entry["csv"] is None:
+                # candidates.csv is read whole or not at all, so this absence is not in doubt.
                 print("    candidates.csv: (no row)")
             else:
                 print(f"    candidates.csv: {', '.join(s or '(blank)' for s in entry['csv'])}")
             if not entry["rows"]:
-                print("    runs/*.json: (no row)")
+                print("    runs/*.json: (no readable row)" if unreadable else "    runs/*.json: (no row)")
             for jp, status in entry["rows"]:
                 print(f"    {jp.name}: {status}")
 

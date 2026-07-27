@@ -551,6 +551,40 @@ class TestATypedObjectSelector:
         assert run_bytes(kb) == before
 
 
+class TestABlankCandidatesCsvStatusIsNeverWritten:
+    """The whitelist's own case: a blank status must never reach a run row.
+
+    With the whitelist flipped to `not in REVIEW_STATUSES` at both gates, a blank CSV status
+    is read as a decision and `""` is written into the run row -- measured. merge coerces
+    that to needs_review on the next rebuild, so the row's real `candidate` is gone. The
+    rebuild below is what makes it visible; a byte comparison alone cannot say whether the
+    surviving value is the right one.
+    """
+
+    def test_apply_writes_nothing_and_the_run_row_survives_a_rebuild(self, tmp_path):
+        kb = init_kb(tmp_path)
+        write_runs(kb, "r1.json", [item(status="candidate"), bystander()])
+        write_csv(kb, "A,knows,B,sources/a.md,,0.90,", "Q,rel,Z,sources/a.md,candidate,0.90,")
+        before = run_bytes(kb)
+
+        proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert "0 run row(s) repaired in 0 file(s), 1 fact(s) left for a human" in proc.stdout
+        assert run_bytes(kb) == before
+
+        assert rebuilt(tmp_path, kb)[("A", "knows", "B")] == "candidate"
+
+    def test_a_whitespace_only_status_is_the_same_case(self, tmp_path):
+        kb = init_kb(tmp_path)
+        write_runs(kb, "r1.json", [item(status="candidate"), bystander()])
+        write_csv(kb, 'A,knows,B,sources/a.md,"   ",0.90,', "Q,rel,Z,sources/a.md,candidate,0.90,")
+        before = run_bytes(kb)
+
+        assert repair(tmp_path, kb, "A", "knows", "B", "--apply").returncode == 3
+        assert run_bytes(kb) == before
+        assert rebuilt(tmp_path, kb)[("A", "knows", "B")] == "candidate"
+
+
 class TestUnreadableFilesDuringApply:
     def test_the_readable_files_are_still_repaired_and_the_exit_code_says_partial(self, tmp_path):
         """Named and survived, not fatal -- but a comparison that could not see every file
