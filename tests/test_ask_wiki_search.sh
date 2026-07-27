@@ -311,27 +311,35 @@ source excerpts: 3" \
 # 마지막 줄로 끝나고, 그 뒤에는 아무것도 없다. 이 pin 을 트립시키는 것은 #575 의 진단만이
 # 아니다 — cmd_wiki 는 POLICY_UNCOMPILED_WARNING 도 렌더 뒤에 덧붙일 수 있다(위 픽스처가
 # 그 경로를 닫아 두었다). 그래서 설명 문구는 원인을 #575 로 단정하지 않는다.
-# 마지막 발췌는 #571 이후 철회 공지가 아니라 kim-2024 의 두 번째 발췌다.
+# 마지막 발췌는 #572 이후 kim-2024 의 두 번째 발췌가 아니라 decisions/ 발췌다: 등급이
+# 정렬 키의 최상위가 되면서 supplementary 발췌가 1위에서 꼴찌로 내려갔다. 값만 갱신했고
+# 이 pin 이 무엇을 고정하는지(꼬리에 덧붙는 줄이 없다)는 그대로다.
 same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄이 없다" \
-  "    ## Abstract" \
+  "    신경기호 근거 로그의 보존 기간은?" \
   "$(printf '%s\n' "$ko_answer" | tail -1)"
 
 # =============================================================================
-# PIN 3 — ranking order: 등급(primary vs supplementary)이 정렬 키에 없다
+# PIN 3 — ranking order: 등급(primary vs supplementary)이 정렬 키의 최상위다
 # =============================================================================
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #572 가 이를 바꾼다. 점수는 (키워드 커버리지,
-# 총 빈도) 뿐이고 디렉터리 등급은 정렬에 전혀 들어가지 않는다. 그래서 사람이 적은
-# 리뷰 노트(decisions/, supplementary)가 원자료(sources/)를 앞선다.
+# 이 두 값은 #572 가 갱신했다 (그 전에는 "supplementary 가 1위다" 라는 결함을 고정했다).
+# 이제 정렬 키는 (등급, 커버리지, 빈도) 이고, 등급이 최상위이므로 decisions/ 발췌는
+# 커버리지·빈도가 더 높아도 sources/ 뒤로 간다 — 이 픽스처가 정확히 그 경우다
+# (실측: decisions/open-questions.md:3 은 (3,5), kim-2024 의 두 발췌는 (2,2). 즉
+# supplementary 가 두 성분 모두에서 앞서는데도 꼴찌다 — 등급이 최상위 키가 아니면
+# 이 순서는 나올 수 없다).
+# 결함 pin 이 아니라 회귀 가드가 됐다: 이 순서가 뒤집히면 등급이 정렬 키에서 빠졌다는 뜻이다.
 # 4번째 행(sources/0000_RETRACTION_16354850.md:3)은 #571 이 제거했다 — 기능어
 # '논문은' 이 유일한 접점이었으므로 이제 어떤 키워드에도 걸리지 않는다.
-same "PIN3 한국어 질문의 랭킹 순서 (#572 가 바꾼다)" \
-  "decisions/open-questions.md:3
-sources/kim-2024-neurosymbolic-grounding.md:4
-sources/kim-2024-neurosymbolic-grounding.md:14" \
+same "PIN3 한국어 질문의 랭킹 순서 — 등급이 커버리지·빈도보다 우선한다 (#572 가 바꿨다)" \
+  "sources/kim-2024-neurosymbolic-grounding.md:4
+sources/kim-2024-neurosymbolic-grounding.md:14
+decisions/open-questions.md:3" \
   "$ko_refs"
 
-same "PIN3 supplementary 발췌가 1위다 (#572 가 바꾼다)" \
-  "decisions (supplementary)" \
+# --all(상한 없음)로 조회한다: 등급 정렬은 상한 적용 전에 일어나므로, 이 pin 은 상한이
+# supplementary 를 잘라냈다는 부수효과가 아니라 순서 자체를 확인한다.
+same "PIN3 primary 발췌가 1위다 — supplementary 는 1위가 될 수 없다 (#572 가 바꿨다)" \
+  "sources" \
   "$(router search "$Q_KO" --all | py "
 import json, sys
 print(json.load(sys.stdin)['results'][0]['dir'])
