@@ -178,6 +178,18 @@ cat > "$KB/decisions/open-questions.md" <<'EOF'
 신경기호 관련 정책은 아직 없다.
 EOF
 
+# (7) pages/ is ENGINE-DERIVED (rebuilt from candidates.csv, needs_review rows and
+#     all), so it is excluded from the wiki corpus by design — grepping it would quote
+#     a candidate the engine never accepted as if it were source text. The file is
+#     seeded with the question's OWN keywords so the exclusion guard is not vacuous:
+#     an empty pages/ passes that guard even if pages/ were added to the corpus.
+cat > "$KB/pages/신경기호-추론.md" <<'EOF'
+<!-- generated-by-factlog -->
+# 신경기호 추론
+
+- 근거를 제시한다 -> [[역추적 절차]] (sources/x.md, confidence=0.40)
+EOF
+
 # The Korean question. Written the way a researcher actually types one: content
 # words carry particles (조사) and the sentence ends in an interrogative form.
 Q_KO='이 논문은 신경기호 추론의 근거를 어떻게 제시하는가'
@@ -268,11 +280,27 @@ ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #575 가 이를 바꾼다. 렌더된 답변에는 어떤
 # 키워드가 몇 건 매치됐는지, 리콜이 낮은지에 대한 진단이 전혀 없다 — 6개 중 2개만
 # 실질적으로 기여했다는 사실이 사용자에게 보이지 않는다.
-if printf '%s\n' "$ko_answer" | grep -qiE 'keyword|키워드|recall|리콜|matched [0-9]'; then
-  bad "PIN2 매치 실적 진단이 이미 렌더된다 — #575 가 머지됐다면 이 pin 을 갱신하라"
-else
-  ok "PIN2 wiki 답변은 키워드 매치 실적/저리콜 진단을 내지 않는다 (#575 가 바꾼다)"
-fi
+#
+# 어휘 화이트리스트('keyword|키워드|recall|...')로 부재를 확인하지 않는다. 그건 진단
+# 문구가 어떤 단어를 쓰느냐에 걸린 운이고, 예상 못 한 표현이면 조용히 통과한다. 대신
+# 첫 인용 줄([ 로 시작) 이전의 머리 블록을 통째로 고정한다 — 어떤 문구로 한 줄이
+# 추가되든 형태가 달라지므로 반드시 트립한다. 이 pin 은 블록 순서 계약(마커 ->
+# question -> reason -> WARNING -> corpus 라벨 -> 발췌 수)과 발췌 수도 함께 고정한다.
+ko_head="$(printf '%s\n' "$ko_answer" | awk '/^\[/{exit} {print}')"
+same "PIN2 답변 머리 블록 전체 — 매치 실적 진단이 없다 (#575 가 바꾼다)" \
+  "UNVERIFIED — wiki exploration
+question: $Q_KO
+reason: unknown entity
+WARNING: unverified candidates — do not treat as confirmed facts.
+sources searched: sources, runs/sources, decisions (supplementary)
+source excerpts: 4" \
+  "$ko_head"
+
+# 진단이 인용 뒤에 덧붙는 형태여도 트립하도록 꼬리도 고정한다: 답변은 마지막 발췌의
+# 마지막 줄로 끝나고, 그 뒤에는 아무것도 없다.
+same "PIN2 답변은 마지막 발췌 줄로 끝난다 (#575 가 바꾼다)" \
+  "    이 논문은 더 이상 인용해서는 안 된다." \
+  "$(printf '%s\n' "$ko_answer" | tail -1)"
 
 # =============================================================================
 # PIN 3 — ranking order: 등급(primary vs supplementary)이 정렬 키에 없다
@@ -329,13 +357,19 @@ else
   ok "PIN4 그 노트의 키워드 출현은 전부 파일 경로다 (산문 기여 0)"
 fi
 
-# 실제 논문은 같은 질의에서 그 노트보다 아래에 있다.
+# 이 값은 현재 결함을 고정한 것이다. 이슈 #573 이 이를 바꾼다.
+# 순위 숫자가 아니라 상대 순서를 고정한다: 4~7위는 전부 (1,1) 동점이라 숫자를 박으면
+# #573 계약이 아니라 픽스처 파일명의 알파벳 순서를 encode 하게 된다.
+notes_rank="$(printf '%s\n' "$path_refs" | grep -nxF 'sources/reading-notes.md:5' | cut -d: -f1 || true)"
 kim_rank="$(printf '%s\n' "$path_refs" | grep -nxF 'sources/kim-2024-neurosymbolic-grounding.md:4' | cut -d: -f1 || true)"
-if [ -z "$kim_rank" ]; then
+if [ -z "$notes_rank" ]; then
+  bad "PIN4 경로 인용 노트가 결과에서 사라졌다 — #573 이 머지됐다면 이 pin 을 갱신하라"
+elif [ -z "$kim_rank" ]; then
   bad "PIN4 비교 기준인 sources/kim-…:4 발췌가 사라졌다 — 발췌 앵커가 이동했다면(#574) 기준 발췌를 갱신하라"
+elif [ "$notes_rank" -lt "$kim_rank" ]; then
+  ok "PIN4 경로만 나열한 노트가 실제 논문을 앞선다 (${notes_rank}위 < ${kim_rank}위, #573 이 바꾼다)"
 else
-  # 이 값은 현재 결함을 고정한 것이다. 이슈 #573 이 이를 바꾼다.
-  same "PIN4 실제 논문은 6위다 (#573 이 바꾼다)" "6" "$kim_rank"
+  bad "PIN4 경로 인용 노트가 더는 실제 논문을 앞서지 않는다 — #573 이 머지됐다면 이 pin 을 갱신하라"
 fi
 
 # =============================================================================
@@ -387,18 +421,8 @@ fi
 # =============================================================================
 # PIN 6 — rendered block structure (안정 계약: 후속 이슈가 바꾸지 않는다)
 # =============================================================================
-same "PIN6 답변 머리 4줄의 순서" \
-  "UNVERIFIED — wiki exploration
-question: $Q_KO
-reason: unknown entity
-WARNING: unverified candidates — do not treat as confirmed facts." \
-  "$(printf '%s\n' "$ko_answer" | head -4)"
-
-same "PIN6 corpus 라벨 줄과 발췌 수 줄이 인용 앞에 온다" \
-  "sources searched: sources, runs/sources, decisions (supplementary)
-source excerpts: 4" \
-  "$(printf '%s\n' "$ko_answer" | sed -n '5,6p')"
-
+# 머리 블록의 줄 순서(마커/question/reason/WARNING/corpus 라벨/발췌 수)는 PIN2 의
+# 머리 블록 pin 이 통째로 고정하므로 여기서 다시 자르지 않는다.
 # 인용 헤더는 [파일:행] (디렉터리 라벨) 형식이고, supplementary 는 라벨로 구분된다.
 if printf '%s\n' "$ko_answer" | grep -qF '[decisions/open-questions.md:3] (decisions (supplementary))'; then
   ok "PIN6 인용 헤더가 파일:행 + 디렉터리 라벨을 싣는다"
@@ -406,11 +430,13 @@ else
   bad "PIN6 인용 헤더 형식이 이동했다"
 fi
 
-# pages/ 는 어떤 경우에도 wiki 코퍼스에 없다 (candidate 누출 금지 — 회귀 가드).
-if printf '%s\n' "$ko_answer" | grep -q 'pages/'; then
-  bad "PIN6 pages/ 가 wiki 답변에 누출됐다"
+# pages/ 는 어떤 경우에도 wiki 코퍼스에 없다 (엔진 파생 후보 누출 금지 — 회귀 가드).
+# 픽스처의 pages/신경기호-추론.md 는 이 질문의 키워드를 그대로 담고 있으므로, pages/ 가
+# 코퍼스에 들어오면 반드시 인용되어 이 가드가 걸린다.
+if printf '%s\n' "$ko_answer" | grep -qE 'pages/|역추적 절차|confidence=0\.40'; then
+  bad "PIN6 pages/ 의 엔진 파생 후보가 wiki 답변에 누출됐다"
 else
-  ok "PIN6 pages/ 는 wiki 코퍼스에서 제외된다"
+  ok "PIN6 pages/ 는 wiki 코퍼스에서 제외된다 (키워드를 담은 후보 페이지도 인용되지 않는다)"
 fi
 
 echo ""
