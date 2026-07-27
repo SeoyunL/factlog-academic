@@ -329,21 +329,35 @@ kw_is "a compound ending in a stop word is not filtered" '반박논문은 어디
 kw_is "ASCII questions are untouched by the stop-word list" 'which paper claims this' \
   "['(?<!\\\\w)which(?!\\\\w)', '(?<!\\\\w)paper(?!\\\\w)', '(?<!\\\\w)claims(?!\\\\w)', '(?<!\\\\w)this(?!\\\\w)']"
 
-# Stage 1 of the degradation: a SHORT ASCII content word ('ai' loses to the len>2
-# floor) must be recovered before any stop word is. Restoring the whole question
-# here would re-cite the retraction notice — the exact defect #571 fixes.
-kw_is "short ASCII content word is recovered before stop words are" 'AI 논문은 어디에 있나' \
-  "['(?<!\\\\w)ai(?!\\\\w)']"
+# The recovery stage: a SHORT ASCII content word ('ai' loses to the len>2 floor)
+# is recovered by relaxing that floor — never by giving the function words back,
+# which would re-cite the retraction notice, the exact defect #571 fixes.
+kw_is "short ASCII content word is recovered when the strict floor empties the set" \
+  'AI 논문은 어디에 있나' "['(?<!\\\\w)ai(?!\\\\w)']"
 if router search 'AI 논문은 어디에 있나' | grep -qF 'sources/571-retraction.md'; then
-  bad "stage-1 recovery still cited the unrelated retraction notice"
+  bad "ASCII recovery still cited the unrelated retraction notice"
 else
-  ok "stage-1 recovery keeps the unrelated retraction notice out (#571)"
+  ok "ASCII recovery keeps the unrelated retraction notice out (#571)"
 fi
-# Stage 2: a question that is function words and NOTHING else must not become a
-# silent non-answer — search() returns [] on an empty pattern list (#571 기준 2).
+# A question that is function words and NOTHING else yields NO keyword and NO
+# result (#571 기준 2, revised). Restoring the tokens — the behaviour this replaced —
+# put the retraction notice back as the sole evidence for '이 논문은?'.
 printf '# 메모\n\n이것은 무엇인가 하는 물음.\n' > "$KB/sources/571-allstop.md"
-kw_is "all-function-word question restores its own tokens" '이것은 무엇인가' "['이것은', '무엇인가']"
-if router search "이것은 무엇인가" | grep -qF 'sources/571-allstop.md'; then ok "all-function-word question still answers (no silent empty result)"; else bad "all-function-word question returned nothing"; fi
+kw_is "all-function-word question yields no keyword" '이것은 무엇인가' "[]"
+kw_is "all-function-word question yields no keyword (bare 논문은)" '이 논문은?' "[]"
+if router search "이것은 무엇인가" | grep -qF 'sources/571-allstop.md'; then bad "all-function-word question still cited a document"; else ok "all-function-word question cites nothing (#571 기준 2)"; fi
+if router search '이 논문은?' | grep -qF 'sources/571-retraction.md'; then bad "'이 논문은?' still cited the retraction notice"; else ok "'이 논문은?' no longer cites the retraction notice (#571)"; fi
+# ...and the emptiness is EXPLAINED, distinguishably from "the corpus has nothing".
+# Both surfaces: the rendered block and the search JSON.
+noterm_answer="$(router wiki '이 논문은?' --reason 'unknown entity')"
+nomatch_answer="$(router wiki 'quantumentanglementxyz' --reason 'unknown entity')"
+if printf '%s' "$noterm_answer" | grep -qF 'nothing to search'; then ok "no-keyword answer explains why it is empty"; else bad "no-keyword answer gave no diagnostic"; fi
+if printf '%s' "$noterm_answer" | grep -qF '(no matching source excerpts found)'; then bad "no-keyword answer claims the corpus was searched and empty"; else ok "no-keyword answer is not reported as 'no such source'"; fi
+if printf '%s' "$nomatch_answer" | grep -qF '(no matching source excerpts found)'; then ok "a searched-but-unmatched question keeps the 'no such source' wording"; else bad "unmatched question lost its own wording"; fi
+if printf '%s' "$nomatch_answer" | grep -qF 'nothing to search'; then bad "unmatched question wrongly reported as unsearchable"; else ok "the two empty-result reasons are not conflated (#571)"; fi
+noterm_diag="$(router search '이 논문은?' | "$PYTHON" -c "import json,sys; print(bool(json.load(sys.stdin)['diagnostic']))")"
+nomatch_diag="$(router search 'quantumentanglementxyz' | "$PYTHON" -c "import json,sys; print(bool(json.load(sys.stdin)['diagnostic']))")"
+if [ "$noterm_diag" = "True" ] && [ "$nomatch_diag" = "False" ]; then ok "search JSON carries the diagnostic only when there was no query term"; else bad "search JSON diagnostic wrong (no-term=$noterm_diag unmatched=$nomatch_diag)"; fi
 
 # Membership is PINNED, not just sampled. A table-driven loop over the constant
 # proves every listed form is droppable, but it cannot notice a form that was
@@ -395,29 +409,24 @@ print([(w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]) for w 
        if [p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호']])
 ")"; fi
 
-# Ordering contract for #581: stem derivation must never resurrect a filtered 어절.
-# The probe injects a 조사 stripper at the seam (_stem_patterns) and checks both the
-# filtered path and the stop-word-restoring stage. The third assertion is the
-# control: with derivation enabled the stem DOES appear, so the first two prove the
-# suppression, not the absence of a stripper.
+# Ordering contract for #581: a filtered 어절 must leave NOTHING behind — not the
+# token, and not a stem derived from it. Checked by consequence rather than by
+# inspecting the code: no pattern produced for '논문은 신경기호' may match the
+# retraction notice's prose, which contains '논문은' and '논문' but neither content
+# word. A stripper added ABOVE the stop-word guard would emit '논문' and match it.
 if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
-a._stem_patterns = lambda w: [w[:-1]] if len(w) > 2 and w[-1] in '은는이가를의' else []
-kw = lambda q: [p.pattern for p in a._keyword_patterns(q)]
-assert kw('논문은 신경기호') == ['신경기호'], kw('논문은 신경기호')
-assert kw('이 논문은?') == ['논문은'], kw('이 논문은?')
-control = [p.pattern for p in a._tokenize_patterns(
-    '이 논문은?', drop_stopwords=False, ascii_min=2, derive_stems=True)]
-assert control == ['논문은', '논문'], control
-" 2>/dev/null; then ok "filtered 어절 yields no derived stem, in either stage (#581 ordering contract)"; else bad "a filtered 어절 was resurrected by stem derivation: $("$PYTHON" -c "
+pats = a._keyword_patterns('논문은 신경기호')
+assert [p.pattern for p in pats] == ['신경기호'], [p.pattern for p in pats]
+prose = '이 논문은 저자 요청으로 철회되었다. 논문 3편이 함께 철회됐다.'
+assert not [p.pattern for p in pats if p.search(prose)], [p.pattern for p in pats if p.search(prose)]
+" 2>/dev/null; then ok "a filtered 어절 leaves no pattern behind, derived or literal (#581 ordering contract)"; else bad "a filtered 어절 still reaches the text: $("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
-a._stem_patterns = lambda w: [w[:-1]] if len(w) > 2 and w[-1] in '은는이가를의' else []
-print('논문은 신경기호 ->', [p.pattern for p in a._keyword_patterns('논문은 신경기호')],
-      '| 이 논문은? ->', [p.pattern for p in a._keyword_patterns('이 논문은?')])
+print([p.pattern for p in a._keyword_patterns('논문은 신경기호')])
 ")"; fi
 rm -f "$KB/sources/571-retraction.md" "$KB/sources/571-topic.md" "$KB/sources/571-allstop.md"
 

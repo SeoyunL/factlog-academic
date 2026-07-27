@@ -752,25 +752,11 @@ def _cjk_stopword(word: str) -> bool:
     return word in _CJK_QUESTION_STOPWORDS
 
 
-def _stem_patterns(word: str) -> list[str]:
-    """Matcher strings derived from *word* by morphological analysis.
+def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]]:
+    """Token→pattern pass shared by both stages of _keyword_patterns.
 
-    Always empty: no 조사 stripper is bundled (#581 owns that work). This is the one
-    seam where one may be added, so the ordering contract in _tokenize_patterns —
-    stop words first, derivation second, and never in the stop-word-restoring
-    fallback — stays enforceable in a single place instead of by convention.
-    """
-    return []
-
-
-def _tokenize_patterns(
-    question: str, *, drop_stopwords: bool, ascii_min: int, derive_stems: bool
-) -> list[re.Pattern[str]]:
-    """Token→pattern pass shared by every stage of _keyword_patterns.
-
-    *ascii_min* is the minimum ASCII token length; *drop_stopwords* applies the
-    Korean question-function-word filter; *derive_stems* allows morphological
-    derivation on top of the literal token.
+    *ascii_min* is the minimum ASCII token length. Korean question function words
+    are always dropped — there is no mode that keeps them (#571 기준 2).
     """
     seen: set[str] = set()
     patterns: list[re.Pattern[str]] = []
@@ -781,23 +767,18 @@ def _tokenize_patterns(
         if word in seen:
             continue
         if _is_cjk(word):
-            # Stop-word removal runs on the RAW 어절 and, when it fires, the token
-            # produces NO pattern at all — not even a derived one. Derivation sits
-            # BELOW this guard on purpose: run above it, '논문은' would first become
-            # the stem '논문' (67 of 186 measured source files, against 1 for the
-            # surface form) and #571 would get wider instead of fixed. The stage
-            # that restores stop words passes derive_stems=False for the same
-            # reason — there the guard never fires, so it cannot do the suppressing.
-            if drop_stopwords and _cjk_stopword(word):
+            # Stop-word removal runs on the RAW 어절, and a token it drops produces
+            # NO pattern at all — not even a derived one. #581's 조사 stripper must
+            # therefore be added BELOW this guard (inside the len>=2 branch): run
+            # above it, '논문은' would first become the stem '논문' — 67 of 186
+            # measured source files, against 1 for the surface form — and #571 would
+            # get wider instead of fixed. No stage of _keyword_patterns bypasses
+            # this guard, so there is no second path a stripper could slip through.
+            if _cjk_stopword(word):
                 continue
             if len(word) >= 2:
                 seen.add(word)
                 patterns.append(re.compile(re.escape(word)))
-                if derive_stems:
-                    for stem in _stem_patterns(word):
-                        if stem not in seen:
-                            seen.add(stem)
-                            patterns.append(re.compile(re.escape(stem)))
         elif len(word) >= ascii_min:
             seen.add(word)
             # Lookaround boundaries (not \b) so punctuation-edged tokens like
@@ -808,10 +789,21 @@ def _tokenize_patterns(
 
 
 # ASCII tokens must exceed 2 characters to become keywords (an 'ai'/'ml' substring
-# is noise in an English corpus). The relaxed floor below is the fallback's first
-# step, not a general loosening.
+# is noise in an English corpus). The relaxed floor is the recovery stage's only
+# concession, not a general loosening.
 _ASCII_MIN = 3
 _ASCII_MIN_RELAXED = 2
+
+# Emitted when the question yields no keyword at all. It must NOT read like the
+# corpus was searched and came back empty: nothing was searched for, because the
+# question named no subject. Conflating "I have no such source" with "you asked me
+# nothing searchable" tells the reader the KB is silent on a topic they never
+# actually named — the same class of unreported retrieval failure as #575.
+NO_QUERY_TERM_NOTE = (
+    "(nothing to search: every word in the question is a question function word, "
+    "so no keyword was queried. This is NOT 'no such source' — the corpus was not "
+    "consulted for any term. Rephrase with a content word.)"
+)
 
 
 def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
@@ -828,31 +820,21 @@ def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
     - Korean question function words (_CJK_QUESTION_STOPWORDS) are dropped, so the
       grammar of the question does not become a search term (#571).
 
-    An empty result is never returned when the question has any token at all
-    (#571 기준 2): search() answers nothing on an empty pattern list, so the
-    filter degrades through the stages below instead of silencing the question.
+    Returns [] for a question made only of function words. That is deliberate
+    (#571 기준 2, revised): search() then returns nothing and the caller reports
+    NO_QUERY_TERM_NOTE. Restoring the function words instead — the earlier
+    behaviour — reproduced the exact defect this filter exists to remove: measured
+    on the real KB, '이 논문은?' came back citing a retracted trial as its only
+    evidence, because that notice is the one file in 186 containing '논문은'.
     """
-    patterns = _tokenize_patterns(
-        question, drop_stopwords=True, ascii_min=_ASCII_MIN, derive_stems=True
-    )
+    patterns = _tokenize_patterns(question, ascii_min=_ASCII_MIN)
     if not patterns:
-        # Stage 1 — usually it is the ASCII floor, not the stop-word list, that
-        # emptied the set: 'AI 논문은 어디에 있나' loses 'ai' to len>2 and everything
-        # else to the filter. Relax the floor and KEEP the filter, so the question
-        # is answered by its own short content word rather than by its grammar.
-        patterns = _tokenize_patterns(
-            question, drop_stopwords=True, ascii_min=_ASCII_MIN_RELAXED, derive_stems=True
-        )
-    if not patterns:
-        # Stage 2 — the question is function words and nothing else ('이것은
-        # 무엇인가'). Restoring them is the least-bad answer: a citation the user
-        # can dismiss beats silence they cannot distinguish from "no such source".
-        # derive_stems=False keeps this stage from doing what the filter exists to
-        # prevent — a restored '논문은' must not also become the far more common
-        # stem '논문' once #581 lands.
-        patterns = _tokenize_patterns(
-            question, drop_stopwords=False, ascii_min=_ASCII_MIN_RELAXED, derive_stems=False
-        )
+        # Recovery stage — usually it is the ASCII floor, not the stop-word list,
+        # that emptied the set: 'AI 논문은 어디에 있나' loses 'ai' to len>2 and
+        # everything else to the filter. Relax the floor and KEEP the filter, so
+        # the question is answered by its own short content word. This is the only
+        # widening; there is no stage that gives the function words back.
+        patterns = _tokenize_patterns(question, ascii_min=_ASCII_MIN_RELAXED)
     return patterns
 
 
@@ -1067,6 +1049,9 @@ def render_wiki_answer(
             lines.append(f"[{r['file']}:{r['line']}] ({r['dir']})")
             for excerpt_line in str(r["excerpt"]).splitlines():
                 lines.append(f"    {excerpt_line}")
+    elif not _keyword_patterns(question):
+        # Empty for two different reasons; say which one (#571).
+        lines.append(NO_QUERY_TERM_NOTE)
     else:
         lines.append("(no matching source excerpts found)")
     truncation = _truncation_line(result_total, len(visible_results))
@@ -1212,8 +1197,16 @@ def cmd_search(args: argparse.Namespace) -> int:
         # the stable ``results`` array.  The additive fields make the cap visible.
         results = search(args.text, root)
         total = len(search(args.text, root, limit=None))
+    # 'diagnostic' is null unless the empty result needs an explanation the row
+    # count cannot give: zero rows because zero keywords, not because zero matches
+    # (#571). Additive, like total/truncated — the results array is unchanged.
     print(json.dumps(
-        {"results": results, "total": total, "truncated": len(results) < total},
+        {
+            "results": results,
+            "total": total,
+            "truncated": len(results) < total,
+            "diagnostic": None if _keyword_patterns(args.text) else NO_QUERY_TERM_NOTE,
+        },
         ensure_ascii=False,
     ))
     return 0
