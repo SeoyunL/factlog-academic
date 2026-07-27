@@ -493,6 +493,147 @@ print([p.pattern for p in a._keyword_patterns('논문은 신경기호')])
 ")"; fi
 rm -f "$KB/sources/571-retraction.md" "$KB/sources/571-topic.md" "$KB/sources/571-allstop.md"
 
+# --- #575: the wiki block reports keyword match record and low recall ---------
+# The defect: an answer whose keywords mostly missed the corpus is shaped exactly
+# like an answer to a question the KB genuinely cannot support. The reader concludes
+# "no evidence here" from what is really "the search did not cover the question".
+#
+# Every case below is a WHOLE-LINE check on the rendered block, so a diagnostic that
+# regresses into the question echo or into another notice's line fails here.
+mkdir -p "$KB/sources/575"
+printf '# Neurosymbolic Grounding\n\nThis paper studies neurosymbolic grounding of retrieval evidence.\n' \
+  > "$KB/sources/575/topic.md"
+
+# rc_line <question> <line prefix> : the matching rendered line(s), '' if none
+rc_line() { router wiki "$1" --reason 'unknown entity' | grep -F "$2" | grep -v '^question:' || true; }
+# same <desc> <expected> <got> : whole-value equality, prints the difference on failure
+same() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 — expected [$2], got [$3]"; fi; }
+
+# 정례 — every keyword reached the corpus: the record is shown, and nothing is
+# reported as unmatched or low.
+full="$(router wiki 'neurosymbolic grounding' --reason 'unknown entity')"
+same "#575 full recall reports the match record" \
+  "keywords matched: 2/2 — neurosymbolic, grounding" \
+  "$(printf '%s\n' "$full" | grep '^keywords matched:' || true)"
+if printf '%s\n' "$full" | grep -q '^keywords unmatched:'; then bad "#575 full recall printed an unmatched line"; else ok "#575 full recall prints no unmatched line"; fi
+if printf '%s\n' "$full" | grep -qF 'NOTE: low keyword recall'; then bad "#575 full recall warned about low recall"; else ok "#575 full recall does not warn"; fi
+
+# 반례(경계) — exactly half is NOT low. The threshold is "fewer than half", and a
+# question whose one real term did land must not be told its search failed.
+half="$(router wiki 'neurosymbolic zzqqxxnotinkb' --reason 'unknown entity')"
+same "#575 half recall names the unmatched keyword" \
+  "keywords unmatched: zzqqxxnotinkb" \
+  "$(printf '%s\n' "$half" | grep '^keywords unmatched:' || true)"
+if printf '%s\n' "$half" | grep -qF 'NOTE: low keyword recall'; then bad "#575 exactly-half recall warned (threshold is strictly below half)"; else ok "#575 exactly-half recall does not warn (boundary)"; fi
+
+# 정례 — below half: the warning appears, on its own line, and does not replace or
+# absorb the standing warning it sits beside (수용 기준 4).
+low="$(router wiki 'neurosymbolic zzqqxxnotinkb yywwvvnotinkb' --reason 'unknown entity')"
+same "#575 low recall reports the ratio" "keywords matched: 1/3 — neurosymbolic" \
+  "$(printf '%s\n' "$low" | grep '^keywords matched:' || true)"
+if printf '%s\n' "$low" | grep -qF 'NOTE: low keyword recall'; then ok "#575 below-half recall warns"; else bad "#575 below-half recall did not warn"; fi
+if printf '%s\n' "$low" | grep -qxF 'WARNING: unverified candidates — do not treat as confirmed facts.'; then ok "#575 the unverified WARNING keeps its own whole line"; else bad "#575 the low-recall note displaced the unverified WARNING"; fi
+nline="$(printf '%s\n' "$low" | grep -cF 'NOTE: low keyword recall')"
+if [ "$nline" = "1" ]; then ok "#575 the low-recall warning is exactly one line"; else bad "#575 low-recall warning spans $nline lines"; fi
+# ...and it must not read as an evidence claim: the wording says the SEARCH missed.
+if printf '%s\n' "$low" | grep -qF "This is NOT 'no such source'"; then ok "#575 the warning distinguishes itself from 'no evidence'"; else bad "#575 the warning can be read as 'no evidence'"; fi
+
+# 반례 — zero matches: the block structure survives (수용 기준 5) and both the
+# 0-count record and the existing empty-corpus wording are present.
+zero="$(router wiki 'zzqqxxnotinkb yywwvvnotinkb' --reason 'unknown entity')"
+same "#575 zero matches still reports a record" "keywords matched: 0/2" \
+  "$(printf '%s\n' "$zero" | grep '^keywords matched:' || true)"
+if printf '%s\n' "$zero" | grep -qF '(no matching source excerpts found)'; then ok "#575 zero matches keeps the empty-corpus wording"; else bad "#575 zero matches lost the empty-corpus wording"; fi
+if printf '%s\n' "$zero" | head -1 | grep -qF 'UNVERIFIED — wiki exploration'; then ok "#575 zero matches keeps the block marker first"; else bad "#575 zero matches broke the block structure"; fi
+
+# EXCLUSIVITY with #571. Three classes, measured one by one: a question with no
+# keyword at all, a question with keywords that mostly miss, and a normal one. The
+# two diagnostics answer different questions and must never stand in for each other
+# — a ratio over an empty keyword set ('0/0') would tell the reader a search ran.
+for probe in 'no-keyword|이 논문은?|noterm' \
+             'low-recall|neurosymbolic zzqqxxnotinkb yywwvvnotinkb|lowrecall' \
+             'normal|neurosymbolic grounding|neither'; do
+  cls="${probe%%|*}"; rest="${probe#*|}"; q="${rest%|*}"; want="${rest##*|}"
+  ans="$(router wiki "$q" --reason 'unknown entity')"
+  has_noterm=no; has_low=no; has_record=no
+  printf '%s\n' "$ans" | grep -qF 'no searchable keyword' && has_noterm=yes
+  printf '%s\n' "$ans" | grep -qF 'NOTE: low keyword recall' && has_low=yes
+  printf '%s\n' "$ans" | grep -q '^keywords matched:' && has_record=yes
+  case "$want" in
+    noterm)    [ "$has_noterm" = yes ] && [ "$has_low" = no ] && [ "$has_record" = no ] && r=ok || r=no ;;
+    lowrecall) [ "$has_noterm" = no ] && [ "$has_low" = yes ] && [ "$has_record" = yes ] && r=ok || r=no ;;
+    neither)   [ "$has_noterm" = no ] && [ "$has_low" = no ] && [ "$has_record" = yes ] && r=ok || r=no ;;
+  esac
+  if [ "$r" = ok ]; then
+    ok "#575/#571 [$cls] gets exactly its own diagnostic"
+  else
+    bad "#575/#571 [$cls] diagnostics overlap (noterm=$has_noterm low=$has_low record=$has_record)"
+  fi
+done
+
+# The tally's VANTAGE POINT — this is the whole correctness of the feature, and the
+# two ways of getting it wrong are both silent, so both are pinned by consequence.
+#
+# (a) counted after the render cap. A keyword whose only excerpt ranks below the cap
+#     is present in the corpus but absent from the shown rows; counting there invents
+#     a low-recall warning for a search that did reach the corpus — the exact false
+#     alarm this diagnostic exists to prevent. Measured on the reference KB, the
+#     issue's own question is 1/8 counted after the cap against 2/8 in the corpus.
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  printf 'capalpha capalpha capalpha capalpha capalpha filler %s\n' "$i" > "$KB/sources/575/filler-$i.md"
+done
+printf 'capbeta appears once, in a weakly ranked file.\n' > "$KB/sources/575/beta.md"
+capped="$(router wiki 'capalpha capbeta' --reason 'unknown entity')"
+if printf '%s\n' "$capped" | grep -qF 'sources/575/beta.md'; then
+  bad "#575 the cap fixture is vacuous — beta.md is inside the rendered cap"
+else
+  ok "#575 cap fixture: the capbeta excerpt ranks below the render cap"
+fi
+same "#575 the tally is taken before the render cap, not after" \
+  "keywords matched: 2/2 — capalpha, capbeta" \
+  "$(printf '%s\n' "$capped" | grep '^keywords matched:' || true)"
+rm -f "$KB"/sources/575/filler-*.md "$KB/sources/575/beta.md"
+
+# (b) counted from the returned excerpts even uncapped. search() collapses a window
+#     that overlaps the previously emitted one, so a keyword confined to a suppressed
+#     line rides in NO excerpt at all — reported unmatched while the corpus holds it.
+#     Fixture: line 3 anchors an excerpt covering lines 1-6; line 7's window starts at
+#     line 4 and is therefore collapsed away.
+printf 'pad\npad\nanchorterm here\npad\npad\npad\nsuppressedterm here\npad\n' > "$KB/sources/575/window.md"
+if router search 'anchorterm suppressedterm' --all | grep -qF 'suppressedterm'; then
+  bad "#575 window fixture is vacuous — suppressedterm does ride in an excerpt"
+else
+  ok "#575 window fixture: suppressedterm rides in no excerpt (last_end collapse)"
+fi
+same "#575 a keyword only on a collapsed line is still reported matched" \
+  "keywords matched: 2/2 — anchorterm, suppressedterm" \
+  "$(rc_line 'anchorterm suppressedterm' 'keywords matched:')"
+rm -f "$KB/sources/575/window.md"
+
+# PURITY (수용 기준 6): the tally is a side report. Same rows, same order, with and
+# without it — and the `search` JSON contract gains no field (its shape is pinned by
+# the #279/#571 cases above; this states the intent that #575 stays out of it).
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+from pathlib import Path
+import ask_router as a
+root = Path('$KB')
+q = 'neurosymbolic grounding retrieval'
+plain = a.search(q, root, limit=None)
+tallied = a.search(q, root, limit=None, recall={})
+assert plain == tallied, (len(plain), len(tallied))
+" 2>/dev/null; then ok "#575 collecting the tally does not change the returned rows"; else bad "#575 the tally changed search() results"; fi
+if router search 'neurosymbolic grounding' | "$PYTHON" -c "
+import json, sys
+sys.exit(0 if sorted(json.load(sys.stdin)) == ['diagnostic', 'results', 'total', 'truncated'] else 1)
+"; then ok "#575 the search JSON contract is unchanged (no recall field)"; else bad "#575 the search JSON gained a field"; fi
+# --all renders the same record: the diagnostic describes the question, not the cap.
+same "#575 --all reports the same tally as the capped render" \
+  "keywords matched: 2/2 — neurosymbolic, grounding" \
+  "$(router wiki 'neurosymbolic grounding' --reason 'unknown entity' --all | grep '^keywords matched:' || true)"
+rm -rf "$KB/sources/575"
+
 # --- Phase 2: path (positive render / variable) + policy + decisions ---
 # Path render/evaluate AND policy-predicate evaluation all go through run_wirelog,
 # which needs pyrewire. Guard the whole block so the no-dependency CI shell-harness
