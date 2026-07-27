@@ -19,16 +19,34 @@ pass=0
 fail=0
 
 # ---------------------------------------------------------------------------
-# Helper: run gate for a given KB root, target file_path, and expected exit.
+# Payload builders.
+#
+# envelope() is the shape Claude Code ACTUALLY sends a PreToolUse hook: the tool
+# input wrapped in an envelope, target at tool_input.file_path. Until #591 every
+# fixture in this file used legacy_payload() below instead, so all 29 cases
+# passed against a gate that could not read a single real invocation and fell
+# through to fail-open. Default new cases to envelope(); reach for
+# legacy_payload() only to pin the compatibility fallback deliberately.
 # ---------------------------------------------------------------------------
-run_case() {
-  local desc="$1"
-  local kb_root="$2"
-  local target_path="$3"
-  local expected_exit="$4"
+envelope() {
+  # envelope <file_path> [tool_name]
+  printf '{"session_id":"s0","cwd":"/","hook_event_name":"PreToolUse","tool_name":"%s","tool_input":{"file_path":"%s","content":"x"},"tool_use_id":"u0"}' \
+    "${2:-Write}" "$1"
+}
 
-  local payload
-  payload="$(printf '{"file_path":"%s"}' "$target_path")"
+legacy_payload() {
+  # LEGACY/COMPAT ONLY — a bare tool input with the path at the TOP level. Not
+  # what Claude Code sends; kept working for callers that pipe a bare tool input
+  # (older harnesses, hand-run `echo '{"file_path":...}' | gate_check.sh`).
+  printf '{"file_path":"%s"}' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: run gate for a given KB root, target file_path, and expected exit.
+# Uses the REAL envelope shape.
+# ---------------------------------------------------------------------------
+run_payload_case() {
+  local desc="$1" kb_root="$2" payload="$3" expected_exit="$4"
 
   local actual_exit=0
   FACTLOG_ROOT="$kb_root" bash "$GATE" <<< "$payload" >/dev/null 2>&1 || actual_exit=$?
@@ -40,6 +58,11 @@ run_case() {
     echo "FAIL: $desc — expected exit $expected_exit, got $actual_exit"
     fail=$((fail + 1))
   fi
+}
+
+run_case() {
+  local desc="$1" kb_root="$2" target_path="$3" expected_exit="$4"
+  run_payload_case "$desc" "$kb_root" "$(envelope "$target_path")" "$expected_exit"
 }
 
 # ---------------------------------------------------------------------------
@@ -233,7 +256,7 @@ BASH_BIN="${BASH:-$(command -v bash)}"
 
 nopy_exit=0
 PATH="$SHIM_PATH" FACTLOG_ROOT="$KB_NOPY" \
-  "$BASH_BIN" "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_NOPY/facts/accepted.dl")" \
+  "$BASH_BIN" "$GATE" <<< "$(envelope "$KB_NOPY/facts/accepted.dl")" \
   >/dev/null 2>&1 || nopy_exit=$?
 if [ "$nopy_exit" -eq 2 ]; then
   echo "PASS: python3 unavailable on engine-input write — fail-closed deny (exit $nopy_exit)"
@@ -267,7 +290,7 @@ chmod +x "$STUB_PATH/python3"
 
 stub_exit=0
 PATH="$STUB_PATH:$PATH" FACTLOG_ROOT="$KB_STUB" \
-  bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_STUB/facts/accepted.dl")" \
+  bash "$GATE" <<< "$(envelope "$KB_STUB/facts/accepted.dl")" \
   >/dev/null 2>&1 || stub_exit=$?
 if [ "$stub_exit" -eq 0 ]; then
   echo "PASS: broken python3 stub skipped when another Python is usable (exit $stub_exit)"
@@ -310,7 +333,7 @@ touch_file "$KB_CFG/facts/accepted.dl"   # existing engine input, no report → 
 set_config_root "$KB_CFG"
 
 cfg_exit=0
-env -u FACTLOG_ROOT bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_CFG/facts/accepted.dl")" \
+env -u FACTLOG_ROOT bash "$GATE" <<< "$(envelope "$KB_CFG/facts/accepted.dl")" \
   >/dev/null 2>&1 || cfg_exit=$?
 if [ "$cfg_exit" -eq 2 ]; then
   echo "PASS: FACTLOG_ROOT unset, config KB used as KB_ROOT — deny (exit $cfg_exit)"
@@ -355,7 +378,7 @@ touch_file "$KB_CFG_STALE/facts/accepted.dl"
 set_config_root "$KB_CFG_STALE"
 
 env_exit=0
-FACTLOG_ROOT="$KB_ENV_FRESH" bash "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_CFG_STALE/facts/accepted.dl")" \
+FACTLOG_ROOT="$KB_ENV_FRESH" bash "$GATE" <<< "$(envelope "$KB_CFG_STALE/facts/accepted.dl")" \
   >/dev/null 2>&1 || env_exit=$?
 if [ "$env_exit" -eq 0 ]; then
   echo "PASS: FACTLOG_ROOT (active) overrides config — write to non-active stale config KB allowed (exit $env_exit)"
@@ -380,7 +403,7 @@ touch_file "$KB_CWD/facts/accepted.dl"   # existing engine input, no report → 
 clear_config
 
 cwd_exit=0
-( cd "$KB_CWD" && env -u FACTLOG_ROOT bash "$GATE" <<< '{"file_path":"facts/accepted.dl"}' ) \
+( cd "$KB_CWD" && env -u FACTLOG_ROOT bash "$GATE" <<< "$(envelope "facts/accepted.dl")" ) \
   >/dev/null 2>&1 || cwd_exit=$?
 if [ "$cwd_exit" -eq 2 ]; then
   echo "PASS: no FACTLOG_ROOT, no config — cwd fallback used as KB_ROOT — deny (exit $cwd_exit)"
@@ -428,7 +451,7 @@ obs_err="$(mktemp)"
 obs_exit=0
 FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_OBS" \
   bash "$FAKE_PLUGIN/hooks/gate_check.sh" \
-  <<< "$(printf '{"file_path":"%s"}' "$KB_OBS/facts/accepted.dl")" \
+  <<< "$(envelope "$KB_OBS/facts/accepted.dl")" \
   >/dev/null 2>"$obs_err" || obs_exit=$?
 
 if [ "$obs_exit" -eq 2 ]; then
@@ -463,7 +486,7 @@ clear_config
 ok_err="$(mktemp)"
 ok_exit=0
 FACTLOG_ROOT="$KB_OK" bash "$GATE" \
-  <<< "$(printf '{"file_path":"%s"}' "$KB_OK/facts/accepted.dl")" \
+  <<< "$(envelope "$KB_OK/facts/accepted.dl")" \
   >/dev/null 2>"$ok_err" || ok_exit=$?
 
 if [ "$ok_exit" -eq 0 ] && ! grep -qF "factlog config resolver unavailable" "$ok_err"; then
@@ -497,7 +520,7 @@ RUNNER
 note_err="$(mktemp)"
 note_exit=0
 FACTLOG_ROOT="$KB_NOTE" FACTLOG_PYTHON_RUNNER="$NOTE_RUNNER" bash "$GATE" \
-  <<< "$(printf '{"file_path":"%s"}' "$KB_NOTE/facts/accepted.dl")" \
+  <<< "$(envelope "$KB_NOTE/facts/accepted.dl")" \
   >/dev/null 2>"$note_err" || note_exit=$?
 
 if grep -qF "[factlog] using /somewhere/off-path/python" "$note_err"; then
@@ -591,11 +614,11 @@ count_execs "no file_path in payload — gate exits before canonicalising" \
 count_execs "unparseable payload — same early exit" \
   3 "$KB_EXEC" 'not json at all'
 count_execs "accepted.dl — engine-input loop breaks on its first entry" \
-  5 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/accepted.dl")"
+  5 "$KB_EXEC" "$(envelope "$KB_EXEC/facts/accepted.dl")"
 count_execs "query.dl — loop reaches its second entry" \
-  6 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/query.dl")"
+  6 "$KB_EXEC" "$(envelope "$KB_EXEC/facts/query.dl")"
 count_execs "non-engine target — loop runs both entries, matches neither" \
-  6 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/candidates.csv")"
+  6 "$KB_EXEC" "$(envelope "$KB_EXEC/facts/candidates.csv")"
 
 # The same targets in a bare KB: no report and no engine inputs, so the verdicts
 # flip to bootstrap-allow and deny. The counts must NOT move. That is the half of
@@ -606,11 +629,11 @@ make_kb "$KB_BARE"
 clear_config
 
 count_execs "bare KB, accepted.dl — count unchanged by KB state" \
-  5 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/facts/accepted.dl")"
+  5 "$KB_BARE" "$(envelope "$KB_BARE/facts/accepted.dl")"
 count_execs "bare KB, query.dl — count unchanged by KB state" \
-  6 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/facts/query.dl")"
+  6 "$KB_BARE" "$(envelope "$KB_BARE/facts/query.dl")"
 count_execs "bare KB, non-engine target — count unchanged by KB state" \
-  6 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/notes.md")"
+  6 "$KB_BARE" "$(envelope "$KB_BARE/notes.md")"
 
 # The one row the ENVIRONMENT decides, not the target. With no usable Python
 # 3.11+ the fail-closed probe is the first exec and DENIES on the spot, so every
@@ -619,15 +642,182 @@ count_execs "bare KB, non-engine target — count unchanged by KB state" \
 # count: 1 exec on its own could equally mean the gate gave up and allowed, which
 # is the opposite of what this branch must do.
 count_execs "no usable Python — accepted.dl collapses to the fail-closed probe" \
-  1 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/accepted.dl")" 2 "$DEAD_RUNNER"
+  1 "$KB_EXEC" "$(envelope "$KB_EXEC/facts/accepted.dl")" 2 "$DEAD_RUNNER"
 count_execs "no usable Python — query.dl collapses too" \
-  1 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/query.dl")" 2 "$DEAD_RUNNER"
+  1 "$KB_EXEC" "$(envelope "$KB_EXEC/facts/query.dl")" 2 "$DEAD_RUNNER"
 count_execs "no usable Python — a non-engine target denies as well" \
-  1 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/candidates.csv")" 2 "$DEAD_RUNNER"
+  1 "$KB_EXEC" "$(envelope "$KB_EXEC/facts/candidates.csv")" 2 "$DEAD_RUNNER"
 count_execs "no usable Python — even a pathless payload never reaches 3" \
   1 "$KB_EXEC" '{"tool":"Write"}' 2 "$DEAD_RUNNER"
 
+# An engine-input-shaped payload whose path cannot be extracted skips
+# canonicalisation and the engine-input loop entirely, so it sits at 3 like the
+# pathless rows above — yet it is NOT the same early exit: the pathless rows had
+# nothing to judge, this one goes on to the predicate. Both KBs are shown so the
+# count is seen not to move while the verdict does (bare KB → deny, fresh-report
+# KB → allow), which is the pair the pathless rows cannot produce at all.
+count_execs "unreadable shape naming an engine input, bare KB — 3 execs, denies" \
+  3 "$KB_BARE" "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_BARE/facts/accepted.dl")" 2
+count_execs "same shape, fresh report — 3 execs, allows" \
+  3 "$KB_EXEC" "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_EXEC/facts/accepted.dl")" 0
+
 rm -rf "$COUNT_DIR" "$KB_EXEC" "$KB_BARE"
+
+# ---------------------------------------------------------------------------
+# CASE 20: PAYLOAD SHAPE (#591) — the gate must read the envelope Claude Code
+# actually sends.
+#
+# Every case above this one used to feed a bare top-level {"file_path":...}. The
+# real PreToolUse payload nests the target under tool_input, so the gate found no
+# path, took the fail-open branch, and allowed EVERY engine-input write for its
+# entire existence while 29 green cases said otherwise. This block pins the shape
+# contract itself rather than trusting the shared helper to stay correct.
+#
+# The KB: an engine input on disk with no report → the correct verdict for
+# anything that resolves to it is DENY (2). So exit 0 here means "the gate did
+# not see the target", which is precisely the defect.
+# ---------------------------------------------------------------------------
+KB_SHAPE="$(mktemp -d)"
+make_kb "$KB_SHAPE"
+touch_file "$KB_SHAPE/facts/accepted.dl"
+touch_file "$KB_SHAPE/facts/query.dl"
+clear_config
+
+# The real thing. Reverting the extraction to top-level-only kills this row.
+run_payload_case "REAL envelope, Write — deny" \
+  "$KB_SHAPE" "$(envelope "$KB_SHAPE/facts/accepted.dl" Write)" 2
+
+# Edit carries the target under the SAME key as Write — tool_input.file_path —
+# with old_string/new_string in place of content. Written out literally rather
+# than via envelope() so the claim is pinned by a fixture, not by a helper that
+# happens to be shared.
+run_payload_case "REAL envelope, Edit — same tool_input.file_path key — deny" \
+  "$KB_SHAPE" \
+  "$(printf '{"session_id":"s0","cwd":"/","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"},"tool_use_id":"u0"}' \
+     "$KB_SHAPE/facts/query.dl")" \
+  2
+
+# tool_name is NOT part of the predicate. hooks.json's matcher decides what is
+# routed here; the gate judges whatever arrives by its target alone. Two rows: a
+# tool name outside the matcher, and no tool_name field at all. Adding a
+# `tool_name == Write|Edit` filter would fail-open on both — the same
+# unrecognised-field fail-open that #591 was.
+run_payload_case "envelope with a non-matcher tool_name — judged by target, deny" \
+  "$KB_SHAPE" "$(envelope "$KB_SHAPE/facts/accepted.dl" MultiEdit)" 2
+run_payload_case "envelope with NO tool_name — judged by target, deny" \
+  "$KB_SHAPE" \
+  "$(printf '{"hook_event_name":"PreToolUse","tool_input":{"file_path":"%s"}}' "$KB_SHAPE/facts/accepted.dl")" \
+  2
+
+# LEGACY/COMPAT: a bare tool input still works. Kept as its OWN case, explicitly
+# labelled, so it can never again be mistaken for coverage of the real shape.
+run_payload_case "LEGACY bare tool input (top-level file_path) — still deny" \
+  "$KB_SHAPE" "$(legacy_payload "$KB_SHAPE/facts/accepted.dl")" 2
+
+# The row above cannot, on its own, show the top-level fallback still READS:
+# drop the fallback and the raw-text probe below denies the same payload for a
+# different reason, so it stays green. Mutation found that; this row is the fix.
+# Bootstrap is where the two disagree — it needs a RESOLVED target, so a fresh KB
+# creating query.dl is ALLOW when the top level is read and DENY when it is not.
+KB_LEGACY_BOOT="$(mktemp -d)"
+make_kb "$KB_LEGACY_BOOT"
+run_payload_case "LEGACY bare tool input, bootstrap KB — allow (proves top level is still read)" \
+  "$KB_LEGACY_BOOT" "$(legacy_payload "$KB_LEGACY_BOOT/facts/query.dl")" 0
+rm -rf "$KB_LEGACY_BOOT"
+
+# Nested wins over a stale top-level duplicate: if both keys are present the
+# envelope's tool_input is the authoritative one. Here the top level points at a
+# harmless file and tool_input at the engine input — an implementation that
+# preferred the top level would ALLOW.
+run_payload_case "both keys present — tool_input takes precedence — deny" \
+  "$KB_SHAPE" \
+  "$(printf '{"file_path":"%s","tool_input":{"file_path":"%s"}}' \
+     "$KB_SHAPE/notes.md" "$KB_SHAPE/facts/accepted.dl")" \
+  2
+
+# ---------------------------------------------------------------------------
+# CASE 21 (#591): the fail-open branch, split by evidence instead of assumption.
+#
+# The old comment claimed "an empty/unparseable payload cannot target an engine
+# input". For a payload we simply misread, that was false. So the branch now asks
+# rather than assumes: no path extracted AND no engine-input filename anywhere in
+# the raw text → allow; no path extracted BUT the text names one → treat it as an
+# engine input of unknown identity and let the freshness predicate decide.
+# ---------------------------------------------------------------------------
+# (a) Nothing to judge — allow. This half must stay, or the gate would deny every
+# Write and Edit in a session over a contract covering two files.
+run_payload_case "pathless payload, no engine input named — allow (fail-open kept)" \
+  "$KB_SHAPE" '{"tool_name":"Write","tool_input":{"content":"hello"}}' 0
+run_payload_case "unparseable payload, no engine input named — allow" \
+  "$KB_SHAPE" 'not json at all' 0
+run_payload_case "JSON that is not an object — allow" \
+  "$KB_SHAPE" '"just a string"' 0
+
+# (b) Unreadable shape that DOES name an engine input — deny. A future schema
+# change lands here instead of silently reopening the hole.
+run_payload_case "unreadable shape naming accepted.dl — deny" \
+  "$KB_SHAPE" \
+  "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_SHAPE/facts/accepted.dl")" 2
+run_payload_case "unreadable shape naming query.dl — deny" \
+  "$KB_SHAPE" \
+  "$(printf '{"tool_name":"Edit","edits":[{"dest":"%s"}]}' "$KB_SHAPE/facts/query.dl")" 2
+# Not even JSON, but it names an engine input: the raw-text probe is deliberately
+# shape-agnostic, so a payload the parser rejects outright still cannot slip past.
+run_payload_case "unparseable payload naming an engine input — deny" \
+  "$KB_SHAPE" "garbage $KB_SHAPE/facts/accepted.dl garbage" 2
+
+# The deny above is a predicate, not a wall. With a fresh report the same
+# unreadable payload is ALLOWED — so an operator whose schema drifted is not
+# locked out: /factlog check clears it. A hard deny-on-unresolved would fail this
+# row, which is why the branch routes into the predicate instead of exiting 2.
+KB_SHAPE_FRESH="$(mktemp -d)"
+make_kb "$KB_SHAPE_FRESH"
+touch_file "$KB_SHAPE_FRESH/facts/accepted.dl"
+set_mtime_past "$KB_SHAPE_FRESH/facts/accepted.dl"
+touch_file "$KB_SHAPE_FRESH/facts/logic_report.txt"
+run_payload_case "unresolved target but report fresh — allow (escapable, not a wall)" \
+  "$KB_SHAPE_FRESH" \
+  "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_SHAPE_FRESH/facts/accepted.dl")" 0
+rm -rf "$KB_SHAPE_FRESH"
+
+# Bootstrap cannot rescue an unresolved target: branch B is a claim about ONE
+# named file being absent on disk, and here we do not know which file was meant.
+# A bare KB therefore denies — and stays escapable, per the row above.
+KB_SHAPE_BOOT="$(mktemp -d)"
+make_kb "$KB_SHAPE_BOOT"
+run_payload_case "unresolved target in a bare KB — deny (bootstrap needs a known target)" \
+  "$KB_SHAPE_BOOT" \
+  "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_SHAPE_BOOT/facts/query.dl")" 2
+rm -rf "$KB_SHAPE_BOOT"
+
+# The unresolved deny is announced, not silent: an operator has to be able to
+# tell this apart from an ordinary stale-report deny.
+shape_err="$(mktemp)"
+shape_exit=0
+FACTLOG_ROOT="$KB_SHAPE" bash "$GATE" \
+  <<< "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_SHAPE/facts/accepted.dl")" \
+  >/dev/null 2>"$shape_err" || shape_exit=$?
+if grep -qF "could not extract a target path" "$shape_err"; then
+  echo "PASS: unresolved-target deny is announced on stderr"
+  pass=$((pass + 1))
+else
+  echo "FAIL: unresolved-target deny was silent; exit=$shape_exit stderr=$(cat "$shape_err")"
+  fail=$((fail + 1))
+fi
+# And it stays quiet on the resolvable path, or it becomes noise on every write.
+quiet_err="$(mktemp)"
+quiet_exit=0
+FACTLOG_ROOT="$KB_SHAPE" bash "$GATE" <<< "$(envelope "$KB_SHAPE/notes.md")" \
+  >/dev/null 2>"$quiet_err" || quiet_exit=$?
+quiet_hits="$(grep -cF "could not extract a target path" "$quiet_err" || true)"
+if [ "$quiet_exit" -eq 0 ] && [ "${quiet_hits:-0}" -eq 0 ]; then
+  echo "PASS: resolvable target emits no unresolved-target note"
+  pass=$((pass + 1))
+else
+  echo "FAIL: unresolved-target note leaked onto a resolvable target; exit=$quiet_exit hits=${quiet_hits:-unset} stderr=$(cat "$quiet_err")"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_SHAPE" "$shape_err" "$quiet_err"
 
 # ---------------------------------------------------------------------------
 # Summary
