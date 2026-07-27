@@ -47,6 +47,7 @@ import math
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 # Ensure tools/ is importable when run directly, and resolve the KB root BEFORE
@@ -97,12 +98,14 @@ os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root(_peek_root_flag())[0]
 from common import (  # noqa: E402
     ACCEPTED_DL,
     CANDIDATES_CSV,
+    ENGINE_STATUSES,
     LOGIC_POLICY_DL,
     QUERY_ENTITY_NOT_ACCEPTED,
     QUERY_FACT_ABSENT,
     QUERY_OK,
     QUERY_RELATION_NOT_ACCEPTED,
     FactlogError,
+    KbContext,
     arg_value,
     canonical_value,
     canonical_variants_of,
@@ -127,6 +130,13 @@ from common import (  # noqa: E402
     sync_ignore_patterns,
 )
 from factlog import ingest, literal_types  # noqa: E402
+from factlog.front_matter_scan import front_matter_body  # noqa: E402
+
+# The bridge (#576) resolves a provenance anchor with the SAME function that
+# validates one. Imported as a module, not by symbol, so the call sites read as
+# "validate's answer" rather than as a local helper that happens to agree today.
+# Measured import cost 19 ms; no cycle — validate imports common/factlog, not this.
+import validate  # noqa: E402
 
 # Keep the default answer short enough to scan while retaining an explicit,
 # deterministic escape hatch for audit work.  This cap is deliberately applied
@@ -1069,6 +1079,342 @@ def _fill_recall(
     recall["unmatched"] = [term for i, (term, _pat) in enumerate(keywords) if i in pending]
 
 
+# ---------------------------------------------------------------------------
+# KB-vocabulary bridge (#576) — reaching a source the lexical scan cannot
+# ---------------------------------------------------------------------------
+# The engine's facts are normalized to Korean (relation '이점', object
+# '설명가능성_향상'); the sources they were extracted FROM are English abstracts.
+# So a Korean question cannot reach its own source lexically — measured on the
+# reference KB, the stem '해석가능' occurs in ZERO of the 186 readable source
+# files and in 4 accepted facts. The retrieval failure is not "the KB is silent
+# on this"; it is "the KB holds the answer in a vocabulary the corpus does not
+# spell".
+#
+# The bridge closes that gap with the vocabulary the engine ALREADY holds, and
+# nothing else: question word -> accepted relation/object -> the backing source
+# path joined out of candidates.csv -> that file joins the search candidates,
+# labeled so it is never read as a lexical hit. Translation and embeddings stay
+# out of scope for the reason _semantic_rerank stays opt-in — CI is offline and
+# deterministic.
+#
+# What the bridge does NOT do, deliberately:
+#   - It does not promote anything to VERIFIED. A bridged excerpt is source prose
+#     that no one checked; reaching it through an accepted fact says the FACT was
+#     accepted, not the sentence. Rendering it inside the UNVERIFIED block with an
+#     explicit tag is the whole contract (수용 기준 3).
+#   - It does not re-score sources the lexical scan already found. Their
+#     KB-vocabulary backing would justify a higher rank (the issue's observation
+#     that coverage flattens to 1), but that is a change to the ranking key, which
+#     is #572/#573's ground, not this one.
+#   - It does not touch the #575 recall tally. A bridged term still occurs nowhere
+#     in the corpus text; counting it as matched would make that diagnostic claim
+#     the corpus contains wording it does not.
+
+# Shared-prefix floor for a bridge match, in characters.
+#
+# The comparison is on a common PREFIX rather than substring containment because
+# Korean inflects on the right: the question writes '해석가능성에서' (조사 attached)
+# where the KB writes '해석가능하며' / '해석가능한' / '해석가능' — one shared stem,
+# three tails. A prefix comparison reads that stem off both sides without a
+# morphological analyzer, which is exactly what #581 exists to introduce and what
+# this issue must not wait for.
+#
+# Three is not a tuned constant; it is where the measurement splits. Every figure
+# below is a TOTAL at that floor (not a delta), on the reference KB's 2055 accepted
+# facts, question 'neurosymbolic 접근이 순수 신경망 대비 해석가능성에서 어떤 이점을
+# 갖는가':
+#   floor 2 -> 44 facts / 27 subjects
+#   floor 3 -> 11 facts /  8 subjects
+#   floor 4 ->  4 facts /  4 subjects
+#   floor 5 ->  1 fact  /  1 subject
+#   floor 6 ->  0 facts /  0 subjects
+# The 33 facts floor 2 adds over floor 3 are EVERY one a 2-character fragment: the
+# relation '이점' alone drags in every 이점 fact in the KB (FRET measurement,
+# base-editor screening, TTS prosody — the question's grammar, not its topic), and
+# '대비' '접근' '신경' '가능' '해석' match inside unrelated compounds. At floor 3 all
+# 11 are about 해석가능 or 신경망. Going higher does not buy precision, it buys
+# silence: floor 4 already drops '신경망', the question's most literal content word,
+# and by floor 6 the bridge answers nothing at all.
+# The same floor is what makes the function-word class structurally unreachable
+# instead of filtered: '논문' is two characters, so no question containing it can
+# bridge at all — the noise #571 needed a stop-word enumeration against cannot
+# arise on this path.
+#
+# The cost is real and deliberate: a two-syllable CONTENT noun ('근거', '추론')
+# cannot bridge either. Buying those back means telling '근거' from '대비', which is
+# a morphological judgement, not a smaller constant.
+_BRIDGE_PREFIX_MIN = 3
+
+# Marker appended to a bridged excerpt's citation header. Greppable, and it states
+# BOTH halves of the contract on one line: how the excerpt was reached, and that
+# reaching it that way changed nothing about its standing.
+VIA_KB_VOCABULARY_TAG = "[via KB vocabulary — still UNVERIFIED]"
+
+
+def _nfc(value: str) -> str:
+    """NFC-fold for bridge comparison. accepted.dl and candidates.csv are written
+    by whatever editor touched them last, so an NFD-authored object would compare
+    unequal to an NFC question character by character and silently never bridge."""
+    return unicodedata.normalize("NFC", value)
+
+
+def _shared_prefix_len(left: str, right: str) -> int:
+    length = 0
+    for left_char, right_char in zip(left, right):
+        if left_char != right_char:
+            break
+        length += 1
+    return length
+
+
+def _vocabulary_words(value: str) -> list[str]:
+    """The CJK words inside an accepted relation name or object.
+
+    Accepted objects are underscore-joined normal forms ('설명가능성_향상'), so the
+    words a question can actually name are the underscore segments. Splitting here
+    is what lets the question's natural form ('설명가능성') meet the normal form
+    (수용 기준 4). Non-CJK segments are dropped: see _bridge_terms.
+    """
+    return [word for word in _nfc(value).split("_") if _is_cjk(word)]
+
+
+def _bridge_terms(question: str) -> list[str]:
+    """The question words eligible to bridge — the CJK keywords _keywords() already
+    produced, nothing re-derived.
+
+    Reusing _keywords is what keeps #571's stop-word filter in force here too: a
+    bridge that re-tokenized the question would hand '논문은' a second way in, below
+    the one guard that drops it.
+
+    ASCII keywords are excluded on purpose. The bridge exists to cross the script
+    boundary the lexical matcher cannot; an ASCII term already matches the English
+    source text directly, so bridging it adds rows without adding reach.
+    """
+    return [_nfc(term) for term, _pattern in _keywords(question) if _is_cjk(term)]
+
+
+def _bridged_facts(
+    question: str,
+    accepted: list[dict[str, str]],
+) -> dict[tuple[str, str, str], list[str]]:
+    """{(subject, relation, object): [question word that reached it, ...]}.
+
+    Matching is relation names and objects only. Subjects are NOT matched here:
+    an accepted entity named in the question is _entity_mentioned()/
+    grounding_facts()' job (수용 기준 6), and it answers a different question —
+    grounding shows the VERIFIED facts about that entity, while this bridge only
+    widens which files the UNVERIFIED excerpt search is allowed to look at.
+    """
+    terms = _bridge_terms(question)
+    if not terms:
+        return {}
+    matched: dict[tuple[str, str, str], list[str]] = {}
+    for row in accepted:
+        hits: set[str] = set()
+        for field in ("relation", "object"):
+            for word in _vocabulary_words(row[field]):
+                for term in terms:
+                    if _shared_prefix_len(word.lower(), term) >= _BRIDGE_PREFIX_MIN:
+                        hits.add(term)
+        if hits:
+            # NFC-folded key: this dict is looked up with a triple read out of
+            # candidates.csv, a different file written by a different tool, and the
+            # two must agree on composition or the join silently finds nothing.
+            matched[(_nfc(row["subject"]), _nfc(row["relation"]), _nfc(row["object"]))] = sorted(hits)
+    return matched
+
+
+def _anchor_line(path: Path, line_count: int, fragment: str) -> int:
+    """1-based line of the markdown heading *fragment* names, or 1.
+
+    candidates.csv records provenance as ``sources/x.md#abstract`` — a SECTION
+    name, not a line number (measured on the reference KB: 761 of 2139 rows carry
+    an anchor, all of them '#abstract'). Resolving it matters because the excerpt
+    window is 3 lines either side: anchored at the file head, a bibliographic
+    source yields seven lines of YAML front matter and zero prose — the same
+    window defect #574 addresses, which this function avoids rather than fixes.
+    An unresolvable or absent fragment falls back to line 1 and takes that cost.
+
+    The anchor set comes from ``validate.heading_anchors`` — the SAME function
+    ``validate_source_ref`` asks "does this anchor exist", asked here for "where".
+    The first cut of this resolved anchors with a local regex and a local slug rule,
+    and the two answers disagreed on three real shapes: a punctuated heading
+    (``## CRISPR/Cas9 results`` -> ``#crisprcas9-results``), GitHub's duplicate
+    suffix (``#abstract-1``), and a ``## Abstract`` written INSIDE a code fence,
+    which the local scan anchored on and #521 exists to say is not a heading. Every
+    one of those makes ``factlog validate`` pass a ref this then silently falls back
+    on, i.e. re-creates #574's front-matter window for a ref the KB called valid.
+    The slug rules also split on script — the local one kept 가-힣 only, so ``概要``
+    slugged to '' here and to ``概要`` there. common.py's ``fact_key`` names this
+    class outright: a second, "equivalent" copy of a rule is a latent recurrence.
+
+    *line_count* is the RAW file's line count; anchors are found in the
+    front-matter-stripped body (md_lines reads a closing ``---`` as a Setext
+    heading otherwise), so the body index is shifted back by the block's height.
+    """
+    if not fragment:
+        return 1
+    try:
+        body = front_matter_body(path)
+    except OSError:
+        return 1
+    index = validate.heading_anchors(body).get(fragment.lower())
+    if index is None:
+        return 1
+    # front_matter_body returns a SUFFIX of the file, so the line counts differ by
+    # exactly the block's height — no second parse of the fence, which is the
+    # boundary front_matter_scan owns (#419).
+    return line_count - len(body.splitlines()) + index + 1
+
+
+def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, object]]:
+    """{source ref: {'fragment': str, 'facts': [ 's, r, o', ... ], 'terms': [...]}}.
+
+    Pure join, no corpus I/O: 'fragment' is the anchor as candidates.csv recorded it
+    ('abstract', or '' when the row carries none). Resolving it to a line needs the
+    file, which is _bridge_rows' job — keeping the two apart is what lets this
+    function be read (and tested) as the provenance question it is.
+
+    The join is mandatory and is the reason this is not a two-line change:
+    ``facts/accepted.dl`` carries only (subject, relation, object) — it has NO
+    source field — so the backing path exists solely in ``facts/candidates.csv``.
+
+    Only rows whose status is in ENGINE_STATUSES (confirmed/accepted) are joined.
+    Promoting a ``superseded`` or ``needs_review`` source would make the UNVERIFIED
+    block quote evidence the KB has already retired, which is worse than the
+    cross-lingual miss this bridge exists to fix.
+
+    Graceful degrade is the whole failure policy: a KB with no accepted.dl, no
+    candidates.csv, an unreadable/malformed one, or facts that join nothing returns
+    {} and search() behaves exactly as it did before (수용 기준 5).
+    """
+    if not _bridge_terms(question):
+        return {}  # an all-ASCII question reads neither fact file
+    try:
+        kb = KbContext.for_root(root)
+        if not kb.accepted_dl.is_file() or not kb.candidates_csv.is_file():
+            return {}
+        matched = _bridged_facts(question, kb.load_accepted_facts())
+        if not matched:
+            return {}
+        candidates = kb.load_facts()
+    except (FactlogError, OSError, UnicodeDecodeError, ValueError):
+        return {}
+    bridged: dict[str, dict[str, object]] = {}
+    for row in candidates:
+        if row["status"] not in ENGINE_STATUSES:
+            continue
+        # NFC on BOTH sides of the join. accepted.dl and candidates.csv are separate
+        # files written by separate tools; an NFD-authored triple in one and an
+        # NFC-authored triple in the other are the same fact and compare unequal
+        # character by character, and the whole bridge would then return {} with
+        # nothing logged anywhere. _bridged_facts already folds its side.
+        terms = matched.get((_nfc(row["subject"]), _nfc(row["relation"]), _nfc(row["object"])))
+        if not terms:
+            continue
+        # Same fold on the path, and for a sharper reason than the join: the ref is
+        # compared against the refs the lexical scan collected (see _bridge_rows'
+        # `cited`), which come from the filesystem. Two spellings of one path make the
+        # same file appear under BOTH banners — a lexical row and a row tagged "not a
+        # lexical match" — so the tag would state something false. This mirrors the
+        # fold every other reader of candidates' `source` already applies
+        # (common.py's cited_source_counts, merge_candidates, source_coverage, cli).
+        ref, _sep, fragment = _nfc(row["source"]).partition("#")
+        if not ref:
+            continue
+        entry = bridged.setdefault(ref, {"fragments": set(), "facts": set(), "terms": set()})
+        entry["fragments"].add(fragment)
+        entry["facts"].add(
+            f"{_nfc(row['subject'])}, {_nfc(row['relation'])}, {_nfc(row['object'])}"
+        )
+        entry["terms"].update(terms)
+    # Sorted everywhere below: one file can be the source of several bridged facts
+    # with different anchors, and this module treats determinism as a contract — the
+    # rendered answer must not depend on CSV row order or set iteration order.
+    return {
+        ref: {
+            "fragment": sorted(entry["fragments"])[0],
+            "facts": sorted(entry["facts"]),
+            "terms": sorted(entry["terms"]),
+        }
+        for ref, entry in sorted(bridged.items())
+    }
+
+
+def _bridge_rows(
+    question: str,
+    root: Path,
+    cited: set[str],
+    ignored_patterns: list[str],
+) -> list[tuple[tuple[int, int, int], dict[str, object]]]:
+    """Scored bridge excerpts for sources the lexical scan did not cite.
+
+    A file the scan already cited is skipped: 수용 기준 2 defines the tag as "reached
+    via KB vocabulary and NOT by a lexical match", so tagging a file that WAS matched
+    lexically would say something false, and adding a second excerpt from it would
+    duplicate the file under two banners. *cited* holds NFC-folded refs and
+    kb_vocabulary_bridge folds its side, so one path spelled two ways cannot slip
+    past that skip.
+
+    Every guard the lexical scan applies applies here too — corpus directories only,
+    sync-ignored sources excluded (a source not synced is not evidence for wiki
+    exploration either), no symlink out of the KB, no binary. pages/ can never be
+    reached: it is not in WIKI_SOURCE_DIRS, so an engine-derived candidate page still
+    cannot enter an answer through this path.
+
+    #574 NOTE — the excerpt window arithmetic below is a SECOND site. search()'s scan
+    computes the same start/end from _EXCERPT_WINDOW; it cannot be shared as written
+    because the scan also collapses overlapping windows against `last_end`, which a
+    single promoted excerpt has no analogue for. Whoever reworks the window has to
+    change both, or a bridged excerpt keeps the geometry #574 removed.
+    """
+    bridged = kb_vocabulary_bridge(question, root)
+    if not bridged:
+        return []
+    rows: list[tuple[tuple[int, int, int], dict[str, object]]] = []
+    # Longest first so 'runs/sources' is tested before 'sources' if the two ever
+    # become prefixes of one another.
+    corpus_dirs = sorted(WIKI_SOURCE_DIRS, key=lambda rel: (-len(rel), rel))
+    for ref, entry in bridged.items():
+        if ref in cited or is_sync_ignored(ref, ignored_patterns):
+            continue
+        rel = next((rel for rel in corpus_dirs if ref.startswith(f"{rel}/")), None)
+        if rel is None:
+            continue
+        base = root / rel
+        path = root / ref
+        try:
+            if not path.is_file() or not path.resolve().is_relative_to(base.resolve()):
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "\x00" in text:
+            continue
+        lines = text.splitlines()
+        if not lines:
+            continue
+        anchor = min(_anchor_line(path, len(lines), str(entry["fragment"])), len(lines))
+        start = max(0, anchor - 1 - _EXCERPT_WINDOW)
+        end = min(len(lines), anchor + _EXCERPT_WINDOW)
+        result = {
+            "file": ref,
+            "line": anchor,
+            "excerpt": "\n".join(_sanitize(line) for line in lines[start:end]),
+            "dir": rel,
+            "via": {"facts": entry["facts"], "terms": entry["terms"]},
+        }
+        # Scored in the SAME (coverage, frequency) space as a lexical excerpt, by
+        # the same reading of it — how much of the question this row answers, and
+        # how much evidence says so — measured on the other channel: distinct
+        # question words that bridged here, and how many accepted facts did the
+        # bridging. Scoring these 0 instead would be a quieter defect than the one
+        # this issue fixes: on a KB whose lexical matches alone fill the render cap,
+        # the bridged source would be collected, ranked last, and never shown.
+        rows.append(((_GRADE_PRIMARY, len(entry["terms"]), len(entry["facts"])), result))
+    return rows
+
+
 def search(
     question: str,
     root: Path,
@@ -1084,6 +1430,12 @@ def search(
     neural backend (graceful degrade when absent), and returns the top *limit*
     cited excerpts: {file, line, excerpt, dir}. Binary files (e.g. an un-converted
     .docx) are skipped.
+
+    Sources the question reached through the engine's accepted Korean vocabulary
+    rather than through the corpus text are added by the bridge (#576) and carry an
+    extra 'via' key naming the accepted facts that reached them. They are ranked
+    alongside the lexical excerpts and stay UNVERIFIED; no other row gains a key, so
+    a KB with no bridge returns byte-identical output.
 
     When *recall* is given it is filled with {'matched': [...], 'unmatched': [...]}
     — which of the question's keywords the corpus contains (#575). It is a pure
@@ -1115,6 +1467,7 @@ def search(
         _fill_recall(recall, keywords, pending)
         return []
     scored: list[tuple[tuple[int, int, int], dict[str, object]]] = []
+    cited: set[str] = set()  # files the lexical scan cited — the bridge below skips them
     ignored_patterns = sync_ignore_patterns(root)
     for rel, label, grade in _wiki_corpus():
         base = root / rel
@@ -1166,6 +1519,19 @@ def search(
                 }
                 coverage, frequency = _excerpt_score(excerpt, patterns)
                 scored.append(((grade, coverage, frequency), result))
+                # NFC-folded: this set is compared against refs read out of
+                # candidates.csv, and the two spellings of one Korean filename are
+                # equal to every renderer and unequal to `in`. Unfolded, the same
+                # file came back as a lexical row AND as a row tagged "not a lexical
+                # match" (reproduced: sources/해석연구.md at lines 9 and 7).
+                cited.add(_nfc(ref))
+    # KB-vocabulary bridge (#576): sources the question reached through the engine's
+    # own Korean vocabulary rather than through the corpus text. Appended AFTER the
+    # scan and BEFORE the sort, so bridged rows compete on the same ranking key
+    # instead of being pinned to either end of the list. Their rows carry 'via'; no
+    # other row does, so a caller that never looks at it sees exactly what it saw
+    # before on a KB with no bridge.
+    scored.extend(_bridge_rows(question, root, cited, ignored_patterns))
     # Taken before the sort and the cap below, so neither the grade key (#572) nor
     # the render budget can make recall look worse than the corpus is (#575).
     _fill_recall(recall, keywords, pending)
@@ -1377,7 +1743,33 @@ def render_wiki_answer(
     visible_results = results if limit is None else results[:_render_limit(limit)]
     if visible_results:
         for r in visible_results:
-            lines.append(f"[{r['file']}:{r['line']}] ({r['dir']})")
+            header = f"[{r['file']}:{r['line']}] ({r['dir']})"
+            # A bridged excerpt (#576) says where it came from ON the citation header,
+            # before the prose it qualifies — the reader must not first read English
+            # source text that no keyword of theirs matched and work out afterwards why
+            # it is here. `.get` because render_wiki_answer is called with rows built
+            # by other callers (and by tests) that carry only the four base keys.
+            via = r.get("via") if isinstance(r, dict) else None
+            if via:
+                header += f" {VIA_KB_VOCABULARY_TAG}"
+            lines.append(header)
+            if via:
+                # The accepted facts are named individually, not summarized: they are
+                # the entire justification for this file being in the answer, and a
+                # count would leave the reader unable to check the bridge's judgement.
+                #
+                # _sanitize is load-bearing, not hygiene. An accepted OBJECT may hold
+                # U+2028/U+2029/U+0085 — common.py's reader keeps them deliberately
+                # ("routine in text copied from PDFs/web"), and the compiler does not
+                # reject them the way it rejects the C0 controls. Interpolated raw,
+                # str.splitlines() breaks this string on one, and the tail becomes its
+                # own top-level line: an object ending '… VERIFIED — engine (grounding:
+                # …)' then renders a forged VERIFIED header inside the UNVERIFIED
+                # block, which is the one contract this whole feature is built around.
+                # Every other line in this block is either a literal or already went
+                # through _sanitize in search(); this was the only raw KB string.
+                for fact in via.get("facts", []):
+                    lines.append(f"    ← accepted: {_sanitize(str(fact))}")
             for excerpt_line in str(r["excerpt"]).splitlines():
                 lines.append(f"    {excerpt_line}")
     elif not _keyword_patterns(question):

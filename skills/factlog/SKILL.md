@@ -1154,7 +1154,19 @@ entities, the block also carries a clearly-separated
 `VERIFIED — engine (grounding: ...)` section listing the engine-verified facts
 about those entities — verified anchors beside the unverified prose. The
 unverified excerpts cite only source text, never `facts/accepted.dl`. Do NOT
-present wiki excerpts as confirmed facts. Optionally record the unanswered
+present wiki excerpts as confirmed facts.
+
+An excerpt whose citation header carries `[via KB vocabulary — still UNVERIFIED]`
+was reached through the engine's accepted Korean vocabulary, not by matching the
+question's words against the file: the KB's facts are normalized to Korean while
+the sources are often English abstracts, so a Korean question cannot reach its own
+source lexically. The `← accepted: ...` lines under such a header name the accepted
+facts that reached it. They are provenance for the ROUTE, not a verdict on the
+excerpt — a bridged excerpt is source prose no one checked, exactly like every
+other row in this block, and must never be glossed as verified because an accepted
+fact led to it.
+
+Optionally record the unanswered
 question for later review (a non-engine-input sink, never `facts/query.dl`):
 
 For a stable entity/relation vocabulary miss, keep the same validated `<draft>`
