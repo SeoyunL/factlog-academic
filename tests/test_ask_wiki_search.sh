@@ -198,6 +198,38 @@ cat > "$KB/pages/신경기호-추론.md" <<'EOF'
 - 근거를 제시한다 -> [[역추적 절차]] (sources/x.md, confidence=0.40)
 EOF
 
+# (8) The engine's own vocabulary. The KB's facts are Korean; the sources they were
+#     extracted from need not be (#576). accepted.dl carries ONLY the triple — the
+#     backing source path exists solely in candidates.csv, so the bridge's join is
+#     what this pair exercises.
+#
+#     `factlog init` writes a header-only candidates.csv and no accepted.dl at all,
+#     which is why every pin in this file up to #576 was measured with the bridge
+#     inert. That state is the graceful-degrade case (수용 기준 5); PIN7 asserts it
+#     directly rather than leaving it implied by a fixture that no longer has it.
+cat > "$KB/facts/accepted.dl" <<'EOF'
+// hand-written fixture; the wiki path never invokes the compiler
+relation("arXiv_2505.0001", "핵심_기법", "신경기호_추론_근거_추적").
+relation("arXiv_2505.0002", "이점", "신경기호_기반_철회_판정").
+relation("arXiv_2505.0003", "이점", "설명가능성_향상").
+relation("arXiv_2505.0004", "이점", "신경기호_로그_보존").
+EOF
+# 0001  confirmed  -> the English paper. The ONLY way Q_KO can reach it: '신경기호'
+#                    appears nowhere in that file (it is an English abstract).
+# 0002  superseded -> the retraction notice. A retired row must never be promoted;
+#                    that is how an UNVERIFIED block would end up citing discarded
+#                    evidence.
+# 0003  confirmed  -> normal form vs natural form: the object '설명가능성_향상' must be
+#                    reachable from a question that types '설명가능성' (수용 기준 4).
+# 0004  needs_review -> same guard as 0002 for the other non-engine status.
+cat > "$KB/facts/candidates.csv" <<'EOF'
+subject,relation,object,source,status,confidence,note
+arXiv_2505.0001,핵심_기법,신경기호_추론_근거_추적,sources/faronius-2025-attention-budget.md#abstract,confirmed,0.90,fixture
+arXiv_2505.0002,이점,신경기호_기반_철회_판정,sources/0000_RETRACTION_16354850.md#abstract,superseded,0.50,fixture
+arXiv_2505.0003,이점,설명가능성_향상,sources/2019-evidence-logging.md,confirmed,0.90,fixture
+arXiv_2505.0004,이점,신경기호_로그_보존,sources/reading-notes.md,needs_review,0.60,fixture
+EOF
+
 # The Korean question. Written the way a researcher actually types one: content
 # words carry particles (조사) and the sentence ends in an interrogative form.
 Q_KO='이 논문은 신경기호 추론의 근거를 어떻게 제시하는가'
@@ -267,7 +299,11 @@ ko_refs="$(refs "$Q_KO" || true)"
 # 중 코퍼스에 닿는 것은 '신경기호' '추론의' '근거를' 뿐이고, 그중 '추론의' '근거를' 는
 # 조사가 붙은 형태를 그대로 담은 문서에만 걸린다.
 # 4 -> 3 은 #571 이 바꿨다: 기능어 '논문은' 만으로 걸리던 철회 공지 발췌가 빠졌다.
-same "PIN2 한국어 질문의 발췌 수 (#581/#576 이 바꾼다)" "3" "$(printf '%s\n' "$ko_refs" | grep -c .)"
+# 3 -> 4 는 #576 이 바꿨다 (값 갱신, pin 유지): 렉시컬로는 도달 불가능한 영어 소스가
+# accepted 어휘를 경유해 한 건 추가된다. 승격 대상이 4건이 아니라 1건인 것이 이 값의
+# 요점이다 — 나머지 셋은 status(superseded/needs_review)와 이미 인용된 파일이라는
+# 이유로 걸러진다 (아래 PIN7).
+same "PIN2 한국어 질문의 발췌 수 (#581 이 바꾼다)" "4" "$(printf '%s\n' "$ko_refs" | grep -c .)"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #581 이 이를 바꾼다. '근거를' 은 어간 '근거'
 # 를 담은 이 파일을 매치하지 못한다 — 조사가 분리되면 이 파일이 결과에 들어와야 한다.
@@ -277,13 +313,13 @@ else
   ok "PIN2 조사 붙은 '근거를' 은 어간만 담은 문서에 닿지 않는다 (#581 이 바꾼다)"
 fi
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #576 이 이를 바꾼다. 같은 주제를 다루는 영어
-# 소스는 한국어 질문에서 어휘적으로 도달 불가능하다 (accepted 한국어 어휘를 경유하면
-# 닿아야 한다).
+# 이 pin 은 #576 이 뒤집은 값이다 (그 전에는 "영어 소스에 닿지 않는다" 는 결함을
+# 고정했다). 결함 pin 이 아니라 회귀 가드가 됐다: 이 파일에는 '신경기호' 가 한 글자도
+# 없으므로, 결과에서 사라진다면 accepted 어휘 경유 경로가 끊겼다는 뜻이다.
 if printf '%s\n' "$ko_refs" | grep -q 'faronius-2025-attention-budget'; then
-  bad "PIN2 한국어 질문이 영어 소스에 닿는다 — #576 이 머지됐다면 이 pin 을 갱신하라"
+  ok "PIN2 한국어 질문이 accepted 어휘를 경유해 영어 소스에 닿는다 (#576 이 바꿨다)"
 else
-  ok "PIN2 한국어 질문은 동일 주제 영어 소스에 닿지 않는다 (#576 이 바꾼다)"
+  bad "PIN2 한국어 질문이 동일 주제 영어 소스에 닿지 않는다 — #576 의 어휘 경유가 끊겼다"
 fi
 
 ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
@@ -308,10 +344,15 @@ question: $Q_KO
 reason: unknown entity
 WARNING: unverified candidates — do not treat as confirmed facts.
 sources searched: sources, runs/sources, decisions (supplementary)
-source excerpts: 3
+source excerpts: 4
 keywords matched: 3/4 — 신경기호, 추론의, 근거를
 keywords unmatched: 제시하는가" \
   "$ko_head"
+
+# 발췌 수만 3 -> 4 로 움직이고 매치 실적 줄은 그대로인 것이 #576 의 계약이다: 어휘 경유로
+# 도달한 키워드는 여전히 코퍼스 본문 어디에도 없으므로 matched 로 세지 않는다. 세었다면
+# #575 의 진단이 "코퍼스가 담고 있지 않은 표현을 담고 있다" 고 말하게 된다. 즉 이 pin 은
+# 두 기능이 직교한다는 사실을 함께 고정한다.
 
 # 진단이 인용 뒤에 덧붙는 형태여도 트립하도록 꼬리도 고정한다: 답변은 마지막 발췌의
 # 마지막 줄로 끝나고, 그 뒤에는 아무것도 없다. 이 pin 을 트립시키는 것은 #575 의 진단만이
@@ -336,9 +377,15 @@ same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄�
 # 결함 pin 이 아니라 회귀 가드가 됐다: 이 순서가 뒤집히면 등급이 정렬 키에서 빠졌다는 뜻이다.
 # 4번째 행(sources/0000_RETRACTION_16354850.md:3)은 #571 이 제거했다 — 기능어
 # '논문은' 이 유일한 접점이었으므로 이제 어떤 키워드에도 걸리지 않는다.
-same "PIN3 한국어 질문의 랭킹 순서 — 등급이 커버리지·빈도보다 우선한다 (#572 가 바꿨다)" \
+# 3행째(sources/faronius-2025-attention-budget.md:16)는 #576 이 추가했다 (값 갱신, pin
+# 유지). 어휘 경유 행은 렉시컬 행과 같은 (등급, 커버리지, 빈도) 키로 경쟁한다: 커버리지
+# 1(브리지된 질문 어절 '신경기호' 하나), 빈도 1(브리지한 accepted 사실 하나)이므로
+# 커버리지 2 인 kim 발췌 뒤, supplementary 앞이다. 어휘 경유 행을 0점으로 두는 대안은
+# 이 픽스처에서는 같은 순서를 내지만 실 KB 에서는 렌더 상한 밖으로 밀려 보이지 않는다.
+same "PIN3 한국어 질문의 랭킹 순서 — 등급이 커버리지·빈도보다 우선한다 (#572/#576 이 바꿨다)" \
   "sources/kim-2024-neurosymbolic-grounding.md:4
 sources/kim-2024-neurosymbolic-grounding.md:14
+sources/faronius-2025-attention-budget.md:16
 decisions/open-questions.md:3" \
   "$ko_refs"
 
@@ -511,6 +558,114 @@ if printf '%s\n' "$ko_answer" | grep -qE 'pages/|역추적 절차|confidence=0\.
 else
   ok "PIN6 pages/ 는 wiki 코퍼스에서 제외된다 (키워드를 담은 후보 페이지도 인용되지 않는다)"
 fi
+
+# =============================================================================
+# PIN 7 — KB-vocabulary bridge (#576): 어휘 경유 도달의 표시·경계·열화
+# =============================================================================
+# 이 픽스처가 공허하지 않다는 것부터 단언한다. accepted 4건 중 브리지 대상은 1건이고,
+# 나머지 3건은 저마다 다른 이유로 걸러진다 — 픽스처가 1행만 냈다면 아래 status 필터
+# pin 들은 절단 뮤턴트로도 통과한다.
+same "PIN7 픽스처 크기 — accepted 4건 / candidates 4행" "4 4" \
+  "$(py "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+from common import KbContext
+kb = KbContext.for_root('$KB')
+print(len(kb.load_accepted_facts()), len(kb.load_facts()))
+" || true)"
+
+# 승격된 발췌는 렉시컬 매치가 아님이 인용 헤더에서 구분되고 (수용 기준 2), 그 근거인
+# accepted 사실이 이름으로 나열된다. 개수가 아니라 이름인 이유는 그 사실이 이 파일이
+# 답변에 있는 유일한 근거이기 때문이다 — 개수만 보이면 독자가 판단을 검증할 수 없다.
+via_block="$(printf '%s\n' "$ko_answer" | grep -A1 -F 'faronius-2025-attention-budget.md:16' || true)"
+same "PIN7 승격 발췌는 어휘 경유임이 표시되고 근거 사실이 명시된다 (수용 기준 2)" \
+  "[sources/faronius-2025-attention-budget.md:16] (sources) [via KB vocabulary — still UNVERIFIED]
+    ← accepted: arXiv_2505.0001, 핵심_기법, 신경기호_추론_근거_추적" \
+  "$via_block"
+
+# 승격됐다고 검증된 것이 아니다 (수용 기준 3). 블록은 여전히 UNVERIFIED 이고, 승격
+# 발췌만 따로 VERIFIED 로 빠져나가는 경로가 없다 — 이 계약이 무너지면 도구가 아무도
+# 확인하지 않은 영어 산문을 확인된 사실로 인용하게 된다.
+if [ "$(printf '%s\n' "$ko_answer" | head -1)" = "UNVERIFIED — wiki exploration" ] \
+   && ! printf '%s\n' "$ko_answer" | grep -q '^VERIFIED'; then
+  ok "PIN7 어휘 경유 발췌는 UNVERIFIED 블록에 남는다 (수용 기준 3)"
+else
+  bad "PIN7 어휘 경유 발췌가 검증됨으로 승격됐다 — 이 도구의 핵심 계약이 깨졌다"
+fi
+
+# 발췌 창은 candidates.csv 의 앵커(#abstract)를 해석해 잡는다. 앵커를 무시하고 파일
+# 머리에 앵커하면 7줄 전부가 YAML front matter 이고 산문은 0줄이다 (PIN5 가 고정한
+# #574 의 결함). 여기서 확인하는 것은 영어 초록 본문이 실제로 노출된다는 것 — 한국어
+# 질문이 영어 소스에 닿았다는 주장이 파일명뿐이면 아무 소용이 없다.
+if printf '%s\n' "$ko_answer" | grep -qF 'This paper measures how a neurosymbolic retriever'; then
+  ok "PIN7 앵커(#abstract) 해석으로 영어 초록 본문이 노출된다"
+else
+  bad "PIN7 승격 발췌에 초록 본문이 없다 — 앵커 해석이나 발췌 창을 확인하라"
+fi
+
+# status 필터. superseded / needs_review 소스를 승격하면 UNVERIFIED 블록이 KB 가 이미
+# 폐기한 근거를 인용하게 된다. 두 파일 모두 Q_KO 의 콘텐츠 키워드를 하나도 담지 않으므로
+# (PIN3 가 별도로 고정한다), 결과에 나타난다면 원인은 이 필터뿐이다.
+if printf '%s\n' "$ko_refs" | grep -q '0000_RETRACTION'; then
+  bad "PIN7 superseded 사실의 소스가 승격됐다 — 폐기된 근거를 인용하고 있다"
+else
+  ok "PIN7 superseded 사실의 소스는 승격되지 않는다"
+fi
+if printf '%s\n' "$ko_refs" | grep -q 'reading-notes'; then
+  bad "PIN7 needs_review 사실의 소스가 승격됐다 — 엔진이 받아들이지 않은 근거다"
+else
+  ok "PIN7 needs_review 사실의 소스는 승격되지 않는다"
+fi
+
+# 객체의 언더스코어 정규형과 질문의 자연어형이 만난다 (수용 기준 4). '설명가능성' 은
+# 이 코퍼스 어디에도 없는 문자열이고, 오직 accepted 객체 '설명가능성_향상' 을 경유해서만
+# 2019-evidence-logging.md 에 닿는다.
+# :1 은 앵커 없는 프로비넌스의 fallback 이다 — 이 candidates 행에는 '#abstract' 같은
+# 섹션 앵커가 없으므로 발췌 창이 파일 머리에 잡힌다. 위 faronius 행(:16)과 나란히 보면
+# 앵커가 있을 때와 없을 때가 둘 다 고정된다.
+same "PIN7 객체 정규형 '설명가능성_향상' 이 질문의 '설명가능성' 과 매칭된다 (수용 기준 4)" \
+  "sources/2019-evidence-logging.md:1" \
+  "$(refs '설명가능성' | head -1 || true)"
+
+# 기능어 어간의 면역은 필터가 아니라 구조다. '논문' 은 두 글자라 어떤 어휘와도 3글자
+# 접두를 공유할 수 없다 — #571 이 불용어 열거로 막아야 했던 종류의 노이즈가 이 경로에는
+# 발생 자체를 못 한다. (실 KB 실측: 어간 '논문' 의 accepted 매치 0건, 렉시컬은 186개 중
+# 67개 파일 오염.)
+same "PIN7 두 글자 기능어 어간 '논문' 은 어떤 accepted 어휘도 브리지하지 않는다" "0" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+from common import KbContext
+print(len(a._bridged_facts('논문 근거 추론', KbContext.for_root('$KB').load_accepted_facts())))
+" || true)"
+
+# graceful degrade (수용 기준 5). accepted.dl 은 있고 candidates.csv 가 없는 KB —
+# 프로비넌스 조인 상대가 없으므로 승격은 0건이고, 렉시컬 결과만 그대로 남는다.
+degraded="$_TMP_KB/degraded"
+cp -R "$KB" "$degraded"
+rm -f "$degraded/facts/candidates.csv"
+same "PIN7 candidates.csv 가 없으면 승격 없이 기존 렉시컬 결과만 남는다 (수용 기준 5)" \
+  "sources/kim-2024-neurosymbolic-grounding.md:4
+sources/kim-2024-neurosymbolic-grounding.md:14
+decisions/open-questions.md:3" \
+  "$("$PYTHON" "$ROUTER" search "$Q_KO" --all --target "$degraded" | "$PYTHON" -c "
+import json, sys
+for r in json.load(sys.stdin)['results']:
+    print(f\"{r['file']}:{r['line']}\")
+" || true)"
+
+# accepted.dl 이 없는 KB (= factlog init 직후의 모든 KB) 도 같은 경로로 열화한다.
+rm -f "$degraded/facts/accepted.dl"
+: > "$degraded/facts/candidates.csv"
+same "PIN7 accepted.dl 이 없는 KB 는 브리지가 비활성이다 (수용 기준 5)" "{}" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$degraded'
+import ask_router as a
+from pathlib import Path
+print(a.kb_vocabulary_bridge('''$Q_KO''', Path('$degraded')))
+" || true)"
 
 echo ""
 echo "========================================"
