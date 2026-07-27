@@ -126,7 +126,7 @@ from common import (  # noqa: E402
     is_sync_ignored,
     sync_ignore_patterns,
 )
-from factlog import literal_types  # noqa: E402
+from factlog import ingest, literal_types  # noqa: E402
 
 # Keep the default answer short enough to scan while retaining an explicit,
 # deterministic escape hatch for audit work.  This cap is deliberately applied
@@ -691,14 +691,33 @@ _CITED_KB_DIRS = (
     "templates",
     "runs",
 )
-# Source-text extensions a KB citation can end in. Required (rather than a bare
-# `\.\w+`) because several scaffold dirs are ordinary English nouns: without it,
-# prose that omits the space after a full stop is eaten as a path — "3 runs/day.The
-# results" and "the policy/value.Networks are trained jointly" both lost their
-# keywords. Such run-on sentences are common in PDF→text conversions under
-# runs/sources/. The trailing `\w*` keeps an attached Korean particle inside the
-# match (`policy/attribute-relations.md에`), which occurs in the reference KB.
-_CITATION_EXTS = ("md", "txt", "json", "csv", "yml", "yaml", "pdf", "docx", "html")
+# Extensions a KB citation can end in — DERIVED, never hand-listed. Every original
+# format `factlog ingest` accepts (INGEST_CONVERTERS) plus the KB's own file types
+# taken from the constants that already define them, plus the plain text/data the KB
+# is written in. The first cut of this list was written by hand and let .docx/.pdf in
+# while .hwp/.hwpx/.pptx/.odt/.dl stayed out — which silently left #573's defect
+# standing for a KB of Korean originals, the very corpus this repo supports first
+# class. Deriving is also why importing factlog.ingest here is worth its 0.5 ms.
+#
+# Requiring an extension at all (rather than a bare `\.\w+`) is what keeps prose out:
+# several scaffold dirs are ordinary English nouns, so "3 runs/day.The results" and
+# "the policy/value.Networks are trained jointly" were eaten as paths and lost their
+# keywords — run-on sentences like that are common in PDF→text conversions under
+# runs/sources/. Note this NARROWS the misfire surface, it does not remove it: prose
+# whose next word STARTS with a listed extension is still eaten ("policy/value.Txt is
+# odd", "pages/index.Htmlish"). Every extension added widens that surface, which is
+# the price of covering the formats above; measured on the reference KB the residual
+# cost is zero (all 533 masked citations are real). The trailing `\w*` keeps an
+# attached Korean particle inside the match (`policy/attribute-relations.md에`, which
+# occurs in the reference KB); if it ever swallows too much of an unspaced CJK 어절,
+# narrow it to `[가-힣]*` rather than dropping it.
+_CITATION_EXTS = tuple(
+    sorted(
+        {"md", "txt", "json", "yml", "yaml"}
+        | {path.suffix.lstrip(".") for path in (ACCEPTED_DL, CANDIDATES_CSV, LOGIC_POLICY_DL)}
+        | {ext.lstrip(".") for ext in ingest.INGEST_CONVERTERS}
+    )
+)
 # A KB-root-relative file path written inside an excerpt, e.g.
 # `sources/faronius-2025-independence-is-not-an-issue-in-neurosymbolic-ai.md` or
 # `runs/sources/kim-2024-neurosymbolic-grounding.txt`. Root-relative ONLY: `./sources/x.md`,
