@@ -59,7 +59,7 @@ def _unrelated_run_row():
 
 
 def _repair(tmp_path, *terms, **overrides):
-    fields = dict(terms=list(terms), target=str(tmp_path))
+    fields = dict(terms=list(terms), target=str(tmp_path), apply=False, all=False)
     fields.update(overrides)
     return cli.cmd_repair_runs(argparse.Namespace(**fields))
 
@@ -69,7 +69,7 @@ def _runs(tmp_path, name="r1.json"):
 
 
 def _bytes(tmp_path):
-    return {p.name: p.read_bytes() for p in sorted((tmp_path / "runs").iterdir())}
+    return {p.name: p.read_bytes() for p in sorted((tmp_path / "runs").glob("*.json"))}
 
 
 class TestRepairableClasses:

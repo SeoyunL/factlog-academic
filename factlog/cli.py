@@ -2237,7 +2237,7 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
 
 
 def cmd_repair_runs(args: argparse.Namespace) -> int:
-    """Report status drift between candidates.csv and runs/*.json.
+    """Report status drift between candidates.csv and runs/*.json; --apply writes the fix.
 
     merge REBUILDS candidates.csv from runs/*.json, so the two stores can end up
     disagreeing about one fact's status: a decision that never reached the run row
@@ -2248,17 +2248,45 @@ def cmd_repair_runs(args: argparse.Namespace) -> int:
     that reached further silently retired a confirmed fact (#477) -- and their
     docstrings say the repair is a separate command's job. This is that command (#566).
 
-    There is deliberately NO --dry-run flag: reporting IS the default and this command
-    writes nothing at all. Every class of drift is printed, including the ones it would
-    never repair, so "nothing to do" and "nothing I may touch" are different sentences.
+    There is deliberately NO --dry-run flag: reporting IS the default and the command
+    writes nothing unless --apply is given. Every class of drift is printed, including the
+    ones it would never repair, so "nothing to do" and "nothing I may touch" are different
+    sentences.
+
+    What --apply may write, and nothing else:
+
+    1. candidates.csv holds a decision and the run row is still PENDING (blank and
+       unrecognised statuses included -- merge reads all three as pending) -> the CSV
+       status. The judgement is `_run_status_after_decision`, the same function
+       accept/reject and `amend --accept` call, not a copy of its rule (#477).
+    2. candidates.csv holds `superseded` and the run row holds an engine status -> retire
+       the run row. This LOWERS it, which agrees with merge rather than overriding it: the
+       existing_superseded_keys pass keeps a candidates.csv `superseded` over a re-asserted
+       engine status on every rebuild.
+
+    So the invariant is "never write against merge's own precedence" -- NOT "never lower a
+    run row", which would leave the eject-drift shape unfixable. There is deliberately no
+    status ranking table: a ranking is a door for a machine judgement to overwrite a human
+    one, and the two rules above each cite the merge pass they mirror instead.
+
+    The gate on the CSV status is a WHITELIST (engine or superseded). Unlike accept/reject,
+    the status here comes from a file a human can edit, so a `not in REVIEW_STATUSES` gate
+    would carry a typo into runs/*.json where merge's clean_row demotes it to needs_review
+    -- the decision destroyed by the command asked to save it.
 
     Out of scope, and reported rather than fixed: a VALUE that drifted (`amend` owns
     values), a CSV row with no run backing (creating a run item would mean inventing a
     docspan and a run_id that no extraction produced -- forged provenance), a fact both
     stores decided differently, and a fact whose candidates.csv rows are ambiguous.
 
-    Exit codes: 0 clean, 1 a run file could not be read (the comparison is partial),
-    2 usage error, 3 drift found.
+    --apply is IDEMPOTENT and each file is written atomically, but atomicity is per FILE,
+    not per command: an interruption can leave some files repaired and others not. Running
+    it again finishes the job and is a no-op once the two stores agree. It does NOT
+    recompile accepted.dl -- it never touches candidates.csv, so the compiler's input is
+    unchanged and a recompile would only raise "why did my .dl change?".
+
+    Exit codes: 0 clean (or every drift repaired), 1 a run file could not be read (the
+    comparison is partial), 2 usage error, 3 drift found that was not repaired.
     """
     from pathlib import Path
 
@@ -2274,6 +2302,17 @@ def cmd_repair_runs(args: argparse.Namespace) -> int:
         )
         return 2
     filt = _triple_filter(args.terms)
+    if args.apply and filt is None and not args.all:
+        # An omitted (or all-wildcard) triple with --apply rewrites run rows across the
+        # entire KB. Every other writing command in this CLI takes a selector; this one can
+        # legitimately run KB-wide, so the selector is not required -- but it has to be
+        # asked for, not arrived at by leaving the arguments off.
+        print(
+            "factlog repair-runs: --apply with no triple selector would rewrite run rows "
+            "across the whole KB; give SUBJECT [RELATION [OBJECT]], or pass --all to mean it.",
+            file=sys.stderr,
+        )
+        return 2
 
     plan = _repair_runs_scan(target, filt)
     scope = "the whole KB" if filt is None else ", ".join(f"{k}={v}" for k, v in filt.items())
@@ -2295,11 +2334,37 @@ def cmd_repair_runs(args: argparse.Namespace) -> int:
     _repair_runs_print(plan)
 
     left = sum(len(rows) for rows in plan["reports"].values())
-    files = len({entry["path"] for entry in plan["repairs"]})
-    print(
-        f"factlog repair-runs: {len(plan['repairs'])} run row(s) repairable in {files} file(s), "
-        f"{left} left for a human; nothing was written."
-    )
+    files = sorted({entry["path"] for entry in plan["repairs"]})
+    if args.apply:
+        import json
+
+        for entry in plan["repairs"]:
+            entry["item"]["status"] = entry["to"]
+        for jp in files:
+            # Per-file atomic write, the same seam accept/reject/amend use, so an
+            # interruption can never leave a truncated runs/*.json behind. It is NOT
+            # per-command: a crash between two files leaves the KB partly repaired, which is
+            # why this command has to be safe to run again -- and it is, because a repaired
+            # row is no longer drift on the next scan.
+            _atomic_write_text(jp, json.dumps(plan["parsed"][jp], ensure_ascii=False, indent=2) + "\n")
+        print(
+            f"factlog repair-runs: {len(plan['repairs'])} run row(s) repaired in {len(files)} file(s), "
+            f"{left} left for a human."
+        )
+        if plan["repairs"]:
+            # No _recompile_accepted: this command writes runs/*.json only, and
+            # accepted.dl is compiled from candidates.csv, which is unchanged. The
+            # decisions BECOME durable here -- they take effect the next time merge
+            # rebuilds candidates.csv from runs/*.json.
+            print(
+                "factlog repair-runs: note — accepted.dl is unchanged (candidates.csv was "
+                "not touched); the repaired rows take effect on the next /factlog sync."
+            )
+    else:
+        print(
+            f"factlog repair-runs: {len(plan['repairs'])} run row(s) repairable in {len(files)} file(s), "
+            f"{left} left for a human; nothing was written. Re-run with --apply to write them."
+        )
     if plan["unreadable"]:
         for name in plan["unreadable"]:
             print(f"factlog: warning — could not read {name}; its rows were not compared.", file=sys.stderr)
@@ -2309,6 +2374,8 @@ def cmd_repair_runs(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.apply:
+        return 3 if left else 0
     return 3 if (plan["repairs"] or left) else 0
 
 
@@ -8883,6 +8950,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TERM",
         help="SUBJECT [RELATION [OBJECT]] prefix; use '-' to wildcard a position; "
         "omit entirely to scan the whole KB",
+    )
+    repair_runs.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the repairs into runs/*.json (there is no --dry-run: reporting IS the default)",
+    )
+    repair_runs.add_argument(
+        "--all",
+        action="store_true",
+        help="with --apply and no triple selector: mean the whole KB (guard against a mass rewrite)",
     )
     repair_runs.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     repair_runs.set_defaults(func=cmd_repair_runs)
