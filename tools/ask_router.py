@@ -829,10 +829,18 @@ def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]
 # question named no subject. Conflating "I have no such source" with "you asked me
 # nothing searchable" tells the reader the KB is silent on a topic they never
 # actually named — the same class of unreported retrieval failure as #575.
+#
+# The stated cause must cover EVERY way the keyword set empties, or it misdiagnoses
+# the user's question for them. There are exactly two such ways, and a question can
+# hit them in combination ('이 논문은?' is one of each):
+#   - a function word: a listed Korean 어절, or a 2-letter English function word
+#   - a single-character token: dropped by the length floor in either script
+# Naming only the first told someone who typed '왜?' to stop using function words.
 NO_QUERY_TERM_NOTE = (
-    "(nothing to search: every word in the question is a question function word, "
-    "so no keyword was queried. This is NOT 'no such source' — the corpus was not "
-    "consulted for any term. Rephrase with a content word.)"
+    "(no searchable keyword in the question: question function words and "
+    "single-character tokens do not become keywords, and nothing else was left. "
+    "This is NOT 'no such source' — the corpus was not consulted for any term. "
+    "Rephrase with a content word.)"
 )
 
 

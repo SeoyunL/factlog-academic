@@ -368,10 +368,29 @@ if router search '이 논문은?' | grep -qF 'sources/571-retraction.md'; then b
 # Both surfaces: the rendered block and the search JSON.
 noterm_answer="$(router wiki '이 논문은?' --reason 'unknown entity')"
 nomatch_answer="$(router wiki 'quantumentanglementxyz' --reason 'unknown entity')"
-if printf '%s' "$noterm_answer" | grep -qF 'nothing to search'; then ok "no-keyword answer explains why it is empty"; else bad "no-keyword answer gave no diagnostic"; fi
+if printf '%s' "$noterm_answer" | grep -qF 'no searchable keyword'; then ok "no-keyword answer explains why it is empty"; else bad "no-keyword answer gave no diagnostic"; fi
 if printf '%s' "$noterm_answer" | grep -qF '(no matching source excerpts found)'; then bad "no-keyword answer claims the corpus was searched and empty"; else ok "no-keyword answer is not reported as 'no such source'"; fi
 if printf '%s' "$nomatch_answer" | grep -qF '(no matching source excerpts found)'; then ok "a searched-but-unmatched question keeps the 'no such source' wording"; else bad "unmatched question lost its own wording"; fi
-if printf '%s' "$nomatch_answer" | grep -qF 'nothing to search'; then bad "unmatched question wrongly reported as unsearchable"; else ok "the two empty-result reasons are not conflated (#571)"; fi
+if printf '%s' "$nomatch_answer" | grep -qF 'no searchable keyword'; then bad "unmatched question wrongly reported as unsearchable"; else ok "the two empty-result reasons are not conflated (#571)"; fi
+# The diagnostic must name a cause that is TRUE of every path to an empty keyword
+# set, not just the stop-word path — a user who typed '왜?' used no function word and
+# must not be told to stop using them. One case per cause class, plus a mixed one.
+for probe in '이것은 무엇인가|all function words' \
+             '왜?|single-character CJK only' \
+             'a b c|single-character ASCII only' \
+             '이 논문은?|mixed: 1-char + function word'; do
+  q="${probe%%|*}"; cls="${probe#*|}"
+  ans="$(router wiki "$q" --reason 'unknown entity')"
+  if ! printf '%s' "$ans" | grep -qF 'no searchable keyword'; then
+    bad "no-keyword diagnostic missing for [$cls]"
+  elif printf '%s' "$ans" | grep -qF '(no matching source excerpts found)'; then
+    bad "[$cls] was reported as 'no such source'"
+  elif printf '%s' "$ans" | grep -qF 'single-character tokens'; then
+    ok "no-keyword diagnostic names a cause true of [$cls]"
+  else
+    bad "[$cls] diagnostic names only the stop-word cause"
+  fi
+done
 noterm_diag="$(router search '이 논문은?' | "$PYTHON" -c "import json,sys; print(bool(json.load(sys.stdin)['diagnostic']))")"
 nomatch_diag="$(router search 'quantumentanglementxyz' | "$PYTHON" -c "import json,sys; print(bool(json.load(sys.stdin)['diagnostic']))")"
 if [ "$noterm_diag" = "True" ] && [ "$nomatch_diag" = "False" ]; then ok "search JSON carries the diagnostic only when there was no query term"; else bad "search JSON diagnostic wrong (no-term=$noterm_diag unmatched=$nomatch_diag)"; fi
