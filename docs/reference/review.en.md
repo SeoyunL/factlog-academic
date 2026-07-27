@@ -125,6 +125,17 @@ produced), and an unrecognised status in `candidates.csv`. **A drifted value is 
 of scope** — that is `amend`'s subject — which is why the `amend` warning does not
 point at this command.
 
+> **"Not repaired" does not mean "left safe."** For a fact with several
+> `candidates.csv` rows in particular, `repair-runs` stands back but **the next sync
+> does not** — merge collapses those rows into one. Re-merged with `candidates.csv` in
+> place, merge's preservation passes decide and a decided row outranks a pending one
+> (superseded > accepted/confirmed > pending), so a live row that sat beside a
+> `superseded` tombstone **comes back retired**. Rebuilt from scratch instead (with
+> `candidates.csv` deleted) those passes have nothing to read, so `runs/*.json` decides
+> and merge's dedup picks by the `source` value and load order — never by status. The
+> two paths **can disagree**, so do not predict which one you will get: read the rows
+> the report lists.
+
 Exit codes: `0` clean, `3` drift found (in report mode, or left unrepaired after
 `--apply`), `1` a run file could not be read so the comparison is partial, `2` a
 usage error. `--apply` with no triple selector is refused unless `--all` is given,

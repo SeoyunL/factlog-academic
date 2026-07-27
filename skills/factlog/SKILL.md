@@ -813,6 +813,16 @@ is a value.)
   docspan and a run_id that no extraction produced), and an unrecognised status in
   the CSV. **A drifted VALUE is not in scope** — that is `amend`'s subject — so do
   not offer `repair-runs` for the `amend` warning.
+- **Do not relay "NOT repaired" as "safe".** For the ambiguous-`candidates.csv` class
+  especially, the command prints a note saying what the next sync does, and it is the
+  part the human needs: merge collapses the duplicate rows into one. With
+  `candidates.csv` in place its preservation passes decide and a decided row outranks
+  a pending one (superseded > accepted/confirmed > pending), so a live row beside a
+  `superseded` tombstone **comes back retired**. Rebuilt from scratch, `runs/*.json`
+  decides instead, by the `source` value and load order — never by status. Relay the
+  rule; **do not predict the outcome** (the two paths can disagree) and **do not offer
+  a command to clean it up** — measured, none does it while keeping the fact live:
+  `accept` leaves the tombstone and `eject --purge` deletes both rows.
 - Read its exit code: `0` clean, `3` drift found (in report mode, or left unrepaired
   after `--apply`), `1` a run file could not be read so the comparison is partial,
   `2` a usage error. `--apply` with no triple selector is refused unless `--all` is

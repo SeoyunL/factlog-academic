@@ -2493,6 +2493,30 @@ def _repair_runs_print(plan: dict) -> None:
                 f"  note: PROVISIONAL — {unreadable} run file(s) could not be read; "
                 f"{provisional[name]}."
             )
+        if name == "ambiguous-csv":
+            # "NOT repaired" reads as "left safe", and for this class it is not: the fact
+            # is unstable in candidates.csv and the next sync settles it. Say the RULE, not
+            # the outcome -- the same prescription the PARTIAL note above follows, and the
+            # reason no remedy is offered: measured, no CLI command removes the duplicate
+            # while keeping the fact live (`accept` leaves the tombstone, `eject --purge`
+            # deletes both), so naming one would be a false remedy of the kind #563 removed.
+            #
+            # Both halves are measured. With candidates.csv present, merge's preservation
+            # passes decide and a decided row outranks a pending one -- CSV[candidate,
+            # superseded] rebuilds as `superseded`, CSV[candidate, accepted] as `accepted`,
+            # CSV[accepted, superseded] as `superseded`. Deleted first, those passes have
+            # nothing to read and the run rows decide by normalize_rows' dedup instead --
+            # the same KB then rebuilds as `candidate`. So the two paths can disagree, and
+            # only naming both is honest.
+            print(
+                "  note: --apply leaves this fact alone; the next sync does not. merge "
+                "collapses these rows to ONE. With candidates.csv in place its preservation "
+                "passes decide and a decided row outranks a pending one (superseded over "
+                "accepted/confirmed over pending), so a live row beside a `superseded` twin "
+                "comes back retired. Rebuilt from runs/*.json alone, the run row(s) below "
+                "decide instead — merge's dedup picks by the `source` value, then load "
+                "order, never by status."
+            )
         for entry in entries:
             partial = " — PARTIAL" if entry["partial"] else ""
             print(f"  {label(entry['key'])}{partial}")

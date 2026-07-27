@@ -109,6 +109,24 @@ def rebuilt(tmp_path, kb: Path) -> dict[tuple[str, str, str], str]:
         return {(r["subject"], r["relation"], r["object"]): r["status"] for r in csv.DictReader(f)}
 
 
+def resynced(tmp_path, kb: Path) -> dict[tuple[str, str, str], str]:
+    """Re-merge with candidates.csv left IN PLACE -- an ordinary `/factlog sync`.
+
+    Different question from `rebuilt()`, and measured to give different answers: with the
+    CSV present merge's preservation passes run, so a human decision recorded there wins;
+    deleted, only runs/*.json speaks. The `ambiguous-csv` note claims both, so both are
+    pinned.
+    """
+    subprocess.run(
+        [sys.executable, str(MERGE), "--wiki", str(kb)],
+        cwd=ROOT, env=_env(tmp_path), capture_output=True, text=True, check=True,
+    )
+    import csv
+
+    with (kb / "facts" / "candidates.csv").open(newline="", encoding="utf-8") as f:
+        return {(r["subject"], r["relation"], r["object"]): r["status"] for r in csv.DictReader(f)}
+
+
 class TestTheDurabilityPayoff:
     def test_a_decision_missing_from_the_run_row_survives_a_rebuild(self, tmp_path):
         kb = init_kb(tmp_path)
@@ -583,6 +601,91 @@ class TestABlankCandidatesCsvStatusIsNeverWritten:
         assert repair(tmp_path, kb, "A", "knows", "B", "--apply").returncode == 3
         assert run_bytes(kb) == before
         assert rebuilt(tmp_path, kb)[("A", "knows", "B")] == "candidate"
+
+
+class TestTheAmbiguousClassStatesTheConsequence:
+    """"NOT repaired" reads as "left safe". For this class it is not.
+
+    The command puts an unstable fact in front of the user and used to stop there. The
+    note now states the RULE that settles it -- not the outcome, and not a remedy: measured,
+    no CLI command removes the duplicate while keeping the fact live (`accept` leaves the
+    tombstone behind, `eject --purge` deletes both rows), so naming one would be exactly the
+    false remedy #563 removed.
+
+    These tests pin the note against the BEHAVIOUR it describes, not just its text. A note
+    asserted only as a string drifts away from what merge does and nothing goes red.
+    """
+
+    def _round_trip(self, tmp_path) -> Path:
+        """The duplicate rows as the real CLI produces them (tombstone first)."""
+        kb = init_kb(tmp_path)
+        write_runs(kb, "r1.json", [item(status="candidate")])
+        subprocess.run(
+            [sys.executable, str(MERGE), "--wiki", str(kb)],
+            cwd=ROOT, env=_env(tmp_path), capture_output=True, text=True, check=True,
+        )
+        for old, new in (("B", "C"), ("C", "B")):
+            proc = subprocess.run(
+                [sys.executable, "-m", "factlog", "amend", "A", "knows", old,
+                 "--set-object", new, "--target", str(kb)],
+                cwd=ROOT, env=_env(tmp_path), capture_output=True, text=True,
+            )
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+        return kb
+
+    def test_the_note_appears_with_the_class(self, tmp_path):
+        kb = self._round_trip(tmp_path)
+        proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+
+        body = _section(proc.stdout, "several candidates.csv rows share one fact — NOT repaired")
+        assert "the next sync does not" in body
+        assert "comes back retired" in body
+        assert "never by status" in body
+
+    def test_an_ordinary_sync_retires_the_fact_exactly_as_the_note_says(self, tmp_path):
+        """The half a user hits first: `/factlog sync` does NOT delete candidates.csv.
+
+        With it in place merge's preservation passes decide, and the `superseded` twin
+        outranks the live row -- so the fact the report just called "NOT repaired" comes
+        back retired at the very next sync. Deterministic, not a lottery.
+        """
+        kb = self._round_trip(tmp_path)
+        assert repair(tmp_path, kb, "A", "knows", "B", "--apply").returncode == 3
+
+        assert resynced(tmp_path, kb)[("A", "knows", "B")] == "superseded"
+
+    def test_a_from_scratch_rebuild_can_disagree_with_that(self, tmp_path):
+        """The other half, and why the note names two paths instead of promising one.
+
+        Delete candidates.csv and the preservation passes have nothing to read, so the run
+        rows decide by dedup order instead. Same KB, opposite outcome -- which is why the
+        note states merge's RULE and never "this fact will be retired".
+        """
+        kb = init_kb(tmp_path)
+        # the live row first, so dedup order and status priority point opposite ways
+        write_runs(kb, "r1.json", [
+            item(obj="B", status="candidate"),
+            item(obj="B", status="superseded"),
+        ])
+        write_csv(
+            kb,
+            "A,knows,B,sources/a.md,candidate,0.90,",
+            "A,knows,B,sources/a.md,superseded,0.90,",
+        )
+        assert repair(tmp_path, kb, "A", "knows", "B", "--apply").returncode == 3
+
+        assert rebuilt(tmp_path, kb)[("A", "knows", "B")] == "candidate"
+
+    def test_the_note_is_absent_when_the_class_is_empty(self, tmp_path):
+        """A note printed unconditionally is noise the reader learns to skip."""
+        kb = init_kb(tmp_path)
+        write_runs(kb, "r1.json", [item(status="candidate"), bystander()])
+        write_csv(kb, "A,knows,B,sources/a.md,accepted,0.90,", "Q,rel,Z,sources/a.md,candidate,0.90,")
+
+        proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "the next sync does not" not in proc.stdout
 
 
 class TestUnreadableFilesDuringApply:
