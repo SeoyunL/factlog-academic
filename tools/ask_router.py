@@ -1009,12 +1009,15 @@ def _semantic_rerank(question: str, results: list[dict[str, object]]) -> list[di
     supplementary decisions/ excerpt above a primary one. Measured with a stub
     backend (`rank` returning ascending scores, i.e. an exact reversal), the top
     result flips from `sources` to `decisions (supplementary)`. That is the chosen
-    behaviour, for two reasons. (a) The grade key has already done its decisive
-    work by this point: search() sorts by grade FIRST and applies the cap BEFORE
-    calling here, so the grade decides WHICH excerpts a backend ever sees and the
-    backend only orders that set — re-sorting within grade groups would buy a
-    guarantee the caller mostly already has, at the cost of overruling the one
-    signal the operator opted in to get. (b) Enabling a backend is an explicit,
+    behaviour, for two reasons. (a) ON THE CAPPED PATH the grade key has already
+    done its decisive work by this point: search() sorts by grade FIRST and slices
+    to `limit` BEFORE calling here, so the grade decides WHICH excerpts a backend
+    ever sees and the backend only orders that set — re-sorting within grade groups
+    would buy a guarantee the caller mostly already has, at the cost of overruling
+    the one signal the operator opted in to get. This reason does NOT hold under
+    `--all` (limit=None): there is no cap, so the backend sees every excerpt and
+    the grade constrains nothing. (b) alone decides that case, and it is the one
+    that carries the choice. (b) Enabling a backend is an explicit,
     KB-operator-level statement that semantic similarity should decide order;
     silently pinning grade above it would make the backend's effect depend on a
     directory layout it cannot see. The guarantee "supplementary never ranks first
@@ -1103,12 +1106,13 @@ def search(question: str, root: Path, *, limit: int | None = 10) -> list[dict[st
     # excerpt must never displace a primary one no matter how many times it repeats
     # a keyword. The consequence is deliberate: because grade is the top key and the
     # cap is applied to the SORTED list, a KB whose primary excerpts alone fill the
-    # cap shows no supplementary excerpt at all (measured on the reference KB, a
-    # query returning 134 excerpts — 124 primary, 10 supplementary: before this
-    # change the top 10 held 4 supplementary excerpts INCLUDING rank 1; after it the
-    # 10 supplementary excerpts occupy ranks 125-134, none inside the default cap).
-    # That is the intended reading of "supplementary":
-    # context for a question the sources do not answer, not a competitor to them.
+    # cap shows no supplementary excerpt at all. Measured on the reference KB with
+    # the query '오메가-3 보충이 COPD 환자에게 효과있음을 보인 연구는?', which returns
+    # 134 excerpts — 124 primary, 10 supplementary: before this change the top 10
+    # held 4 supplementary excerpts INCLUDING rank 1; after it the 10 supplementary
+    # excerpts occupy ranks 125-134, none inside the default cap. That is the
+    # intended reading of "supplementary": context for a question the sources do
+    # not answer, not a competitor to them.
     # Supplementary excerpts are never FILTERED — they are collected and ranked as
     # before and reappear as soon as primary matches run short (or under `--all`,
     # which passes limit=None).
