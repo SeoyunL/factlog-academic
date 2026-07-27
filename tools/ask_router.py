@@ -635,6 +635,215 @@ def _is_cjk(word: str) -> bool:
     )
 
 
+# Korean question function words, as whole 어절 (whitespace-token) SURFACE forms.
+#
+# Why this list exists (#571): every CJK token of length>=2 is promoted to a content
+# keyword, so the grammar of the question becomes search terms. A question ending
+# '…주장하는 논문은?' then substring-matches '이 논문은 …철회(retracted)되었다' in a
+# topically unrelated retraction notice and ranks it as evidence — noise on an
+# exploration surface is tolerable, but citing a retracted trial as a candidate
+# answer is the worst failure mode available to a verification tool. These forms
+# only CONSTRUCT a question; they never name its subject.
+#
+# Membership rule (#571 기준 4): surface forms only, never a bare stem. '논문' and
+# '방법' are legitimate content nouns and stay searchable; only the particle-attached
+# 어절 that a question frame produces ('논문은') is dropped. Matching is therefore on
+# the WHOLE token — a substring or suffix rule would swallow content words, e.g. a
+# query for '반박논문은' ends in '논문은' but names a real subject.
+#
+# A form is listed only if it is a function word AS A STANDALONE 어절. Copular endings
+# that only ever appear ATTACHED ('-인가', '-인지') are therefore NOT listed: alone,
+# '인지' is 인지(cognition) and '인가' is 인가(認可 / 전압 인가) — content nouns in the
+# very literature a KB like this holds. Their attached forms ('무엇인가', '무엇인지')
+# are listed individually instead.
+#
+# Single-character forms ('왜', '이', '그') are deliberately absent: the len>=2 floor
+# below already drops them, so listing them would only imply a guarantee this filter
+# does not provide.
+#
+# This is a CLOSED enumeration, not a morphological rule: unlisted question forms
+# exist (요청형 '알려줘', 의존명사 '대한', 동사+의문어미 '제시하는가') and still become
+# keywords. Widening it needs an analyzer, not more literals — that is #581's ground.
+_CJK_QUESTION_STOPWORDS = frozenset(
+    {
+        # 의문사 + 그 조사/어미 표층형
+        "무엇",
+        "무엇이",
+        "무엇을",
+        "무엇인가",
+        "무엇인지",
+        "무엇인가요",
+        "무엇에",
+        "뭐가",
+        "뭐야",
+        "뭔가",
+        "언제",
+        "언제부터",
+        "언제까지",
+        "언제인가",
+        "어디",
+        "어디에",
+        "어디서",
+        "어디에서",
+        "어디까지",
+        "어디인가",
+        "어떻게",
+        "어떤",
+        "어떠한",
+        "어느",
+        "누가",
+        "누구",
+        "누구인가",
+        "누구인가요",
+        "얼마나",
+        # 의문형 종결부. 독립 어절로 쓰였을 때 술어를 지시하지 않는 것만 넣는다.
+        "있나",
+        "있는지",
+        "있나요",
+        "있는가",
+        "없나",
+        "없나요",
+        "없는가",
+        "맞나",
+        "맞는가",
+        # 지시/대용어
+        "이것",
+        "이것이",
+        "이것은",
+        "그것",
+        "그것이",
+        "그것은",
+        "저것",
+        "저것이",
+        "저것은",
+        "이거",
+        "그거",
+        "저거",
+        "여기",
+        "여기서",
+        "거기",
+        "거기서",
+        "저기",
+        "저기서",
+        "이런",
+        "그런",
+        "저런",
+        "이렇게",
+        "그렇게",
+        "저렇게",
+        # 질문 틀이 만들어 내는 총칭 명사의 조사 표층형. 어간('논문')은 콘텐츠
+        # 명사이므로 목록에 없다 — 사용자가 '논문' 을 그대로 치면 키워드로 남는다.
+        # 실측(실제 KB, sources/ 의 읽을 수 있는 파일 186개): '논문은' 이 걸리는 파일은
+        # 단 1개이고, 그 1개가 질문과 주제 접점이 0인 철회 공지다. 변별력이 없는 게
+        # 아니라, 이 표층형이 변별하는 대상이 오답 하나뿐이다.
+        "논문은",
+        "논문이",
+        "논문을",
+        "논문인가",
+    }
+)
+
+
+def _cjk_stopword(word: str) -> bool:
+    """True if *word* is a Korean question function word (whole-token match).
+
+    The list holds precomposed (NFC) forms, and so does the comparison. A decomposed
+    (NFD) question does not reach this branch at all — _is_cjk tests the 가-힣
+    syllable block, which NFD jamo are not in — but it is NOT thereby unfiltered:
+    the NFD token falls through to the ASCII branch and still becomes a pattern. So
+    this filter's contract holds for NFC input only. Harmless today (the corpus and
+    the CLI's own input are NFC); closing it means normalizing the question before
+    tokenizing, which changes matching for every non-NFC token, not just stop words.
+    """
+    return word in _CJK_QUESTION_STOPWORDS
+
+
+# ASCII tokens must exceed 2 characters to become keywords. The reason is not
+# substring noise — the ASCII branch matches with lookaround boundaries, so 'ai'
+# never matches inside 'training' — it is that at two characters the English
+# function words are the highest-reach tokens in an English corpus. The relaxed
+# floor is the recovery stage's only concession, not a general loosening.
+_ASCII_MIN = 3
+_ASCII_MIN_RELAXED = 2
+
+# 2-character English function words, excluded from the keyword set. Same purpose as
+# _CJK_QUESTION_STOPWORDS in the other language: the relaxed floor exists to rescue a
+# short CONTENT initialism ('AI', 'ML', 'QA'), and by length alone those are
+# indistinguishable from 'of'/'in'. Measured over the KB's 186 readable source files,
+# by how many files contain the token: of 182, in 181, to 175, we 135, is 134, on 131,
+# by 127, as 117, an 105, be 73, or 65, at 57 — against ai 56 for the best-reaching
+# content initialism. Promoting one of these makes the question's ENGLISH grammar the
+# entire query, which is #571's defect in another language: measured, a question like
+# '이것은 무엇인가 of 그것은' returned 451 excerpts on 'of' alone.
+#
+# EVERY entry is exactly 2 characters, so this list cannot affect the strict floor —
+# it only constrains what the relaxed floor is allowed to let back in. Longer English
+# function words ('the', 'and', 'which') are keywords today and stay that way; changing
+# that is a recall decision for the English side, not part of #571.
+_ASCII_FUNCTION_WORDS = frozenset(
+    {
+        "am", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it",
+        "me", "my", "no", "of", "on", "or", "so", "to", "up", "us", "we",
+    }
+)
+
+
+def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]]:
+    """Token→pattern pass shared by both stages of _keyword_patterns.
+
+    *ascii_min* is the minimum ASCII token length. Korean question function words
+    are always dropped — there is no mode that keeps them (#571 기준 2).
+    """
+    seen: set[str] = set()
+    patterns: list[re.Pattern[str]] = []
+    # Tokenizer captures programming-term punctuation: internal '.'/'-' (node.js,
+    # 도구가) and trailing '+'/'#' (c++, c#, f#), while excluding trailing
+    # sentence punctuation. Plain \w runs (incl. CJK) still tokenize as before.
+    for word in re.findall(r"\w+(?:[.+#-]+\w+)*[+#]*", question.lower(), flags=re.UNICODE):
+        if word in seen:
+            continue
+        if _is_cjk(word):
+            # Stop-word removal runs on the RAW 어절, and a token it drops produces
+            # NO pattern at all — not even a derived one. #581's 조사 stripper must
+            # therefore be added BELOW this guard (inside the len>=2 branch): run
+            # above it, '논문은' would first become the stem '논문' — 67 of 186
+            # measured source files, against 1 for the surface form — and #571 would
+            # get wider instead of fixed. No stage of _keyword_patterns bypasses
+            # this guard, so there is no second path a stripper could slip through.
+            if _cjk_stopword(word):
+                continue
+            if len(word) >= 2:
+                seen.add(word)
+                patterns.append(re.compile(re.escape(word)))
+        elif len(word) >= ascii_min and word not in _ASCII_FUNCTION_WORDS:
+            seen.add(word)
+            # Lookaround boundaries (not \b) so punctuation-edged tokens like
+            # 'c++' / 'c#' match while 'api' still does not match inside
+            # 'therapist'.
+            patterns.append(re.compile(rf"(?<!\w){re.escape(word)}(?!\w)"))
+    return patterns
+
+
+# Emitted when the question yields no keyword at all. It must NOT read like the
+# corpus was searched and came back empty: nothing was searched for, because the
+# question named no subject. Conflating "I have no such source" with "you asked me
+# nothing searchable" tells the reader the KB is silent on a topic they never
+# actually named — the same class of unreported retrieval failure as #575.
+#
+# The stated cause must cover EVERY way the keyword set empties, or it misdiagnoses
+# the user's question for them. There are exactly two such ways, and a question can
+# hit them in combination ('이 논문은?' is one of each):
+#   - a function word: a listed Korean 어절, or a 2-letter English function word
+#   - a single-character token: dropped by the length floor in either script
+# Naming only the first told someone who typed '왜?' to stop using function words.
+NO_QUERY_TERM_NOTE = (
+    "(no searchable keyword in the question: question function words and "
+    "single-character tokens do not become keywords, and nothing else was left. "
+    "This is NOT 'no such source' — the corpus was not consulted for any term. "
+    "Rephrase with a content word.)"
+)
+
+
 def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
     """Keyword matchers for the question, bilingual:
 
@@ -646,25 +855,24 @@ def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
       query can substring-match inside an unrelated compound; this recall-over-
       precision trade-off is acceptable for the UNVERIFIED exploration surface,
       but do NOT reuse this matcher on a precision-sensitive path.
+    - Korean question function words (_CJK_QUESTION_STOPWORDS) are dropped, so the
+      grammar of the question does not become a search term (#571).
+
+    Returns [] for a question made only of function words. That is deliberate
+    (#571 기준 2, revised): search() then returns nothing and the caller reports
+    NO_QUERY_TERM_NOTE. Restoring the function words instead — the earlier
+    behaviour — reproduced the exact defect this filter exists to remove: measured
+    on the real KB, '이 논문은?' came back citing a retracted trial as its only
+    evidence, because that notice is the one file in 186 containing '논문은'.
     """
-    seen: set[str] = set()
-    patterns: list[re.Pattern[str]] = []
-    # Tokenizer captures programming-term punctuation: internal '.'/'-' (node.js,
-    # 도구가) and trailing '+'/'#' (c++, c#, f#), while excluding trailing
-    # sentence punctuation. Plain \w runs (incl. CJK) still tokenize as before.
-    for word in re.findall(r"\w+(?:[.+#-]+\w+)*[+#]*", question.lower(), flags=re.UNICODE):
-        if word in seen:
-            continue
-        if _is_cjk(word):
-            if len(word) >= 2:
-                seen.add(word)
-                patterns.append(re.compile(re.escape(word)))
-        elif len(word) > 2:
-            seen.add(word)
-            # Lookaround boundaries (not \b) so punctuation-edged tokens like
-            # 'c++' / 'c#' match while 'api' still does not match inside
-            # 'therapist'.
-            patterns.append(re.compile(rf"(?<!\w){re.escape(word)}(?!\w)"))
+    patterns = _tokenize_patterns(question, ascii_min=_ASCII_MIN)
+    if not patterns:
+        # Recovery stage — usually it is the ASCII floor, not the stop-word list,
+        # that emptied the set: 'AI 논문은 어디에 있나' loses 'ai' to len>2 and
+        # everything else to the filter. Relax the floor and KEEP the filter, so
+        # the question is answered by its own short content word. This is the only
+        # widening; there is no stage that gives the function words back.
+        patterns = _tokenize_patterns(question, ascii_min=_ASCII_MIN_RELAXED)
     return patterns
 
 
@@ -967,6 +1175,9 @@ def render_wiki_answer(
             lines.append(f"[{r['file']}:{r['line']}] ({r['dir']})")
             for excerpt_line in str(r["excerpt"]).splitlines():
                 lines.append(f"    {excerpt_line}")
+    elif not _keyword_patterns(question):
+        # Empty for two different reasons; say which one (#571).
+        lines.append(NO_QUERY_TERM_NOTE)
     else:
         lines.append("(no matching source excerpts found)")
     truncation = _truncation_line(result_total, len(visible_results))
@@ -1112,8 +1323,16 @@ def cmd_search(args: argparse.Namespace) -> int:
         # the stable ``results`` array.  The additive fields make the cap visible.
         results = search(args.text, root)
         total = len(search(args.text, root, limit=None))
+    # 'diagnostic' is null unless the empty result needs an explanation the row
+    # count cannot give: zero rows because zero keywords, not because zero matches
+    # (#571). Additive, like total/truncated — the results array is unchanged.
     print(json.dumps(
-        {"results": results, "total": total, "truncated": len(results) < total},
+        {
+            "results": results,
+            "total": total,
+            "truncated": len(results) < total,
+            "diagnostic": None if _keyword_patterns(args.text) else NO_QUERY_TERM_NOTE,
+        },
         ensure_ascii=False,
     ))
     return 0

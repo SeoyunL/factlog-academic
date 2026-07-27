@@ -279,6 +279,220 @@ if router search "문서 자료" | grep -qF 'sources/ko.md'; then ok "2-char Kor
 if router search "자료" | grep -qF '자료는'; then ok "CJK substring tolerates a particle (자료 -> 자료는)"; else bad "CJK keyword did not match across a particle"; fi
 rm -f "$KB/sources/ko.md"
 
+# --- #571: question function words are not content keywords ------------------
+# The defect: every CJK token of len>=2 became a keyword, so '논문은' — pure question
+# grammar — matched a topically unrelated retraction notice and cited it as evidence.
+#
+# Every case below pins the KEYWORD SET, not just "did any result come back": a
+# question keeps returning results when a single content word survives, so a
+# result-existence check passes even while the filter is silently broken. Each case
+# is its own ok/bad and prints the actual patterns, so a failure names itself.
+printf '# 철회 공지\n\n이 논문은 저자 요청으로 철회되었다.\n' > "$KB/sources/571-retraction.md"
+printf '# 신경기호 추론\n\n신경기호 추론의 근거를 역추적하는 절차.\n' > "$KB/sources/571-topic.md"
+
+# kw_is <desc> <question> <expected repr of the pattern list>
+kw_is() {
+  local got
+  got="$("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([p.pattern for p in a._keyword_patterns(sys.argv[1])])
+" "$2")"
+  if [ "$got" = "$3" ]; then ok "$1"; else bad "$1 — expected $3, got $got"; fi
+}
+
+kw_is "question grammar drops out of the keyword set (#571)" \
+  '이 논문은 신경기호 추론의 근거를 어떻게 제시하는가' \
+  "['신경기호', '추론의', '근거를', '제시하는가']"
+ko_q_out="$(router search '이 논문은 신경기호 추론의 근거를 어떻게 제시하는가')"
+if printf '%s' "$ko_q_out" | grep -qF 'sources/571-retraction.md'; then
+  bad "function word '논문은' pulled a topically unrelated document into the results"
+else
+  ok "function word '논문은' does not pull an unrelated document (#571)"
+fi
+if printf '%s' "$ko_q_out" | grep -qF 'sources/571-topic.md'; then ok "content keywords still reach the on-topic document"; else bad "stop-word filter also removed content keywords"; fi
+# Bare stems are NOT stop words (#571 기준 4): the list holds surface forms only.
+kw_is "bare stems '논문'/'방법' stay content keywords" '논문 방법' "['논문', '방법']"
+# The corpus probe pairs '논문' with a keyword the target document does NOT contain,
+# so the match can only come from '논문' itself — a query whose every token is
+# filtered would reach the restoring stage and match anyway, hiding the regression.
+if router search "논문 신경기호" | grep -qF 'sources/571-retraction.md'; then ok "bare stem '논문' still reaches a document (corpus level)"; else bad "bare stem '논문' was treated as a stop word"; fi
+# Copular endings appear ATTACHED; standing alone they are content nouns —
+# 인지(cognition), 인가(認可 / 전압 인가). Listing them would over-filter the very
+# literature this KB holds.
+kw_is "'인지'(cognition) is a content word, not a stop word" '인지 편향' "['인지', '편향']"
+kw_is "'인가'(認可) is a content word, not a stop word" '전압 인가 방식' "['전압', '인가', '방식']"
+# Whole-token match: a compound merely ENDING in a stop word is content.
+kw_is "a compound ending in a stop word is not filtered" '반박논문은 어디에' "['반박논문은']"
+# ASCII is untouched by this filter (it is a list of Korean 어절).
+kw_is "ASCII questions are untouched by the stop-word list" 'which paper claims this' \
+  "['(?<!\\\\w)which(?!\\\\w)', '(?<!\\\\w)paper(?!\\\\w)', '(?<!\\\\w)claims(?!\\\\w)', '(?<!\\\\w)this(?!\\\\w)']"
+
+# The recovery stage: a SHORT ASCII content word ('ai' loses to the len>2 floor)
+# is recovered by relaxing that floor — never by giving the function words back,
+# which would re-cite the retraction notice, the exact defect #571 fixes.
+kw_is "short ASCII content word is recovered when the strict floor empties the set" \
+  'AI 논문은 어디에 있나' "['(?<!\\\\w)ai(?!\\\\w)']"
+if router search 'AI 논문은 어디에 있나' | grep -qF 'sources/571-retraction.md'; then
+  bad "ASCII recovery still cited the unrelated retraction notice"
+else
+  ok "ASCII recovery keeps the unrelated retraction notice out (#571)"
+fi
+# The strict floor itself is a contract, not an accident: relaxing it globally would
+# make 'of'/'in' keywords in EVERY question. Pinned so that change cannot pass quietly.
+kw_is "a 2-char ASCII token is not a keyword on the default path" 'AI 신경기호' "['신경기호']"
+# ...and the recovery stage must not let English GRAMMAR back in while rescuing a
+# short content word. 'of' reaches 182 of 186 source files — promoting it is the same
+# defect as '논문은', in the other language.
+kw_is "the recovery stage does not promote a 2-char English function word" \
+  '이것은 무엇인가 of 그것은' "[]"
+kw_is "the recovery stage still rescues a short content initialism" 'QA 논문은 어디에 있나' \
+  "['(?<!\\\\w)qa(?!\\\\w)']"
+printf 'This paper is about retrieval of evidence in a corpus.\n' > "$KB/sources/571-english.md"
+if router search '이것은 무엇인가 of 그것은' | grep -qF 'sources/571-english.md'; then
+  bad "an English function word became the entire query"
+else
+  ok "English function words do not become the entire query (#571)"
+fi
+rm -f "$KB/sources/571-english.md"
+# A question that is function words and NOTHING else yields NO keyword and NO
+# result (#571 기준 2, revised). Restoring the tokens — the behaviour this replaced —
+# put the retraction notice back as the sole evidence for '이 논문은?'.
+printf '# 메모\n\n이것은 무엇인가 하는 물음.\n' > "$KB/sources/571-allstop.md"
+kw_is "all-function-word question yields no keyword" '이것은 무엇인가' "[]"
+kw_is "all-function-word question yields no keyword (bare 논문은)" '이 논문은?' "[]"
+if router search "이것은 무엇인가" | grep -qF 'sources/571-allstop.md'; then bad "all-function-word question still cited a document"; else ok "all-function-word question cites nothing (#571 기준 2)"; fi
+if router search '이 논문은?' | grep -qF 'sources/571-retraction.md'; then bad "'이 논문은?' still cited the retraction notice"; else ok "'이 논문은?' no longer cites the retraction notice (#571)"; fi
+# ...and the emptiness is EXPLAINED, distinguishably from "the corpus has nothing".
+# Both surfaces: the rendered block and the search JSON.
+noterm_answer="$(router wiki '이 논문은?' --reason 'unknown entity')"
+nomatch_answer="$(router wiki 'quantumentanglementxyz' --reason 'unknown entity')"
+if printf '%s' "$noterm_answer" | grep -qF 'no searchable keyword'; then ok "no-keyword answer explains why it is empty"; else bad "no-keyword answer gave no diagnostic"; fi
+if printf '%s' "$noterm_answer" | grep -qF '(no matching source excerpts found)'; then bad "no-keyword answer claims the corpus was searched and empty"; else ok "no-keyword answer is not reported as 'no such source'"; fi
+if printf '%s' "$nomatch_answer" | grep -qF '(no matching source excerpts found)'; then ok "a searched-but-unmatched question keeps the 'no such source' wording"; else bad "unmatched question lost its own wording"; fi
+if printf '%s' "$nomatch_answer" | grep -qF 'no searchable keyword'; then bad "unmatched question wrongly reported as unsearchable"; else ok "the two empty-result reasons are not conflated (#571)"; fi
+# The diagnostic must name a cause that is TRUE of every path to an empty keyword
+# set, not just the stop-word path — a user who typed '왜?' used no function word and
+# must not be told to stop using them. One case per cause class, plus a mixed one.
+for probe in '이것은 무엇인가|all function words' \
+             '왜?|single-character CJK only' \
+             'a b c|single-character ASCII only' \
+             '이 논문은?|mixed: 1-char + function word'; do
+  q="${probe%%|*}"; cls="${probe#*|}"
+  ans="$(router wiki "$q" --reason 'unknown entity')"
+  if ! printf '%s' "$ans" | grep -qF 'no searchable keyword'; then
+    bad "no-keyword diagnostic missing for [$cls]"
+  elif printf '%s' "$ans" | grep -qF '(no matching source excerpts found)'; then
+    bad "[$cls] was reported as 'no such source'"
+  elif printf '%s' "$ans" | grep -qF 'single-character tokens'; then
+    ok "no-keyword diagnostic names a cause true of [$cls]"
+  else
+    bad "[$cls] diagnostic names only the stop-word cause"
+  fi
+done
+noterm_diag="$(router search '이 논문은?' | "$PYTHON" -c "import json,sys; print(bool(json.load(sys.stdin)['diagnostic']))")"
+nomatch_diag="$(router search 'quantumentanglementxyz' | "$PYTHON" -c "import json,sys; print(bool(json.load(sys.stdin)['diagnostic']))")"
+if [ "$noterm_diag" = "True" ] && [ "$nomatch_diag" = "False" ]; then ok "search JSON carries the diagnostic only when there was no query term"; else bad "search JSON diagnostic wrong (no-term=$noterm_diag unmatched=$nomatch_diag)"; fi
+
+# Membership is PINNED, not just sampled. A table-driven loop over the constant
+# proves every listed form is droppable, but it cannot notice a form that was
+# DELETED — the loop simply stops testing it. So the expected set is written out
+# here: adding or removing any entry fails with the difference named.
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+want = {
+    '거기', '거기서', '그거', '그것', '그것은', '그것이', '그런', '그렇게', '논문은', '논문을',
+    '논문이', '논문인가', '누가', '누구', '누구인가', '누구인가요', '맞나', '맞는가', '무엇',
+    '무엇에', '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지', '뭐가', '뭐야', '뭔가',
+    '어느', '어디', '어디까지', '어디서', '어디에', '어디에서', '어디인가', '어떠한', '어떤',
+    '어떻게', '언제', '언제까지', '언제부터', '언제인가', '얼마나', '없나', '없나요', '없는가',
+    '여기', '여기서', '이거', '이것', '이것은', '이것이', '이런', '이렇게', '있나', '있나요',
+    '있는가', '있는지', '저거', '저것', '저것은', '저것이', '저기', '저기서', '저런', '저렇게',
+}
+got = set(a._CJK_QUESTION_STOPWORDS)
+assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
+# 이/그/저 계열은 대칭이어야 한다. 한 계열에서만 형태가 빠지면 그 지시어를 쓴 질문에서만
+# 조용히 필터가 새고, 목록을 훑어보는 것으로는 알아채기 어렵다.
+for suffix in ('', '이', '은'):
+    assert {b + suffix for b in ('이것', '그것', '저것')} <= got, suffix
+for suffix in ('', '서'):
+    assert {b + suffix for b in ('여기', '거기', '저기')} <= got, suffix
+" 2>/dev/null; then ok "stop-word list membership pinned (66 forms, 이/그/저 대칭)"; else bad "stop-word list membership moved: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print(sorted(a._CJK_QUESTION_STOPWORDS))
+")"; fi
+# ...and every pinned form must actually be dropped, be a CJK 어절 of len>=2 (a
+# 1-char entry would be filtered by the length floor anyway, promising a guarantee
+# this list does not give), and never be a bare content stem (#571 기준 4).
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+broken = []
+for w in sorted(a._CJK_QUESTION_STOPWORDS):
+    if len(w) < 2 or not a._is_cjk(w):
+        broken.append(('not a CJK 어절 of len>=2', w))
+        continue
+    got = [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]
+    if got != ['신경기호']:
+        broken.append(('survived', w, got))
+broken += [('bare stem listed', s) for s in ('논문', '방법') if s in a._CJK_QUESTION_STOPWORDS]
+assert not broken, broken
+" 2>/dev/null; then ok "every listed form is dropped, none is a bare stem (#571)"; else bad "stop-word list contract broken: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([(w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]) for w in sorted(a._CJK_QUESTION_STOPWORDS)
+       if [p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호']])
+")"; fi
+# The English list is pinned the same way, and every entry must be EXACTLY 2 chars:
+# that length invariant is what makes it harmless on the default path (a 3-char entry
+# would silently start filtering questions that never reach the recovery stage).
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+want = {'am', 'an', 'as', 'at', 'be', 'by', 'do', 'he', 'if', 'in', 'is', 'it',
+        'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up', 'us', 'we'}
+got = set(a._ASCII_FUNCTION_WORDS)
+assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
+assert all(len(w) == 2 for w in got), sorted(w for w in got if len(w) != 2)
+for w in sorted(got):
+    kw = [p.pattern for p in a._keyword_patterns('논문은 어디에 ' + w)]
+    assert kw == [], (w, kw)
+" 2>/dev/null; then ok "2-char English function words pinned (23 forms, all len 2, all dropped)"; else bad "English function-word list moved: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print(sorted(a._ASCII_FUNCTION_WORDS))
+")"; fi
+
+# Ordering contract for #581: a filtered 어절 must leave NOTHING behind — not the
+# token, and not a stem derived from it. Checked by consequence rather than by
+# inspecting the code: no pattern produced for '논문은 신경기호' may match the
+# retraction notice's prose, which contains '논문은' and '논문' but neither content
+# word. A stripper added ABOVE the stop-word guard would emit '논문' and match it.
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+pats = a._keyword_patterns('논문은 신경기호')
+assert [p.pattern for p in pats] == ['신경기호'], [p.pattern for p in pats]
+prose = '이 논문은 저자 요청으로 철회되었다. 논문 3편이 함께 철회됐다.'
+assert not [p.pattern for p in pats if p.search(prose)], [p.pattern for p in pats if p.search(prose)]
+" 2>/dev/null; then ok "a filtered 어절 leaves no pattern behind, derived or literal (#581 ordering contract)"; else bad "a filtered 어절 still reaches the text: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([p.pattern for p in a._keyword_patterns('논문은 신경기호')])
+")"; fi
+rm -f "$KB/sources/571-retraction.md" "$KB/sources/571-topic.md" "$KB/sources/571-allstop.md"
+
 # --- Phase 2: path (positive render / variable) + policy + decisions ---
 # Path render/evaluate AND policy-predicate evaluation all go through run_wirelog,
 # which needs pyrewire. Guard the whole block so the no-dependency CI shell-harness
