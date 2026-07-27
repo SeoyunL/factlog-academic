@@ -2505,9 +2505,17 @@ def _repair_runs_print(plan: dict) -> None:
             # passes decide and a decided row outranks a pending one -- CSV[candidate,
             # superseded] rebuilds as `superseded`, CSV[candidate, accepted] as `accepted`,
             # CSV[accepted, superseded] as `superseded`. Deleted first, those passes have
-            # nothing to read and the run rows decide by normalize_rows' dedup instead --
-            # the same KB then rebuilds as `candidate`. So the two paths can disagree, and
-            # only naming both is honest.
+            # nothing to read and the run rows decide by normalize_rows' dedup instead: a KB
+            # whose run items sort the LIVE row first then rebuilds as `candidate`. So the
+            # two paths can disagree, and only naming both is honest.
+            #
+            # Which order a KB has is not academic, and not the same for every KB. A
+            # round-trip `amend` does NOT produce the diverging order: cmd_amend mutates the
+            # old item in place and appends the corrected one, so the tombstone always sorts
+            # first and that KB measures `superseded` on BOTH paths. The divergence needs a
+            # runs file whose items are ordered the other way -- hand-edited, or written by
+            # something other than that path. Do not try to reproduce it with a round-trip
+            # amend; it will not show.
             print(
                 "  note: --apply leaves this fact alone; the next sync does not. merge "
                 "collapses these rows to ONE. With candidates.csv in place its preservation "

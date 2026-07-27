@@ -702,11 +702,19 @@ class TestTheAmbiguousClassStatesTheConsequence:
         """The other half, and why the note names two paths instead of promising one.
 
         Delete candidates.csv and the preservation passes have nothing to read, so the run
-        rows decide by dedup order instead. Same KB, opposite outcome -- which is why the
-        note states merge's RULE and never "this fact will be retired".
+        rows decide by dedup order instead -- which is why the note states merge's RULE and
+        never "this fact will be retired".
+
+        This is NOT the same KB as the test above, and the difference is the whole point.
+        A round-trip `amend` cannot produce the diverging order: cmd_amend mutates the old
+        item in place and appends the corrected one, so the tombstone always sorts first,
+        and that KB measures `superseded` on BOTH paths. The KB below orders the LIVE row
+        first -- reachable by hand-editing a runs file, or by any writer other than that
+        path -- which is what makes dedup order and status priority point opposite ways.
+        Do not "simplify" this to `_round_trip`: the divergence disappears and the test
+        stops testing anything.
         """
         kb = init_kb(tmp_path)
-        # the live row first, so dedup order and status priority point opposite ways
         write_runs(kb, "r1.json", [
             item(obj="B", status="candidate"),
             item(obj="B", status="superseded"),
