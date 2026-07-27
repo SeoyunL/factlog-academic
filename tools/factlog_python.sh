@@ -180,13 +180,34 @@ _announce_off_path() {
 #   * Once a cache hit is required to re-probe (it must be — otherwise a stale
 #     entry can pin an under-floor engine and silently downgrade finalize to
 #     "logic check SKIPPED"), the saving mostly evaporates. Measured on one gate
-#     evaluation (five execs of this script): 437 ms with no cache versus 478 ms
-#     with a re-validating cache when PATH already carries the engine, i.e. the
-#     common case got SLOWER, before adding the ownership/symlink/whitelist
-#     checks a writable cache would also need.
+#     evaluation with a facts/accepted.dl target — five execs of this script, the
+#     middle row of the table above: 437 ms with no cache versus 478 ms with a
+#     re-validating cache when PATH already carries the engine, i.e. the common
+#     case got SLOWER, before adding the ownership/symlink/whitelist checks a
+#     writable cache would also need.
 #
 # Every selection below therefore executes the candidate it selects, on every
 # call, exactly as the header promises.
+#
+# What that costs relative to the launcher BEFORE #578 (the number a user
+# actually experiences) — same fixture, same five-exec target, engine first on
+# PATH, macOS/arm64, mean of 20 evaluations:
+#
+#   engine on PATH            pre-#578    #578      delta
+#   real pyrewire 1.0.3        358 ms    637 ms    +279 ms  (+78%)
+#   stub pyrewire (test venv)  382 ms    389 ms      +8 ms   (+2%)
+#
+# The two rows differ by two orders of magnitude, and the reason is the whole
+# point: the added cost is one `import pyrewire` per exec, so it is the ENGINE's
+# import time, not this script's logic. Here that import is 55 ms (31 ms bare
+# interpreter vs 86 ms with the import), and 5 x 55 accounts for the +279 ms
+# almost exactly. tests/test_factlog_python.sh plants a one-line stub pyrewire,
+# so any timing taken against the fixtures measures the bottom row and will
+# understate the real cost roughly 35-fold. Quote the top row.
+#
+# +0.28 s per gate evaluation is not free. The lever is not this probe but the
+# number of execs it is multiplied by: a perfect zero-cost cache could still only
+# remove the probe half, and the remaining execs stay.
 
 _resolve() {
   # The activated virtualenv is an explicit user signal, not a search result, so it
