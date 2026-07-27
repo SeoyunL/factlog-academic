@@ -282,8 +282,29 @@ rm -f "$KB/sources/ko.md"
 # --- #571: question function words are not content keywords ------------------
 # The defect: every CJK token of len>=2 became a keyword, so '논문은' — pure question
 # grammar — matched a topically unrelated retraction notice and cited it as evidence.
+#
+# Every case below pins the KEYWORD SET, not just "did any result come back": a
+# question keeps returning results when a single content word survives, so a
+# result-existence check passes even while the filter is silently broken. Each case
+# is its own ok/bad and prints the actual patterns, so a failure names itself.
 printf '# 철회 공지\n\n이 논문은 저자 요청으로 철회되었다.\n' > "$KB/sources/571-retraction.md"
 printf '# 신경기호 추론\n\n신경기호 추론의 근거를 역추적하는 절차.\n' > "$KB/sources/571-topic.md"
+
+# kw_is <desc> <question> <expected repr of the pattern list>
+kw_is() {
+  local got
+  got="$("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([p.pattern for p in a._keyword_patterns(sys.argv[1])])
+" "$2")"
+  if [ "$got" = "$3" ]; then ok "$1"; else bad "$1 — expected $3, got $got"; fi
+}
+
+kw_is "question grammar drops out of the keyword set (#571)" \
+  '이 논문은 신경기호 추론의 근거를 어떻게 제시하는가' \
+  "['신경기호', '추론의', '근거를', '제시하는가']"
 ko_q_out="$(router search '이 논문은 신경기호 추론의 근거를 어떻게 제시하는가')"
 if printf '%s' "$ko_q_out" | grep -qF 'sources/571-retraction.md'; then
   bad "function word '논문은' pulled a topically unrelated document into the results"
@@ -291,31 +312,113 @@ else
   ok "function word '논문은' does not pull an unrelated document (#571)"
 fi
 if printf '%s' "$ko_q_out" | grep -qF 'sources/571-topic.md'; then ok "content keywords still reach the on-topic document"; else bad "stop-word filter also removed content keywords"; fi
-# The bare stem is NOT a stop word (#571 기준 4). The probe pairs it with a keyword
-# the target document does NOT contain, so the match can only come from '논문'
-# itself — a query whose every token is filtered would hit the fallback and match
-# anyway, hiding the regression.
-if router search "논문 신경기호" | grep -qF 'sources/571-retraction.md'; then ok "bare stem '논문' remains a content keyword"; else bad "bare stem '논문' was treated as a stop word"; fi
-# A question made only of function words must not become a silent non-answer
-# (search() returns [] on an empty pattern list) — it falls back to the raw tokens.
+# Bare stems are NOT stop words (#571 기준 4): the list holds surface forms only.
+kw_is "bare stems '논문'/'방법' stay content keywords" '논문 방법' "['논문', '방법']"
+# The corpus probe pairs '논문' with a keyword the target document does NOT contain,
+# so the match can only come from '논문' itself — a query whose every token is
+# filtered would reach the restoring stage and match anyway, hiding the regression.
+if router search "논문 신경기호" | grep -qF 'sources/571-retraction.md'; then ok "bare stem '논문' still reaches a document (corpus level)"; else bad "bare stem '논문' was treated as a stop word"; fi
+# Copular endings appear ATTACHED; standing alone they are content nouns —
+# 인지(cognition), 인가(認可 / 전압 인가). Listing them would over-filter the very
+# literature this KB holds.
+kw_is "'인지'(cognition) is a content word, not a stop word" '인지 편향' "['인지', '편향']"
+kw_is "'인가'(認可) is a content word, not a stop word" '전압 인가 방식' "['전압', '인가', '방식']"
+# Whole-token match: a compound merely ENDING in a stop word is content.
+kw_is "a compound ending in a stop word is not filtered" '반박논문은 어디에' "['반박논문은']"
+# ASCII is untouched by this filter (it is a list of Korean 어절).
+kw_is "ASCII questions are untouched by the stop-word list" 'which paper claims this' \
+  "['(?<!\\\\w)which(?!\\\\w)', '(?<!\\\\w)paper(?!\\\\w)', '(?<!\\\\w)claims(?!\\\\w)', '(?<!\\\\w)this(?!\\\\w)']"
+
+# Stage 1 of the degradation: a SHORT ASCII content word ('ai' loses to the len>2
+# floor) must be recovered before any stop word is. Restoring the whole question
+# here would re-cite the retraction notice — the exact defect #571 fixes.
+kw_is "short ASCII content word is recovered before stop words are" 'AI 논문은 어디에 있나' \
+  "['(?<!\\\\w)ai(?!\\\\w)']"
+if router search 'AI 논문은 어디에 있나' | grep -qF 'sources/571-retraction.md'; then
+  bad "stage-1 recovery still cited the unrelated retraction notice"
+else
+  ok "stage-1 recovery keeps the unrelated retraction notice out (#571)"
+fi
+# Stage 2: a question that is function words and NOTHING else must not become a
+# silent non-answer — search() returns [] on an empty pattern list (#571 기준 2).
 printf '# 메모\n\n이것은 무엇인가 하는 물음.\n' > "$KB/sources/571-allstop.md"
-if router search "이것은 무엇인가" | grep -qF 'sources/571-allstop.md'; then ok "all-stop-word question falls back to the raw tokens (no silent empty answer)"; else bad "all-stop-word question returned nothing"; fi
+kw_is "all-function-word question restores its own tokens" '이것은 무엇인가' "['이것은', '무엇인가']"
+if router search "이것은 무엇인가" | grep -qF 'sources/571-allstop.md'; then ok "all-function-word question still answers (no silent empty result)"; else bad "all-function-word question returned nothing"; fi
+
+# Membership is PINNED, not just sampled. A table-driven loop over the constant
+# proves every listed form is droppable, but it cannot notice a form that was
+# DELETED — the loop simply stops testing it. So the expected set is written out
+# here: adding or removing any entry fails with the difference named.
 if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
+want = {
+    '거기', '그거', '그것', '그것은', '그것이', '그런', '그렇게', '논문은', '논문을', '논문이',
+    '논문인가', '누가', '누구', '누구인가', '누구인가요', '맞나', '맞는가', '무엇', '무엇에',
+    '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지', '뭐가', '뭐야', '뭔가', '어느',
+    '어디', '어디까지', '어디서', '어디에', '어디에서', '어디인가', '어떠한', '어떤', '어떻게',
+    '언제', '언제까지', '언제부터', '언제인가', '얼마나', '없나', '없나요', '없는가', '여기',
+    '여기서', '이거', '이것', '이것은', '이것이', '이런', '이렇게', '있나', '있나요', '있는가',
+    '있는지', '저것', '저기', '저런',
+}
+got = set(a._CJK_QUESTION_STOPWORDS)
+assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
+" 2>/dev/null; then ok "stop-word list membership pinned (60 forms)"; else bad "stop-word list membership moved: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print(sorted(a._CJK_QUESTION_STOPWORDS))
+")"; fi
+# ...and every pinned form must actually be dropped, be a CJK 어절 of len>=2 (a
+# 1-char entry would be filtered by the length floor anyway, promising a guarantee
+# this list does not give), and never be a bare content stem (#571 기준 4).
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+broken = []
+for w in sorted(a._CJK_QUESTION_STOPWORDS):
+    if len(w) < 2 or not a._is_cjk(w):
+        broken.append(('not a CJK 어절 of len>=2', w))
+        continue
+    got = [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]
+    if got != ['신경기호']:
+        broken.append(('survived', w, got))
+broken += [('bare stem listed', s) for s in ('논문', '방법') if s in a._CJK_QUESTION_STOPWORDS]
+assert not broken, broken
+" 2>/dev/null; then ok "every listed form is dropped, none is a bare stem (#571)"; else bad "stop-word list contract broken: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([(w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]) for w in sorted(a._CJK_QUESTION_STOPWORDS)
+       if [p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호']])
+")"; fi
+
+# Ordering contract for #581: stem derivation must never resurrect a filtered 어절.
+# The probe injects a 조사 stripper at the seam (_stem_patterns) and checks both the
+# filtered path and the stop-word-restoring stage. The third assertion is the
+# control: with derivation enabled the stem DOES appear, so the first two prove the
+# suppression, not the absence of a stripper.
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+a._stem_patterns = lambda w: [w[:-1]] if len(w) > 2 and w[-1] in '은는이가를의' else []
 kw = lambda q: [p.pattern for p in a._keyword_patterns(q)]
-assert kw('이 논문은 신경기호 추론') == ['신경기호', '추론'], kw('이 논문은 신경기호 추론')
-# bare stems stay searchable (#571 기준 4): the list holds surface forms only
-assert kw('논문 방법') == ['논문', '방법'], kw('논문 방법')
-assert not {'논문', '방법'} & a._CJK_QUESTION_STOPWORDS, 'bare stem entered the stop-word list'
-# whole-token match: a compound merely ENDING in a stop word is content
-assert kw('반박논문은 어디에') == ['반박논문은'], kw('반박논문은 어디에')
-# the fallback re-emits the ORIGINAL tokens, it does not invent new ones
-assert kw('이것은 무엇인가') == ['이것은', '무엇인가'], kw('이것은 무엇인가')
-# ASCII questions are untouched by this filter (it is a Korean 어절 list)
-assert len(kw('which paper claims this')) == 4, kw('which paper claims this')
-" 2>/dev/null; then ok "stop-word list: surface forms only, whole-token match, ASCII untouched (#571)"; else bad "stop-word list contract broken"; fi
+assert kw('논문은 신경기호') == ['신경기호'], kw('논문은 신경기호')
+assert kw('이 논문은?') == ['논문은'], kw('이 논문은?')
+control = [p.pattern for p in a._tokenize_patterns(
+    '이 논문은?', drop_stopwords=False, ascii_min=2, derive_stems=True)]
+assert control == ['논문은', '논문'], control
+" 2>/dev/null; then ok "filtered 어절 yields no derived stem, in either stage (#581 ordering contract)"; else bad "a filtered 어절 was resurrected by stem derivation: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+a._stem_patterns = lambda w: [w[:-1]] if len(w) > 2 and w[-1] in '은는이가를의' else []
+print('논문은 신경기호 ->', [p.pattern for p in a._keyword_patterns('논문은 신경기호')],
+      '| 이 논문은? ->', [p.pattern for p in a._keyword_patterns('이 논문은?')])
+")"; fi
 rm -f "$KB/sources/571-retraction.md" "$KB/sources/571-topic.md" "$KB/sources/571-allstop.md"
 
 # --- Phase 2: path (positive render / variable) + policy + decisions ---

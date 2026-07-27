@@ -651,9 +651,19 @@ def _is_cjk(word: str) -> bool:
 # the WHOLE token — a substring or suffix rule would swallow content words, e.g. a
 # query for '반박논문은' ends in '논문은' but names a real subject.
 #
+# A form is listed only if it is a function word AS A STANDALONE 어절. Copular endings
+# that only ever appear ATTACHED ('-인가', '-인지') are therefore NOT listed: alone,
+# '인지' is 인지(cognition) and '인가' is 인가(認可 / 전압 인가) — content nouns in the
+# very literature a KB like this holds. Their attached forms ('무엇인가', '무엇인지')
+# are listed individually instead.
+#
 # Single-character forms ('왜', '이', '그') are deliberately absent: the len>=2 floor
 # below already drops them, so listing them would only imply a guarantee this filter
 # does not provide.
+#
+# This is a CLOSED enumeration, not a morphological rule: unlisted question forms
+# exist (요청형 '알려줘', 의존명사 '대한', 동사+의문어미 '제시하는가') and still become
+# keywords. Widening it needs an analyzer, not more literals — that is #581's ground.
 _CJK_QUESTION_STOPWORDS = frozenset(
     {
         # 의문사 + 그 조사/어미 표층형
@@ -663,17 +673,20 @@ _CJK_QUESTION_STOPWORDS = frozenset(
         "무엇인가",
         "무엇인지",
         "무엇인가요",
+        "무엇에",
         "뭐가",
         "뭐야",
         "뭔가",
         "언제",
         "언제부터",
         "언제까지",
+        "언제인가",
         "어디",
         "어디에",
         "어디서",
         "어디에서",
         "어디까지",
+        "어디인가",
         "어떻게",
         "어떤",
         "어떠한",
@@ -681,12 +694,11 @@ _CJK_QUESTION_STOPWORDS = frozenset(
         "누가",
         "누구",
         "누구인가",
+        "누구인가요",
         "얼마나",
-        # 의문형 종결부 (그 자체로는 술어를 지시하지 않는다)
-        "인가",
-        "인지",
-        "인가요",
+        # 의문형 종결부. 독립 어절로 쓰였을 때 술어를 지시하지 않는 것만 넣는다.
         "있나",
+        "있는지",
         "있나요",
         "있는가",
         "없나",
@@ -715,8 +727,9 @@ _CJK_QUESTION_STOPWORDS = frozenset(
         "그렇게",
         # 질문 틀이 만들어 내는 총칭 명사의 조사 표층형. 어간('논문')은 콘텐츠
         # 명사이므로 목록에 없다 — 사용자가 '논문' 을 그대로 치면 키워드로 남는다.
-        # 실측한 실제 KB 에서 sources/ 의 읽을 수 있는 파일 186개 중 67개가 '논문' 을
-        # 포함했다. 질문 틀에서 온 이 표층형은 변별력이 사실상 0이다.
+        # 실측(실제 KB, sources/ 의 읽을 수 있는 파일 186개): '논문은' 이 걸리는 파일은
+        # 단 1개이고, 그 1개가 질문과 주제 접점이 0인 철회 공지다. 변별력이 없는 게
+        # 아니라, 이 표층형이 변별하는 대상이 오답 하나뿐이다.
         "논문은",
         "논문이",
         "논문을",
@@ -728,15 +741,37 @@ _CJK_QUESTION_STOPWORDS = frozenset(
 def _cjk_stopword(word: str) -> bool:
     """True if *word* is a Korean question function word (whole-token match).
 
-    Compares precomposed (NFC) forms, matching the rest of the CJK path: _is_cjk
-    tests the 가-힣 syllable block, so a decomposed (NFD) question never reaches
-    this branch at all — that pre-existing gap is not this filter's to close.
+    The list holds precomposed (NFC) forms, and so does the comparison. A decomposed
+    (NFD) question does not reach this branch at all — _is_cjk tests the 가-힣
+    syllable block, which NFD jamo are not in — but it is NOT thereby unfiltered:
+    the NFD token falls through to the ASCII branch and still becomes a pattern. So
+    this filter's contract holds for NFC input only. Harmless today (the corpus and
+    the CLI's own input are NFC); closing it means normalizing the question before
+    tokenizing, which changes matching for every non-NFC token, not just stop words.
     """
     return word in _CJK_QUESTION_STOPWORDS
 
 
-def _tokenize_patterns(question: str, *, drop_stopwords: bool) -> list[re.Pattern[str]]:
-    """Token→pattern pass shared by the filtered and the unfiltered fallback run."""
+def _stem_patterns(word: str) -> list[str]:
+    """Matcher strings derived from *word* by morphological analysis.
+
+    Always empty: no 조사 stripper is bundled (#581 owns that work). This is the one
+    seam where one may be added, so the ordering contract in _tokenize_patterns —
+    stop words first, derivation second, and never in the stop-word-restoring
+    fallback — stays enforceable in a single place instead of by convention.
+    """
+    return []
+
+
+def _tokenize_patterns(
+    question: str, *, drop_stopwords: bool, ascii_min: int, derive_stems: bool
+) -> list[re.Pattern[str]]:
+    """Token→pattern pass shared by every stage of _keyword_patterns.
+
+    *ascii_min* is the minimum ASCII token length; *drop_stopwords* applies the
+    Korean question-function-word filter; *derive_stems* allows morphological
+    derivation on top of the literal token.
+    """
     seen: set[str] = set()
     patterns: list[re.Pattern[str]] = []
     # Tokenizer captures programming-term punctuation: internal '.'/'-' (node.js,
@@ -747,23 +782,36 @@ def _tokenize_patterns(question: str, *, drop_stopwords: bool) -> list[re.Patter
             continue
         if _is_cjk(word):
             # Stop-word removal runs on the RAW 어절 and, when it fires, the token
-            # produces NO pattern at all — not even a derived one. Any future
-            # 조사-stripping step (#581) must be added BELOW this guard: run above
-            # it, '논문은' would first become the stem '논문' (67 of 186 measured
-            # source files), and this defect would get wider instead of fixed.
-            # (#571)
+            # produces NO pattern at all — not even a derived one. Derivation sits
+            # BELOW this guard on purpose: run above it, '논문은' would first become
+            # the stem '논문' (67 of 186 measured source files, against 1 for the
+            # surface form) and #571 would get wider instead of fixed. The stage
+            # that restores stop words passes derive_stems=False for the same
+            # reason — there the guard never fires, so it cannot do the suppressing.
             if drop_stopwords and _cjk_stopword(word):
                 continue
             if len(word) >= 2:
                 seen.add(word)
                 patterns.append(re.compile(re.escape(word)))
-        elif len(word) > 2:
+                if derive_stems:
+                    for stem in _stem_patterns(word):
+                        if stem not in seen:
+                            seen.add(stem)
+                            patterns.append(re.compile(re.escape(stem)))
+        elif len(word) >= ascii_min:
             seen.add(word)
             # Lookaround boundaries (not \b) so punctuation-edged tokens like
             # 'c++' / 'c#' match while 'api' still does not match inside
             # 'therapist'.
             patterns.append(re.compile(rf"(?<!\w){re.escape(word)}(?!\w)"))
     return patterns
+
+
+# ASCII tokens must exceed 2 characters to become keywords (an 'ai'/'ml' substring
+# is noise in an English corpus). The relaxed floor below is the fallback's first
+# step, not a general loosening.
+_ASCII_MIN = 3
+_ASCII_MIN_RELAXED = 2
 
 
 def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
@@ -779,14 +827,32 @@ def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
       but do NOT reuse this matcher on a precision-sensitive path.
     - Korean question function words (_CJK_QUESTION_STOPWORDS) are dropped, so the
       grammar of the question does not become a search term (#571).
+
+    An empty result is never returned when the question has any token at all
+    (#571 기준 2): search() answers nothing on an empty pattern list, so the
+    filter degrades through the stages below instead of silencing the question.
     """
-    patterns = _tokenize_patterns(question, drop_stopwords=True)
+    patterns = _tokenize_patterns(
+        question, drop_stopwords=True, ascii_min=_ASCII_MIN, derive_stems=True
+    )
     if not patterns:
-        # A question made of nothing but function words ('이것은 무엇인가'). search()
-        # returns [] on an empty pattern list, so filtering to zero would turn the
-        # question into a silent non-answer — strictly worse than the noisy match
-        # this filter exists to remove. Fall back to the unfiltered tokens. (#571)
-        patterns = _tokenize_patterns(question, drop_stopwords=False)
+        # Stage 1 — usually it is the ASCII floor, not the stop-word list, that
+        # emptied the set: 'AI 논문은 어디에 있나' loses 'ai' to len>2 and everything
+        # else to the filter. Relax the floor and KEEP the filter, so the question
+        # is answered by its own short content word rather than by its grammar.
+        patterns = _tokenize_patterns(
+            question, drop_stopwords=True, ascii_min=_ASCII_MIN_RELAXED, derive_stems=True
+        )
+    if not patterns:
+        # Stage 2 — the question is function words and nothing else ('이것은
+        # 무엇인가'). Restoring them is the least-bad answer: a citation the user
+        # can dismiss beats silence they cannot distinguish from "no such source".
+        # derive_stems=False keeps this stage from doing what the filter exists to
+        # prevent — a restored '논문은' must not also become the far more common
+        # stem '논문' once #581 lands.
+        patterns = _tokenize_patterns(
+            question, drop_stopwords=False, ascii_min=_ASCII_MIN_RELAXED, derive_stems=False
+        )
     return patterns
 
 
