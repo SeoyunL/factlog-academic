@@ -2238,8 +2238,20 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
         for entry in key_repairs:
             entry["partial"] = partial
             repairs.append(entry)
+        # ONE entry per (fact, class), listing every run row of that fact underneath --
+        # never one entry per run row. The unit of the work a human is left with is the
+        # FACT: its run rows have to be settled together, so counting them apart says
+        # nothing anyone can act on. Per-row entries also made the count mean different
+        # things in different classes -- measured, one fact with four run rows counted 1
+        # under `ambiguous-csv` and 3 under `both-decided` -- while the summary sentence
+        # leads with "run row(s)" and invites the reader to carry that unit across. Same
+        # shape of counter trap as #565. The per-file detail D3 needs is not lost: the
+        # rows are still listed one line each, under the fact.
+        by_bucket: dict[str, list] = {}
         for bucket, jp, item in key_reports:
-            report(bucket, key, [csv_status], [(jp, item)], partial=partial)
+            by_bucket.setdefault(bucket, []).append((jp, item))
+        for bucket, rows in by_bucket.items():
+            report(bucket, key, [csv_status], rows, partial=partial)
 
     return {
         "repairs": repairs,
@@ -2352,7 +2364,13 @@ def cmd_repair_runs(args: argparse.Namespace) -> int:
 
     _repair_runs_print(plan)
 
-    left = sum(len(rows) for rows in plan["reports"].values())
+    # Two units in one sentence, each named where it is used. "run row(s) repaired" counts
+    # rows because that is literally what was written. "fact(s) left for a human" counts
+    # FACTS because that is the unit of the work remaining -- and it is counted over
+    # DISTINCT keys, not over entries: one fact can land in two classes at once (a pending
+    # CSV row whose copies are split between `csv-pending-run-decided` and `both-pending`),
+    # and reporting it as two things to fix would be the same over-count one level up.
+    left = len({entry["key"] for rows in plan["reports"].values() for entry in rows})
     files = sorted({entry["path"] for entry in plan["repairs"]})
     if args.apply:
         import json
@@ -2368,7 +2386,7 @@ def cmd_repair_runs(args: argparse.Namespace) -> int:
             _atomic_write_text(jp, json.dumps(plan["parsed"][jp], ensure_ascii=False, indent=2) + "\n")
         print(
             f"factlog repair-runs: {len(plan['repairs'])} run row(s) repaired in {len(files)} file(s), "
-            f"{left} left for a human."
+            f"{left} fact(s) left for a human."
         )
         if plan["repairs"]:
             # No _recompile_accepted: this command writes runs/*.json only, and
@@ -2382,7 +2400,7 @@ def cmd_repair_runs(args: argparse.Namespace) -> int:
     else:
         print(
             f"factlog repair-runs: {len(plan['repairs'])} run row(s) repairable in {len(files)} file(s), "
-            f"{left} left for a human; nothing was written. Re-run with --apply to write them."
+            f"{left} fact(s) left for a human; nothing was written. Re-run with --apply to write them."
         )
     if plan["unreadable"]:
         for name in plan["unreadable"]:

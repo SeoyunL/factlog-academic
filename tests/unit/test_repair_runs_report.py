@@ -104,7 +104,7 @@ class TestRepairableClasses:
         body = _section(out, "decided in candidates.csv, still pending in the run row")
         assert "A / R / X  ← sources/note.md" in body
         assert "r1.json  [candidate → accepted]" in body
-        assert "1 run row(s) repairable in 1 file(s), 0 left for a human" in out
+        assert "1 run row(s) repairable in 1 file(s), 0 fact(s) left for a human" in out
 
     def test_a_blank_status_run_row_counts_as_pending(self, tmp_path, capsys):
         """merge coerces a missing/blank status to needs_review, so this must too.
@@ -167,7 +167,7 @@ class TestTheDuplicateFactKeyGuard:
         body = _section(out, "several candidates.csv rows share one fact — NOT repaired")
         assert "A / R / X  ← sources/note.md" in body
         assert "candidates.csv: candidate, superseded" in body
-        assert "0 run row(s) repairable in 0 file(s), 1 left for a human" in out
+        assert "0 run row(s) repairable in 0 file(s), 1 fact(s) left for a human" in out
         # and specifically NOT offered as a repair, in either direction
         assert "→ superseded]" not in out
         assert "→ candidate]" not in out
@@ -187,7 +187,7 @@ class TestTheDuplicateFactKeyGuard:
         assert "A / R / X  ← sources/note.md" in _section(
             out, "several candidates.csv rows share one fact — NOT repaired"
         )
-        assert "0 run row(s) repairable in 0 file(s), 1 left for a human" in out
+        assert "0 run row(s) repairable in 0 file(s), 1 fact(s) left for a human" in out
 
 
 class TestClassesItRefusesToTouch:
@@ -225,7 +225,7 @@ class TestClassesItRefusesToTouch:
         assert "A / R / X  ← sources/note.md" in body
         assert "candidates.csv: accepted" in body
         assert "r1.json: confirmed" in body
-        assert "0 run row(s) repairable in 0 file(s), 1 left for a human" in out
+        assert "0 run row(s) repairable in 0 file(s), 1 fact(s) left for a human" in out
 
     def test_a_decision_only_the_run_row_holds_is_reported_only(self, tmp_path, capsys):
         """The run row is the last surviving copy; writing the CSV's pending status over it
@@ -313,7 +313,129 @@ class TestPartialRepairIsNamed:
         left = _section(out, "both stores decided, and they disagree — NOT repaired")
         assert "A / R / X  ← sources/note.md — PARTIAL" in left
         assert "zzz.json: confirmed" in left
-        assert "1 run row(s) repairable in 1 file(s), 1 left for a human" in out
+        assert "1 run row(s) repairable in 1 file(s), 1 fact(s) left for a human" in out
+
+
+class TestTheSummaryCounterUnit:
+    """`K fact(s) left for a human` must count FACTS, in every class, always.
+
+    The summary carries two units in one sentence -- "N run row(s) repaired" (rows, because
+    that is what was written) and "K fact(s) left" (facts, because that is the unit of the
+    remaining work). Each names its own unit, but only if K really is facts.
+
+    It was not. Measured on the shipped code: one fact with four run rows reported
+    `1 left` under `ambiguous-csv` and `3 left` under `both-decided`, because entries were
+    per-fact in some classes and per-row in others, while the sentence leads with
+    "run row(s)" and invites the reader to carry that unit across.
+
+    A per-fixture string assertion cannot catch that: each number was right for its own
+    fixture. Only a KB where the three candidate answers DIFFER can. This is that KB.
+    """
+
+    def _mixed_kb(self, tmp_path):
+        """Three drifted facts, chosen so facts / entries / run rows are three numbers.
+
+        * A/R/X -- ambiguous candidates.csv, 3 run rows  -> 1 fact, 1 entry, 3 rows
+        * B/R/Y -- both stores decided, 2 run rows        -> 1 fact, 1 entry, 2 rows
+        * C/R/Z -- pending CSV whose run copies split across TWO classes at once
+                   (one decided, one pending-but-different) -> 1 fact, 2 entries, 2 rows
+        * Q/rel/W -- agrees in both stores; must not be counted at all
+
+        facts = 3, entries = 4, run rows = 7. Counting entries (the shape this class was
+        added for) or rows (the shape before the grouping fix) both miss.
+        """
+        return _kb(
+            tmp_path,
+            [
+                "A,R,X,sources/note.md,candidate,0.90,",
+                "A,R,X,sources/note.md,superseded,0.90,",
+                "B,R,Y,sources/note.md,accepted,0.90,",
+                "C,R,Z,sources/note.md,candidate,0.90,",
+                "Q,rel,W,sources/note.md,candidate,0.90,",
+            ],
+            {
+                "aaa.json": [
+                    _run_row(obj="X", status="candidate"),
+                    _run_row(obj="X", status="superseded"),
+                    _run_row(subject="B", obj="Y", status="confirmed"),
+                    _run_row(subject="C", obj="Z", status="accepted"),
+                    _run_row(subject="Q", relation="rel", obj="W", status="candidate"),
+                ],
+                "zzz.json": [
+                    _run_row(obj="X", status="accepted"),
+                    _run_row(subject="B", obj="Y", status="confirmed"),
+                    _run_row(subject="C", obj="Z", status="needs_review"),
+                ],
+            },
+        )
+
+    def test_the_count_is_facts_not_entries_and_not_run_rows(self, tmp_path, capsys):
+        kb = self._mixed_kb(tmp_path)
+        assert _repair(kb) == 3
+
+        out = capsys.readouterr().out
+        assert "0 run row(s) repairable in 0 file(s), 3 fact(s) left for a human" in out
+        # ...and the two numbers it must not have collapsed into, stated explicitly so a
+        # future reader can see the fixture still separates them.
+        assert "4 fact(s) left for a human" not in out   # entries
+        assert "7 fact(s) left for a human" not in out   # run rows
+
+    def test_every_run_row_is_still_listed_under_its_fact(self, tmp_path, capsys):
+        """Counting facts must not cost the per-file detail D3 requires.
+
+        merge picks between run files by glob order, not by status, so a human settling one
+        of these facts has to see WHICH file holds WHICH status. Grouping the rows under one
+        label is what makes the count honest; dropping them would trade one defect for
+        another.
+        """
+        kb = self._mixed_kb(tmp_path)
+        assert _repair(kb) == 3
+
+        out = capsys.readouterr().out
+        reported = "".join(
+            _section(out, heading) for _n, heading in cli._REPAIR_RUNS_REPORTED
+        )
+        assert len([ln for ln in reported.splitlines() if ".json:" in ln]) == 7
+
+        ambiguous = _section(out, "several candidates.csv rows share one fact — NOT repaired")
+        assert ambiguous.count("A / R / X  ← sources/note.md") == 1
+        assert "aaa.json: candidate" in ambiguous
+        assert "aaa.json: superseded" in ambiguous
+        assert "zzz.json: accepted" in ambiguous
+
+    def test_one_fact_split_across_two_classes_is_still_one_fact(self, tmp_path, capsys):
+        """C/R/Z is the case that separates "distinct facts" from "entries".
+
+        Its pending CSV row has one decided run copy and one differently-pending run copy,
+        so it is filed under two headings at once -- correctly, they are different problems
+        -- but it is still ONE fact for a human to settle.
+        """
+        kb = self._mixed_kb(tmp_path)
+        assert _repair(kb) == 3
+
+        out = capsys.readouterr().out
+        decided = _section(out, "pending in candidates.csv, decided in the run row — NOT repaired")
+        pending = _section(out, "both stores pending, with different pending statuses — NOT repaired")
+        assert "C / R / Z  ← sources/note.md" in decided
+        assert "aaa.json: accepted" in decided
+        assert "C / R / Z  ← sources/note.md" in pending
+        assert "zzz.json: needs_review" in pending
+
+    def test_a_label_is_not_repeated_once_per_run_row(self, tmp_path, capsys):
+        """B/R/Y has two run rows in one class; the fact must be named once, not twice.
+
+        Per-row entries printed the same fact label once per row, which is what made the
+        count read as rows in the first place.
+        """
+        kb = self._mixed_kb(tmp_path)
+        assert _repair(kb) == 3
+
+        body = _section(
+            capsys.readouterr().out, "both stores decided, and they disagree — NOT repaired"
+        )
+        assert body.count("B / R / Y  ← sources/note.md") == 1
+        assert "aaa.json: confirmed" in body
+        assert "zzz.json: confirmed" in body
 
 
 class TestScopeAndCleanliness:
@@ -327,7 +449,7 @@ class TestScopeAndCleanliness:
         assert _repair(kb) == 0
 
         out = capsys.readouterr().out
-        assert "0 run row(s) repairable in 0 file(s), 0 left for a human" in out
+        assert "0 run row(s) repairable in 0 file(s), 0 fact(s) left for a human" in out
         assert _bytes(kb) == before
 
     def test_reporting_writes_nothing_even_when_drift_is_found(self, tmp_path):
@@ -377,7 +499,7 @@ class TestScopeAndCleanliness:
         out = capsys.readouterr().out
         assert "skipped 1 candidates.csv row(s) with no source file" in out
         assert "skipped 1 runs/*.json row(s) with no source file" in out
-        assert "0 run row(s) repairable in 0 file(s), 0 left for a human" in out
+        assert "0 run row(s) repairable in 0 file(s), 0 fact(s) left for a human" in out
 
     def test_an_anchor_only_source_keys_to_the_same_empty_source(self, tmp_path, capsys):
         """fact_key cuts at '#', so a bare anchor is the empty-source case in disguise.

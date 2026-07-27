@@ -115,7 +115,7 @@ class TestTheDurabilityPayoff:
 
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "1 run row(s) repaired in 1 file(s), 0 left for a human" in proc.stdout
+        assert "1 run row(s) repaired in 1 file(s), 0 fact(s) left for a human" in proc.stdout
         assert run_statuses(kb) == [("A", "B", "accepted"), ("Q", "Z", "candidate")]
 
         after = rebuilt(tmp_path, kb)
@@ -216,7 +216,7 @@ class TestTheDuplicateFactKeyGuard:
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 3, proc.stdout + proc.stderr
         assert "several candidates.csv rows share one fact — NOT repaired:" in proc.stdout
-        assert "0 run row(s) repaired in 0 file(s), 1 left for a human" in proc.stdout
+        assert "0 run row(s) repaired in 0 file(s), 1 fact(s) left for a human" in proc.stdout
         assert run_bytes(kb) == before
 
         # the payoff: the fact that was alive is still alive after a from-scratch rebuild
@@ -342,7 +342,7 @@ class TestPartialRepairs:
         assert proc.returncode == 3, proc.stdout + proc.stderr
         assert "A / knows / B  ← sources/a.md — PARTIAL" in proc.stdout
         assert "glob order, not by status" in proc.stdout
-        assert "1 run row(s) repaired in 1 file(s), 1 left for a human" in proc.stdout
+        assert "1 run row(s) repaired in 1 file(s), 1 fact(s) left for a human" in proc.stdout
         assert run_statuses(kb, "aaa.json") == [("A", "B", "accepted"), ("Q", "Z", "candidate")]
         assert run_statuses(kb, "zzz.json") == [("A", "B", "confirmed")]
 
@@ -360,7 +360,7 @@ class TestIdempotenceAndNoOp:
 
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "0 run row(s) repaired in 0 file(s), 0 left for a human" in proc.stdout
+        assert "0 run row(s) repaired in 0 file(s), 0 fact(s) left for a human" in proc.stdout
         assert run_bytes(kb) == after_first
 
     def test_a_clean_kb_changes_no_byte(self, tmp_path):
@@ -371,7 +371,7 @@ class TestIdempotenceAndNoOp:
 
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "0 run row(s) repaired in 0 file(s), 0 left for a human" in proc.stdout
+        assert "0 run row(s) repaired in 0 file(s), 0 fact(s) left for a human" in proc.stdout
         assert "warning" not in proc.stderr
         assert run_bytes(kb) == before
 
