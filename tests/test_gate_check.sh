@@ -820,6 +820,74 @@ fi
 rm -rf "$KB_SHAPE" "$shape_err" "$quiet_err"
 
 # ---------------------------------------------------------------------------
+# CASE 22 (#591): the engine-input probe must not depend on an external command.
+#
+# The probe was first written as `printf ... | grep -Eq`. With grep missing from
+# PATH the pipeline just fails, and because it sits in an `if` condition,
+# `set -e` does not fire — the branch fell through to ALLOW. That is a second
+# fail-open with a second trigger, sitting inside the fix for the first one, and
+# it decides a security verdict on whether a coreutil happens to be installed.
+# The probe is now a shell `case`, so this row pins "no external command".
+#
+# Hermetic setup: PATH is emptied, but a runner stub execs an interpreter by
+# ABSOLUTE path, so Python stays available and we are NOT in the fail-closed
+# python-availability window — the deny below can only come from the probe.
+# Everything the gate runs after that point (stat, the shell builtins) must also
+# survive an empty PATH, which this row incidentally pins too.
+KB_NOGREP="$(mktemp -d)"
+make_kb "$KB_NOGREP"
+touch_file "$KB_NOGREP/facts/accepted.dl"   # existing engine input, no report → deny
+clear_config
+
+NOGREP_PY="$(bash "$PYTHON_RUNNER" -c 'import sys; print(sys.executable)' 2>/dev/null)"
+NOGREP_RUNNER="$(mktemp)"
+cat > "$NOGREP_RUNNER" <<RUNNER
+#!/usr/bin/env bash
+exec "$NOGREP_PY" "\$@"
+RUNNER
+
+if [ -z "$NOGREP_PY" ] || [ ! -x "$NOGREP_PY" ]; then
+  echo "FAIL: empty-PATH probe — could not resolve an absolute interpreter for the stub runner (got '$NOGREP_PY')"
+  fail=$((fail + 1))
+else
+  nogrep_exit=0
+  PATH="" FACTLOG_PYTHON_RUNNER="$NOGREP_RUNNER" FACTLOG_ROOT="$KB_NOGREP" \
+    "$BASH_BIN" "$GATE" \
+    <<< "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_NOGREP/facts/accepted.dl")" \
+    >/dev/null 2>&1 || nogrep_exit=$?
+  if [ "$nogrep_exit" -eq 2 ]; then
+    echo "PASS: engine-input probe works with an empty PATH — no external command (exit $nogrep_exit)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: empty-PATH probe — expected deny (exit 2), got $nogrep_exit (probe fell back to fail-open?)"
+    fail=$((fail + 1))
+  fi
+
+  # Companion: with an empty PATH the ALLOW half must still be reachable, or the
+  # row above could be satisfied by a gate that simply denies everything when
+  # PATH is empty.
+  nogrep_allow_exit=0
+  PATH="" FACTLOG_PYTHON_RUNNER="$NOGREP_RUNNER" FACTLOG_ROOT="$KB_NOGREP" \
+    "$BASH_BIN" "$GATE" <<< '{"tool_name":"Write","tool_input":{"content":"nothing to see"}}' \
+    >/dev/null 2>&1 || nogrep_allow_exit=$?
+  if [ "$nogrep_allow_exit" -eq 0 ]; then
+    echo "PASS: empty PATH, no engine input named — still allows (probe discriminates, not blanket-denies)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: empty PATH, no engine input named — expected allow (exit 0), got $nogrep_allow_exit"
+    fail=$((fail + 1))
+  fi
+fi
+
+# Windows spells the separator with a backslash, and JSON escapes it, so the raw
+# payload text carries `facts\\accepted.dl`. A probe written only for "/" reads
+# that as no engine input at all and allows.
+run_payload_case "backslash separator (JSON-escaped Windows path) — deny" \
+  "$KB_NOGREP" '{"tool_name":"Write","tool_input":{"target":"C:\\kb\\facts\\accepted.dl"}}' 2
+
+rm -rf "$KB_NOGREP" "$NOGREP_RUNNER"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

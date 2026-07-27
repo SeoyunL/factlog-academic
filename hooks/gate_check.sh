@@ -166,14 +166,28 @@ target_path="$(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c \
 # facts/accepted.dl — reachable only once extraction has ALREADY failed, i.e. in
 # a state that should not occur, and recoverable by running /factlog check
 # (see below: the predicate, not a hard deny, decides the verdict).
+#
+# The probe is a shell `case`, not grep. An external command here would decide a
+# security verdict on whether PATH happens to contain it: with grep missing, the
+# `if` condition simply failed (set -e does not fire inside an `if`) and the gate
+# ALLOWED — a second fail-open with a second trigger, reached without touching
+# the payload logic at all. Everything this branch needs is glob matching, which
+# the shell already has, so the probe now depends on nothing but bash. The
+# separator appears three ways in raw payload text: "/" on POSIX, a lone "\" in
+# text JSON never escaped, and "\\" once JSON has escaped a Windows backslash.
 target_unresolved=false
 if [ -z "$target_path" ]; then
-  if printf '%s' "$payload" | grep -Eq 'facts[/\\]+(accepted|query)\.dl'; then
-    target_unresolved=true
-    echo "[factlog GATE] note: could not extract a target path from the hook payload, but it names an engine input; evaluating the freshness predicate conservatively." >&2
-  else
-    exit 0
-  fi
+  case "$payload" in
+    *facts/accepted.dl*     | *facts/query.dl*     | \
+    *'facts\accepted.dl'*   | *'facts\query.dl'*   | \
+    *'facts\\accepted.dl'*  | *'facts\\query.dl'*)
+      target_unresolved=true
+      echo "[factlog GATE] note: could not extract a target path from the hook payload, but it names an engine input; evaluating the freshness predicate conservatively." >&2
+      ;;
+    *)
+      exit 0
+      ;;
+  esac
 fi
 
 # Normalise: check whether the target is facts/accepted.dl or facts/query.dl
