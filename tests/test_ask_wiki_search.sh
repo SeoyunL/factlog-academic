@@ -404,12 +404,15 @@ fi
 # 이 pin 은 #573 이 뒤집은 값이다 (그 전에는 notes_rank < kim_rank 였다).
 # 순위 숫자가 아니라 상대 순서를 고정한다: 동점 구간이 있어 숫자를 박으면 #573 계약이
 # 아니라 픽스처 파일명의 알파벳 순서를 encode 하게 된다.
-# 노트를 결과에서 지우는 것은 #573 의 범위가 아니다 — 줄 단위 매치는 그대로라 노트는
-# 여전히 반환되고, 점수만 (0,0) 이라 뒤로 밀린다. 그래서 '사라졌다' 는 여전히 실패다.
+# 노트를 결과에서 지우는 것은 #573 의 범위가 아니다 — 줄 단위 수집 게이트는 마스킹 전
+# 원문을 보므로 노트는 여전히 수집되고, 점수 (0,0) 으로 순위만 내려간다. 다만 "항상
+# 보인다"는 뜻은 아니다: search() 의 limit 상한 밖으로 밀려 렌더 결과에서 빠질 수 있다
+# (실 KB, 기본 상한 10 에서 강등된 decisions/ 발췌가 top10 밖으로 나가는 것을 실측했다).
+# 이 하니스의 refs() 는 --all 로 조회해 상한이 없으므로 '사라졌다' 는 여전히 실패다.
 notes_rank="$(printf '%s\n' "$path_refs" | grep -nxF 'sources/reading-notes.md:5' | cut -d: -f1 || true)"
 kim_rank="$(printf '%s\n' "$path_refs" | grep -nxF 'sources/kim-2024-neurosymbolic-grounding.md:4' | cut -d: -f1 || true)"
 if [ -z "$notes_rank" ]; then
-  bad "PIN4 경로 인용 노트가 결과에서 사라졌다 — #573 은 점수만 감쇠하고 recall 은 건드리지 않는다"
+  bad "PIN4 경로 인용 노트가 결과에서 사라졌다 — #573 은 점수만 감쇠하고 수집은 건드리지 않는다"
 elif [ -z "$kim_rank" ]; then
   bad "PIN4 비교 기준인 sources/kim-…:4 발췌가 사라졌다 — 발췌 앵커가 이동했다면(#574) 기준 발췌를 갱신하라"
 elif [ "$notes_rank" -gt "$kim_rank" ]; then

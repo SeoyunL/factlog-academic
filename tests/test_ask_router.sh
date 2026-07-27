@@ -417,19 +417,45 @@ printf '# notes\n\n- sources/graphdb-tuning-widgetterm.md\n- sources/graphdb-tun
 printf '# tuning\n\nThis paper measures widgetterm latency in a graph database.\n' > "$KB/sources/graphdb-tuning-widgetterm.md"
 pc_top="$(router search "widgetterm" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d['results'][0]['file'] if d['results'] else '')")"
 if [ "$pc_top" = "sources/graphdb-tuning-widgetterm.md" ]; then ok "#573: prose about the keyword outranks a note that only cites its path"; else bad "#573: path citations still win the ranking (top=$pc_top)"; fi
-# recall is untouched: the path-only note is demoted, not dropped
-if router search "widgetterm" | grep -qF 'sources/pathcite-notes.md'; then ok "#573: path-only note is still returned (score damped, recall unchanged)"; else bad "#573: path-only note disappeared from results (damping must not drop recall)"; fi
-# prose keeps its full weight, including a path mentioned mid-sentence
+# collection is untouched: the path-only note is demoted, not filtered out. (Under a
+# result cap a (0,0) excerpt can still fall outside the cap — that is ranking, not a filter.)
+if router search "widgetterm" | grep -qF 'sources/pathcite-notes.md'; then ok "#573: path-only note is still collected (score damped, not filtered out)"; else bad "#573: path-only note disappeared from results (damping must not filter)"; fi
+# a path mentioned mid-sentence loses only its own token — searched, not just scored
 printf '# mixed\n\nsources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.\n' > "$KB/sources/pathcite-mixed.md"
-pc_mixed="$("$PYTHON" -c "
+pc_order="$(router search "widgetterm" | "$PYTHON" -c "
+import json, sys
+files = [r['file'] for r in json.load(sys.stdin)['results']]
+mixed, notes = 'sources/pathcite-mixed.md', 'sources/pathcite-notes.md'
+print('ok' if mixed in files and notes in files and files.index(mixed) < files.index(notes) else files)
+")"
+if [ "$pc_order" = "ok" ]; then ok "#573: prose keyword survives beside a path citation in the same sentence (ranks above the path-only note)"; else bad "#573: mid-sentence path masking swallowed the prose keyword (order=$pc_order)"; fi
+# the damping boundaries, at score level: what must NOT be masked. Each line below
+# fails if one of the guards is dropped — the lookbehind (a dir name ending another
+# word), the extension requirement (a directory reference, no file), the root-relative
+# restriction, and the prose baseline.
+pc_edges="$("$PYTHON" -c "
 import sys
 sys.path.insert(0, '$PLUGIN_ROOT/tools')
 import ask_router as a
 pats = a._keyword_patterns('widgetterm')
-line = 'sources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.'
-print(a._excerpt_score(line, pats), a._excerpt_score('widgetterm widgetterm', pats))
+score = lambda text: a._excerpt_score(text, pats)
+runon = a._keyword_patterns('runs policy')
+print(score('sources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.'),  # mid-sentence path
+      score('widgetterm widgetterm'),                                          # plain prose
+      score('resources/x-widgetterm.md'),                                      # 'sources' ends another word
+      score('sources/widgetterm/ 디렉터리'),                                    # a dir, not a file
+      score('./sources/x-widgetterm.md'),                                      # not root-relative
+      # scaffold dirs are ordinary English nouns: a missing space after a full stop
+      # must not turn prose into a path (common in PDF->text under runs/sources/)
+      a._excerpt_score('we performed 3 runs/day.The results were stable', runon),
+      a._excerpt_score('the policy/value.Networks are trained jointly', runon),
+      # a Korean particle glued to a citation belongs to the citation, not to prose
+      a._excerpt_score('sources/kim-widgetterm.md에서', a._keyword_patterns('에서 widgetterm')),
+      # scaffold dirs outside the searched corpus are damped too: decisions/open-questions.md
+      # in the reference KB cites 154 pages/*.md paths (measured), and those are locators
+      score('- stale_source: pages/widgetterm.md references a removed source'))
 ")"
-if [ "$pc_mixed" = "(1, 1) (1, 2)" ]; then ok "#573: only the path token is dropped; prose keywords count as before"; else bad "#573: prose scoring moved (got $pc_mixed)"; fi
+if [ "$pc_edges" = "(1, 1) (1, 2) (1, 1) (1, 1) (1, 1) (1, 1) (1, 1) (0, 0) (0, 0)" ]; then ok "#573: damping is bounded — only a root-relative KB path with a source-text extension is masked"; else bad "#573: damping boundaries moved (got $pc_edges)"; fi
 rm -f "$KB/sources/pathcite-notes.md" "$KB/sources/graphdb-tuning-widgetterm.md" "$KB/sources/pathcite-mixed.md"
 
 # --- #32: grounded answers (verified facts about mentioned entities) ---
