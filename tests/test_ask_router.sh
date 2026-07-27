@@ -368,17 +368,23 @@ import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 want = {
-    '거기', '그거', '그것', '그것은', '그것이', '그런', '그렇게', '논문은', '논문을', '논문이',
-    '논문인가', '누가', '누구', '누구인가', '누구인가요', '맞나', '맞는가', '무엇', '무엇에',
-    '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지', '뭐가', '뭐야', '뭔가', '어느',
-    '어디', '어디까지', '어디서', '어디에', '어디에서', '어디인가', '어떠한', '어떤', '어떻게',
-    '언제', '언제까지', '언제부터', '언제인가', '얼마나', '없나', '없나요', '없는가', '여기',
-    '여기서', '이거', '이것', '이것은', '이것이', '이런', '이렇게', '있나', '있나요', '있는가',
-    '있는지', '저것', '저기', '저런',
+    '거기', '거기서', '그거', '그것', '그것은', '그것이', '그런', '그렇게', '논문은', '논문을',
+    '논문이', '논문인가', '누가', '누구', '누구인가', '누구인가요', '맞나', '맞는가', '무엇',
+    '무엇에', '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지', '뭐가', '뭐야', '뭔가',
+    '어느', '어디', '어디까지', '어디서', '어디에', '어디에서', '어디인가', '어떠한', '어떤',
+    '어떻게', '언제', '언제까지', '언제부터', '언제인가', '얼마나', '없나', '없나요', '없는가',
+    '여기', '여기서', '이거', '이것', '이것은', '이것이', '이런', '이렇게', '있나', '있나요',
+    '있는가', '있는지', '저거', '저것', '저것은', '저것이', '저기', '저기서', '저런', '저렇게',
 }
 got = set(a._CJK_QUESTION_STOPWORDS)
 assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
-" 2>/dev/null; then ok "stop-word list membership pinned (60 forms)"; else bad "stop-word list membership moved: $("$PYTHON" -c "
+# 이/그/저 계열은 대칭이어야 한다. 한 계열에서만 형태가 빠지면 그 지시어를 쓴 질문에서만
+# 조용히 필터가 새고, 목록을 훑어보는 것으로는 알아채기 어렵다.
+for suffix in ('', '이', '은'):
+    assert {b + suffix for b in ('이것', '그것', '저것')} <= got, suffix
+for suffix in ('', '서'):
+    assert {b + suffix for b in ('여기', '거기', '저기')} <= got, suffix
+" 2>/dev/null; then ok "stop-word list membership pinned (66 forms, 이/그/저 대칭)"; else bad "stop-word list membership moved: $("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
