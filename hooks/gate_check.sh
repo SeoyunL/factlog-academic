@@ -67,7 +67,14 @@ PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
 
 # Python 3.11+ is required for JSON parsing and portable path/mtime handling.
 # Fail closed: without it we cannot evaluate the predicate safely.
-if ! "${PYTHON_RUNNER[@]}" -c 'import sys' >/dev/null 2>&1; then
+#
+# stdout only is discarded here, deliberately. This is the first of the up-to-five
+# times one gate evaluation execs the runner, and the runner writes one stderr line
+# when it selects an interpreter from outside PATH (#578). Swallowing stderr at
+# every call site would make that disclosure zero-per-evaluation, which is the
+# silent selection it exists to prevent; letting it through exactly here surfaces
+# it once, alongside the deny reason a user actually reads.
+if ! "${PYTHON_RUNNER[@]}" -c 'import sys' >/dev/null; then
   echo "[factlog GATE] DENIED: usable Python 3.11+ is required to evaluate the gate predicate." >&2
   echo "  Set FACTLOG_PYTHON to a venv/system python if python3 is unavailable or is a Windows Store stub." >&2
   exit 2

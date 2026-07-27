@@ -476,6 +476,50 @@ fi
 rm -rf "$KB_OK" "$ok_err"
 
 # ---------------------------------------------------------------------------
+# CASE 18: the runner's off-PATH selection notice reaches the hook's stderr.
+#
+# The runner discloses on stderr when it execs an interpreter from outside PATH
+# (#578). Every call site here used to discard stderr, making that disclosure zero
+# per gate evaluation — a silent selection by another route. A stub runner stands
+# in for the real one so the case cannot depend on the developer's own PATH.
+# ---------------------------------------------------------------------------
+KB_NOTE="$(mktemp -d)"
+make_kb "$KB_NOTE"
+clear_config
+
+NOTE_RUNNER="$(mktemp)"
+cat > "$NOTE_RUNNER" <<'RUNNER'
+#!/usr/bin/env bash
+echo "[factlog] using /somewhere/off-path/python (test stub)" >&2
+exec python3 "$@"
+RUNNER
+
+note_err="$(mktemp)"
+note_exit=0
+FACTLOG_ROOT="$KB_NOTE" FACTLOG_PYTHON_RUNNER="$NOTE_RUNNER" bash "$GATE" \
+  <<< "$(printf '{"file_path":"%s"}' "$KB_NOTE/facts/accepted.dl")" \
+  >/dev/null 2>"$note_err" || note_exit=$?
+
+if grep -qF "[factlog] using /somewhere/off-path/python" "$note_err"; then
+  echo "PASS: runner's off-PATH selection notice survives to the hook's stderr"
+  pass=$((pass + 1))
+else
+  echo "FAIL: runner's off-PATH notice was swallowed; exit=$note_exit stderr=$(cat "$note_err")"
+  fail=$((fail + 1))
+fi
+
+# Once per evaluation, not once per runner exec, or it drowns the deny reason.
+note_count="$(grep -cF "[factlog] using /somewhere/off-path/python" "$note_err" || true)"
+if [ "$note_count" -eq 1 ]; then
+  echo "PASS: the notice appears exactly once per gate evaluation"
+  pass=$((pass + 1))
+else
+  echo "FAIL: expected the notice once per evaluation, got $note_count"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_NOTE" "$NOTE_RUNNER" "$note_err"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
