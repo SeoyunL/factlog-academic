@@ -67,24 +67,75 @@ if [ -n "${FACTLOG_PYTHON:-}" ]; then
   exit 127
 fi
 
-if command -v python3 >/dev/null 2>&1 && _version_ok python3; then
-  exec python3 "$@"
-fi
+# PATH candidates in preference order, one per line: a command name plus at most
+# one fixed argument (the Windows `py` launcher picks a version by flag). The `py`
+# rows get the same ranking as the POSIX ones — nothing here is platform-special.
+_PATH_CANDIDATES='python3
+python
+py -3.12
+py -3.11
+py -3
+py'
 
-if command -v python >/dev/null 2>&1 && _version_ok python; then
-  exec python "$@"
-fi
+# Selected interpreter, as command + optional argument (never an array: bash 3.2
+# on macOS makes empty-array expansion under `set -u` a footgun).
+_chosen_cmd=''
+_chosen_arg=''
+# First candidate that runs Python 3.11+ but has no usable engine. Kept as the
+# bootstrap fallback: `doctor` must diagnose and `setup` must install from a state
+# where pyrewire exists nowhere, so "no engine" can never be a hard failure.
+_fallback_cmd=''
+_fallback_arg=''
 
-if command -v py >/dev/null 2>&1; then
-  for version in -3.12 -3.11 -3; do
-    if _version_ok py "$version"; then
-      exec py "$version" "$@"
+_select() {
+  _chosen_cmd="$1"
+  _chosen_arg="${2:-}"
+}
+
+# One pass over the candidates, not two: re-probing to find the fallback would
+# double the process spawns in exactly the environment that has none to spare.
+_scan_path_candidates() {
+  local line cmd arg rc
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    cmd="${line%% *}"
+    arg=''
+    if [ "$line" != "$cmd" ]; then
+      arg="${line#* }"
     fi
-  done
-  if _version_ok py; then
-    exec py "$@"
+    command -v "$cmd" >/dev/null 2>&1 || continue
+    rc=0
+    if [ -n "$arg" ]; then
+      _probe "$cmd" "$arg" || rc=$?
+    else
+      _probe "$cmd" || rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
+      _select "$cmd" "$arg"
+      return 0
+    fi
+    if [ "$rc" -eq 10 ] && [ -z "$_fallback_cmd" ]; then
+      _fallback_cmd="$cmd"
+      _fallback_arg="$arg"
+    fi
+  done <<CANDIDATES
+$_PATH_CANDIDATES
+CANDIDATES
+  return 1
+}
+
+if ! _scan_path_candidates; then
+  if [ -n "$_fallback_cmd" ]; then
+    _select "$_fallback_cmd" "$_fallback_arg"
   fi
 fi
 
-echo "[factlog] no usable Python 3.11+ found. Set FACTLOG_PYTHON to a venv/system python." >&2
-exit 127
+if [ -z "$_chosen_cmd" ]; then
+  echo "[factlog] no usable Python 3.11+ found. Set FACTLOG_PYTHON to a venv/system python." >&2
+  exit 127
+fi
+
+if [ -n "$_chosen_arg" ]; then
+  exec "$_chosen_cmd" "$_chosen_arg" "$@"
+fi
+exec "$_chosen_cmd" "$@"

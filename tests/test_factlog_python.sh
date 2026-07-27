@@ -151,6 +151,62 @@ report "no pyrewire anywhere still selects a 3.11+ interpreter" "bare" "$(launch
 report "no pyrewire anywhere exits 0" "0" "$(launcher_status)"
 
 # ---------------------------------------------------------------------------
+# CASE 4: a candidate carrying the engine outranks an earlier one without it
+# ---------------------------------------------------------------------------
+ENGINE="$TMP/engine"
+make_venv "$ENGINE" "engine" "1.0.3"
+
+RANK_BIN="$TMP/rank-bin"
+make_shim "$RANK_BIN" "python3" "$(venv_python "$BARE")"
+make_shim "$RANK_BIN" "python" "$(venv_python "$ENGINE")"
+
+export PATH="$RANK_BIN:/usr/bin:/bin"
+report "later candidate with pyrewire beats earlier one without" "engine" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 5: the ranking honours the version floor, not mere importability
+#
+# pyrewire 0.9 imports fine but is below MIN_PYREWIRE, and finalize downgrades to
+# "Logic check SKIPPED" on it — silently lowering the verification tier. So an
+# under-floor engine must NOT outrank a candidate that has the real floor.
+# ---------------------------------------------------------------------------
+OLD_ENGINE="$TMP/old-engine"
+make_venv "$OLD_ENGINE" "old-engine" "0.9.0"
+
+FLOOR_BIN="$TMP/floor-bin"
+make_shim "$FLOOR_BIN" "python3" "$(venv_python "$OLD_ENGINE")"
+make_shim "$FLOOR_BIN" "python" "$(venv_python "$ENGINE")"
+
+export PATH="$FLOOR_BIN:/usr/bin:/bin"
+report "pyrewire below the floor does not outrank the floor" "engine" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 6: with the engine everywhere, the documented candidate order still wins
+# ---------------------------------------------------------------------------
+ENGINE2="$TMP/engine2"
+make_venv "$ENGINE2" "engine2" "1.0.3"
+
+ORDER_BIN="$TMP/order-bin"
+make_shim "$ORDER_BIN" "python3" "$(venv_python "$ENGINE")"
+make_shim "$ORDER_BIN" "python" "$(venv_python "$ENGINE2")"
+
+export PATH="$ORDER_BIN:/usr/bin:/bin"
+report "equally equipped candidates keep python3 first" "engine" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
+# CASE 7: the bootstrap fallback also keeps the documented order
+# ---------------------------------------------------------------------------
+BARE2="$TMP/bare2"
+make_venv "$BARE2" "bare2"
+
+FB_BIN="$TMP/fallback-bin"
+make_shim "$FB_BIN" "python3" "$(venv_python "$BARE")"
+make_shim "$FB_BIN" "python" "$(venv_python "$BARE2")"
+
+export PATH="$FB_BIN:/usr/bin:/bin"
+report "engine-less fallback keeps python3 first" "bare" "$(launcher_pick)"
+
+# ---------------------------------------------------------------------------
 echo "----"
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]
