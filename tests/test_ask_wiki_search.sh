@@ -341,18 +341,53 @@ else
 fi
 
 # =============================================================================
-# PIN 4 — path citations inside an excerpt feed the frequency score
+# PIN 4 — path citations inside an excerpt are masked out of the score (#573)
 # =============================================================================
 path_refs="$(refs "$Q_PATH" || true)"
 [ -n "$path_refs" ] || bad "PIN4 경로 인용 질의가 발췌를 0건 반환했다 (이후 PIN4 는 이 사실의 파생)"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #573 이 이를 바꾼다. reading-notes.md 의
-# 본문에는 주제에 대한 산문이 한 줄도 없다 — 'neurosymbolic' 은 오직 파일 경로 안에서만
-# 3회 나타나는데, 그 3회가 빈도 점수가 되어 실제 논문을 앞지른다 (primary vs primary,
-# 즉 등급 정렬(#572)로는 걸러지지 않는 경로다).
-same "PIN4 경로 인용만 있는 노트가 1위다 (#573 이 바꾼다)" \
-  "sources/reading-notes.md:5" \
-  "$(printf '%s\n' "$path_refs" | head -1)"
+# 이 pin 은 #573 이 갱신한 값이다 (그 전에는 "경로 인용만 있는 노트가 1위다" 를 고정했다).
+# reading-notes.md 의 본문에는 주제에 대한 산문이 한 줄도 없다 — 'neurosymbolic' 은 오직
+# 파일 경로 안에서만 3회 나타난다. #573 이 그 경로 토큰을 채점 전에 마스킹하므로 그 3회는
+# 빈도에 기여하지 않고, 노트는 1위 자리를 산문 발췌에 내준다 (primary vs primary, 즉 등급
+# 정렬(#572)로는 걸러지지 않는 경로다).
+# 새 1위의 파일명을 박지 않는 이유는 아래 상대 순서 pin 과 같다: 상위 두 건은 동점이라
+# 파일명을 박으면 #573 계약이 아니라 픽스처의 정렬 순서를 encode 하게 된다.
+if [ "$(printf '%s\n' "$path_refs" | head -1)" = "sources/reading-notes.md:5" ]; then
+  bad "PIN4 경로 인용만 있는 노트가 아직 1위다 — #573 의 경로 마스킹이 동작하지 않는다"
+else
+  ok "PIN4 경로 인용만 있는 노트는 더는 1위가 아니다 (#573 이 바꿨다)"
+fi
+
+# 감쇠 방식 자체를 고정한다: 경로 토큰은 가중치가 축소되는 게 아니라 0 이다. 마스킹 전
+# 원문 점수 (1,3) 과 나란히 확인해, 이 pin 이 "패턴이 아무것도 매치하지 못하게 됐다" 같은
+# 무관한 회귀로도 통과하지 않게 한다.
+if py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+notes = '''- sources/kim-2024-neurosymbolic-grounding.md
+- sources/kim-2024-neurosymbolic-grounding.md 의 3절
+- runs/sources/kim-2024-neurosymbolic-grounding.txt'''
+pats = a._keyword_patterns('''$Q_PATH''')
+raw = (sum(1 for p in pats if p.search(notes.lower())),
+       sum(len(p.findall(notes.lower())) for p in pats))
+assert raw == (1, 3), raw
+assert a._excerpt_score(notes, pats) == (0, 0), a._excerpt_score(notes, pats)
+" 2>/dev/null; then ok "PIN4 경로 인용의 가중치는 0 이다 — 마스킹 전 (1,3) → 채점 (0,0) (#573)"; else bad "PIN4 경로 마스킹 점수가 이동했다 — 마스킹 규칙이나 픽스처를 확인하라"; fi
+
+# 산문의 동일 키워드는 기존대로 계산된다 (#573 이 건드리지 않는 쪽). 문장 한가운데의
+# 경로 언급은 그 토큰만 사라지고 같은 문장의 산문 키워드는 그대로 남는다.
+if py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+pats = a._keyword_patterns('''$Q_PATH''')
+prose = 'neurosymbolic 추론의 근거 로그를 남긴다. neurosymbolic 근거.'
+assert a._excerpt_score(prose, pats) == (2, 4), a._excerpt_score(prose, pats)
+mixed = 'sources/faronius-2025-neurosymbolic.md 는 neurosymbolic 근거를 다룬다.'
+assert a._excerpt_score(mixed, pats) == (2, 2), a._excerpt_score(mixed, pats)
+" 2>/dev/null; then ok "PIN4 산문 키워드는 감쇠되지 않는다 — 문장 중간 경로 언급도 그 토큰만 제외된다 (#573)"; else bad "PIN4 산문 점수가 이동했다 — 경로 마스킹이 산문까지 먹고 있다"; fi
 
 # 빈 발췌를 통과로 읽지 않도록 -n 가드를 먼저 둔다: 발췌가 사라지면 첫 grep 이 rc=1 을
 # 내고 pipefail 때문에 조건 전체가 거짓이 되어, "발췌가 없다"가 "전부 경로다"와 같은
@@ -366,19 +401,21 @@ else
   ok "PIN4 그 노트의 키워드 출현은 전부 파일 경로다 (산문 기여 0)"
 fi
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #573 이 이를 바꾼다.
-# 순위 숫자가 아니라 상대 순서를 고정한다: 4~7위는 전부 (1,1) 동점이라 숫자를 박으면
-# #573 계약이 아니라 픽스처 파일명의 알파벳 순서를 encode 하게 된다.
+# 이 pin 은 #573 이 뒤집은 값이다 (그 전에는 notes_rank < kim_rank 였다).
+# 순위 숫자가 아니라 상대 순서를 고정한다: 동점 구간이 있어 숫자를 박으면 #573 계약이
+# 아니라 픽스처 파일명의 알파벳 순서를 encode 하게 된다.
+# 노트를 결과에서 지우는 것은 #573 의 범위가 아니다 — 줄 단위 매치는 그대로라 노트는
+# 여전히 반환되고, 점수만 (0,0) 이라 뒤로 밀린다. 그래서 '사라졌다' 는 여전히 실패다.
 notes_rank="$(printf '%s\n' "$path_refs" | grep -nxF 'sources/reading-notes.md:5' | cut -d: -f1 || true)"
 kim_rank="$(printf '%s\n' "$path_refs" | grep -nxF 'sources/kim-2024-neurosymbolic-grounding.md:4' | cut -d: -f1 || true)"
 if [ -z "$notes_rank" ]; then
-  bad "PIN4 경로 인용 노트가 결과에서 사라졌다 — #573 이 머지됐다면 이 pin 을 갱신하라"
+  bad "PIN4 경로 인용 노트가 결과에서 사라졌다 — #573 은 점수만 감쇠하고 recall 은 건드리지 않는다"
 elif [ -z "$kim_rank" ]; then
   bad "PIN4 비교 기준인 sources/kim-…:4 발췌가 사라졌다 — 발췌 앵커가 이동했다면(#574) 기준 발췌를 갱신하라"
-elif [ "$notes_rank" -lt "$kim_rank" ]; then
-  ok "PIN4 경로만 나열한 노트가 실제 논문을 앞선다 (${notes_rank}위 < ${kim_rank}위, #573 이 바꾼다)"
+elif [ "$notes_rank" -gt "$kim_rank" ]; then
+  ok "PIN4 실제 논문이 경로만 나열한 노트를 앞선다 (${kim_rank}위 < ${notes_rank}위, #573 이 바꿨다)"
 else
-  bad "PIN4 경로 인용 노트가 더는 실제 논문을 앞서지 않는다 — #573 이 머지됐다면 이 pin 을 갱신하라"
+  bad "PIN4 경로 인용 노트가 아직 실제 논문을 앞선다 (${notes_rank}위 <= ${kim_rank}위) — #573 의 감쇠가 동작하지 않는다"
 fi
 
 # =============================================================================

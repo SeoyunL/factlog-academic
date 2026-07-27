@@ -674,12 +674,56 @@ def _sanitize(line: str) -> str:
     return "".join(ch for ch in line if ch == "\t" or ch.isprintable())
 
 
+# KB-relative directories a cited file path can be rooted at. Kept in sync with
+# the corpus constants above (plus the remaining `factlog init` scaffold dirs,
+# which notes cite the same way even though the wiki search never reads them).
+_CITED_KB_DIRS = (
+    *WIKI_SOURCE_DIRS,
+    *WIKI_SUPPLEMENTARY_DIRS,
+    "pages",
+    "facts",
+    "policy",
+    "templates",
+    "runs",
+)
+# A KB-relative file path written inside an excerpt, e.g.
+# `sources/faronius-2025-independence-is-not-an-issue-in-neurosymbolic-ai.md` or
+# `runs/sources/kim-2024-neurosymbolic-grounding.txt`. Longest dir first so the
+# match spans the whole path (`runs/sources/…`, not `runs/` + leftovers). The
+# body stops at whitespace or the punctuation that closes a citation, so
+# `(sources/x.md, confidence=0.85)` yields just the path.
+_PATH_CITATION_RE = re.compile(
+    r"(?<![\w./-])(?:"
+    + "|".join(re.escape(rel) for rel in sorted(set(_CITED_KB_DIRS), key=len, reverse=True))
+    + r")/[^\s,;()\[\]<>\"'`]*\.\w+"
+)
+
+
 def _excerpt_score(excerpt: str, patterns: list[re.Pattern[str]]) -> tuple[int, int]:
     """Relevance of an excerpt to the query: (distinct keyword coverage, total
     match frequency). An excerpt covering more of the query's keywords ranks
     above one that merely repeats a single keyword — so the most relevant excerpt
-    surfaces even under a small result cap."""
-    low = excerpt.lower()
+    surfaces even under a small result cap.
+
+    Cited KB file paths are MASKED OUT before scoring (#573). A filename is a
+    locator for where text lives, not a claim about the topic: a note whose body
+    is a list of `sources/…-neurosymbolic-….md` links says nothing about
+    neurosymbolic anything, yet unmasked it outscored the paper itself. The
+    damping is full EXCLUSION (weight 0), not a reduced fractional weight, for
+    two reasons: (a) the score is an integer lexicographic sort key, so a
+    fractional path weight would have to widen or float the key that every
+    caller compares, a larger contract change than this defect warrants; (b) zero
+    is the honest weight — the keyword in a path is evidence about a *different*
+    file, so any nonzero weight would still let enough citations outrank prose.
+
+    Only the path token itself is removed, so prose is scored exactly as before:
+    a path mentioned mid-sentence loses its own characters and nothing else, and
+    the same keyword spelled out in the surrounding sentence still counts.
+    Recall is untouched on purpose — search() still admits an excerpt on a raw
+    line match, so a path-only note is ranked last rather than dropped; damping
+    the score is this issue's scope, discarding the result is not.
+    """
+    low = _PATH_CITATION_RE.sub(" ", excerpt.lower())
     coverage = sum(1 for pat in patterns if pat.search(low))
     frequency = sum(len(pat.findall(low)) for pat in patterns)
     return (coverage, frequency)

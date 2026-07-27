@@ -409,6 +409,29 @@ act0="$(FACTLOG_EMBED_MODULE=embed_stub PYTHONPATH="$PLUGIN_ROOT:$EMB" "$PYTHON"
 if [ -n "$act0" ] && [ "$act0" != "$top" ]; then ok "optional embedding backend reorders results (seam invoked, graceful when absent)"; else bad "embedding seam did not reorder (lex=$top act=$act0)"; fi
 rm -f "$KB/sources/rank-hi.md" "$KB/sources/rank-lo.md"
 
+# --- #573: cited file paths must not feed the keyword frequency score ---
+# primary vs primary ON PURPOSE: both files live in sources/, so a directory-grade
+# sort (#572) cannot separate them — only the path damping can. The real KB has no
+# such case, so the fixture is synthetic.
+printf '# notes\n\n- sources/graphdb-tuning-widgetterm.md\n- sources/graphdb-tuning-widgetterm.md (2절)\n- runs/sources/graphdb-tuning-widgetterm.txt\n' > "$KB/sources/pathcite-notes.md"
+printf '# tuning\n\nThis paper measures widgetterm latency in a graph database.\n' > "$KB/sources/graphdb-tuning-widgetterm.md"
+pc_top="$(router search "widgetterm" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d['results'][0]['file'] if d['results'] else '')")"
+if [ "$pc_top" = "sources/graphdb-tuning-widgetterm.md" ]; then ok "#573: prose about the keyword outranks a note that only cites its path"; else bad "#573: path citations still win the ranking (top=$pc_top)"; fi
+# recall is untouched: the path-only note is demoted, not dropped
+if router search "widgetterm" | grep -qF 'sources/pathcite-notes.md'; then ok "#573: path-only note is still returned (score damped, recall unchanged)"; else bad "#573: path-only note disappeared from results (damping must not drop recall)"; fi
+# prose keeps its full weight, including a path mentioned mid-sentence
+printf '# mixed\n\nsources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.\n' > "$KB/sources/pathcite-mixed.md"
+pc_mixed="$("$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a
+pats = a._keyword_patterns('widgetterm')
+line = 'sources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.'
+print(a._excerpt_score(line, pats), a._excerpt_score('widgetterm widgetterm', pats))
+")"
+if [ "$pc_mixed" = "(1, 1) (1, 2)" ]; then ok "#573: only the path token is dropped; prose keywords count as before"; else bad "#573: prose scoring moved (got $pc_mixed)"; fi
+rm -f "$KB/sources/pathcite-notes.md" "$KB/sources/graphdb-tuning-widgetterm.md" "$KB/sources/pathcite-mixed.md"
+
 # --- #32: grounded answers (verified facts about mentioned entities) ---
 gw="$(router wiki "tell me about Acme API")"
 printf '%s' "$gw" | grep -qF "VERIFIED — engine (grounding" && ok "wiki answer includes a VERIFIED grounding block" || bad "no grounding block"
