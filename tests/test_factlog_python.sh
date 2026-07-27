@@ -301,6 +301,8 @@ make_venv "$ELSEWHERE" "elsewhere" "1.0.3"
 
 export PATH="$DOC_BIN:/usr/bin:/bin"
 report "a venv outside the fixed paths is never discovered" "bare" "$(launcher_pick)"
+# Belt and braces before an rm -rf: $HOME is this run's sandbox, never the real one.
+[ "$HOME" = "$TMP/home" ] || exit 1
 rm -rf "$HOME/.virtualenvs"
 
 # ---------------------------------------------------------------------------
@@ -344,6 +346,54 @@ case "$second" in
   *"$DOC_VENV"*) report "second call announces it too" "named" "named" ;;
   *) report "second call announces it too" "named" "[$second]" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# CASE 16: the Windows `py` launcher — the version flag survives probe AND exec
+#
+# `py` alone may resolve to a Python below the floor, so the flag is not
+# decoration: dropping it in either place silently changes which interpreter runs.
+# This shim answers only to `-3.12`, so a lost flag shows up as no selection at all.
+# ---------------------------------------------------------------------------
+PY_BIN="$TMP/py-bin"
+mkdir -p "$PY_BIN"
+cat > "$PY_BIN/py" <<PYSHIM
+#!/bin/sh
+printf '%s\n' "py \$1" >> "\${FACTLOG_TEST_CALLS:-/dev/null}"
+if [ "\$1" = "-3.12" ]; then
+  shift
+  exec "$(venv_python "$ENGINE")" "\$@"
+fi
+exit 1
+PYSHIM
+chmod +x "$PY_BIN/py"
+
+export PATH="$PY_BIN:/usr/bin:/bin"
+report "py -3.12 is probed and exec'd with its flag" "engine" "$(launcher_pick)"
+
+# The same, one row further down the table: only `py -3` answers here.
+cat > "$PY_BIN/py" <<PYSHIM
+#!/bin/sh
+if [ "\$1" = "-3" ]; then
+  shift
+  exec "$(venv_python "$ENGINE2")" "\$@"
+fi
+exit 1
+PYSHIM
+chmod +x "$PY_BIN/py"
+
+report "the py table falls through to -3" "engine2" "$(launcher_pick)"
+
+# And bare `py`, the last row of the table.
+cat > "$PY_BIN/py" <<PYSHIM
+#!/bin/sh
+case "\$1" in
+  -3*) exit 1 ;;
+esac
+exec "$(venv_python "$ENGINE")" "\$@"
+PYSHIM
+chmod +x "$PY_BIN/py"
+
+report "the py table ends with bare py" "engine" "$(launcher_pick)"
 
 # ---------------------------------------------------------------------------
 echo "----"
