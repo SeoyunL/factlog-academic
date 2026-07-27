@@ -9,8 +9,12 @@
 # interprets as a permissionDecision=deny and blocks the tool call.
 #
 # FALSIFIABLE predicate (per CRITIC M4 + bootstrap fix):
-#   Let TARGET be the tool target path. TARGET is an "engine input" iff it
-#   resolves to <KB_ROOT>/facts/accepted.dl OR <KB_ROOT>/facts/query.dl.
+#   Let TARGET be the tool target path, read from tool_input.file_path in the
+#   PreToolUse envelope (top level kept as a legacy fallback — see #591). TARGET
+#   is an "engine input" iff it resolves to <KB_ROOT>/facts/accepted.dl OR
+#   <KB_ROOT>/facts/query.dl. If TARGET cannot be read at all but the raw payload
+#   names one of those two files, it counts as an engine input of unknown
+#   identity: branch B cannot apply and only branch C can allow.
 #
 #   ALLOW (exit 0) iff any of:
 #     A. TARGET is not an engine input; OR
@@ -41,6 +45,20 @@
 # that write does not match the active KB_ROOT and is allowed. This is
 # intentional and consistent with the tools, which also resolve to the active KB.
 #
+# That scope rule is a statement about RESOLVED targets, and it has exactly one
+# exception, which follows from its own reasoning: when the target path cannot be
+# read out of the payload at all (see the extraction block below), there is no
+# path to compare against KB_ROOT, so which KB is meant is not merely unknown but
+# unknowable. The scope rule has no input to apply. The fallback probe matches on
+# filename alone and is therefore KB-blind: a payload we cannot parse that names
+# facts/accepted.dl is judged against the ACTIVE KB's report even if it meant
+# some other KB's copy. That errs toward denying, never toward allowing, so it
+# takes nothing away from the guarantee above — and it stays escapable, since a
+# fresh report in the active KB lets the write through. Making the probe
+# KB-scoped instead would mean pattern-matching KB_ROOT against text we have
+# already failed to parse, and would silently miss relative paths, which is the
+# one direction this branch must not fail in.
+#
 # If the resolver cannot run (e.g. the factlog package is unavailable), KB_ROOT
 # safely degrades to the prior ${FACTLOG_ROOT:-.} behaviour (usually cwd). This
 # is a fail-to-previous-behaviour, NOT a fail-closed: it opens no new hole beyond
@@ -51,7 +69,9 @@
 # The only true fail-closed here is the python-availability check below (which
 # DENYs when no usable Python 3.11+ is present, since the predicate cannot then
 # be evaluated). Target-path extraction failures for engine-input-shaped payloads
-# likewise deny.
+# likewise deny — a claim this header made from #239 onward while the code below
+# allowed them unconditionally; #591 turned that gap into the live defect and the
+# extraction block now implements what is written here.
 
 set -euo pipefail
 
@@ -109,17 +129,79 @@ else
 fi
 
 # Extract the tool target from the hook payload.
-# Claude Code sends the tool input as JSON on stdin.
-# The relevant field is "file_path" for Write and "file_path" for Edit.
+#
+# Claude Code sends an ENVELOPE on stdin, not the bare tool input (#591):
+#   {"session_id":..., "cwd":..., "hook_event_name":"PreToolUse",
+#    "tool_name":"Write", "tool_input":{"file_path":..., "content":...},
+#    "tool_use_id":...}
+# so the target lives at tool_input.file_path — for Edit exactly as for Write,
+# both tools name it "file_path". Reading only the TOP level (the pre-#591
+# behaviour) found nothing in every real invocation and fell through to the
+# fail-open below, which is why this gate never once fired in production.
+# The top-level lookup is kept as a LEGACY fallback for callers that pipe a bare
+# tool input (older harnesses, manual `echo '{"file_path":...}' | gate_check.sh`).
+#
+# tool_name is deliberately NOT consulted. Routing is hooks.json's job (its
+# matcher is Write|Edit); this hook's predicate is about the TARGET, so whatever
+# tool call is routed here is judged by the path it carries and nothing else.
+# Gating on tool_name would re-add a fail-open on an unrecognised/renamed field —
+# the exact failure mode #591 was.
 target_path="$(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c \
-  "import json,sys; d=json.load(sys.stdin); print(d.get('file_path','') or d.get('path',''))" \
+  "import json,sys; d=json.load(sys.stdin); d=d if isinstance(d,dict) else {}; ti=d.get('tool_input'); ti=ti if isinstance(ti,dict) else {}; print(ti.get('file_path') or ti.get('path') or d.get('file_path') or d.get('path') or '')" \
   2>/dev/null || true)"
 
-# If we could not extract a path, allow the tool to proceed (fail open).
-# An empty/unparseable payload cannot target an engine input, so allowing here
-# does not weaken the engine-input guard below.
+# No path extracted. Two causes hide behind one symptom, and #591 proved they
+# must NOT share a verdict:
+#
+#   (a) the payload genuinely names no engine input (a pathless probe, a shape
+#       this hook is not meant to judge, plain garbage on stdin), or
+#   (b) the payload DOES carry an engine input but under a key/shape we failed
+#       to read — a future schema change, a tool form we did not anticipate.
+#
+# The pre-#591 comment asserted "an empty/unparseable payload cannot target an
+# engine input" and allowed both. That premise was FALSE for (b): the path was
+# in the payload all along, we looked in the wrong place, and the gate SKILL.md
+# calls "do not skip" silently permitted every engine-input write for its whole
+# existence. An assumption that a payload we cannot read is harmless is not
+# something this gate gets to make about its own two files.
+#
+# So separate them by evidence rather than by assumption: scan the RAW payload
+# text for an engine-input filename (the shape-agnostic probe gate_reminder.sh
+# already relies on, so it survives envelope changes). Present → treat the write
+# as targeting an unknown engine input and fall through to the freshness
+# predicate (fail-closed-ish). Absent → allow, and now the premise is actually
+# checked instead of assumed.
+#
+# Deliberately NOT a blanket deny-on-unreadable: this hook fires on every Write
+# and Edit in a session, so denying whenever a path cannot be parsed would brick
+# all file editing over a contract that covers exactly two files.
+#
+# The residual false positive is a non-engine write whose CONTENT mentions
+# facts/accepted.dl — reachable only once extraction has ALREADY failed, i.e. in
+# a state that should not occur, and recoverable by running /factlog check
+# (see below: the predicate, not a hard deny, decides the verdict).
+#
+# The probe is a shell `case`, not grep. An external command here would decide a
+# security verdict on whether PATH happens to contain it: with grep missing, the
+# `if` condition simply failed (set -e does not fire inside an `if`) and the gate
+# ALLOWED — a second fail-open with a second trigger, reached without touching
+# the payload logic at all. Everything this branch needs is glob matching, which
+# the shell already has, so the probe now depends on nothing but bash. The
+# separator appears three ways in raw payload text: "/" on POSIX, a lone "\" in
+# text JSON never escaped, and "\\" once JSON has escaped a Windows backslash.
+target_unresolved=false
 if [ -z "$target_path" ]; then
-  exit 0
+  case "$payload" in
+    *facts/accepted.dl*     | *facts/query.dl*     | \
+    *'facts\accepted.dl'*   | *'facts\query.dl'*   | \
+    *'facts\\accepted.dl'*  | *'facts\\query.dl'*)
+      target_unresolved=true
+      echo "[factlog GATE] note: could not extract a target path from the hook payload, but it names an engine input; evaluating the freshness predicate conservatively." >&2
+      ;;
+    *)
+      exit 0
+      ;;
+  esac
 fi
 
 # Normalise: check whether the target is facts/accepted.dl or facts/query.dl
@@ -133,16 +215,23 @@ _canon() {
   "${PYTHON_RUNNER[@]}" -c "import os,sys; print(os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1]))))" "$1" 2>/dev/null || printf '%s' "$1"
 }
 
-abs_target="$(_canon "$target_path")"
-
 is_engine_input=false
-for engine_file in "${KB_ROOT}/facts/accepted.dl" "${KB_ROOT}/facts/query.dl"; do
-  abs_engine="$(_canon "$engine_file")"
-  if [ "$abs_target" = "$abs_engine" ]; then
-    is_engine_input=true
-    break
-  fi
-done
+abs_target=""
+if [ "$target_unresolved" = true ]; then
+  # Path unreadable but the payload names an engine input: assume it is one.
+  # abs_target stays empty on purpose — we do not know WHICH file, so no on-disk
+  # test may be run against it (see the bootstrap branch below).
+  is_engine_input=true
+else
+  abs_target="$(_canon "$target_path")"
+  for engine_file in "${KB_ROOT}/facts/accepted.dl" "${KB_ROOT}/facts/query.dl"; do
+    abs_engine="$(_canon "$engine_file")"
+    if [ "$abs_target" = "$abs_engine" ]; then
+      is_engine_input=true
+      break
+    fi
+  done
+fi
 
 # If the target is not an engine input file, allow the tool to proceed.
 if [ "$is_engine_input" = false ]; then
@@ -159,7 +248,14 @@ query="${KB_ROOT}/facts/query.dl"
 # preceded by a report. Allow it; the stale-guard takes over once a report
 # exists. We test the on-disk existence of the *target* (not the path string)
 # so this only relaxes the genuine first-write case.
-if [ ! -f "$report" ] && [ ! -e "$abs_target" ]; then
+#
+# When the target could not be resolved (target_unresolved), abs_target is empty
+# and this branch is skipped: bootstrap is a claim about ONE specific file being
+# absent, and we do not know which file was named. Skipping it costs nothing —
+# running /factlog check in a fresh KB writes a report that no existing input
+# post-dates, so the predicate below then allows. The gate stays escapable
+# instead of deadlocking.
+if [ "$target_unresolved" = false ] && [ ! -f "$report" ] && [ ! -e "$abs_target" ]; then
   exit 0
 fi
 
