@@ -324,7 +324,7 @@ print(json.load(sys.stdin)['results'][0]['dir'])
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #571 이 이를 바꾼다. 철회 공지는 질문과
 # 주제가 전혀 겹치지 않는데도, 기능어 '논문은' 하나만으로 결과에 들어온다.
-retraction="$(excerpt_of "$Q_KO" 'sources/0000_RETRACTION_16354850.md:3')"
+retraction="$(excerpt_of "$Q_KO" 'sources/0000_RETRACTION_16354850.md:3' || true)"
 if [ -n "$retraction" ] && ! printf '%s' "$retraction" | grep -qE '신경기호|추론|근거'; then
   ok "PIN3 무관 문서가 기능어 '논문은' 단독으로 결과에 오른다 (#571 이 바꾼다)"
 else
