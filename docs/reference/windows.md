@@ -37,7 +37,13 @@ $env:FACTLOG_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 `$FACTLOG_PYTHON` 이 설정되지 않았을 때의 선택 순서는 다음과 같습니다.
 
 1. `$VIRTUAL_ENV` 의 인터프리터 — venv를 활성화했다는 명시적 신호.
-   **버전 조건만** 봅니다(pyrewire 를 요구하지 않습니다)
+   **버전 조건만** 봅니다(pyrewire 를 요구하지 않습니다).
+   그래서 엔진이 없는 venv 를 활성화해 두면, PATH 의 `python3` 가 엔진을 갖고 있어도
+   그쪽이 아니라 활성 venv 가 선택됩니다. **그 결과 `finalize` 의 로직 검사가
+   "Logic check SKIPPED" 로 내려갑니다** — 검증 티어가 한 칸 낮아진 채로 진행됩니다.
+   게다가 `activate` 는 venv 의 실행 파일 폴더를 PATH 에 넣으므로 아래의 stderr 고지
+   조건(PATH 밖)에 걸리지 않아 아무 말도 나오지 않습니다. 원래 티어로 돌리려면 그
+   venv 안에 `setup` 으로 엔진을 설치하거나 venv 를 비활성화하십시오
 2. PATH 후보(`python3`, `python`, `py -3.12`/`-3.11`/`-3`, `py`) 중 **pyrewire
    1.0.3 이상을 가진** 첫 번째
 3. `~/.factlog-venv` 의 인터프리터 — 아래 PEP 668 안내가 만들도록 지시하는 고정 경로.
@@ -47,7 +53,9 @@ $env:FACTLOG_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
    `doctor` 와 `setup` 이 실행돼야 하므로 여기서 실패하지 않습니다
 
 PATH 밖의 인터프리터가 선택되면 어느 것을 골랐는지 stderr 에 한 줄 출력합니다.
-고정된 이 두 경로 외의 venv는 탐색하지 않습니다. 선택 결과는 **캐시하지 않습니다** —
+venv 를 **탐색하지는 않습니다** — 후보는 `~/.factlog-venv` 라는 고정 경로 하나와,
+`$VIRTUAL_ENV` 가 가리키는 곳뿐입니다. 뒤의 것은 고정 경로가 아니라 사용자가
+활성화로 직접 지정한 값입니다. 선택 결과는 **캐시하지 않습니다** —
 호출할 때마다 후보를 다시 실행해 확인하므로, 인터프리터의 상태가 바뀌면 즉시 반영됩니다.
 
 여러분의 Python이 외부 관리(PEP 668) 상태라면 pip이 그 안으로의 설치를
