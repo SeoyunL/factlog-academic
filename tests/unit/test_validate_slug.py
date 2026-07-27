@@ -106,3 +106,38 @@ class TestValidateSourceRef:
         # be rejected — dropping front_matter_body (feeding read(path)) fails here.
         err = validate.validate_source_ref(tmp_path, "src.md#title-a-paper-authors-ada-bob")
         assert err and "section does not exist" in err
+
+
+class TestHeadingAnchors:
+    """The positional view heading_slugs is now the membership view of (#576).
+
+    Two callers ask about the same anchor set — validate_source_ref asks whether one
+    exists, the wiki bridge asks where it lands — and the point of deriving one from
+    the other is that they cannot answer differently about the same document.
+    """
+
+    BODY = (
+        "# Top\n\n## CRISPR/Cas9 results\n\nbody\n\n```\n## Fenced\n```\n\n"
+        "## Abstract\n\nfirst\n\n## Abstract\n\nsecond\n"
+    )
+
+    def test_membership_view_matches_exactly(self):
+        assert validate.heading_slugs(self.BODY) == set(validate.heading_anchors(self.BODY))
+
+    def test_positions_are_the_heading_lines(self):
+        anchors = validate.heading_anchors(self.BODY)
+        lines = self.BODY.splitlines()
+        assert lines[anchors["crisprcas9-results"]] == "## CRISPR/Cas9 results"
+        assert lines[anchors["abstract"]] == "## Abstract"
+
+    def test_duplicate_suffix_points_at_the_second_heading(self):
+        # foo / foo-1 is GitHub's numbering; the positions have to follow the same
+        # document order, or the suffix names one heading and locates another.
+        anchors = validate.heading_anchors(self.BODY)
+        assert anchors["abstract"] < anchors["abstract-1"]
+        assert self.BODY.splitlines()[anchors["abstract-1"]] == "## Abstract"
+
+    def test_fenced_heading_has_no_position(self):
+        # #521 from the positional side: a heading no renderer shows must not be
+        # locatable either, or the bridge anchors an excerpt inside a code block.
+        assert "fenced" not in validate.heading_anchors(self.BODY)

@@ -129,8 +129,8 @@ def slugify_heading(heading: str) -> str:
     return re.sub(r"\s+", "-", text).strip("-")
 
 
-def heading_slugs(text: str) -> set[str]:
-    """Every anchor a markdown body exposes.
+def heading_anchors(text: str) -> dict[str, int]:
+    """Every anchor a markdown body exposes -> the 0-based line index it points at.
 
     Which lines *are* headings is :mod:`factlog.md_lines`'s question, not this
     function's: it walks the document fence-aware, so a ``## Fake Anchor`` written
@@ -153,17 +153,31 @@ def heading_slugs(text: str) -> set[str]:
     underline it would otherwise read as a level-2 heading. Callers pass
     :func:`factlog.front_matter_scan.front_matter_body` (the boundary owner), not
     raw source text.
+
+    The POSITION is here rather than in a second walk because two callers now need
+    the same anchor set for different reasons — ``validate_source_ref`` asks whether
+    an anchor exists, and the wiki bridge (#576) asks where it lands — and a
+    same-shaped copy of the slug rule is how a "does this anchor exist" answer and a
+    "where is it" answer drift into disagreeing about the same ref. A duplicated
+    slug keeps its FIRST heading's line, so the position answers the same document
+    order the duplicate suffixes are numbered in.
     """
     seen: dict[str, int] = {}
-    slugs: set[str] = set()
+    anchors: dict[str, int] = {}
     for heading in headings(text):
         title = heading.title
         base = slugify_heading(title)
         n = seen.get(base, 0)
         seen[base] = n + 1
-        slugs.add(base if n == 0 else f"{base}-{n}")
-        slugs.add(re.sub(r"\s+", "-", title.lower()))  # legacy naive slug
-    return slugs
+        anchors.setdefault(base if n == 0 else f"{base}-{n}", heading.start)
+        anchors.setdefault(re.sub(r"\s+", "-", title.lower()), heading.start)  # legacy naive slug
+    return anchors
+
+
+def heading_slugs(text: str) -> set[str]:
+    """Every anchor a markdown body exposes. See :func:`heading_anchors`, which this
+    is the membership view of — one walk, one slug rule, two questions."""
+    return set(heading_anchors(text))
 
 
 def validate_source_ref(root: Path, source_ref: str, *, allow_missing_file: bool = False) -> str | None:
