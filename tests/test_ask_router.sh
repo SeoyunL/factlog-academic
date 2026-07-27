@@ -409,6 +409,98 @@ act0="$(FACTLOG_EMBED_MODULE=embed_stub PYTHONPATH="$PLUGIN_ROOT:$EMB" "$PYTHON"
 if [ -n "$act0" ] && [ "$act0" != "$top" ]; then ok "optional embedding backend reorders results (seam invoked, graceful when absent)"; else bad "embedding seam did not reorder (lex=$top act=$act0)"; fi
 rm -f "$KB/sources/rank-hi.md" "$KB/sources/rank-lo.md"
 
+# --- #573: cited file paths must not feed the keyword frequency score ---
+# primary vs primary ON PURPOSE: both files live in sources/, so a directory-grade
+# sort (#572) cannot separate them — only the path damping can. The real KB has no
+# such case, so the fixture is synthetic.
+printf '# notes\n\n- sources/graphdb-tuning-widgetterm.md\n- sources/graphdb-tuning-widgetterm.md (2절)\n- runs/sources/graphdb-tuning-widgetterm.txt\n' > "$KB/sources/pathcite-notes.md"
+printf '# tuning\n\nThis paper measures widgetterm latency in a graph database.\n' > "$KB/sources/graphdb-tuning-widgetterm.md"
+pc_top="$(router search "widgetterm" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d['results'][0]['file'] if d['results'] else '')")"
+if [ "$pc_top" = "sources/graphdb-tuning-widgetterm.md" ]; then ok "#573: prose about the keyword outranks a note that only cites its path"; else bad "#573: path citations still win the ranking (top=$pc_top)"; fi
+# collection is untouched: the path-only note is demoted, not filtered out. (Under a
+# result cap a (0,0) excerpt can still fall outside the cap — that is ranking, not a filter.)
+if router search "widgetterm" | grep -qF 'sources/pathcite-notes.md'; then ok "#573: path-only note is still collected (score damped, not filtered out)"; else bad "#573: path-only note disappeared from results (damping must not filter)"; fi
+# a path mentioned mid-sentence loses only its own token — searched, not just scored
+printf '# mixed\n\nsources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.\n' > "$KB/sources/pathcite-mixed.md"
+pc_order="$(router search "widgetterm" | "$PYTHON" -c "
+import json, sys
+files = [r['file'] for r in json.load(sys.stdin)['results']]
+mixed, notes = 'sources/pathcite-mixed.md', 'sources/pathcite-notes.md'
+print('ok' if mixed in files and notes in files and files.index(mixed) < files.index(notes) else files)
+")"
+if [ "$pc_order" = "ok" ]; then ok "#573: prose keyword survives beside a path citation in the same sentence (ranks above the path-only note)"; else bad "#573: mid-sentence path masking swallowed the prose keyword (order=$pc_order)"; fi
+# the damping boundaries, at score level: what must NOT be masked. Each line below
+# fails if one of the guards is dropped — the lookbehind (a dir name ending another
+# word), the extension requirement (a directory reference, no file), the root-relative
+# restriction, and the prose baseline.
+pc_edges="$("$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a
+pats = a._keyword_patterns('widgetterm')
+score = lambda text: a._excerpt_score(text, pats)
+runon = a._keyword_patterns('runs policy')
+print(score('sources/graphdb-tuning-widgetterm.md 는 widgetterm 을 다룬다.'),  # mid-sentence path
+      score('widgetterm widgetterm'),                                          # plain prose
+      score('resources/x-widgetterm.md'),                                      # 'sources' ends another word
+      score('sources/widgetterm/ 디렉터리'),                                    # a dir, not a file
+      score('./sources/x-widgetterm.md'),                                      # not root-relative
+      # scaffold dirs are ordinary English nouns: a missing space after a full stop
+      # must not turn prose into a path (common in PDF->text under runs/sources/)
+      a._excerpt_score('we performed 3 runs/day.The results were stable', runon),
+      a._excerpt_score('the policy/value.Networks are trained jointly', runon),
+      # a Korean particle glued to a citation belongs to the citation, not to prose
+      a._excerpt_score('sources/kim-widgetterm.md에서', a._keyword_patterns('에서 widgetterm')),
+      # scaffold dirs outside the searched corpus are damped too: decisions/open-questions.md
+      # in the reference KB cites 154 pages/*.md paths (measured), and those are locators
+      score('- stale_source: pages/widgetterm.md references a removed source'))
+")"
+if [ "$pc_edges" = "(1, 1) (1, 2) (1, 1) (1, 1) (1, 1) (1, 1) (1, 1) (0, 0) (0, 0)" ]; then ok "#573: damping is bounded — only a root-relative KB path with a source-text extension is masked"; else bad "#573: damping boundaries moved (got $pc_edges)"; fi
+# Every axis of the damping, swept rather than sampled: dropping one directory or one
+# extension from the constants must fail here. The extension list is DERIVED from
+# ingest.INGEST_CONVERTERS + the KB's own file-type constants, so this sweep is also
+# what catches an ingest format joining the repo without joining the damping.
+if "$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a
+pats = a._keyword_patterns('widgetterm')
+for rel in a._CITED_KB_DIRS:                      # every scaffold root is damped
+    text = f'{rel}/x-widgetterm.md 를 봤다'
+    assert a._excerpt_score(text, pats) == (0, 0), (rel, a._excerpt_score(text, pats))
+for ext in a._CITATION_EXTS:                      # every citable extension is damped
+    text = f'sources/x-widgetterm.{ext} 를 봤다'
+    assert a._excerpt_score(text, pats) == (0, 0), (ext, a._excerpt_score(text, pats))
+for ext in ('py', 'exe', 'png', 'zip'):           # non-source extensions are NOT damped
+    text = f'sources/x-widgetterm.{ext} 를 봤다'
+    assert a._excerpt_score(text, pats) == (1, 1), (ext, a._excerpt_score(text, pats))
+# the two axes the reference KB cannot exercise: a decisions/ citation (none in the KB)
+# and a runs/ data file (all real citations are .md/.csv)
+assert a._excerpt_score('decisions/open-questions-widgetterm.md 참고', pats) == (0, 0)
+assert a._excerpt_score('runs/2024-widgetterm.json 로그', pats) == (0, 0)
+# The sweeps above iterate the constants themselves, so they cannot see an entry being
+# DELETED. These membership checks can. INGEST_CONVERTERS is compared live, so a format
+# added to ingest without joining the damping fails here rather than silently regressing
+# a Korean-original KB (.hwp/.hwpx/.pptx/.odt were missed exactly that way).
+from factlog import ingest
+assert {ext.lstrip('.') for ext in ingest.INGEST_CONVERTERS} <= set(a._CITATION_EXTS), (
+    sorted({ext.lstrip('.') for ext in ingest.INGEST_CONVERTERS} - set(a._CITATION_EXTS)))
+assert {'csv', 'dl', 'json', 'md', 'txt', 'yaml', 'yml'} <= set(a._CITATION_EXTS), a._CITATION_EXTS
+assert {'sources', 'runs/sources', 'decisions', 'pages', 'facts', 'policy', 'templates',
+        'runs'} <= set(a._CITED_KB_DIRS), a._CITED_KB_DIRS
+" 2>/dev/null; then ok "#573: damping covers every scaffold dir and every citable extension (derived from INGEST_CONVERTERS)"; else bad "#573: a directory or extension axis of the damping is uncovered — run the sweep by hand"; fi
+# The compiled pattern must be byte-identical across processes: the dir/ext sets are
+# built from set unions, whose iteration order follows PYTHONHASHSEED. Sorting is what
+# makes it stable, and no functional assertion can catch its removal.
+pc_pat_a="$(PYTHONHASHSEED=1 "$PYTHON" -c "
+import sys; sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a; print(a._PATH_CITATION_RE.pattern)")"
+pc_pat_b="$(PYTHONHASHSEED=987654321 "$PYTHON" -c "
+import sys; sys.path.insert(0, '$PLUGIN_ROOT/tools')
+import ask_router as a; print(a._PATH_CITATION_RE.pattern)")"
+if [ -n "$pc_pat_a" ] && [ "$pc_pat_a" = "$pc_pat_b" ]; then ok "#573: the compiled path pattern is deterministic across PYTHONHASHSEED"; else bad "#573: path pattern varies by hash seed — a set is being iterated unsorted"; fi
+rm -f "$KB/sources/pathcite-notes.md" "$KB/sources/graphdb-tuning-widgetterm.md" "$KB/sources/pathcite-mixed.md"
+
 # --- #32: grounded answers (verified facts about mentioned entities) ---
 gw="$(router wiki "tell me about Acme API")"
 printf '%s' "$gw" | grep -qF "VERIFIED — engine (grounding" && ok "wiki answer includes a VERIFIED grounding block" || bad "no grounding block"

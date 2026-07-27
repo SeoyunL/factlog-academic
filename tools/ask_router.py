@@ -126,7 +126,7 @@ from common import (  # noqa: E402
     is_sync_ignored,
     sync_ignore_patterns,
 )
-from factlog import literal_types  # noqa: E402
+from factlog import ingest, literal_types  # noqa: E402
 
 # Keep the default answer short enough to scan while retaining an explicit,
 # deterministic escape hatch for audit work.  This cap is deliberately applied
@@ -674,12 +674,100 @@ def _sanitize(line: str) -> str:
     return "".join(ch for ch in line if ch == "\t" or ch.isprintable())
 
 
+# The closed set of directories `factlog init` scaffolds — the only roots a
+# KB-relative citation can start from. It is NOT narrowed to the searched corpus
+# (sources/ + runs/sources/ + decisions/): measured over the corpus of the
+# reference KB (187 readable files under those three dirs), the 533 masked
+# citations are 378 `sources/…`, 154 `pages/…` and 1 `policy/…` — narrowing would
+# leave those 155 non-corpus citations scoring like prose. facts/, templates/ and
+# bare runs/ measure zero hits there but stay in the set: it is the scaffold's
+# closed list, and the extension whitelist below bounds what they can misfire on.
+_CITED_KB_DIRS = (
+    *WIKI_SOURCE_DIRS,
+    *WIKI_SUPPLEMENTARY_DIRS,
+    "pages",
+    "facts",
+    "policy",
+    "templates",
+    "runs",
+)
+# Extensions a KB citation can end in — DERIVED, never hand-listed. Every original
+# format `factlog ingest` accepts (INGEST_CONVERTERS) plus the KB's own file types
+# taken from the constants that already define them, plus the plain text/data the KB
+# is written in. The first cut of this list was written by hand and let .docx/.pdf in
+# while .hwp/.hwpx/.pptx/.odt/.dl stayed out — which silently left #573's defect
+# standing for a KB of Korean originals, the very corpus this repo supports first
+# class. Deriving is also why importing factlog.ingest here is worth its 0.5 ms.
+#
+# Requiring an extension at all (rather than a bare `\.\w+`) is what keeps prose out:
+# several scaffold dirs are ordinary English nouns, so "3 runs/day.The results" and
+# "the policy/value.Networks are trained jointly" were eaten as paths and lost their
+# keywords — run-on sentences like that are common in PDF→text conversions under
+# runs/sources/. Note this NARROWS the misfire surface, it does not remove it: prose
+# whose next word STARTS with a listed extension is still eaten ("policy/value.Txt is
+# odd", "pages/index.Htmlish"). Every extension added widens that surface, which is
+# the price of covering the formats above; measured on the reference KB the residual
+# cost is zero (all 533 masked citations are real). The trailing `\w*` keeps an
+# attached Korean particle inside the match (`policy/attribute-relations.md에`, which
+# occurs in the reference KB); if it ever swallows too much of an unspaced CJK 어절,
+# narrow it to `[가-힣]*` rather than dropping it.
+_CITATION_EXTS = tuple(
+    sorted(
+        {"md", "txt", "json", "yml", "yaml"}
+        | {path.suffix.lstrip(".") for path in (ACCEPTED_DL, CANDIDATES_CSV, LOGIC_POLICY_DL)}
+        | {ext.lstrip(".") for ext in ingest.INGEST_CONVERTERS}
+    )
+)
+# A KB-root-relative file path written inside an excerpt, e.g.
+# `sources/faronius-2025-independence-is-not-an-issue-in-neurosymbolic-ai.md` or
+# `runs/sources/kim-2024-neurosymbolic-grounding.txt`. Root-relative ONLY: `./sources/x.md`,
+# `~/kb/sources/x.md`, an absolute path, a bare filename and a `#anchor` fragment are
+# NOT damped (zero such citations in the reference KB; left to a follow-up issue).
+# The dir alternation is sorted (-len, name) purely so the compiled pattern string is
+# byte-identical across processes — set iteration order varies with PYTHONHASHSEED, and
+# this repo treats determinism as a contract. Order does not affect what is matched: the
+# body character class includes '/', so a shorter root that matches first still swallows
+# the rest of the path. The body stops at whitespace or the punctuation that closes a
+# citation, so `(sources/x.md, confidence=0.85)` yields just the path.
+_PATH_CITATION_RE = re.compile(
+    r"(?<![\w./-])(?:"
+    + "|".join(re.escape(rel) for rel in sorted(set(_CITED_KB_DIRS), key=lambda rel: (-len(rel), rel)))
+    + r")/[^\s,;()\[\]<>\"'`]*\.(?:"
+    + "|".join(_CITATION_EXTS)
+    + r")\w*"
+)
+
+
 def _excerpt_score(excerpt: str, patterns: list[re.Pattern[str]]) -> tuple[int, int]:
     """Relevance of an excerpt to the query: (distinct keyword coverage, total
     match frequency). An excerpt covering more of the query's keywords ranks
     above one that merely repeats a single keyword — so the most relevant excerpt
-    surfaces even under a small result cap."""
-    low = excerpt.lower()
+    surfaces even under a small result cap.
+
+    Cited KB file paths are MASKED OUT before scoring (#573). A filename is a
+    locator for where text lives, not a claim about the topic: a note whose body
+    is a list of `sources/…-neurosymbolic-….md` links says nothing about
+    neurosymbolic anything, yet unmasked it outscored the paper itself. The
+    damping is full EXCLUSION (weight 0), not a reduced fractional weight, for
+    two reasons: (a) this score is an integer lexicographic sort key whose SCALE
+    is itself pinned — a fractional path weight would have to float the key (a
+    contract change for every caller that compares it) and the integer workaround,
+    scaling prose up instead, changes what a plain prose line scores; (b) zero is
+    the honest weight — the keyword in a path is evidence about a *different*
+    file, so any nonzero weight would still let enough citations outrank prose.
+
+    Only the path token itself is removed, so prose is scored exactly as before:
+    a path mentioned mid-sentence loses its own characters and nothing else, and
+    the same keyword spelled out in the surrounding sentence still counts.
+    COLLECTION recall is untouched on purpose — search() gates an excerpt on the
+    raw, unmasked line, so a path-only note is still collected and ranked rather
+    than filtered out. It is NOT retained unconditionally in the rendered answer:
+    a (0, 0) excerpt sinks below better-scoring ones and can fall outside
+    search()'s `limit` cap (measured: with the default cap of 10, a demoted
+    decisions/ excerpt drops out of the top 10). That demotion is the intended
+    effect; deciding an excerpt is unciteable is not this issue's scope.
+    """
+    low = _PATH_CITATION_RE.sub(" ", excerpt.lower())
     coverage = sum(1 for pat in patterns if pat.search(low))
     frequency = sum(len(pat.findall(low)) for pat in patterns)
     return (coverage, frequency)
