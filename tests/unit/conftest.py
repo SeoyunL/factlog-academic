@@ -83,6 +83,32 @@ def isolated_user_config(_user_config_sandbox, monkeypatch) -> Path:
         shutil.rmtree(_user_config_sandbox / ".config" / "factlog", ignore_errors=True)
 
 
+def repair_runs_section(out: str, heading: str) -> str:
+    """The body `factlog repair-runs` printed under one report heading.
+
+    EVERY heading is printed, empty or not -- that is the point of the report. So
+    ``heading in out`` is a vacuous assertion: it holds no matter which class a fact was
+    sorted into, and a defect that files a fact under the WRONG heading sails through.
+    Measured twice: flipping the status whitelist left the whole suite green because the
+    fact merely moved from one always-printed heading to another, and disabling the
+    unrecognised-status class did the same. Assert on the BODY.
+
+    Shared here rather than in one test module because both repair-runs test files need
+    it -- and because the first version of this helper lived in only one of them, which is
+    exactly how the vacuous assertions survived in the other (#566).
+    """
+    from factlog import cli
+
+    headings = [h for _n, h in cli._REPAIR_RUNS_REPAIRABLE + cli._REPAIR_RUNS_REPORTED]
+    assert heading in headings, f"not a report heading: {heading}"
+    body = out.split(f"\n{heading}:\n", 1)
+    assert len(body) == 2, f"heading not printed: {heading}"
+    rest = body[1]
+    for other in headings:
+        rest = rest.split(f"\n{other}:\n", 1)[0]
+    return rest.split("\nfactlog repair-runs:", 1)[0]
+
+
 def vocabulary(constants: set[str]) -> "QueryVocabulary":  # noqa: F821
     """A ``QueryVocabulary`` that licenses `constants` in every query position.
 

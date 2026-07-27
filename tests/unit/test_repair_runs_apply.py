@@ -20,6 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from conftest import repair_runs_section as _section
+
 ROOT = Path(__file__).resolve().parents[2]
 MERGE = ROOT / "tools" / "merge_candidates.py"
 HEADER = "subject,relation,object,source,status,confidence,note\n"
@@ -433,6 +435,85 @@ class TestTheMassRewriteGuard:
         proc = repair(tmp_path, kb)
         assert proc.returncode == 3, proc.stdout + proc.stderr
         assert "the whole KB" in proc.stdout
+
+
+class TestATypedObjectSelector:
+    """A selector must reach the fact it names, whatever spelling of it the user types.
+
+    fact_key canonicalises an amount object, so `amount(7,억)` in runs and the canonical
+    `amount(7,"억")` in candidates.csv are ONE fact. Measured before the fix: comparing the
+    selector against RAW fields matched one store at a time -- the canonical spelling
+    selected the CSV row and reported `no run backing` with the run row sitting right there,
+    the bare spelling selected the run row and reported it as having no CSV row -- while the
+    unfiltered `--all` scan repaired it correctly.
+
+    That is the gate designed backwards: naming the fact (the careful thing) failed and
+    reported a falsehood, rewriting the whole KB (the broad thing) worked. It is also
+    exactly the drift class this command exists for -- `accept` DOES reach this row
+    (test_accept_durable.sh block (l)), because it selects the CSV row and re-keys THAT row
+    to find the run row.
+    """
+
+    def _amount_kb(self, tmp_path) -> Path:
+        kb = init_kb(tmp_path)
+        write_runs(kb, "r1.json", [
+            item(subject="A", relation="costs", obj="amount(7,억)", status="candidate"),
+            bystander(),
+        ])
+        # merged by the real merge, so candidates.csv holds whatever canonical form it
+        # actually produces rather than a hand-written guess at it
+        subprocess.run(
+            [sys.executable, str(MERGE), "--wiki", str(kb)],
+            cwd=ROOT, env=_env(tmp_path), capture_output=True, text=True, check=True,
+        )
+        csv_path = kb / "facts" / "candidates.csv"
+        text = csv_path.read_text(encoding="utf-8")
+        assert 'A,costs,"amount(7,""억"")",sources/a.md,candidate' in text, text
+        csv_path.write_text(
+            text.replace(
+                'A,costs,"amount(7,""억"")",sources/a.md,candidate',
+                'A,costs,"amount(7,""억"")",sources/a.md,accepted',
+            ),
+            encoding="utf-8",
+        )
+        return kb
+
+    def test_the_canonical_spelling_reaches_the_run_row(self, tmp_path):
+        kb = self._amount_kb(tmp_path)
+        proc = repair(tmp_path, kb, "A", "costs", 'amount(7,"억")', "--apply")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "1 run row(s) repaired in 1 file(s), 0 fact(s) left for a human" in proc.stdout
+        assert ("A", "amount(7,억)", "accepted") in run_statuses(kb)
+
+        assert rebuilt(tmp_path, kb)[("A", "costs", 'amount(7,"억")')] == "accepted"
+
+    def test_the_bare_spelling_reaches_the_same_row(self, tmp_path):
+        kb = self._amount_kb(tmp_path)
+        proc = repair(tmp_path, kb, "A", "costs", "amount(7,억)", "--apply")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "1 run row(s) repaired in 1 file(s), 0 fact(s) left for a human" in proc.stdout
+        assert ("A", "amount(7,억)", "accepted") in run_statuses(kb)
+
+        assert rebuilt(tmp_path, kb)[("A", "costs", 'amount(7,"억")')] == "accepted"
+
+    def test_neither_spelling_reports_a_missing_counterpart(self, tmp_path):
+        """The specific falsehood the raw-field filter told, pinned in both directions."""
+        for n, selector in enumerate(('amount(7,"억")', "amount(7,억)")):
+            kb = self._amount_kb(tmp_path / f"case{n}")
+            proc = repair(tmp_path, kb, "A", "costs", selector)
+            assert proc.returncode == 3, proc.stdout + proc.stderr
+            assert "1 candidates.csv row(s), 1 runs/*.json row(s) in scope" in proc.stdout
+            assert _section(proc.stdout, "candidates.csv row with no run backing — NOT repaired").strip() == "(none)"
+            assert _section(proc.stdout, "run row with no candidates.csv row — NOT repaired").strip() == "(none)"
+
+    def test_a_different_amount_is_still_excluded(self, tmp_path):
+        """The counter-example: canonicalising the selector must not make amounts collide."""
+        kb = self._amount_kb(tmp_path)
+        before = run_bytes(kb)
+        proc = repair(tmp_path, kb, "A", "costs", 'amount(8,"억")', "--apply")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "0 candidates.csv row(s), 0 runs/*.json row(s) in scope" in proc.stdout
+        assert run_bytes(kb) == before
 
 
 class TestUnreadableFilesDuringApply:

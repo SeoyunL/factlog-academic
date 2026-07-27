@@ -2032,13 +2032,27 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
     human (`reports`), the run files that could not be read, and the parsed contents of
     the readable ones so a caller applying the plan writes back what it judged.
 
-    MATCHING and IDENTITY are different jobs, the rule `_apply_review_status` states and
-    this reuses rather than re-derives. Matching (the triple filter) NFC-folds, because a
-    term typed at an IME we do not control must still find the row it means. Identity is
-    `common.fact_key` on the RAW field values -- literally the function merge dedups with
-    -- so the CLI and merge agree on which run row IS this CSV row. Folding identity here
-    would make an NFC row and an NFD row one fact to this command while merge keeps them
-    apart (#477).
+    MATCHING and IDENTITY stay different jobs, but they must NORMALISE ALIKE, and both go
+    through `common.fact_key` to do it. Identity is fact_key on the RAW field values --
+    literally the function merge dedups with -- so the CLI and merge agree on which run row
+    IS this CSV row. Matching pushes the selector terms through the same function once and
+    compares each row on the key it is already identified by.
+
+    Comparing the selector against raw fields instead was a real defect, not a nicety.
+    fact_key canonicalises an amount object, so a KB holding `amount(7,億)` in runs and the
+    canonical `amount(7,"億")` in candidates.csv has ONE fact -- but a raw-field filter
+    matched only one store at a time: the canonical spelling selected the CSV row and
+    reported `no run backing` while the run row sat right there, and the bare spelling
+    selected the run row and reported it as having no CSV row. Both answers were false, and
+    the fact was filed under a class this command refuses to touch. Worse, the unfiltered
+    (`--all`) scan repaired it correctly -- so naming the fact, the careful thing to do,
+    failed while rewriting the whole KB worked.
+
+    Note this does NOT fold matching more loosely than identity: it folds them IDENTICALLY.
+    `_apply_review_status` keeps its lenient NFC matching separate from fact_key identity
+    because it selects CSV rows and then re-keys THOSE rows to find the run rows; this
+    command filters both stores directly, so a selector that normalises differently from
+    fact_key cannot name the same fact on both sides.
 
     A row whose fact_key has an EMPTY source component is skipped on both sides: such a
     key matches every other sourceless row, so a decision keyed on it would spray across
@@ -2048,7 +2062,6 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
     """
     import csv
     import json
-    import unicodedata
     from pathlib import Path
 
     from factlog.common import (
@@ -2061,13 +2074,6 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
 
     decided_statuses = ENGINE_STATUSES | SUPERSEDED_STATUSES
 
-    def matches(d: dict) -> bool:
-        if not filt:
-            return True
-        return all(
-            unicodedata.normalize("NFC", str(d.get(k) or "").strip()) == v for k, v in filt.items()
-        )
-
     def key_of(d: dict) -> tuple[str, str, str, str]:
         return fact_key(
             d.get("subject") or "",
@@ -2075,6 +2081,19 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
             d.get("object") or "",
             d.get("source") or "",
         )
+
+    # The selector goes through fact_key ONCE, here, so it is normalised by exactly the
+    # rules every row is keyed by -- NFC folding and canonical_amount alike. Comparing
+    # against a hand-normalised copy is what let a canonical `amount(7,"億")` selector miss
+    # the run row spelled `amount(7,億)`, and vice versa; #477 is the standing lesson that a
+    # second copy of fact_key's rules drifts from fact_key.
+    wanted = key_of(filt) if filt else None
+    # Only the positions the user actually named. A '-' wildcard (and an omitted trailing
+    # term) is absent from `filt`, so it must not be compared against fact_key's "" default.
+    positions = [i for i, name in enumerate(("subject", "relation", "object")) if filt and name in filt]
+
+    def matches(key: tuple[str, str, str, str]) -> bool:
+        return all(key[i] == wanted[i] for i in positions)
 
     target = Path(target)
     csv_path = target / "facts" / "candidates.csv"
@@ -2084,10 +2103,10 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
     if csv_path.is_file():
         with csv_path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                if not matches(row):
+                key = key_of(row)
+                if not matches(key):
                     continue
                 csv_seen += 1
-                key = key_of(row)
                 if not key[3]:
                     csv_sourceless += 1
                     continue
@@ -2117,10 +2136,12 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
                 continue
             parsed[jp] = data
             for item in data:
-                if not isinstance(item, dict) or not matches(item):
+                if not isinstance(item, dict):
+                    continue
+                key = key_of(item)
+                if not matches(key):
                     continue
                 run_seen += 1
-                key = key_of(item)
                 if not key[3]:
                     run_sourceless += 1
                     continue
