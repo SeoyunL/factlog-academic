@@ -167,3 +167,53 @@ class TestValueOnlyEditsDoNotDecide:
 
         assert _statuses(kb) == {"X": "candidate"}
         assert _runs(kb)[0]["note"] == "checked"
+
+
+class TestTheReportedRunCount:
+    def test_a_no_op_edit_reports_zero_and_stays_quiet(self, tmp_path, capsys):
+        """Setting a value to what it already holds changes no run row -- and the
+        durability note must NOT fire.
+
+        The note answers "does this fact have run backing?", so it is gated on rows
+        FOUND, not rows written. Gated on writes, this amend would be told its edit
+        will not survive a re-merge while correct backing sat right there -- and a user
+        who believes that creates fresh run backing and duplicates the row (#563).
+        """
+        kb = _kb(
+            tmp_path,
+            ["A,R,X,sources/note.md,candidate,0.90,checked"],
+            [_run_row("X", "candidate", note="checked")],
+        )
+        assert _amend(kb, set_note="checked") == 0
+
+        cap = capsys.readouterr()
+        assert "0 runs/*.json row(s) updated" in cap.out
+        assert "will NOT survive a re-merge" not in cap.err
+
+    def test_no_run_backing_still_warns(self, tmp_path, capsys):
+        """The counter change must not silence the genuinely-unbacked case."""
+        kb = _kb(tmp_path, ["A,R,X,sources/note.md,candidate,0.90,"], None)
+        assert _amend(kb, set_note="checked") == 0
+
+        cap = capsys.readouterr()
+        assert "0 runs/*.json row(s) updated" in cap.out
+        assert "no runs/*.json backing was found" in cap.err
+        assert "will NOT survive a re-merge" in cap.err
+
+    def test_only_tombstone_run_items_still_warns(self, tmp_path, capsys):
+        """A fact whose every run item is retired has no LIVE backing, so the note is
+        true and must still fire.
+
+        Counting matched rows before the superseded skip would swallow it: the amend
+        writes nothing durable, yet the user would hear nothing.
+        """
+        kb = _kb(
+            tmp_path,
+            ["A,R,X,sources/note.md,candidate,0.90,"],
+            [_run_row("X", "superseded")],
+        )
+        assert _amend(kb, set_note="checked") == 0
+
+        cap = capsys.readouterr()
+        assert "0 runs/*.json row(s) updated" in cap.out
+        assert "will NOT survive a re-merge" in cap.err

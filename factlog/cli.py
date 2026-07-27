@@ -1827,6 +1827,13 @@ def cmd_amend(args: argparse.Namespace) -> int:
     # accepted). A note-only / --accept-only edit has no triple change and is
     # applied in place as before.
     runs_changed = 0
+    # Run rows this amend actually reached, counted whether or not they needed a write.
+    # `runs_changed` cannot answer "does this fact have run backing?" once it reports
+    # real changes only: an amend that set a value to what it already held would look
+    # exactly like one that found no backing at all. Counted only for a LIVE, matching
+    # item -- past the superseded skip -- because a fact whose run items are all
+    # tombstones genuinely has no live backing, and the note below is then true.
+    runs_matched = 0
     runs_unreadable = False
     runs_dir = target / "runs"
     if runs_dir.is_dir():
@@ -1880,6 +1887,7 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 )
                 if ikey not in decided:
                     continue
+                runs_matched += 1
                 # `--accept` is a DECISION, so it follows the same pending-only rule
                 # accept/reject follow -- the shared _run_status_after_decision, not a
                 # restatement of it. Evaluated here, BEFORE the tombstone rewrite below
@@ -1901,6 +1909,7 @@ def cmd_amend(args: argparse.Namespace) -> int:
                     if args.accept
                     else None
                 )
+                mutated = False
                 if triple_changed:
                     corrected = dict(item)
                     for k, v in sets.items():
@@ -1914,13 +1923,18 @@ def cmd_amend(args: argparse.Namespace) -> int:
                     # plus a new item is always a real change; never make this
                     # conditional, or new_items below is dropped along with the write.
                     item["status"] = SUPERSEDED
+                    mutated = True
                 else:
                     for k, v in sets.items():
-                        item[k] = v
+                        if item.get(k) != v:
+                            item[k] = v
+                            mutated = True
                     if promoted:
                         item["status"] = promoted
-                dirty = True
-                runs_changed += 1
+                        mutated = True
+                if mutated:
+                    dirty = True
+                    runs_changed += 1
             if new_items:
                 data.extend(new_items)
             if dirty:
@@ -1942,11 +1956,17 @@ def cmd_amend(args: argparse.Namespace) -> int:
             "re-run `/factlog check` (or compile_facts.py) to refresh accepted.dl.",
             file=sys.stderr,
         )
-    if changed and not runs_changed:
-        # "no backing was found" is false when the backing exists but could not be read,
-        # and it is a costly lie right next to the per-file warning above: a user who
-        # believes it creates fresh run backing and duplicates the row. The edit is
-        # still not durable either way, so only the reason is qualified (#563).
+    if changed and not runs_matched:
+        # Gated on rows FOUND, not rows written. "no backing was found" is a claim about
+        # existence, and once runs_changed counts real changes only, an amend that set a
+        # value to what it already held would trip a `not runs_changed` gate and tell the
+        # user their edit is not durable -- while the backing sits right there, already
+        # correct. That is the same costly lie #563 named: a user who believes it creates
+        # fresh run backing and duplicates the row.
+        #
+        # "no backing was found" is also false when the backing exists but could not be
+        # read, right next to the per-file warning above. The edit is not durable in that
+        # case either, so only the reason is qualified (#563).
         found = "no readable runs/*.json backing" if runs_unreadable else "no runs/*.json backing"
         print(
             f"factlog amend: note — {found} was found; the edit will NOT survive a "
