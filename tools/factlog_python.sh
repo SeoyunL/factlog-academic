@@ -15,8 +15,24 @@ _PYREWIRE_FLOOR='1.0.3'
 
 # Both questions the launcher asks ("is this Python 3.11+?" and "does it carry a
 # usable engine?") are answered by ONE python invocation, so the dependency check
-# costs no extra process spawn — hooks/gate_check.sh execs this runner up to four
-# times per gate evaluation.
+# costs no extra process spawn.
+#
+# How many times hooks/gate_check.sh execs this runner per gate evaluation is a
+# RANGE, not a constant. Three earlier readings of this comment reported three
+# different numbers because each measured one point of that range. Measured, and
+# pinned by CASE 19 of tests/test_gate_check.sh:
+#
+#   3 execs — the payload carries no usable target path (no file_path key, or
+#             unparseable JSON): the gate exits before canonicalising anything
+#   5 execs — the target canonicalises to <KB_ROOT>/facts/accepted.dl, so the
+#             engine-input loop matches on its first entry and breaks
+#   6 execs — every other target: <KB_ROOT>/facts/query.dl (matches on the second
+#             loop entry) or a non-engine path (loop runs both, matches neither)
+#
+# KB state is NOT a determinant. Whether logic_report.txt exists, whether the
+# engine inputs exist, and whether the verdict is allow or deny all change the
+# exit code and change nothing here: every _canon call above the verdict runs
+# unconditionally. Only the target's identity moves the number.
 #
 # Exit-code contract:
 #   0     — Python 3.11+ AND pyrewire >= floor

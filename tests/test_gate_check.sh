@@ -520,6 +520,83 @@ fi
 rm -rf "$KB_NOTE" "$NOTE_RUNNER" "$note_err"
 
 # ---------------------------------------------------------------------------
+# CASE 19: how many times ONE gate evaluation execs the runner.
+#
+# The number carries two arguments — "one probe answers both questions, so the
+# dependency check adds no spawn" in tools/factlog_python.sh, and the timing that
+# justified removing the resolution cache. It was written as a constant and
+# drifted into three mutually inconsistent values, because it is not a constant:
+# it is 3, 5, or 6, decided by the target alone. This case fixes the whole table
+# so the next reader measures nothing.
+#
+# A counting wrapper stands in for the runner via FACTLOG_PYTHON_RUNNER — the
+# same seam CASE 16/18 use — so the count cannot depend on the developer's PATH.
+# ---------------------------------------------------------------------------
+COUNT_DIR="$(mktemp -d)"
+COUNT_RUNNER="$COUNT_DIR/runner.sh"
+cat > "$COUNT_RUNNER" <<'RUNNER'
+#!/usr/bin/env bash
+printf 'x\n' >> "$GATE_RUNNER_CALLS"
+exec "${BASH:-bash}" "$GATE_REAL_RUNNER" "$@"
+RUNNER
+
+# count_execs <desc> <expected> <kb-root> <payload>
+count_execs() {
+  local desc="$1" expected="$2" kb_root="$3" payload="$4" actual
+  : > "$COUNT_DIR/calls"
+  GATE_RUNNER_CALLS="$COUNT_DIR/calls" GATE_REAL_RUNNER="$PYTHON_RUNNER" \
+    FACTLOG_PYTHON_RUNNER="$COUNT_RUNNER" FACTLOG_ROOT="$kb_root" \
+    bash "$GATE" <<< "$payload" >/dev/null 2>&1 || true
+  actual="$(wc -l < "$COUNT_DIR/calls" | tr -d ' ')"
+  if [ "$actual" = "$expected" ]; then
+    echo "PASS: $desc ($actual runner execs)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc — expected $expected runner execs, got $actual"
+    fail=$((fail + 1))
+  fi
+}
+
+# Populated KB: both engine inputs on disk, report fresh, so every verdict below
+# is allow.
+KB_EXEC="$(mktemp -d)"
+make_kb "$KB_EXEC"
+touch_file "$KB_EXEC/facts/accepted.dl"
+touch_file "$KB_EXEC/facts/query.dl"
+set_mtime_past "$KB_EXEC/facts/accepted.dl"
+set_mtime_past "$KB_EXEC/facts/query.dl"
+touch_file "$KB_EXEC/facts/logic_report.txt"
+clear_config
+
+count_execs "no file_path in payload — gate exits before canonicalising" \
+  3 "$KB_EXEC" '{"tool":"Write"}'
+count_execs "unparseable payload — same early exit" \
+  3 "$KB_EXEC" 'not json at all'
+count_execs "accepted.dl — engine-input loop breaks on its first entry" \
+  5 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/accepted.dl")"
+count_execs "query.dl — loop reaches its second entry" \
+  6 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/query.dl")"
+count_execs "non-engine target — loop runs both entries, matches neither" \
+  6 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/candidates.csv")"
+
+# The same targets in a bare KB: no report and no engine inputs, so the verdicts
+# flip to bootstrap-allow and deny. The counts must NOT move. That is the half of
+# the claim which says KB state is not a determinant — and it is exactly the
+# assumption the drifted comments got wrong.
+KB_BARE="$(mktemp -d)"
+make_kb "$KB_BARE"
+clear_config
+
+count_execs "bare KB, accepted.dl — count unchanged by KB state" \
+  5 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/facts/accepted.dl")"
+count_execs "bare KB, query.dl — count unchanged by KB state" \
+  6 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/facts/query.dl")"
+count_execs "bare KB, non-engine target — count unchanged by KB state" \
+  6 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/notes.md")"
+
+rm -rf "$COUNT_DIR" "$KB_EXEC" "$KB_BARE"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

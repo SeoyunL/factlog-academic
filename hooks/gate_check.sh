@@ -68,8 +68,11 @@ PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
 # Python 3.11+ is required for JSON parsing and portable path/mtime handling.
 # Fail closed: without it we cannot evaluate the predicate safely.
 #
-# stdout only is discarded here, deliberately. This is the first of the up-to-five
-# times one gate evaluation execs the runner, and the runner writes one stderr line
+# stdout only is discarded here, deliberately. This is the first of the three,
+# five, or six times one gate evaluation execs the runner (which of the three
+# depends on the target alone — see the exec-count table in
+# tools/factlog_python.sh, pinned by CASE 19 of tests/test_gate_check.sh), and
+# the runner writes one stderr line
 # when it selects an interpreter from outside PATH (#578). Swallowing stderr at
 # every call site would make that disclosure zero-per-evaluation, which is the
 # silent selection it exists to prevent; letting it through exactly here surfaces
