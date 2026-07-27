@@ -115,8 +115,10 @@ launcher_status() {
   printf '%s' "$rc"
 }
 
-# How many times did a shimmed interpreter run? One line per invocation, so a
-# cold resolution reads 2 (one probe + the exec) and a cache hit reads 1.
+# How many times did a shimmed interpreter run? One line per invocation, so every
+# resolution reads 2: one probe, then the exec. There is no second reading to
+# describe — the launcher memoises nothing (CASE 14, which uses this helper), so a
+# 1 would mean an interpreter was selected without being executed first.
 count_calls() {
   : > "$TMP/calls"
   export FACTLOG_TEST_CALLS="$TMP/calls"
