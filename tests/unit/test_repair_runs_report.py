@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 
+from conftest import repair_runs_section as _section
+
 from factlog import cli
 
 HEADER = "subject,relation,object,source,status,confidence,note\n"
@@ -70,25 +72,6 @@ def _runs(tmp_path, name="r1.json"):
 
 def _bytes(tmp_path):
     return {p.name: p.read_bytes() for p in sorted((tmp_path / "runs").glob("*.json"))}
-
-
-def _section(out: str, heading: str) -> str:
-    """The body printed under one heading.
-
-    EVERY heading is printed, empty or not -- that is the point of the report. So
-    `heading in out` is a vacuous assertion: it holds no matter which class a fact was
-    sorted into, and a defect that files a fact under the wrong heading passes. Measured:
-    flipping the status whitelist left the whole suite green because the fact merely moved
-    from one always-printed heading to another. Assert on the BODY.
-    """
-    headings = [h for _n, h in cli._REPAIR_RUNS_REPAIRABLE + cli._REPAIR_RUNS_REPORTED]
-    assert heading in headings, f"not a report heading: {heading}"
-    body = out.split(f"\n{heading}:\n", 1)
-    assert len(body) == 2, f"heading not printed: {heading}"
-    rest = body[1]
-    for other in headings:
-        rest = rest.split(f"\n{other}:\n", 1)[0]
-    return rest.split("\nfactlog repair-runs:", 1)[0]
 
 
 class TestRepairableClasses:

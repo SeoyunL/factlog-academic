@@ -196,6 +196,14 @@ class TestTheDuplicateFactKeyGuard:
         # `source` string and, on a tie, by load order -- so with the tombstone first the
         # fact is already lost to dedup on any rebuild, defect or no defect, and the
         # rebuild could not tell the two apart. This order is what makes the payoff visible.
+        #
+        # NOTE this is NOT the order a real round-trip amend produces: amend appends the
+        # corrected item, so the tombstone genuinely comes first (pinned in
+        # test_the_shape_this_guards_is_what_a_round_trip_amend_actually_produces, which
+        # also pins that the real order loses the live fact on rebuild -- a pre-existing
+        # defect of amend, not of this command). The order is inverted here on purpose, to
+        # get a KB where the rebuild can distinguish "the guard held" from "the guard was
+        # never needed". Both orders are valid KBs; only this one is a discriminating test.
         write_runs(kb, "r1.json", [
             item(obj="B", status="candidate"),
             item(obj="B", status="superseded"),
@@ -217,7 +225,9 @@ class TestTheDuplicateFactKeyGuard:
 
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 3, proc.stdout + proc.stderr
-        assert "several candidates.csv rows share one fact — NOT repaired:" in proc.stdout
+        body = _section(proc.stdout, "several candidates.csv rows share one fact — NOT repaired")
+        assert "A / knows / B  ← sources/a.md" in body
+        assert "candidates.csv: candidate, superseded" in body
         assert "0 run row(s) repaired in 0 file(s), 1 fact(s) left for a human" in proc.stdout
         assert run_bytes(kb) == before
 
@@ -250,9 +260,27 @@ class TestTheDuplicateFactKeyGuard:
             rows = [r for r in csv.DictReader(f) if (r["subject"], r["object"]) == ("A", "B")]
         assert sorted(r["status"] for r in rows) == ["candidate", "superseded"]
 
+        # the REAL row order, which the fixture above deliberately inverts: amend appends
+        # the corrected item, so the tombstone comes FIRST here.
+        assert run_statuses(kb) == [
+            ("A", "B", "superseded"), ("A", "C", "superseded"), ("A", "B", "candidate"),
+        ]
+
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 3
-        assert "several candidates.csv rows share one fact — NOT repaired:" in proc.stdout
+        body = _section(proc.stdout, "several candidates.csv rows share one fact — NOT repaired")
+        assert "A / knows / B  ← sources/a.md" in body
+        assert "candidates.csv: candidate, superseded" in body
+        assert "0 run row(s) repaired in 0 file(s), 1 fact(s) left for a human" in proc.stdout
+
+        # THE BOUNDARY, pinned deliberately. In this real order the tombstone sorts first,
+        # so a from-scratch rebuild loses the live fact -- and it does so WITHOUT this
+        # command having touched anything. That loss is a pre-existing defect of the
+        # round-trip amend (measured against a control run that never invoked repair-runs),
+        # not something repair-runs causes or is required to repair. Pinning it here keeps
+        # the two apart: if a later change makes repair-runs responsible for this, this
+        # assertion is where the decision has to be made explicitly rather than absorbed.
+        assert rebuilt(tmp_path, kb)[("A", "knows", "B")] == "superseded"
 
 
 class TestTheCsvStatusWhitelist:
@@ -270,7 +298,9 @@ class TestTheCsvStatusWhitelist:
 
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 3, proc.stdout + proc.stderr
-        assert "unrecognised status in candidates.csv — NOT repaired:" in proc.stdout
+        body = _section(proc.stdout, "unrecognised status in candidates.csv — NOT repaired")
+        assert "A / knows / B  ← sources/a.md" in body
+        assert "candidates.csv: aceptd" in body
         assert run_bytes(kb) == before
 
         assert rebuilt(tmp_path, kb)[("A", "knows", "B")] == "candidate"
@@ -288,7 +318,10 @@ class TestClassesApplyMustNotTouch:
 
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 3, proc.stdout + proc.stderr
-        assert "both stores decided, and they disagree — NOT repaired:" in proc.stdout
+        body = _section(proc.stdout, "both stores decided, and they disagree — NOT repaired")
+        assert "A / knows / B  ← sources/a.md" in body
+        assert "candidates.csv: accepted" in body
+        assert "r1.json: confirmed" in body
         assert run_bytes(kb) == before
 
         assert rebuilt(tmp_path, kb)[("A", "knows", "B")] == "confirmed"
@@ -303,7 +336,9 @@ class TestClassesApplyMustNotTouch:
 
         proc = repair(tmp_path, kb, "A", "knows", "B", "--apply")
         assert proc.returncode == 3, proc.stdout + proc.stderr
-        assert "candidates.csv row with no run backing — NOT repaired:" in proc.stdout
+        body = _section(proc.stdout, "candidates.csv row with no run backing — NOT repaired")
+        assert "A / knows / B  ← sources/a.md" in body
+        assert "runs/*.json: (no row)" in body
         assert run_bytes(kb) == before
 
     def test_a_sourceless_row_is_never_written(self, tmp_path):
