@@ -22,8 +22,15 @@ _PYREWIRE_FLOOR='1.0.3'
 # different numbers because each measured one point of that range. Measured, and
 # pinned by CASE 19 of tests/test_gate_check.sh:
 #
-#   3 execs — the payload carries no usable target path (no file_path key, or
-#             unparseable JSON): the gate exits before canonicalising anything
+#   1 exec  — no usable Python 3.11+ anywhere: the gate's fail-closed probe is
+#             this exec, and it DENIES on the spot. The only row the environment
+#             rather than the target decides, and it overrides every row below
+#   3 execs — the gate extracted no target path and exits before canonicalising
+#             anything. It reads a TOP-LEVEL `file_path`/`path` key, so this row
+#             covers unparseable JSON AND any payload carrying the path somewhere
+#             else. Whether every payload shape that ought to be guarded actually
+#             reaches the rows below is open in #591; the count is what it is
+#             either way
 #   5 execs — the target canonicalises to <KB_ROOT>/facts/accepted.dl, so the
 #             engine-input loop matches on its first entry and breaks
 #   6 execs — every other target: <KB_ROOT>/facts/query.dl (matches on the second
@@ -32,7 +39,8 @@ _PYREWIRE_FLOOR='1.0.3'
 # KB state is NOT a determinant. Whether logic_report.txt exists, whether the
 # engine inputs exist, and whether the verdict is allow or deny all change the
 # exit code and change nothing here: every _canon call above the verdict runs
-# unconditionally. Only the target's identity moves the number.
+# unconditionally. Given a usable Python 3.11+, only the target's identity moves
+# the number.
 #
 # Exit-code contract:
 #   0     — Python 3.11+ AND pyrewire >= floor
@@ -181,7 +189,7 @@ _announce_off_path() {
 #     entry can pin an under-floor engine and silently downgrade finalize to
 #     "logic check SKIPPED"), the saving mostly evaporates. Measured on one gate
 #     evaluation with a facts/accepted.dl target — five execs of this script, the
-#     middle row of the table above: 437 ms with no cache versus 478 ms with a
+#     5-exec row of the table above: 437 ms with no cache versus 478 ms with a
 #     re-validating cache when PATH already carries the engine, i.e. the common
 #     case got SLOWER, before adding the ownership/symlink/whitelist checks a
 #     writable cache would also need.
