@@ -80,6 +80,27 @@ class TestFactlogPython:
         assert row is not None
         assert row.severity == "INFO"
 
+    def test_unset_row_does_not_name_an_interpreter(self, monkeypatch):
+        """The severity alone was the whole assertion, so the user-visible text
+        was free to say anything.
+
+        It used to read "시스템 python3 사용", and #578 made that a lie: with
+        FACTLOG_PYTHON unset the launcher may pick an activated virtualenv or
+        ~/.factlog-venv instead. Which interpreter actually won is the Python
+        row's job to report; this row's only claim is that the override is unset.
+        Pinned as a prefix plus the two halves of the claim, not as the exact
+        sentence, so rewording stays free but re-asserting a specific interpreter
+        does not.
+        """
+        monkeypatch.delenv("FACTLOG_PYTHON", raising=False)
+        row = _by_prefix(cli._collect_doctor_checks(), "FACTLOG_PYTHON 미설정")
+        assert row is not None, "the unset row must lead with FACTLOG_PYTHON 미설정"
+        assert "런처" in row.title, "the row must say the launcher does the choosing"
+        assert "시스템 python3" not in row.title, (
+            "the row must not name an interpreter — since #578 the launcher may "
+            "select an activated virtualenv or ~/.factlog-venv"
+        )
+
     def test_set_and_existing_is_ok(self, monkeypatch, tmp_path):
         target = tmp_path / "python3"
         target.write_text("#!/bin/sh\n")
