@@ -130,6 +130,13 @@ from common import (  # noqa: E402
     sync_ignore_patterns,
 )
 from factlog import ingest, literal_types  # noqa: E402
+from factlog.front_matter_scan import front_matter_body  # noqa: E402
+
+# The bridge (#576) resolves a provenance anchor with the SAME function that
+# validates one. Imported as a module, not by symbol, so the call sites read as
+# "validate's answer" rather than as a local helper that happens to agree today.
+# Measured import cost 19 ms; no cycle — validate imports common/factlog, not this.
+import validate  # noqa: E402
 
 # Keep the default answer short enough to scan while retaining an explicit,
 # deterministic escape hatch for audit work.  This cap is deliberately applied
@@ -1112,15 +1119,22 @@ def _fill_recall(
 # morphological analyzer, which is exactly what #581 exists to introduce and what
 # this issue must not wait for.
 #
-# Three is not a tuned constant; it is where the measurement splits. On the
-# reference KB, question 'neurosymbolic 접근이 순수 신경망 대비 해석가능성에서 어떤
-# 이점을 갖는가':
-#   floor 2 -> 33 facts / 21 subjects. EVERY added hit is a 2-character fragment:
-#              the relation '이점' alone drags in every 이점 fact in the KB (FRET
-#              measurement, base-editor screening, TTS prosody — the question's
-#              grammar, not its topic), and '대비' '접근' '신경' '가능' '해석' match
-#              inside unrelated compounds.
-#   floor 3 -> 11 facts / 8 subjects, every one about 해석가능 or 신경망.
+# Three is not a tuned constant; it is where the measurement splits. Every figure
+# below is a TOTAL at that floor (not a delta), on the reference KB's 2055 accepted
+# facts, question 'neurosymbolic 접근이 순수 신경망 대비 해석가능성에서 어떤 이점을
+# 갖는가':
+#   floor 2 -> 44 facts / 27 subjects
+#   floor 3 -> 11 facts /  8 subjects
+#   floor 4 ->  4 facts /  4 subjects
+#   floor 5 ->  1 fact  /  1 subject
+#   floor 6 ->  0 facts /  0 subjects
+# The 33 facts floor 2 adds over floor 3 are EVERY one a 2-character fragment: the
+# relation '이점' alone drags in every 이점 fact in the KB (FRET measurement,
+# base-editor screening, TTS prosody — the question's grammar, not its topic), and
+# '대비' '접근' '신경' '가능' '해석' match inside unrelated compounds. At floor 3 all
+# 11 are about 해석가능 or 신경망. Going higher does not buy precision, it buys
+# silence: floor 4 already drops '신경망', the question's most literal content word,
+# and by floor 6 the bridge answers nothing at all.
 # The same floor is what makes the function-word class structurally unreachable
 # instead of filtered: '논문' is two characters, so no question containing it can
 # bridge at all — the noise #571 needed a stop-word enumeration against cannot
@@ -1135,8 +1149,6 @@ _BRIDGE_PREFIX_MIN = 3
 # BOTH halves of the contract on one line: how the excerpt was reached, and that
 # reaching it that way changed nothing about its standing.
 VIA_KB_VOCABULARY_TAG = "[via KB vocabulary — still UNVERIFIED]"
-
-_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 
 
 def _nfc(value: str) -> str:
@@ -1212,7 +1224,7 @@ def _bridged_facts(
     return matched
 
 
-def _anchor_line(lines: list[str], fragment: str) -> int:
+def _anchor_line(path: Path, line_count: int, fragment: str) -> int:
     """1-based line of the markdown heading *fragment* names, or 1.
 
     candidates.csv records provenance as ``sources/x.md#abstract`` — a SECTION
@@ -1222,24 +1234,37 @@ def _anchor_line(lines: list[str], fragment: str) -> int:
     source yields seven lines of YAML front matter and zero prose — the same
     window defect #574 addresses, which this function avoids rather than fixes.
     An unresolvable or absent fragment falls back to line 1 and takes that cost.
+
+    The anchor set comes from ``validate.heading_anchors`` — the SAME function
+    ``validate_source_ref`` asks "does this anchor exist", asked here for "where".
+    The first cut of this resolved anchors with a local regex and a local slug rule,
+    and the two answers disagreed on three real shapes: a punctuated heading
+    (``## CRISPR/Cas9 results`` -> ``#crisprcas9-results``), GitHub's duplicate
+    suffix (``#abstract-1``), and a ``## Abstract`` written INSIDE a code fence,
+    which the local scan anchored on and #521 exists to say is not a heading. Every
+    one of those makes ``factlog validate`` pass a ref this then silently falls back
+    on, i.e. re-creates #574's front-matter window for a ref the KB called valid.
+    The slug rules also split on script — the local one kept 가-힣 only, so ``概要``
+    slugged to '' here and to ``概要`` there. common.py's ``fact_key`` names this
+    class outright: a second, "equivalent" copy of a rule is a latent recurrence.
+
+    *line_count* is the RAW file's line count; anchors are found in the
+    front-matter-stripped body (md_lines reads a closing ``---`` as a Setext
+    heading otherwise), so the body index is shifted back by the block's height.
     """
     if not fragment:
         return 1
-    want = _slug(fragment)
-    if not want:
+    try:
+        body = front_matter_body(path)
+    except OSError:
         return 1
-    for index, line in enumerate(lines):
-        heading = _HEADING_RE.match(line)
-        if heading and _slug(heading.group(1)) == want:
-            return index + 1
-    return 1
-
-
-def _slug(text: str) -> str:
-    """Heading text -> anchor fragment. Lowercase, runs of anything that is not a
-    letter/digit collapsed to '-'. Korean headings slug to themselves, so a KB
-    whose sources are Korean resolves anchors the same way an English one does."""
-    return re.sub(r"[^0-9a-z가-힣]+", "-", _nfc(text).lower()).strip("-")
+    index = validate.heading_anchors(body).get(fragment.lower())
+    if index is None:
+        return 1
+    # front_matter_body returns a SUFFIX of the file, so the line counts differ by
+    # exactly the block's height — no second parse of the fence, which is the
+    # boundary front_matter_scan owns (#419).
+    return line_count - len(body.splitlines()) + index + 1
 
 
 def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, object]]:
@@ -1336,6 +1361,12 @@ def _bridge_rows(
     exploration either), no symlink out of the KB, no binary. pages/ can never be
     reached: it is not in WIKI_SOURCE_DIRS, so an engine-derived candidate page still
     cannot enter an answer through this path.
+
+    #574 NOTE — the excerpt window arithmetic below is a SECOND site. search()'s scan
+    computes the same start/end from _EXCERPT_WINDOW; it cannot be shared as written
+    because the scan also collapses overlapping windows against `last_end`, which a
+    single promoted excerpt has no analogue for. Whoever reworks the window has to
+    change both, or a bridged excerpt keeps the geometry #574 removed.
     """
     bridged = kb_vocabulary_bridge(question, root)
     if not bridged:
@@ -1363,7 +1394,7 @@ def _bridge_rows(
         lines = text.splitlines()
         if not lines:
             continue
-        anchor = min(_anchor_line(lines, str(entry["fragment"])), len(lines))
+        anchor = min(_anchor_line(path, len(lines), str(entry["fragment"])), len(lines))
         start = max(0, anchor - 1 - _EXCERPT_WINDOW)
         end = min(len(lines), anchor + _EXCERPT_WINDOW)
         result = {
