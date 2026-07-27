@@ -45,6 +45,20 @@
 # that write does not match the active KB_ROOT and is allowed. This is
 # intentional and consistent with the tools, which also resolve to the active KB.
 #
+# That scope rule is a statement about RESOLVED targets, and it has exactly one
+# exception, which follows from its own reasoning: when the target path cannot be
+# read out of the payload at all (see the extraction block below), there is no
+# path to compare against KB_ROOT, so which KB is meant is not merely unknown but
+# unknowable. The scope rule has no input to apply. The fallback probe matches on
+# filename alone and is therefore KB-blind: a payload we cannot parse that names
+# facts/accepted.dl is judged against the ACTIVE KB's report even if it meant
+# some other KB's copy. That errs toward denying, never toward allowing, so it
+# takes nothing away from the guarantee above — and it stays escapable, since a
+# fresh report in the active KB lets the write through. Making the probe
+# KB-scoped instead would mean pattern-matching KB_ROOT against text we have
+# already failed to parse, and would silently miss relative paths, which is the
+# one direction this branch must not fail in.
+#
 # If the resolver cannot run (e.g. the factlog package is unavailable), KB_ROOT
 # safely degrades to the prior ${FACTLOG_ROOT:-.} behaviour (usually cwd). This
 # is a fail-to-previous-behaviour, NOT a fail-closed: it opens no new hole beyond

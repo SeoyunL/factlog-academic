@@ -809,6 +809,30 @@ run_payload_case "unresolved target but report fresh — allow (escapable, not a
   "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_SHAPE_FRESH/facts/accepted.dl")" 0
 rm -rf "$KB_SHAPE_FRESH"
 
+# KB-BLINDNESS of the fallback probe, pinned because it is the one exception to
+# the SCOPE paragraph in the hook header ("a write to a NON-active KB is allowed"
+# — true of resolved targets, and it cannot be true here). With no readable path
+# there is nothing to compare against KB_ROOT, so a payload naming some OTHER
+# KB's accepted.dl is judged against the ACTIVE KB's report. It denies, i.e. errs
+# toward the guard, and the second row shows it is still the predicate deciding:
+# a fresh report in the ACTIVE KB lets that same foreign-KB payload through.
+KB_OTHER="$(mktemp -d)"
+make_kb "$KB_OTHER"
+touch_file "$KB_OTHER/facts/accepted.dl"
+run_payload_case "unresolved target naming a NON-active KB — deny (probe is KB-blind)" \
+  "$KB_SHAPE" \
+  "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_OTHER/facts/accepted.dl")" 2
+
+KB_ACTIVE_FRESH="$(mktemp -d)"
+make_kb "$KB_ACTIVE_FRESH"
+touch_file "$KB_ACTIVE_FRESH/facts/accepted.dl"
+set_mtime_past "$KB_ACTIVE_FRESH/facts/accepted.dl"
+touch_file "$KB_ACTIVE_FRESH/facts/logic_report.txt"
+run_payload_case "same foreign-KB payload, active KB report fresh — allow (predicate, not KB identity)" \
+  "$KB_ACTIVE_FRESH" \
+  "$(printf '{"tool_name":"Write","tool_input":{"target":"%s"}}' "$KB_OTHER/facts/accepted.dl")" 0
+rm -rf "$KB_OTHER" "$KB_ACTIVE_FRESH"
+
 # Bootstrap cannot rescue an unresolved target: branch B is a claim about ONE
 # named file being absent on disk, and here we do not know which file was meant.
 # A bare KB therefore denies — and stays escapable, per the row above.
