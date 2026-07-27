@@ -646,14 +646,57 @@ class TestTheAmbiguousClassStatesTheConsequence:
     def test_an_ordinary_sync_retires_the_fact_exactly_as_the_note_says(self, tmp_path):
         """The half a user hits first: `/factlog sync` does NOT delete candidates.csv.
 
-        With it in place merge's preservation passes decide, and the `superseded` twin
-        outranks the live row -- so the fact the report just called "NOT repaired" comes
-        back retired at the very next sync. Deterministic, not a lottery.
+        The fact the report just called "NOT repaired" comes back retired at the very next
+        sync. Deterministic, not a lottery.
+
+        This pins the OUTCOME for the KB a round-trip amend actually leaves behind, which
+        is worth pinning on its own. It does NOT pin the mechanism: measured, this fixture
+        reaches `superseded` through merge's DEDUP (its run rows include the tombstone, and
+        the tombstone loads first), not through the preservation pass -- merge prints no
+        "preserved ... superseded row(s)" line here at all. The mechanism the note names is
+        isolated in the next test.
         """
         kb = self._round_trip(tmp_path)
         assert repair(tmp_path, kb, "A", "knows", "B", "--apply").returncode == 3
 
         assert resynced(tmp_path, kb)[("A", "knows", "B")] == "superseded"
+
+    def test_the_preservation_pass_alone_can_retire_the_fact(self, tmp_path):
+        """The CAUSE the note claims, isolated so only that cause can produce the answer.
+
+        The test above stays green with `existing_superseded_keys` disabled entirely
+        (measured), because its run rows can produce `superseded` by dedup alone. So it
+        cannot defend the sentence "merge's preservation passes decide and a decided row
+        outranks a pending one".
+
+        Here runs/*.json holds ONE pending row and no tombstone anywhere, so dedup has
+        nothing retired to pick: the only path to `superseded` is the preservation pass
+        reading the duplicate `superseded` row out of candidates.csv. merge says so itself,
+        which is asserted too -- the message is the mechanism naming itself, so a rewrite
+        that silently drops the pass cannot leave this test green on the status alone.
+        """
+        kb = init_kb(tmp_path)
+        write_runs(kb, "r1.json", [item(obj="B", status="candidate")])
+        write_csv(
+            kb,
+            "A,knows,B,sources/a.md,candidate,0.90,",
+            "A,knows,B,sources/a.md,superseded,0.90,",
+        )
+        assert repair(tmp_path, kb, "A", "knows", "B", "--apply").returncode == 3
+        # the run row is untouched, so it cannot be the source of the retirement below
+        assert run_statuses(kb) == [("A", "B", "candidate")]
+
+        proc = subprocess.run(
+            [sys.executable, str(MERGE), "--wiki", str(kb)],
+            cwd=ROOT, env=_env(tmp_path), capture_output=True, text=True, check=True,
+        )
+        assert "preserved 1 superseded row(s) from candidates.csv" in proc.stdout + proc.stderr
+
+        import csv
+
+        with (kb / "facts" / "candidates.csv").open(newline="", encoding="utf-8") as f:
+            rows = {(r["subject"], r["relation"], r["object"]): r["status"] for r in csv.DictReader(f)}
+        assert rows[("A", "knows", "B")] == "superseded"
 
     def test_a_from_scratch_rebuild_can_disagree_with_that(self, tmp_path):
         """The other half, and why the note names two paths instead of promising one.

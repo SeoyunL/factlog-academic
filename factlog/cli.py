@@ -2036,8 +2036,8 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
     compares each row on the key it is already identified by.
 
     Comparing the selector against raw fields instead was a real defect, not a nicety.
-    fact_key canonicalises an amount object, so a KB holding `amount(7,億)` in runs and the
-    canonical `amount(7,"億")` in candidates.csv has ONE fact -- but a raw-field filter
+    fact_key canonicalises an amount object, so a KB holding `amount(7,억)` in runs and the
+    canonical `amount(7,"억")` in candidates.csv has ONE fact -- but a raw-field filter
     matched only one store at a time: the canonical spelling selected the CSV row and
     reported `no run backing` while the run row sat right there, and the bare spelling
     selected the run row and reported it as having no CSV row. Both answers were false, and
@@ -2081,8 +2081,8 @@ def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
 
     # The selector goes through fact_key ONCE, here, so it is normalised by exactly the
     # rules every row is keyed by -- NFC folding and canonical_amount alike. Comparing
-    # against a hand-normalised copy is what let a canonical `amount(7,"億")` selector miss
-    # the run row spelled `amount(7,億)`, and vice versa; #477 is the standing lesson that a
+    # against a hand-normalised copy is what let a canonical `amount(7,"억")` selector miss
+    # the run row spelled `amount(7,억)`, and vice versa; #477 is the standing lesson that a
     # second copy of fact_key's rules drifts from fact_key.
     wanted = key_of(filt) if filt else None
     # Only the positions the user actually named. A '-' wildcard (and an omitted trailing
