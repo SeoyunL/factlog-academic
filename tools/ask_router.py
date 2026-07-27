@@ -758,6 +758,36 @@ def _cjk_stopword(word: str) -> bool:
     return word in _CJK_QUESTION_STOPWORDS
 
 
+# ASCII tokens must exceed 2 characters to become keywords. The reason is not
+# substring noise — the ASCII branch matches with lookaround boundaries, so 'ai'
+# never matches inside 'training' — it is that at two characters the English
+# function words are the highest-reach tokens in an English corpus. The relaxed
+# floor is the recovery stage's only concession, not a general loosening.
+_ASCII_MIN = 3
+_ASCII_MIN_RELAXED = 2
+
+# 2-character English function words, excluded from the keyword set. Same purpose as
+# _CJK_QUESTION_STOPWORDS in the other language: the relaxed floor exists to rescue a
+# short CONTENT initialism ('AI', 'ML', 'QA'), and by length alone those are
+# indistinguishable from 'of'/'in'. Measured over the KB's 186 readable source files,
+# by how many files contain the token: of 182, in 181, to 175, we 135, is 134, on 131,
+# by 127, as 117, an 105, be 73, or 65, at 57 — against ai 56 for the best-reaching
+# content initialism. Promoting one of these makes the question's ENGLISH grammar the
+# entire query, which is #571's defect in another language: measured, a question like
+# '이것은 무엇인가 of 그것은' returned 451 excerpts on 'of' alone.
+#
+# EVERY entry is exactly 2 characters, so this list cannot affect the strict floor —
+# it only constrains what the relaxed floor is allowed to let back in. Longer English
+# function words ('the', 'and', 'which') are keywords today and stay that way; changing
+# that is a recall decision for the English side, not part of #571.
+_ASCII_FUNCTION_WORDS = frozenset(
+    {
+        "am", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it",
+        "me", "my", "no", "of", "on", "or", "so", "to", "up", "us", "we",
+    }
+)
+
+
 def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]]:
     """Token→pattern pass shared by both stages of _keyword_patterns.
 
@@ -785,7 +815,7 @@ def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]
             if len(word) >= 2:
                 seen.add(word)
                 patterns.append(re.compile(re.escape(word)))
-        elif len(word) >= ascii_min:
+        elif len(word) >= ascii_min and word not in _ASCII_FUNCTION_WORDS:
             seen.add(word)
             # Lookaround boundaries (not \b) so punctuation-edged tokens like
             # 'c++' / 'c#' match while 'api' still does not match inside
@@ -793,12 +823,6 @@ def _tokenize_patterns(question: str, *, ascii_min: int) -> list[re.Pattern[str]
             patterns.append(re.compile(rf"(?<!\w){re.escape(word)}(?!\w)"))
     return patterns
 
-
-# ASCII tokens must exceed 2 characters to become keywords (an 'ai'/'ml' substring
-# is noise in an English corpus). The relaxed floor is the recovery stage's only
-# concession, not a general loosening.
-_ASCII_MIN = 3
-_ASCII_MIN_RELAXED = 2
 
 # Emitted when the question yields no keyword at all. It must NOT read like the
 # corpus was searched and came back empty: nothing was searched for, because the

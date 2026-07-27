@@ -339,6 +339,23 @@ if router search 'AI 논문은 어디에 있나' | grep -qF 'sources/571-retract
 else
   ok "ASCII recovery keeps the unrelated retraction notice out (#571)"
 fi
+# The strict floor itself is a contract, not an accident: relaxing it globally would
+# make 'of'/'in' keywords in EVERY question. Pinned so that change cannot pass quietly.
+kw_is "a 2-char ASCII token is not a keyword on the default path" 'AI 신경기호' "['신경기호']"
+# ...and the recovery stage must not let English GRAMMAR back in while rescuing a
+# short content word. 'of' reaches 182 of 186 source files — promoting it is the same
+# defect as '논문은', in the other language.
+kw_is "the recovery stage does not promote a 2-char English function word" \
+  '이것은 무엇인가 of 그것은' "[]"
+kw_is "the recovery stage still rescues a short content initialism" 'QA 논문은 어디에 있나' \
+  "['(?<!\\\\w)qa(?!\\\\w)']"
+printf 'This paper is about retrieval of evidence in a corpus.\n' > "$KB/sources/571-english.md"
+if router search '이것은 무엇인가 of 그것은' | grep -qF 'sources/571-english.md'; then
+  bad "an English function word became the entire query"
+else
+  ok "English function words do not become the entire query (#571)"
+fi
+rm -f "$KB/sources/571-english.md"
 # A question that is function words and NOTHING else yields NO keyword and NO
 # result (#571 기준 2, revised). Restoring the tokens — the behaviour this replaced —
 # put the retraction notice back as the sole evidence for '이 논문은?'.
@@ -413,6 +430,27 @@ sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 print([(w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]) for w in sorted(a._CJK_QUESTION_STOPWORDS)
        if [p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호']])
+")"; fi
+# The English list is pinned the same way, and every entry must be EXACTLY 2 chars:
+# that length invariant is what makes it harmless on the default path (a 3-char entry
+# would silently start filtering questions that never reach the recovery stage).
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+want = {'am', 'an', 'as', 'at', 'be', 'by', 'do', 'he', 'if', 'in', 'is', 'it',
+        'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up', 'us', 'we'}
+got = set(a._ASCII_FUNCTION_WORDS)
+assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
+assert all(len(w) == 2 for w in got), sorted(w for w in got if len(w) != 2)
+for w in sorted(got):
+    kw = [p.pattern for p in a._keyword_patterns('논문은 어디에 ' + w)]
+    assert kw == [], (w, kw)
+" 2>/dev/null; then ok "2-char English function words pinned (23 forms, all len 2, all dropped)"; else bad "English function-word list moved: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print(sorted(a._ASCII_FUNCTION_WORDS))
 ")"; fi
 
 # Ordering contract for #581: a filtered 어절 must leave NOTHING behind — not the
