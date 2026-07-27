@@ -533,7 +533,11 @@ same "#575 low recall reports the ratio" "keywords matched: 1/3 — neurosymboli
   "$(printf '%s\n' "$low" | grep '^keywords matched:' || true)"
 if printf '%s\n' "$low" | grep -qF 'NOTE: low keyword recall'; then ok "#575 below-half recall warns"; else bad "#575 below-half recall did not warn"; fi
 if printf '%s\n' "$low" | grep -qxF 'WARNING: unverified candidates — do not treat as confirmed facts.'; then ok "#575 the unverified WARNING keeps its own whole line"; else bad "#575 the low-recall note displaced the unverified WARNING"; fi
-nline="$(printf '%s\n' "$low" | grep -cF 'NOTE: low keyword recall')"
+# `|| true`: `grep -c` exits 1 on a count of 0, and with `set -e` a failing pipeline
+# inside an ASSIGNMENT kills the whole harness — every check after this line would
+# vanish instead of reporting. Measured: without it, a mutant that removes the
+# warning aborted the run at this line and silenced 90+ later checks.
+nline="$(printf '%s\n' "$low" | grep -cF 'NOTE: low keyword recall' || true)"
 if [ "$nline" = "1" ]; then ok "#575 the low-recall warning is exactly one line"; else bad "#575 low-recall warning spans $nline lines"; fi
 # ...and it must not read as an evidence claim: the wording says the SEARCH missed.
 if printf '%s\n' "$low" | grep -qF "This is NOT 'no such source'"; then ok "#575 the warning distinguishes itself from 'no evidence'"; else bad "#575 the warning can be read as 'no evidence'"; fi
@@ -633,17 +637,28 @@ rm -rf "$KB/sources/575/hidden"
 # PURITY (수용 기준 6): the tally is a side report. Same rows, same order, with and
 # without it — and the `search` JSON contract gains no field (its shape is pinned by
 # the #279/#571 cases above; this states the intent that #575 stays out of it).
+for i in 1 2 3 4 5; do
+  printf 'purealpha and purebeta appear here, file %s\n' "$i" > "$KB/sources/575/pure-$i.md"
+done
 if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 from pathlib import Path
 import ask_router as a
 root = Path('$KB')
-q = 'neurosymbolic grounding retrieval'
+q = 'purealpha purebeta'
 plain = a.search(q, root, limit=None)
 tallied = a.search(q, root, limit=None, recall={})
+# The comparison is only meaningful over several rows: with one row it cannot tell
+# a truncation from an identity, and a mutant that truncated the result to [:1]
+# passed this check while the fixture yielded a single row. Assert the fixture's
+# own size first, so it can never go vacuous again without saying so.
+assert len(plain) >= 5, ('fixture yields too few rows to compare', len(plain))
 assert plain == tallied, (len(plain), len(tallied))
+# ...and the same for the capped path, where a truncation is likeliest to hide.
+assert a.search(q, root) == a.search(q, root, recall={}), 'capped rows differ'
 " 2>/dev/null; then ok "#575 collecting the tally does not change the returned rows"; else bad "#575 the tally changed search() results"; fi
+rm -f "$KB"/sources/575/pure-*.md
 if router search 'neurosymbolic grounding' | "$PYTHON" -c "
 import json, sys
 sys.exit(0 if sorted(json.load(sys.stdin)) == ['diagnostic', 'results', 'total', 'truncated'] else 1)
