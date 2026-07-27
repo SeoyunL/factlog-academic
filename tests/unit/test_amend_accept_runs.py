@@ -50,6 +50,25 @@ def _run_row(obj, status, note=""):
     return row
 
 
+def _unrelated_run_row():
+    """A live run item for a DIFFERENT fact, sharing the run file with the target.
+
+    The normal shape of a real KB -- one run file holds every fact an extraction
+    produced -- and the one shape that tells a per-item counter apart from a per-file
+    one. Without it, "this file has live items" and "this file has live items FOR THIS
+    FACT" are the same sentence.
+    """
+    return {
+        "subject": "Q",
+        "relation": "rel",
+        "object": "Z",
+        "source": "sources/note.md",
+        "status": "candidate",
+        "confidence": "0.9",
+        "note": "",
+    }
+
+
 def _amend(tmp_path, triple=("A", "R", "X"), **overrides):
     fields = dict(
         subject=triple[0],
@@ -199,6 +218,37 @@ class TestTheReportedRunCount:
         assert "0 runs/*.json row(s) updated" in cap.out
         assert "no runs/*.json backing was found" in cap.err
         assert "will NOT survive a re-merge" in cap.err
+
+    def test_another_facts_live_run_row_is_not_this_facts_backing(self, tmp_path, capsys):
+        """A live run item for a DIFFERENT fact must not pass as this fact's backing.
+
+        The counter has to be per ITEM MATCHED, not per file or per live item: run
+        files hold many facts, so "there are live items here" says nothing about the
+        one being amended. Counted before the `decided` check, this amend goes silent
+        while its edit is in candidates.csv only -- exactly the #563 lie the note
+        exists to prevent, and it is the everyday shape (one run file, several facts)
+        that hits it, not a corner case.
+
+        The tombstone case below cannot stand in for this one: it exercises the
+        superseded skip, several lines earlier, and stays green while the `decided`
+        check is bypassed.
+        """
+        kb = _kb(
+            tmp_path,
+            [
+                "A,R,X,sources/note.md,candidate,0.90,",
+                "Q,rel,Z,sources/note.md,candidate,0.90,",
+            ],
+            [_unrelated_run_row()],
+        )
+        assert _amend(kb, set_note="checked") == 0
+
+        cap = capsys.readouterr()
+        assert "0 runs/*.json row(s) updated" in cap.out
+        assert "no runs/*.json backing was found" in cap.err
+        assert "will NOT survive a re-merge" in cap.err
+        # ...and the bystander is untouched: no write was needed at all.
+        assert _runs(kb) == [_unrelated_run_row()]
 
     def test_only_tombstone_run_items_still_warns(self, tmp_path, capsys):
         """A fact whose every run item is retired has no LIVE backing, so the note is

@@ -21,7 +21,12 @@ from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
 from factlog import config as factlog_config
-from factlog.common import FACT_HEADER, _atomic_write_text, candidates_csv_writer
+from factlog.common import (
+    FACT_HEADER,
+    KNOWN_STATUSES,
+    _atomic_write_text,
+    candidates_csv_writer,
+)
 from factlog.review_sections import OPEN_QUESTIONS_SCAFFOLD
 
 MIN_PYTHON = (3, 11)
@@ -1351,9 +1356,10 @@ def _run_status_after_decision(item_status, from_statuses: set, new_status: str)
     being restated at each call site: a copy is how the CLI and merge drifted apart in
     the first place (#477), and the same drift between two CLI paths is what let
     `accept` and `amend --accept` disagree about the very same row (#565).
-    """
-    from factlog.common import KNOWN_STATUSES
 
+    KNOWN_STATUSES is imported at module scope, unlike the import-local habit around
+    it: this runs once per run ITEM, inside the loop, not once per command.
+    """
     st = str(item_status or "").strip()
     if st not in from_statuses and st in KNOWN_STATUSES:
         return None

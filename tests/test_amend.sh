@@ -156,9 +156,9 @@ err="$("$PYTHON" -m factlog amend Widget codename Draft --set-object Falcon --ta
 [ "$rc" -eq 0 ] && ok "#563 amend survives an undecodable run file (rc 0)" || bad "#563 amend died on an undecodable run file (rc $rc)"
 printf '%s' "$err" | grep -q "Traceback" && bad "#563 amend printed a traceback: $err" || ok "#563 amend printed no traceback"
 grep -qF '"object": "Falcon"' "$KB/runs/r.json" && ok "#563 the edit still reached the readable run file" || bad "#563 the edit never reached the readable run file"
-# the pre-existing `changed and not runs_changed` note cannot cover this: r.json DID
-# take the edit, so runs_changed == 1 and the note stays quiet. Only a per-file
-# warning tells the user bin.json was left behind.
+# the `changed and not runs_matched` note cannot cover this: r.json DID hold a matching
+# row, so runs_matched == 1 and the note stays quiet -- correctly, since the fact does
+# have readable backing. Only a per-file warning tells the user bin.json was left behind.
 # the wording is pinned too: amend records an EDIT. `--accept` rides along with it
 # (#565), but the value is what amend is for and what is lost here, so accept's
 # "record the decision" would narrow the warning to the smaller half.
