@@ -215,7 +215,12 @@ print([p.pattern for p in a._keyword_patterns('''$Q_KO''')])
 # =============================================================================
 # PIN 2 — corpus match record: what the Korean question does and does not reach
 # =============================================================================
-ko_refs="$(refs "$Q_KO")"
+# `|| true` on every capture: with `set -e` a failing pipeline inside an ASSIGNMENT
+# kills the script, and the summary block never prints. A baseline whose whole point
+# is showing what a change moved must never abort mid-run — an empty capture is
+# reported as a named failure below instead.
+ko_refs="$(refs "$Q_KO" || true)"
+[ -n "$ko_refs" ] || bad "PIN2 한국어 질문이 발췌를 0건 반환했다 (이후 PIN2/PIN3 는 이 사실의 파생)"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #581 (조사 분리) 이 이를 바꾼다: 6개 키워드
 # 중 코퍼스에 닿는 것은 '논문은' '신경기호' '추론의' '근거를' 뿐이고, 그중 '추론의'
@@ -239,7 +244,8 @@ else
   ok "PIN2 한국어 질문은 동일 주제 영어 소스에 닿지 않는다 (#576 이 바꾼다)"
 fi
 
-ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity')"
+ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
+[ -n "$ko_answer" ] || bad "PIN2 wiki 렌더가 아무것도 출력하지 않았다"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #575 가 이를 바꾼다. 렌더된 답변에는 어떤
 # 키워드가 몇 건 매치됐는지, 리콜이 낮은지에 대한 진단이 전혀 없다 — 6개 중 2개만
@@ -282,7 +288,8 @@ fi
 # =============================================================================
 # PIN 4 — path citations inside an excerpt feed the frequency score
 # =============================================================================
-path_refs="$(refs "$Q_PATH")"
+path_refs="$(refs "$Q_PATH" || true)"
+[ -n "$path_refs" ] || bad "PIN4 경로 인용 질의가 발췌를 0건 반환했다 (이후 PIN4 는 이 사실의 파생)"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #573 이 이를 바꾼다. reading-notes.md 의
 # 본문에는 주제에 대한 산문이 한 줄도 없다 — 'neurosymbolic' 은 오직 파일 경로 안에서만
@@ -292,22 +299,31 @@ same "PIN4 경로 인용만 있는 노트가 1위다 (#573 이 바꾼다)" \
   "sources/reading-notes.md:5" \
   "$(printf '%s\n' "$path_refs" | head -1)"
 
-notes_excerpt="$(excerpt_of "$Q_PATH" 'sources/reading-notes.md:5')"
-if printf '%s\n' "$notes_excerpt" | grep -i 'neurosymbolic' | grep -qvE '^- (runs/)?sources/'; then
+# 빈 발췌를 통과로 읽지 않도록 -n 가드를 먼저 둔다: 발췌가 사라지면 첫 grep 이 rc=1 을
+# 내고 pipefail 때문에 조건 전체가 거짓이 되어, "발췌가 없다"가 "전부 경로다"와 같은
+# 결과로 보고된다.
+notes_excerpt="$(excerpt_of "$Q_PATH" 'sources/reading-notes.md:5' || true)"
+if [ -z "$notes_excerpt" ]; then
+  bad "PIN4 reading-notes 발췌가 사라졌다 — 산문 기여 0 을 확인할 수 없다"
+elif printf '%s\n' "$notes_excerpt" | grep -i 'neurosymbolic' | grep -qvE '^- (runs/)?sources/'; then
   bad "PIN4 reading-notes 발췌에 경로가 아닌 'neurosymbolic' 이 생겼다 — 픽스처를 확인하라"
 else
   ok "PIN4 그 노트의 키워드 출현은 전부 파일 경로다 (산문 기여 0)"
 fi
 
 # 실제 논문은 같은 질의에서 그 노트보다 아래에 있다.
-kim_rank="$(printf '%s\n' "$path_refs" | grep -n '^sources/kim-2024-neurosymbolic-grounding.md:4$' | cut -d: -f1)"
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #573 이 이를 바꾼다.
-same "PIN4 실제 논문은 6위다 (#573 이 바꾼다)" "6" "$kim_rank"
+kim_rank="$(printf '%s\n' "$path_refs" | grep -nxF 'sources/kim-2024-neurosymbolic-grounding.md:4' | cut -d: -f1 || true)"
+if [ -z "$kim_rank" ]; then
+  bad "PIN4 비교 기준인 sources/kim-…:4 발췌가 사라졌다 — 발췌 앵커가 이동했다면(#574) 기준 발췌를 갱신하라"
+else
+  # 이 값은 현재 결함을 고정한 것이다. 이슈 #573 이 이를 바꾼다.
+  same "PIN4 실제 논문은 6위다 (#573 이 바꾼다)" "6" "$kim_rank"
+fi
 
 # =============================================================================
 # PIN 5 — excerpt window: front matter swallows the window, prose is suppressed
 # =============================================================================
-fm_excerpt="$(excerpt_of "$Q_KO" 'sources/kim-2024-neurosymbolic-grounding.md:4')"
+fm_excerpt="$(excerpt_of "$Q_KO" 'sources/kim-2024-neurosymbolic-grounding.md:4' || true)"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #574 가 이를 바꾼다. 발췌 창(_EXCERPT_WINDOW=3)
 # 이 front matter 안의 title 행에 앵커되면, 7줄 전부가 YAML 메타데이터고 산문은 0줄이다.
