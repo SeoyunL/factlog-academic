@@ -42,8 +42,9 @@ export XDG_CONFIG_HOME="$_TMP_CFG/factlog-test-cfg"  # isolate active-KB config 
 # re-rank must be OFF. FACTLOG_EMBED_MODULE inherited from the developer's shell
 # reorders search() results and would fail PIN3/PIN4 as a false alarm — a pinned
 # baseline that reports defects the code does not have is worse than none.
-# (tests/test_ask_router.sh deliberately switches it ON for one case; this file
-# needs the opposite, so it unsets rather than assuming an unset environment.)
+# (tests/test_ask_router.sh deliberately switches it ON for two cases — the #31
+# rerank seam and the #572 grade-override decision; this file needs the opposite,
+# so it unsets rather than assuming an unset environment.)
 unset FACTLOG_EMBED_MODULE
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
