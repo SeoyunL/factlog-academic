@@ -674,9 +674,14 @@ def _sanitize(line: str) -> str:
     return "".join(ch for ch in line if ch == "\t" or ch.isprintable())
 
 
-# KB-relative directories a cited file path can be rooted at. Kept in sync with
-# the corpus constants above (plus the remaining `factlog init` scaffold dirs,
-# which notes cite the same way even though the wiki search never reads them).
+# The closed set of directories `factlog init` scaffolds — the only roots a
+# KB-relative citation can start from. It is NOT narrowed to the searched corpus
+# (sources/ + runs/sources/ + decisions/): measured over the corpus of the
+# reference KB (187 readable files under those three dirs), the 533 masked
+# citations are 378 `sources/…`, 154 `pages/…` and 1 `policy/…` — narrowing would
+# leave those 155 non-corpus citations scoring like prose. facts/, templates/ and
+# bare runs/ measure zero hits there but stay in the set: it is the scaffold's
+# closed list, and the extension whitelist below bounds what they can misfire on.
 _CITED_KB_DIRS = (
     *WIKI_SOURCE_DIRS,
     *WIKI_SUPPLEMENTARY_DIRS,
@@ -686,16 +691,31 @@ _CITED_KB_DIRS = (
     "templates",
     "runs",
 )
-# A KB-relative file path written inside an excerpt, e.g.
+# Source-text extensions a KB citation can end in. Required (rather than a bare
+# `\.\w+`) because several scaffold dirs are ordinary English nouns: without it,
+# prose that omits the space after a full stop is eaten as a path — "3 runs/day.The
+# results" and "the policy/value.Networks are trained jointly" both lost their
+# keywords. Such run-on sentences are common in PDF→text conversions under
+# runs/sources/. The trailing `\w*` keeps an attached Korean particle inside the
+# match (`policy/attribute-relations.md에`), which occurs in the reference KB.
+_CITATION_EXTS = ("md", "txt", "json", "csv", "yml", "yaml", "pdf", "docx", "html")
+# A KB-root-relative file path written inside an excerpt, e.g.
 # `sources/faronius-2025-independence-is-not-an-issue-in-neurosymbolic-ai.md` or
-# `runs/sources/kim-2024-neurosymbolic-grounding.txt`. Longest dir first so the
-# match spans the whole path (`runs/sources/…`, not `runs/` + leftovers). The
-# body stops at whitespace or the punctuation that closes a citation, so
-# `(sources/x.md, confidence=0.85)` yields just the path.
+# `runs/sources/kim-2024-neurosymbolic-grounding.txt`. Root-relative ONLY: `./sources/x.md`,
+# `~/kb/sources/x.md`, an absolute path, a bare filename and a `#anchor` fragment are
+# NOT damped (zero such citations in the reference KB; left to a follow-up issue).
+# The dir alternation is sorted (-len, name) purely so the compiled pattern string is
+# byte-identical across processes — set iteration order varies with PYTHONHASHSEED, and
+# this repo treats determinism as a contract. Order does not affect what is matched: the
+# body character class includes '/', so a shorter root that matches first still swallows
+# the rest of the path. The body stops at whitespace or the punctuation that closes a
+# citation, so `(sources/x.md, confidence=0.85)` yields just the path.
 _PATH_CITATION_RE = re.compile(
     r"(?<![\w./-])(?:"
-    + "|".join(re.escape(rel) for rel in sorted(set(_CITED_KB_DIRS), key=len, reverse=True))
-    + r")/[^\s,;()\[\]<>\"'`]*\.\w+"
+    + "|".join(re.escape(rel) for rel in sorted(set(_CITED_KB_DIRS), key=lambda rel: (-len(rel), rel)))
+    + r")/[^\s,;()\[\]<>\"'`]*\.(?:"
+    + "|".join(_CITATION_EXTS)
+    + r")\w*"
 )
 
 
@@ -710,18 +730,23 @@ def _excerpt_score(excerpt: str, patterns: list[re.Pattern[str]]) -> tuple[int, 
     is a list of `sources/…-neurosymbolic-….md` links says nothing about
     neurosymbolic anything, yet unmasked it outscored the paper itself. The
     damping is full EXCLUSION (weight 0), not a reduced fractional weight, for
-    two reasons: (a) the score is an integer lexicographic sort key, so a
-    fractional path weight would have to widen or float the key that every
-    caller compares, a larger contract change than this defect warrants; (b) zero
-    is the honest weight — the keyword in a path is evidence about a *different*
+    two reasons: (a) this score is an integer lexicographic sort key whose SCALE
+    is itself pinned — a fractional path weight would have to float the key (a
+    contract change for every caller that compares it) and the integer workaround,
+    scaling prose up instead, changes what a plain prose line scores; (b) zero is
+    the honest weight — the keyword in a path is evidence about a *different*
     file, so any nonzero weight would still let enough citations outrank prose.
 
     Only the path token itself is removed, so prose is scored exactly as before:
     a path mentioned mid-sentence loses its own characters and nothing else, and
     the same keyword spelled out in the surrounding sentence still counts.
-    Recall is untouched on purpose — search() still admits an excerpt on a raw
-    line match, so a path-only note is ranked last rather than dropped; damping
-    the score is this issue's scope, discarding the result is not.
+    COLLECTION recall is untouched on purpose — search() gates an excerpt on the
+    raw, unmasked line, so a path-only note is still collected and ranked rather
+    than filtered out. It is NOT retained unconditionally in the rendered answer:
+    a (0, 0) excerpt sinks below better-scoring ones and can fall outside
+    search()'s `limit` cap (measured: with the default cap of 10, a demoted
+    decisions/ excerpt drops out of the top 10). That demotion is the intended
+    effect; deciding an excerpt is unciteable is not this issue's scope.
     """
     low = _PATH_CITATION_RE.sub(" ", excerpt.lower())
     coverage = sum(1 for pat in patterns if pat.search(low))
