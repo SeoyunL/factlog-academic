@@ -72,6 +72,25 @@ def _bytes(tmp_path):
     return {p.name: p.read_bytes() for p in sorted((tmp_path / "runs").glob("*.json"))}
 
 
+def _section(out: str, heading: str) -> str:
+    """The body printed under one heading.
+
+    EVERY heading is printed, empty or not -- that is the point of the report. So
+    `heading in out` is a vacuous assertion: it holds no matter which class a fact was
+    sorted into, and a defect that files a fact under the wrong heading passes. Measured:
+    flipping the status whitelist left the whole suite green because the fact merely moved
+    from one always-printed heading to another. Assert on the BODY.
+    """
+    headings = [h for _n, h in cli._REPAIR_RUNS_REPAIRABLE + cli._REPAIR_RUNS_REPORTED]
+    assert heading in headings, f"not a report heading: {heading}"
+    body = out.split(f"\n{heading}:\n", 1)
+    assert len(body) == 2, f"heading not printed: {heading}"
+    rest = body[1]
+    for other in headings:
+        rest = rest.split(f"\n{other}:\n", 1)[0]
+    return rest.split("\nfactlog repair-runs:", 1)[0]
+
+
 class TestRepairableClasses:
     def test_a_decision_missing_from_the_run_row_is_repairable(self, tmp_path, capsys):
         kb = _kb(
@@ -82,8 +101,9 @@ class TestRepairableClasses:
         assert _repair(kb, "A", "R", "X") == 3
 
         out = capsys.readouterr().out
-        assert "decided in candidates.csv, still pending in the run row:" in out
-        assert "r1.json  [candidate → accepted]" in out
+        body = _section(out, "decided in candidates.csv, still pending in the run row")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "r1.json  [candidate → accepted]" in body
         assert "1 run row(s) repairable in 1 file(s), 0 left for a human" in out
 
     def test_a_blank_status_run_row_counts_as_pending(self, tmp_path, capsys):
@@ -99,7 +119,8 @@ class TestRepairableClasses:
         )
         assert _repair(kb, "A", "R", "X") == 3
 
-        assert "r1.json  [needs_review → accepted]" in capsys.readouterr().out
+        body = _section(capsys.readouterr().out, "decided in candidates.csv, still pending in the run row")
+        assert "r1.json  [needs_review → accepted]" in body
 
     def test_a_retirement_the_run_row_never_heard_about_is_repairable(self, tmp_path, capsys):
         """CSV `superseded` over run `accepted` -- the eject-drift shape.
@@ -116,9 +137,9 @@ class TestRepairableClasses:
         )
         assert _repair(kb, "A", "R", "X") == 3
 
-        out = capsys.readouterr().out
-        assert "retired in candidates.csv, still engine input in the run row:" in out
-        assert "r1.json  [accepted → superseded]" in out
+        body = _section(capsys.readouterr().out, "retired in candidates.csv, still engine input in the run row")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "r1.json  [accepted → superseded]" in body
 
 
 class TestTheDuplicateFactKeyGuard:
@@ -143,8 +164,9 @@ class TestTheDuplicateFactKeyGuard:
         assert _repair(kb, "A", "R", "X") == 3
 
         out = capsys.readouterr().out
-        assert "several candidates.csv rows share one fact — NOT repaired:" in out
-        assert "candidates.csv: candidate, superseded" in out
+        body = _section(out, "several candidates.csv rows share one fact — NOT repaired")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "candidates.csv: candidate, superseded" in body
         assert "0 run row(s) repairable in 0 file(s), 1 left for a human" in out
         # and specifically NOT offered as a repair, in either direction
         assert "→ superseded]" not in out
@@ -162,7 +184,9 @@ class TestTheDuplicateFactKeyGuard:
         assert _repair(kb, "A", "R", "X") == 3
 
         out = capsys.readouterr().out
-        assert "several candidates.csv rows share one fact — NOT repaired:" in out
+        assert "A / R / X  ← sources/note.md" in _section(
+            out, "several candidates.csv rows share one fact — NOT repaired"
+        )
         assert "0 run row(s) repairable in 0 file(s), 1 left for a human" in out
 
 
@@ -182,8 +206,9 @@ class TestClassesItRefusesToTouch:
         assert _repair(kb, "A", "R", "X") == 3
 
         out = capsys.readouterr().out
-        assert "unrecognised status in candidates.csv — NOT repaired:" in out
-        assert "candidates.csv: aceptd" in out
+        body = _section(out, "unrecognised status in candidates.csv — NOT repaired")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "candidates.csv: aceptd" in body
         assert "→ aceptd]" not in out
         assert "0 run row(s) repairable" in out
 
@@ -196,7 +221,10 @@ class TestClassesItRefusesToTouch:
         assert _repair(kb, "A", "R", "X") == 3
 
         out = capsys.readouterr().out
-        assert "both stores decided, and they disagree — NOT repaired:" in out
+        body = _section(out, "both stores decided, and they disagree — NOT repaired")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "candidates.csv: accepted" in body
+        assert "r1.json: confirmed" in body
         assert "0 run row(s) repairable in 0 file(s), 1 left for a human" in out
 
     def test_a_decision_only_the_run_row_holds_is_reported_only(self, tmp_path, capsys):
@@ -211,7 +239,9 @@ class TestClassesItRefusesToTouch:
         assert _repair(kb, "A", "R", "X") == 3
 
         out = capsys.readouterr().out
-        assert "pending in candidates.csv, decided in the run row — NOT repaired:" in out
+        body = _section(out, "pending in candidates.csv, decided in the run row — NOT repaired")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "r1.json: accepted" in body
         assert "0 run row(s) repairable" in out
 
     def test_two_different_pending_statuses_are_reported(self, tmp_path, capsys):
@@ -222,17 +252,21 @@ class TestClassesItRefusesToTouch:
         )
         assert _repair(kb, "A", "R", "X") == 3
 
-        assert "both stores pending, with different pending statuses — NOT repaired:" in (
-            capsys.readouterr().out
+        body = _section(
+            capsys.readouterr().out,
+            "both stores pending, with different pending statuses — NOT repaired",
         )
+        assert "A / R / X  ← sources/note.md" in body
+        assert "candidates.csv: candidate" in body
+        assert "r1.json: needs_review" in body
 
     def test_a_run_row_with_no_csv_row_is_reported(self, tmp_path, capsys):
         kb = _kb(tmp_path, [], {"r1.json": [_run_row(status="candidate")]})
         assert _repair(kb, "A", "R", "X") == 3
 
-        out = capsys.readouterr().out
-        assert "run row with no candidates.csv row — NOT repaired:" in out
-        assert "candidates.csv: (no row)" in out
+        body = _section(capsys.readouterr().out, "run row with no candidates.csv row — NOT repaired")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "candidates.csv: (no row)" in body
 
     def test_a_csv_row_with_no_run_backing_is_reported_not_created(self, tmp_path, capsys):
         """Creating a run item would mean inventing a docspan and a run_id no extraction
@@ -245,9 +279,9 @@ class TestClassesItRefusesToTouch:
         )
         assert _repair(kb, "A", "R", "X") == 3
 
-        out = capsys.readouterr().out
-        assert "candidates.csv row with no run backing — NOT repaired:" in out
-        assert "runs/*.json: (no row)" in out
+        body = _section(capsys.readouterr().out, "candidates.csv row with no run backing — NOT repaired")
+        assert "A / R / X  ← sources/note.md" in body
+        assert "runs/*.json: (no row)" in body
         assert _runs(kb) == [_unrelated_run_row()]
 
 
@@ -271,9 +305,14 @@ class TestPartialRepairIsNamed:
         assert _repair(kb, "A", "R", "X") == 3
 
         out = capsys.readouterr().out
-        assert "A / R / X  ← sources/note.md — PARTIAL" in out
-        assert "aaa.json  [candidate → accepted]" in out
-        assert "glob order, not by status" in out
+        body = _section(out, "decided in candidates.csv, still pending in the run row")
+        assert "A / R / X  ← sources/note.md — PARTIAL" in body
+        assert "aaa.json  [candidate → accepted]" in body
+        assert "glob order, not by status" in body
+        # the other copy is filed where a human will see it, marked as the same fact
+        left = _section(out, "both stores decided, and they disagree — NOT repaired")
+        assert "A / R / X  ← sources/note.md — PARTIAL" in left
+        assert "zzz.json: confirmed" in left
         assert "1 run row(s) repairable in 1 file(s), 1 left for a human" in out
 
 
