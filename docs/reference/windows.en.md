@@ -40,11 +40,11 @@ When `$FACTLOG_PYTHON` is unset, the selection order is:
 1. the interpreter in `$VIRTUAL_ENV` — an explicit "I activated a venv" signal.
    Checked for **version only**; pyrewire is not required.
    So an activated venv that has no engine wins over a `python3` on PATH that
-   does. **The consequence is that `finalize`'s logic check degrades to "Logic
-   check SKIPPED"** — you keep working, one verification tier lower. Nothing is
-   printed about it either: `activate` puts the venv's executable directory on
-   PATH, so the off-PATH stderr notice below does not apply. To get the tier
-   back, install the engine into that venv with `setup`, or deactivate it
+   does. **The consequence is that `finalize`'s logic check degrades to
+   "Logic check SKIPPED"** — you keep working, one verification tier lower.
+   Nothing is printed about it either: `activate` puts the venv's executable
+   directory on PATH, so the off-PATH stderr notice below does not apply. To get
+   the tier back, install the engine into that venv with `setup`, or deactivate it
 2. the first PATH candidate (`python3`, `python`, `py -3.12`/`-3.11`/`-3`, `py`)
    that **carries pyrewire 1.0.3 or newer**
 3. the interpreter in `~/.factlog-venv` — the fixed path the PEP 668 guidance
