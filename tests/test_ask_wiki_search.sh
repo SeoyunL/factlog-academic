@@ -31,7 +31,20 @@
 
 set -euo pipefail
 
-export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
+# Temp roots are tracked so a harness that runs inside CI's discovery loop leaves
+# nothing behind.
+_TMP_CFG="$(mktemp -d)"
+_TMP_KB="$(mktemp -d)"
+trap 'rm -rf "$_TMP_CFG" "$_TMP_KB"' EXIT
+
+export XDG_CONFIG_HOME="$_TMP_CFG/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
+# This is the repo's only harness that pins RANKED ORDER, so the optional neural
+# re-rank must be OFF. FACTLOG_EMBED_MODULE inherited from the developer's shell
+# reorders search() results and would fail PIN3/PIN4 as a false alarm — a pinned
+# baseline that reports defects the code does not have is worse than none.
+# (tests/test_ask_router.sh deliberately switches it ON for one case; this file
+# needs the opposite, so it unsets rather than assuming an unset environment.)
+unset FACTLOG_EMBED_MODULE
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -47,8 +60,13 @@ same() {  # same <desc> <expected> <got>
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 — expected [$2], got [$3]"; fi
 }
 
-KB="$(mktemp -d)/wiki"
+KB="$_TMP_KB/wiki"
 "$PYTHON" -m factlog init --target "$KB" >/dev/null
+# Start from an empty corpus. `factlog init` already seeds decisions/open-questions.md
+# (this fixture overwrites it), and a future seed file joining the corpus would move
+# PIN2/PIN3/PIN6 for a reason that lives outside this file — the hardest kind of pin
+# failure to diagnose.
+rm -f "$KB"/sources/* "$KB"/decisions/*
 
 # --- fixture -----------------------------------------------------------------
 # Bibliographic sources are written in the exact shape `factlog zotero-import`
