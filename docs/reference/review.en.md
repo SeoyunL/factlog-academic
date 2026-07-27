@@ -79,8 +79,67 @@ silently downgraded to `candidate`, or the fact you rejected can come back.
 the `candidates.csv` row out of pending, so `accept`/`reject` report `nothing to
 change` and `amend` cannot find the old triple (`no fact matches`, exit code 1).
 Reconciling two stores that have already drifted apart is not these commands' job
-(see "Boundary" below), and no command does it yet (#566). So repair an unreadable
-run file **before** rebuilding `candidates.csv`.
+(see "Boundary" below); **the command that does it is `factlog repair-runs`** (#566).
+Once the file is repaired, run it on the fact:
+
+```bash
+factlog repair-runs A knows B            # report only
+factlog repair-runs A knows B --apply    # write into runs/*.json
+```
+
+`repair-runs` decides nothing; it **compares the two stores**. That is why a
+`candidates.csv` row which is no longer pending — a dead end for `accept` — is
+exactly its input. It writes nothing without `--apply` (which is why there is no
+`--dry-run`: the report is the default). It never touches `candidates.csv` and does
+not recompile `accepted.dl`; a repaired row takes effect from the next rebuild.
+It is still better to repair an unreadable run file **before** rebuilding
+`candidates.csv` — then this recovery is not needed at all.
+
+`--apply` writes in **exactly two cases**:
+
+1. `candidates.csv` holds a decision and the run row is still **pending** (blank and
+   unrecognised statuses included — merge reads all three as pending) → the decision
+   is recorded into the run row.
+2. `candidates.csv` holds `superseded` while the run row holds `accepted`/`confirmed`
+   → **the run row is lowered to `superseded`.**
+
+> ⚠️ **The second rule retires a run row that was engine input.** It is the shape drift
+> takes after `eject` retires a fact and the run row does not follow, and lowering is
+> the only way to fix it. It is not an arbitrary ranking but an alignment with **merge's
+> own precedence**: merge's `existing_superseded_keys` pass keeps a `candidates.csv`
+> `superseded` over a re-asserted engine status on every rebuild. Writing `superseded`
+> here therefore lands on the same result merge would reach anyway, and it is *leaving*
+> the run row alone that disagrees with merge. Even so, **rows do drop out of engine
+> input as a result**, so run the report first before combining `--apply` with `--all`
+> and no triple.
+
+The invariant this command keeps is **not** "never lower a run row" but "never write
+against merge's own precedence". Under the former, the second kind of drift above could
+never be repaired at all.
+
+Some classes `repair-runs` **reports and does not touch**: a fact with several
+`candidates.csv` rows (a round-trip `amend` leaves a live row and a tombstone on one
+fact), a fact the two stores decided differently, a CSV row with no run backing
+(creating a run item would fabricate a docspan and a run_id that no extraction
+produced), and an unrecognised status in `candidates.csv`. **A drifted value is out
+of scope** — that is `amend`'s subject — which is why the `amend` warning does not
+point at this command.
+
+> **"Not repaired" does not mean "left safe."** For a fact with several
+> `candidates.csv` rows in particular, `repair-runs` stands back but **the next sync
+> does not** — merge collapses those rows into one. Re-merged with `candidates.csv` in
+> place, merge's preservation passes decide and a decided row outranks a pending one
+> (superseded > accepted/confirmed > pending), so a live row that sat beside a
+> `superseded` tombstone **comes back retired**. Rebuilt from scratch instead (with
+> `candidates.csv` deleted) those passes have nothing to read, so `runs/*.json` decides
+> and merge's dedup picks by the `source` value and load order — never by status. The
+> two paths **can disagree**, so do not predict which one you will get: read the rows
+> the report lists.
+
+Exit codes: `0` clean, `3` drift found (in report mode, or left unrepaired after
+`--apply`), `1` a run file could not be read so the comparison is partial, `2` a
+usage error. `--apply` with no triple selector is refused unless `--all` is given,
+since it would rewrite run rows across the whole KB.
 
 Subject, relation, object and source are all **normalised to NFC** for both
 comparison and storage. Two values that look identical but differ only in Unicode
@@ -102,7 +161,9 @@ NFC unification, re-merge (`/factlog sync` or `merge_candidates.py`).
 Boundary: repairing drift — `confirmed` in `candidates.csv` while `runs/*.json`
 still says `candidate`, as in a KB predating #233 — is not a side effect of
 `accept`/`reject`. They write down the decision they just made, nothing else;
-recovering drifted rows is a separate command's job.
+recovering drifted rows is a separate command's job (`factlog repair-runs`, above).
+The boundary is a safeguard: let `accept` reconcile drift too and a wildcard reaches
+rows the gate reported as "skipped", silently retiring a `confirmed` fact (#477).
 
 To **correct** a fact's value (not just its status), use `factlog amend`:
 

@@ -746,7 +746,7 @@ input either way.
 actually changed, keyed like merge on `(subject, relation, object, source file)` —
 a decision on one source's row never moves another source's row, and repairing
 rows whose two stores already drifted apart is a separate command's job, not
-theirs.
+theirs. That command is `factlog repair-runs` (see below).
 
 **Unreadable run file contract (do not skip).** A `runs/*.json` the CLI cannot
 read — bytes that do not decode, or invalid JSON — is skipped rather than fatal,
@@ -756,10 +756,14 @@ and `accept`/`reject`/`amend` name it:
 factlog: warning — could not read <file> to record the decision (...); any row it
 holds for this fact keeps its old status, and a candidates.csv rebuilt from
 runs/*.json alone can take that old status (merge keeps whichever run file comes
-first in glob order).
+first in glob order). Once the file reads again, `factlog repair-runs` compares the
+two stores, which records the candidates.csv decision into any row that file still
+holds as pending.
 ```
 
-(`amend` prints the same line with "to record the edit" / "old value".)
+(`amend` prints the same line with "to record the edit" / "old value", and **without**
+the `repair-runs` sentence: `repair-runs` restores a status, and what amend loses here
+is a value.)
 
 - That line goes to **stderr**, so the "Show the stdout" instruction above will not
   surface it. Capture stderr for these commands and **relay the warning line to the
@@ -768,11 +772,61 @@ first in glob order).
 - Do not report the command as clean because it exited 0. Exit 0 here means "the
   readable files were updated", not "every file holding this fact was updated".
 - **Do not tell the user to re-run the command after fixing the file.** It does not
-  work and no other recovery command exists yet (#566): the first run already moved
-  the `candidates.csv` row out of pending, so a second `accept`/`reject` answers
-  `nothing to change` and a second `amend` answers `no fact matches` (exit code 1),
-  while the repaired file's row keeps its old status. Reconciling two stores that
-  have already drifted apart is out of scope for these commands by design.
+  work: the first run already moved the `candidates.csv` row out of pending, so a
+  second `accept`/`reject` answers `nothing to change` and a second `amend` answers
+  `no fact matches` (exit code 1), while the repaired file's row keeps its old
+  status. Reconciling two stores that have already drifted apart is out of scope for
+  these commands by design.
+- **The recovery command is `factlog repair-runs`** (#566), and it is what the
+  warning now points at. Once the file reads again, run it on the fact:
+
+  ```bash
+  factlog repair-runs <subject> <relation> <object>            # report only
+  factlog repair-runs <subject> <relation> <object> --apply    # write the repairs
+  ```
+
+  Say what it does, not "this fixes it": it **compares** `candidates.csv` against
+  `runs/*.json`. It writes nothing without `--apply` (there is no `--dry-run` — the
+  report is the default), it never touches `candidates.csv`, and it does not
+  recompile `accepted.dl`. `--apply` writes in **exactly two cases**:
+
+  1. `candidates.csv` holds a decision and the run row is still **pending** (blank
+     and unrecognised statuses included — merge reads all three as pending) → the
+     decision is recorded into the run row.
+  2. `candidates.csv` holds `superseded` while the run row holds
+     `accepted`/`confirmed` → **the run row is lowered to `superseded`.**
+
+  **Warn the human before `--apply` on a KB where case 2 applies.** It retires a run
+  row that was engine input — the shape drift takes after `eject` retires a fact and
+  the run row does not follow. Lowering is the only way to repair it, and it aligns
+  with merge rather than overriding it (merge's `existing_superseded_keys` pass keeps
+  a `candidates.csv` `superseded` over a re-asserted engine status on every rebuild)
+  — but rows do drop out of engine input as a result. Show the human the report
+  first, especially with `--all`. The invariant is "never write against merge's own
+  precedence", **not** "never lower a run row": the latter would leave this drift
+  permanently unrepairable.
+
+  It also refuses several classes, prints them under their
+  own headings, and leaves them to the human: a fact whose `candidates.csv` rows are
+  ambiguous (a round-trip `amend` leaves two rows on one fact), a fact both stores
+  decided differently, a CSV row with no run backing (creating one would fabricate a
+  docspan and a run_id that no extraction produced), and an unrecognised status in
+  the CSV. **A drifted VALUE is not in scope** — that is `amend`'s subject — so do
+  not offer `repair-runs` for the `amend` warning.
+- **Do not relay "NOT repaired" as "safe".** For the ambiguous-`candidates.csv` class
+  especially, the command prints a note saying what the next sync does, and it is the
+  part the human needs: merge collapses the duplicate rows into one. With
+  `candidates.csv` in place its preservation passes decide and a decided row outranks
+  a pending one (superseded > accepted/confirmed > pending), so a live row beside a
+  `superseded` tombstone **comes back retired**. Rebuilt from scratch, `runs/*.json`
+  decides instead, by the `source` value and load order — never by status. Relay the
+  rule; **do not predict the outcome** (the two paths can disagree) and **do not offer
+  a command to clean it up** — measured, none does it while keeping the fact live:
+  `accept` leaves the tombstone and `eject --purge` deletes both rows.
+- Read its exit code: `0` clean, `3` drift found (in report mode, or left unrepaired
+  after `--apply`), `1` a run file could not be read so the comparison is partial,
+  `2` a usage error. `--apply` with no triple selector is refused unless `--all` is
+  given, because it would rewrite run rows across the whole KB.
 - What you may say is what the warning says: that file was not updated, its row (if
   any) still holds the old status, and merge settles a fact claimed by two run files
   by **glob order, not status** — so once `candidates.csv` is rebuilt from
@@ -1376,6 +1430,13 @@ The review commands are the supported alternative to hand-editing
   [--set-object Z] [--set-note TEXT] [--accept] [--dry-run]` — correct a fact's
   value durably: it rewrites `facts/candidates.csv` **and** the backing
   `runs/*.json`, so a re-merge does not resurrect the old value.
+- `factlog repair-runs [SUBJECT [RELATION [OBJECT]]] [--apply] [--all]` — compare
+  the two stores and report **status** drift between `facts/candidates.csv` and
+  `runs/*.json`; `--apply` records the CSV decision into the run rows that are still
+  pending. Reporting is the default (there is no `--dry-run`), and it never writes
+  `candidates.csv` or recompiles `accepted.dl`. This is the repair `accept`/`reject`/
+  `amend` deliberately do not perform; see "Unreadable run file contract" above for
+  what it refuses to touch.
 
 Because `accept`/`reject` match a *prefix* with `-` wildcards, a two-term
 invocation can match far more rows than intended. Run `--dry-run` first and show

@@ -1415,7 +1415,10 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             # command reports "nothing to change" and the run row keeps its old
             # status forever. Repairing two stores that already drifted apart is a
             # separate command's job, not this one's -- as the docstring above says
-            # about #477. No such command exists yet (#566).
+            # about #477. That command is `factlog repair-runs` (#566): it compares the
+            # two stores instead of deciding, so a CSV row that already carries the
+            # decision is its input, not its dead end -- which is why the warning may
+            # name it where it could not name a re-run (see the fourth clause below).
             # "can take", not "would take": whether the stale row actually wins a
             # from-scratch rebuild depends on glob order. Measured -- an unreadable
             # zzz_bin.json alongside a readable aaa_good.json that DID take the
@@ -1423,11 +1426,20 @@ def _apply_status_to_runs(target, decided: set, from_statuses: set, new_status: 
             # rebuilds as `candidate`. Stating it unconditionally would be the same
             # class of unverified promise as the re-run remedy this replaced, so the
             # rule merge actually applies is named instead of a guaranteed outcome.
+            # The fourth clause is SELF-LIMITING on purpose. Whether repair-runs reaches
+            # that row is conditional -- the row must still be pending once the file reads
+            # again, the fact's candidates.csv rows must be unambiguous, and the row must
+            # carry a source file -- so the sentence promises only what it can deliver:
+            # what repair-runs records, and into which rows. An unconditional "run this to
+            # fix it" would be the same class of unverified remedy as the "re-run after
+            # fixing" text this warning replaced (#563).
             print(
                 f"factlog: warning — could not read {jp.name} to record the decision "
                 f"({exc}); any row it holds for this fact keeps its old status, and a "
                 "candidates.csv rebuilt from runs/*.json alone can take that old status "
-                "(merge keeps whichever run file comes first in glob order).",
+                "(merge keeps whichever run file comes first in glob order). Once the file "
+                "reads again, `factlog repair-runs` compares the two stores, which records "
+                "the candidates.csv decision into any row that file still holds as pending.",
                 file=sys.stderr,
             )
             continue
@@ -1862,6 +1874,10 @@ def cmd_amend(args: argparse.Namespace) -> int:
                 # No "re-run after fixing the file" here either, and amend is the
                 # blunter case: candidates.csv already carries the NEW triple, so the
                 # same command comes back `no fact matches` on the old one (#566).
+                # `factlog repair-runs` is not the answer here and must not be offered:
+                # it reconciles a STATUS by comparing the two stores, and what this
+                # warning is about is a VALUE, which candidates.csv alone now holds.
+                # Naming it would be the same shape of false remedy, one command over.
                 # "can take", not "would take", for the reason spelled out in
                 # _apply_status_to_runs: the stale row only wins a from-scratch
                 # rebuild when it sorts first.
@@ -1981,6 +1997,546 @@ def cmd_amend(args: argparse.Namespace) -> int:
         )
     print("factlog amend: note — pages/ may be stale; run /factlog sync to regenerate them.")
     return 1 if recompile_failed else 0
+
+
+# The classes `repair-runs` sorts a fact's rows into, printed in this order. The two
+# REPAIRABLE ones are the only ones it will ever write; every REPORTED one is left to a
+# human. Both lists are printed even when empty. A command whose whole job is "compare
+# the two stores" that showed only the rows it can fix would lie by silence about the
+# rows it cannot -- and the classes it does not touch are the interesting ones: a fact
+# both stores decided differently, a run row with no CSV row behind it, a CSV row with
+# no run backing at all (the shape an `amend` correction and the #218 ratchet protect,
+# and which this command deliberately does NOT close -- see the docstring).
+_REPAIR_RUNS_REPAIRABLE = (
+    ("csv-decided-run-pending", "decided in candidates.csv, still pending in the run row"),
+    ("csv-superseded-run-engine", "retired in candidates.csv, still engine input in the run row"),
+)
+_REPAIR_RUNS_REPORTED = (
+    ("ambiguous-csv", "several candidates.csv rows share one fact — NOT repaired"),
+    ("both-decided", "both stores decided, and they disagree — NOT repaired"),
+    ("csv-pending-run-decided", "pending in candidates.csv, decided in the run row — NOT repaired"),
+    ("both-pending", "both stores pending, with different pending statuses — NOT repaired"),
+    ("csv-status-unrecognised", "unrecognised status in candidates.csv — NOT repaired"),
+    ("run-only", "run row with no candidates.csv row — NOT repaired"),
+    ("csv-only", "candidates.csv row with no run backing — NOT repaired"),
+)
+
+
+def _repair_runs_scan(target, filt: dict[str, str] | None) -> dict:
+    """Compare candidates.csv against runs/*.json and classify every matching fact.
+
+    Returns a plan: the run rows a repair may write (`repairs`), the drift left to a
+    human (`reports`), the run files that could not be read, and the parsed contents of
+    the readable ones so a caller applying the plan writes back what it judged.
+
+    MATCHING and IDENTITY stay different jobs, but they must NORMALISE ALIKE, and both go
+    through `common.fact_key` to do it. Identity is fact_key on the RAW field values --
+    literally the function merge dedups with -- so the CLI and merge agree on which run row
+    IS this CSV row. Matching pushes the selector terms through the same function once and
+    compares each row on the key it is already identified by.
+
+    Comparing the selector against raw fields instead was a real defect, not a nicety.
+    fact_key canonicalises an amount object, so a KB holding `amount(7,억)` in runs and the
+    canonical `amount(7,"억")` in candidates.csv has ONE fact -- but a raw-field filter
+    matched only one store at a time: the canonical spelling selected the CSV row and
+    reported `no run backing` while the run row sat right there, and the bare spelling
+    selected the run row and reported it as having no CSV row. Both answers were false, and
+    the fact was filed under a class this command refuses to touch. Worse, the unfiltered
+    (`--all`) scan repaired it correctly -- so naming the fact, the careful thing to do,
+    failed while rewriting the whole KB worked.
+
+    Note this does NOT fold matching more loosely than identity: it folds them IDENTICALLY.
+    `_apply_review_status` keeps its lenient NFC matching separate from fact_key identity
+    because it selects CSV rows and then re-keys THOSE rows to find the run rows; this
+    command filters both stores directly, so a selector that normalises differently from
+    fact_key cannot name the same fact on both sides.
+
+    A row whose fact_key has an EMPTY source component is skipped on both sides: such a
+    key matches every other sourceless row, so a decision keyed on it would spray across
+    unrelated facts. accept/reject apply the same guard, but theirs lives inside
+    `_apply_review_status`, so this is a second site, not a call away -- a guard this
+    command must carry itself.
+    """
+    import csv
+    import json
+    from pathlib import Path
+
+    from factlog.common import (
+        ENGINE_STATUSES,
+        KNOWN_STATUSES,
+        REVIEW_STATUSES,
+        SUPERSEDED_STATUSES,
+        fact_key,
+    )
+
+    decided_statuses = ENGINE_STATUSES | SUPERSEDED_STATUSES
+
+    def key_of(d: dict) -> tuple[str, str, str, str]:
+        return fact_key(
+            d.get("subject") or "",
+            d.get("relation") or "",
+            d.get("object") or "",
+            d.get("source") or "",
+        )
+
+    # The selector goes through fact_key ONCE, here, so it is normalised by exactly the
+    # rules every row is keyed by -- NFC folding and canonical_amount alike. Comparing
+    # against a hand-normalised copy is what let a canonical `amount(7,"억")` selector miss
+    # the run row spelled `amount(7,억)`, and vice versa; #477 is the standing lesson that a
+    # second copy of fact_key's rules drifts from fact_key.
+    wanted = key_of(filt) if filt else None
+    # Only the positions the user actually named. A '-' wildcard (and an omitted trailing
+    # term) is absent from `filt`, so it must not be compared against fact_key's "" default.
+    positions = [i for i, name in enumerate(("subject", "relation", "object")) if filt and name in filt]
+
+    def matches(key: tuple[str, str, str, str]) -> bool:
+        return all(key[i] == wanted[i] for i in positions)
+
+    target = Path(target)
+    csv_path = target / "facts" / "candidates.csv"
+    csv_by_key: dict[tuple[str, str, str, str], list[str]] = {}
+    csv_seen = 0
+    csv_sourceless = 0
+    if csv_path.is_file():
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                key = key_of(row)
+                if not matches(key):
+                    continue
+                csv_seen += 1
+                if not key[3]:
+                    csv_sourceless += 1
+                    continue
+                csv_by_key.setdefault(key, []).append((row.get("status") or "").strip())
+
+    runs_dir = target / "runs"
+    parsed: dict[Path, list] = {}
+    unreadable: list[str] = []
+    run_by_key: dict[tuple[str, str, str, str], list[tuple[Path, dict]]] = {}
+    run_seen = 0
+    run_sourceless = 0
+    if runs_dir.is_dir():
+        for jp in sorted(runs_dir.glob("*.json")):
+            try:
+                data = json.loads(jp.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+                # Bytes that do not decode are unreadable in exactly the same way invalid
+                # JSON is -- the rule common.run_cited_sources already states, and the one
+                # accept/reject/amend follow. Named and survived rather than fatal, but the
+                # caller turns it into a non-zero exit: an unreadable file makes the whole
+                # comparison partial, and a repair report nobody can trust is worse than
+                # none. This is also the very file whose failure created the drift this
+                # command exists to repair (#563).
+                unreadable.append(f"{jp.name} ({exc})")
+                continue
+            if not isinstance(data, list):
+                continue
+            parsed[jp] = data
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                key = key_of(item)
+                if not matches(key):
+                    continue
+                run_seen += 1
+                if not key[3]:
+                    run_sourceless += 1
+                    continue
+                run_by_key.setdefault(key, []).append((jp, item))
+
+    def effective(status) -> str:
+        """The status merge would end up with, so agreement is judged as merge judges it.
+
+        clean_row coerces anything outside the status vocabulary -- a blank field, a
+        missing key, a typo -- to needs_review when candidates.csv is rebuilt. Comparing
+        raw strings instead would report a run item with no `status` key at all as
+        drifting from a `needs_review` CSV row, which is agreement, not drift.
+        """
+        st = str(status or "").strip()
+        # merge's clean_row falls back to needs_review, and there is no constant for it:
+        # spelling it here matches what a rebuild would store.
+        return st if st in KNOWN_STATUSES else "needs_review"
+
+    repairs: list[dict] = []
+    reports: dict[str, list[dict]] = {name: [] for name, _ in _REPAIR_RUNS_REPORTED}
+
+    def report(bucket: str, key, csv_statuses, run_rows, partial: bool = False) -> None:
+        """One shape for every reported entry, so the printer needs no special cases."""
+        reports[bucket].append({
+            "key": key,
+            "csv": sorted(csv_statuses) if csv_statuses is not None else None,
+            "rows": [(jp, effective(item.get("status"))) for jp, item in run_rows],
+            "partial": partial,
+        })
+
+    for key in sorted(set(csv_by_key) | set(run_by_key)):
+        csv_statuses = csv_by_key.get(key, [])
+        run_rows = run_by_key.get(key, [])
+        if not csv_statuses:
+            report("run-only", key, None, run_rows)
+            continue
+        decided = [st for st in csv_statuses if st in decided_statuses]
+        pending = [st for st in csv_statuses if st not in decided_statuses]
+        # THE guard that keeps this command from being a destroyer. Measured: a round-trip
+        # amend (--set-object C, then --set-object B) leaves TWO candidates.csv rows on one
+        # fact_key -- the live `candidate` row and the first amend's `superseded` tombstone.
+        # An implementation that picks "the" CSV status here picks the tombstone as often as
+        # not, writes `superseded` over the LIVE run row, and the fact that was alive is gone
+        # from the next from-scratch rebuild. So: more than one decision, or a decision
+        # sitting next to a pending row, means this command cannot tell which row speaks for
+        # the fact -- report it and write nothing.
+        if len(decided) > 1 or (decided and pending):
+            report("ambiguous-csv", key, csv_statuses, run_rows)
+            continue
+        unrecognised = [st for st in csv_statuses if st and st not in KNOWN_STATUSES]
+        if unrecognised:
+            # D4: `new_status` here comes from a file a human can edit, unlike accept/reject
+            # where it is a code constant. A typo ('aceptd') that slipped past a
+            # `not in REVIEW_STATUSES` gate would be written into runs/*.json, and merge's
+            # clean_row would then demote it to needs_review -- the decision destroyed by the
+            # very command asked to save it. The gate is a whitelist for that reason, and an
+            # unrecognised status is surfaced instead of being quietly treated as pending.
+            report("csv-status-unrecognised", key, csv_statuses, run_rows)
+            continue
+        if not run_rows:
+            report("csv-only", key, csv_statuses, [])
+            continue
+        if not decided and len({effective(st) for st in csv_statuses}) > 1:
+            # Several pending rows on one key that do not even agree with each other: there
+            # is no CSV decision to record, and no single pending status to compare against.
+            report("ambiguous-csv", key, csv_statuses, run_rows)
+            continue
+        csv_status = decided[0] if decided else effective(csv_statuses[0])
+        key_repairs: list[dict] = []
+        key_reports: list[tuple[str, Path, dict]] = []
+        for jp, item in run_rows:
+            run_raw = item.get("status", "")
+            run_eff = effective(run_raw)
+            entry = {"key": key, "path": jp, "item": item, "csv": csv_status, "from": run_eff}
+            if decided:
+                # Rule 1 -- the CSV holds a decision and the run row is still PENDING (or
+                # blank, or unrecognised: merge reads all three as pending). The judgement of
+                # what a decision may overwrite is `_run_status_after_decision`, the same
+                # function accept/reject and `amend --accept` call. Re-stating it here is how
+                # the CLI and merge drifted apart in the first place (#477), and how two CLI
+                # paths came to disagree about one row (#565).
+                new = _run_status_after_decision(run_raw, REVIEW_STATUSES, csv_status)
+                if new is not None:
+                    key_repairs.append({**entry, "to": new, "bucket": "csv-decided-run-pending"})
+                elif csv_status in SUPERSEDED_STATUSES and run_eff in ENGINE_STATUSES:
+                    # Rule 2 -- a retirement the run row never heard about (the eject-drift
+                    # shape: CSV `superseded`, run `accepted`). This LOWERS the run row, which
+                    # is not an arbitrary ranking: merge itself puts superseded above an engine
+                    # status when it rebuilds, in the existing_superseded_keys pass
+                    # (tools/merge_candidates.py) -- a row previously set to superseded in
+                    # candidates.csv stays superseded even when a run re-asserts it. Writing
+                    # `superseded` here therefore agrees with the rebuild merge would perform;
+                    # leaving the run row alone is what disagrees with it. The invariant this
+                    # command keeps is "never write against merge's own precedence", not
+                    # "never lower a run row" -- the latter would leave this drift unfixable.
+                    key_repairs.append({**entry, "to": "superseded", "bucket": "csv-superseded-run-engine"})
+                elif run_eff == csv_status:
+                    continue  # the two stores agree; nothing to report
+                else:
+                    key_reports.append(("both-decided", jp, item))
+            elif run_eff in decided_statuses:
+                # The run row is the LAST surviving copy of a decision the CSV does not have.
+                # Writing the CSV's pending status over it would destroy that decision, and
+                # writing the run status into candidates.csv is not this command's job -- it
+                # writes runs/*.json only. Report it.
+                key_reports.append(("csv-pending-run-decided", jp, item))
+            elif run_eff != csv_status:
+                key_reports.append(("both-pending", jp, item))
+        # D3: merge's dedup winner does not look at status -- it compares the `source`
+        # string and, when those tie, keeps whichever run file the glob loaded first. So a
+        # fact whose run rows are spread across files in DIFFERENT states is still a lottery
+        # after a partial repair, and a single "N row(s) repaired" line cannot say so. Mark
+        # the fact instead of counting it.
+        partial = bool(key_repairs) and bool(key_reports)
+        for entry in key_repairs:
+            entry["partial"] = partial
+            repairs.append(entry)
+        # ONE entry per (fact, class), listing every run row of that fact underneath --
+        # never one entry per run row. The unit of the work a human is left with is the
+        # FACT: its run rows have to be settled together, so counting them apart says
+        # nothing anyone can act on. Per-row entries also made the count mean different
+        # things in different classes -- measured, one fact with four run rows counted 1
+        # under `ambiguous-csv` and 3 under `both-decided` -- while the summary sentence
+        # leads with "run row(s)" and invites the reader to carry that unit across. Same
+        # shape of counter trap as #565. The per-file detail D3 needs is not lost: the
+        # rows are still listed one line each, under the fact.
+        by_bucket: dict[str, list] = {}
+        for bucket, jp, item in key_reports:
+            by_bucket.setdefault(bucket, []).append((jp, item))
+        for bucket, rows in by_bucket.items():
+            # The RAW statuses, not the `csv_status` the comparison ran on. They differ for
+            # a blank/absent status, where the comparison uses merge's needs_review fallback:
+            # printing that fallback would tell a user to grep candidates.csv for a word it
+            # does not contain. The report describes the file; the rules act on the fallback.
+            report(bucket, key, csv_statuses, rows, partial=partial)
+
+    return {
+        "repairs": repairs,
+        "reports": reports,
+        "unreadable": unreadable,
+        "parsed": parsed,
+        "csv_path": csv_path,
+        "runs_dir": runs_dir,
+        "csv_seen": csv_seen,
+        "run_seen": run_seen,
+        "csv_sourceless": csv_sourceless,
+        "run_sourceless": run_sourceless,
+    }
+
+
+def cmd_repair_runs(args: argparse.Namespace) -> int:
+    """Report status drift between candidates.csv and runs/*.json; --apply writes the fix.
+
+    merge REBUILDS candidates.csv from runs/*.json, so the two stores can end up
+    disagreeing about one fact's status: a decision that never reached the run row
+    because the file holding it could not be read at the time (#563), a KB predating the
+    change that started writing decisions into runs at all (#233), a fact retired by
+    `eject` whose run row still says `accepted`. accept/reject/amend refuse to reconcile
+    that by design -- they record only the decision they just made, because a command
+    that reached further silently retired a confirmed fact (#477) -- and their
+    docstrings say the repair is a separate command's job. This is that command (#566).
+
+    There is deliberately NO --dry-run flag: reporting IS the default and the command
+    writes nothing unless --apply is given. Every class of drift is printed, including the
+    ones it would never repair, so "nothing to do" and "nothing I may touch" are different
+    sentences.
+
+    What --apply may write, and nothing else:
+
+    1. candidates.csv holds a decision and the run row is still PENDING (blank and
+       unrecognised statuses included -- merge reads all three as pending) -> the CSV
+       status. The judgement is `_run_status_after_decision`, the same function
+       accept/reject and `amend --accept` call, not a copy of its rule (#477).
+    2. candidates.csv holds `superseded` and the run row holds an engine status -> retire
+       the run row. This LOWERS it, which agrees with merge rather than overriding it: the
+       existing_superseded_keys pass keeps a candidates.csv `superseded` over a re-asserted
+       engine status on every rebuild.
+
+    So the invariant is "never write against merge's own precedence" -- NOT "never lower a
+    run row", which would leave the eject-drift shape unfixable. There is deliberately no
+    status ranking table: a ranking is a door for a machine judgement to overwrite a human
+    one, and the two rules above each cite the merge pass they mirror instead.
+
+    The gate on the CSV status is a WHITELIST (engine or superseded). Unlike accept/reject,
+    the status here comes from a file a human can edit, so a `not in REVIEW_STATUSES` gate
+    would carry a typo into runs/*.json where merge's clean_row demotes it to needs_review
+    -- the decision destroyed by the command asked to save it.
+
+    Out of scope, and reported rather than fixed: a VALUE that drifted (`amend` owns
+    values), a CSV row with no run backing (creating a run item would mean inventing a
+    docspan and a run_id that no extraction produced -- forged provenance), a fact both
+    stores decided differently, and a fact whose candidates.csv rows are ambiguous.
+
+    --apply is IDEMPOTENT and each file is written atomically, but atomicity is per FILE,
+    not per command: an interruption can leave some files repaired and others not. Running
+    it again finishes the job and is a no-op once the two stores agree. It does NOT
+    recompile accepted.dl -- it never touches candidates.csv, so the compiler's input is
+    unchanged and a recompile would only raise "why did my .dl change?".
+
+    Exit codes: 0 clean (or every drift repaired), 1 a run file could not be read (the
+    comparison is partial), 2 usage error, 3 drift found that was not repaired.
+    """
+    from pathlib import Path
+
+    target_str, _ = factlog_config.resolve_root(args.target)
+    target = Path(target_str)
+    if not _require_kb(target, "repair-runs"):
+        return 1
+    if len(args.terms) > 3:
+        print(
+            "factlog repair-runs: too many terms — give at most SUBJECT RELATION OBJECT "
+            "(quote a value that contains spaces)",
+            file=sys.stderr,
+        )
+        return 2
+    filt = _triple_filter(args.terms)
+    if args.apply and filt is None and not args.all:
+        # An omitted (or all-wildcard) triple with --apply rewrites run rows across the
+        # entire KB. Every other writing command in this CLI takes a selector; this one can
+        # legitimately run KB-wide, so the selector is not required -- but it has to be
+        # asked for, not arrived at by leaving the arguments off.
+        print(
+            "factlog repair-runs: --apply with no triple selector would rewrite run rows "
+            "across the whole KB; give SUBJECT [RELATION [OBJECT]], or pass --all to mean it.",
+            file=sys.stderr,
+        )
+        return 2
+
+    plan = _repair_runs_scan(target, filt)
+    scope = "the whole KB" if filt is None else ", ".join(f"{k}={v}" for k, v in filt.items())
+    print(
+        f"factlog repair-runs (KB: {target}): {plan['csv_seen']} candidates.csv row(s), "
+        f"{plan['run_seen']} runs/*.json row(s) in scope ({scope})"
+    )
+    if not plan["csv_path"].is_file():
+        print("factlog repair-runs: note — facts/candidates.csv does not exist; nothing to compare against.")
+    if not plan["runs_dir"].is_dir():
+        print("factlog repair-runs: note — runs/ does not exist; nothing to compare against.")
+    for label, count in (("candidates.csv", plan["csv_sourceless"]), ("runs/*.json", plan["run_sourceless"])):
+        if count:
+            # A row whose fact_key has no source FILE cannot be matched to its counterpart
+            # without matching every other sourceless row too, so it is skipped -- said out
+            # loud, because a silent skip is how a user concludes the fact is clean.
+            print(f"factlog repair-runs: note — skipped {count} {label} row(s) with no source file.")
+
+    _repair_runs_print(plan)
+
+    # Two units in one sentence, each named where it is used. "run row(s) repaired" counts
+    # rows because that is literally what was written. "fact(s) left for a human" counts
+    # FACTS because that is the unit of the work remaining -- and it is counted over
+    # DISTINCT keys, not over entries: one fact can land in two classes at once (a pending
+    # CSV row whose copies are split between `csv-pending-run-decided` and `both-pending`),
+    # and reporting it as two things to fix would be the same over-count one level up.
+    left = len({entry["key"] for rows in plan["reports"].values() for entry in rows})
+    files = sorted({entry["path"] for entry in plan["repairs"]})
+    if args.apply:
+        import json
+
+        for entry in plan["repairs"]:
+            entry["item"]["status"] = entry["to"]
+        for jp in files:
+            # Per-file atomic write, the same seam accept/reject/amend use, so an
+            # interruption can never leave a truncated runs/*.json behind. It is NOT
+            # per-command: a crash between two files leaves the KB partly repaired, which is
+            # why this command has to be safe to run again -- and it is, because a repaired
+            # row is no longer drift on the next scan.
+            _atomic_write_text(jp, json.dumps(plan["parsed"][jp], ensure_ascii=False, indent=2) + "\n")
+        print(
+            f"factlog repair-runs: {len(plan['repairs'])} run row(s) repaired in {len(files)} file(s), "
+            f"{left} fact(s) left for a human."
+        )
+        if plan["repairs"]:
+            # No _recompile_accepted: this command writes runs/*.json only, and
+            # accepted.dl is compiled from candidates.csv, which is unchanged. The
+            # decisions BECOME durable here -- they take effect the next time merge
+            # rebuilds candidates.csv from runs/*.json.
+            print(
+                "factlog repair-runs: note — accepted.dl is unchanged (candidates.csv was "
+                "not touched); the repaired rows take effect on the next /factlog sync."
+            )
+    else:
+        print(
+            f"factlog repair-runs: {len(plan['repairs'])} run row(s) repairable in {len(files)} file(s), "
+            f"{left} fact(s) left for a human; nothing was written. Re-run with --apply to write them."
+        )
+    if plan["unreadable"]:
+        for name in plan["unreadable"]:
+            print(f"factlog: warning — could not read {name}; its rows were not compared.", file=sys.stderr)
+        print(
+            "factlog repair-runs: the comparison is INCOMPLETE — repair the unreadable "
+            "file(s) and run this again.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.apply:
+        return 3 if left else 0
+    return 3 if (plan["repairs"] or left) else 0
+
+
+def _repair_runs_print(plan: dict) -> None:
+    """Print every class in `_REPAIR_RUNS_REPAIRABLE` + `_REPAIR_RUNS_REPORTED`, empty or not."""
+
+    def label(key) -> str:
+        return f"{key[0]} / {key[1]} / {key[2]}  ← {key[3]}"
+
+    grouped: dict[str, dict] = {}
+    for entry in plan["repairs"]:
+        grouped.setdefault(entry["bucket"], {}).setdefault(entry["key"], []).append(entry)
+
+    for name, heading in _REPAIR_RUNS_REPAIRABLE:
+        print(f"\n{heading}:")
+        by_key = grouped.get(name, {})
+        if not by_key:
+            print("  (none)")
+            continue
+        for key, entries in sorted(by_key.items()):
+            partial = " — PARTIAL" if entries[0]["partial"] else ""
+            print(f"  {label(key)}{partial}")
+            for entry in entries:
+                print(f"    {entry['path'].name}  [{entry['from']} → {entry['to']}]")
+            if partial:
+                # Not a cosmetic note. merge picks between two run files claiming one fact by
+                # glob order, not by status, so repairing only some of them leaves the next
+                # from-scratch rebuild undecided -- and a bare row counter would have called
+                # this a success.
+                print(
+                    "    note: this fact's other run row(s) appear below and are NOT repaired; "
+                    "merge picks between run files by glob order, not by status, so a "
+                    "candidates.csv rebuilt from runs/*.json alone is still a lottery here."
+                )
+
+    # `csv-only` and `run-only` are the two classes whose verdict is an ABSENCE -- "there is
+    # no row on the other side". Every other class names rows it actually saw, so an
+    # unreadable file can only add to it; these two it can falsify outright. And this is the
+    # #566 scenario itself: the file that could not be read was the sole backing. Saying
+    # "(no row)" flatly there would be the command telling the user a fact has no evidence
+    # while the evidence sits in the file it just refused to open.
+    unreadable = len(plan["unreadable"])
+    provisional = {
+        "csv-only": "the backing this row appears to lack may be inside one of them",
+        "run-only": "this fact's other run rows may be inside one of them",
+    }
+
+    for name, heading in _REPAIR_RUNS_REPORTED:
+        print(f"\n{heading}:")
+        entries = plan["reports"][name]
+        if not entries:
+            print("  (none)")
+            continue
+        if unreadable and name in provisional:
+            print(
+                f"  note: PROVISIONAL — {unreadable} run file(s) could not be read; "
+                f"{provisional[name]}."
+            )
+        if name == "ambiguous-csv":
+            # "NOT repaired" reads as "left safe", and for this class it is not: the fact
+            # is unstable in candidates.csv and the next sync settles it. Say the RULE, not
+            # the outcome -- the same prescription the PARTIAL note above follows, and the
+            # reason no remedy is offered: measured, no CLI command removes the duplicate
+            # while keeping the fact live (`accept` leaves the tombstone, `eject --purge`
+            # deletes both), so naming one would be a false remedy of the kind #563 removed.
+            #
+            # Both halves are measured. With candidates.csv present, merge's preservation
+            # passes decide and a decided row outranks a pending one -- CSV[candidate,
+            # superseded] rebuilds as `superseded`, CSV[candidate, accepted] as `accepted`,
+            # CSV[accepted, superseded] as `superseded`. Deleted first, those passes have
+            # nothing to read and the run rows decide by normalize_rows' dedup instead: a KB
+            # whose run items sort the LIVE row first then rebuilds as `candidate`. So the
+            # two paths can disagree, and only naming both is honest.
+            #
+            # Which order a KB has is not academic, and not the same for every KB. A
+            # round-trip `amend` does NOT produce the diverging order: cmd_amend mutates the
+            # old item in place and appends the corrected one, so the tombstone always sorts
+            # first and that KB measures `superseded` on BOTH paths. The divergence needs a
+            # runs file whose items are ordered the other way -- hand-edited, or written by
+            # something other than that path. Do not try to reproduce it with a round-trip
+            # amend; it will not show.
+            print(
+                "  note: --apply leaves this fact alone; the next sync does not. merge "
+                "collapses these rows to ONE. With candidates.csv in place its preservation "
+                "passes decide and a decided row outranks a pending one (superseded over "
+                "accepted/confirmed over pending), so a live row beside a `superseded` twin "
+                "comes back retired. Rebuilt from runs/*.json alone, the run row(s) below "
+                "decide instead — merge's dedup picks by the `source` value, then load "
+                "order, never by status."
+            )
+        for entry in entries:
+            partial = " — PARTIAL" if entry["partial"] else ""
+            print(f"  {label(entry['key'])}{partial}")
+            if entry["csv"] is None:
+                # candidates.csv is read whole or not at all, so this absence is not in doubt.
+                print("    candidates.csv: (no row)")
+            else:
+                print(f"    candidates.csv: {', '.join(s or '(blank)' for s in entry['csv'])}")
+            if not entry["rows"]:
+                print("    runs/*.json: (no readable row)" if unreadable else "    runs/*.json: (no row)")
+            for jp, status in entry["rows"]:
+                print(f"    {jp.name}: {status}")
 
 
 # Priority for resolving a post-fold status collision, highest first. A human
@@ -8491,6 +9047,31 @@ def build_parser() -> argparse.ArgumentParser:
     amend.add_argument("--dry-run", action="store_true", help="print the planned changes without modifying anything")
     amend.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
     amend.set_defaults(func=cmd_amend)
+
+    repair_runs = sub.add_parser(
+        "repair-runs",
+        help="report status drift between candidates.csv and runs/*.json (the repair "
+        "accept/reject/amend deliberately do not perform)",
+    )
+    repair_runs.add_argument(
+        "terms",
+        nargs="*",
+        metavar="TERM",
+        help="SUBJECT [RELATION [OBJECT]] prefix; use '-' to wildcard a position; "
+        "omit entirely to scan the whole KB",
+    )
+    repair_runs.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the repairs into runs/*.json (there is no --dry-run: reporting IS the default)",
+    )
+    repair_runs.add_argument(
+        "--all",
+        action="store_true",
+        help="with --apply and no triple selector: mean the whole KB (guard against a mass rewrite)",
+    )
+    repair_runs.add_argument("--target", default=None, help="KB root (default: the active KB; see `factlog where`)")
+    repair_runs.set_defaults(func=cmd_repair_runs)
 
     migrate_unicode = sub.add_parser(
         "migrate-unicode",
