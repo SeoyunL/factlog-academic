@@ -15,8 +15,32 @@ _PYREWIRE_FLOOR='1.0.3'
 
 # Both questions the launcher asks ("is this Python 3.11+?" and "does it carry a
 # usable engine?") are answered by ONE python invocation, so the dependency check
-# costs no extra process spawn — hooks/gate_check.sh execs this runner up to four
-# times per gate evaluation.
+# costs no extra process spawn.
+#
+# How many times hooks/gate_check.sh execs this runner per gate evaluation is a
+# RANGE, not a constant. Three earlier readings of this comment reported three
+# different numbers because each measured one point of that range. Measured, and
+# pinned by CASE 19 of tests/test_gate_check.sh:
+#
+#   1 exec  — no usable Python 3.11+ anywhere: the gate's fail-closed probe is
+#             this exec, and it DENIES on the spot. The only row the environment
+#             rather than the target decides, and it overrides every row below
+#   3 execs — the gate extracted no target path and exits before canonicalising
+#             anything. It reads a TOP-LEVEL `file_path`/`path` key, so this row
+#             covers unparseable JSON AND any payload carrying the path somewhere
+#             else. Whether every payload shape that ought to be guarded actually
+#             reaches the rows below is open in #591; the count is what it is
+#             either way
+#   5 execs — the target canonicalises to <KB_ROOT>/facts/accepted.dl, so the
+#             engine-input loop matches on its first entry and breaks
+#   6 execs — every other target: <KB_ROOT>/facts/query.dl (matches on the second
+#             loop entry) or a non-engine path (loop runs both, matches neither)
+#
+# KB state is NOT a determinant. Whether logic_report.txt exists, whether the
+# engine inputs exist, and whether the verdict is allow or deny all change the
+# exit code and change nothing here: every _canon call above the verdict runs
+# unconditionally. Given a usable Python 3.11+, only the target's identity moves
+# the number.
 #
 # Exit-code contract:
 #   0     — Python 3.11+ AND pyrewire >= floor
@@ -164,13 +188,34 @@ _announce_off_path() {
 #   * Once a cache hit is required to re-probe (it must be — otherwise a stale
 #     entry can pin an under-floor engine and silently downgrade finalize to
 #     "logic check SKIPPED"), the saving mostly evaporates. Measured on one gate
-#     evaluation (five execs of this script): 437 ms with no cache versus 478 ms
-#     with a re-validating cache when PATH already carries the engine, i.e. the
-#     common case got SLOWER, before adding the ownership/symlink/whitelist
-#     checks a writable cache would also need.
+#     evaluation with a facts/accepted.dl target — five execs of this script, the
+#     5-exec row of the table above: 437 ms with no cache versus 478 ms with a
+#     re-validating cache when PATH already carries the engine, i.e. the common
+#     case got SLOWER, before adding the ownership/symlink/whitelist checks a
+#     writable cache would also need.
 #
 # Every selection below therefore executes the candidate it selects, on every
 # call, exactly as the header promises.
+#
+# What that costs relative to the launcher BEFORE #578 (the number a user
+# actually experiences) — same fixture, same five-exec target, engine first on
+# PATH, macOS/arm64, mean of 20 evaluations:
+#
+#   engine on PATH            pre-#578    #578      delta
+#   real pyrewire 1.0.3        358 ms    637 ms    +279 ms  (+78%)
+#   stub pyrewire (test venv)  382 ms    389 ms      +8 ms   (+2%)
+#
+# The two rows differ by two orders of magnitude, and the reason is the whole
+# point: the added cost is one `import pyrewire` per exec, so it is the ENGINE's
+# import time, not this script's logic. Here that import is 55 ms (31 ms bare
+# interpreter vs 86 ms with the import), and 5 x 55 accounts for the +279 ms
+# almost exactly. tests/test_factlog_python.sh plants a one-line stub pyrewire,
+# so any timing taken against the fixtures measures the bottom row and will
+# understate the real cost roughly 35-fold. Quote the top row.
+#
+# +0.28 s per gate evaluation is not free. The lever is not this probe but the
+# number of execs it is multiplied by: a perfect zero-cost cache could still only
+# remove the probe half, and the remaining execs stay.
 
 _resolve() {
   # The activated virtualenv is an explicit user signal, not a search result, so it

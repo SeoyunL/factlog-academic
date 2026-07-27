@@ -38,7 +38,13 @@ falling back** to `python3`/`python`/`py` (exit code 127).
 When `$FACTLOG_PYTHON` is unset, the selection order is:
 
 1. the interpreter in `$VIRTUAL_ENV` — an explicit "I activated a venv" signal.
-   Checked for **version only**; pyrewire is not required
+   Checked for **version only**; pyrewire is not required.
+   So an activated venv that has no engine wins over a `python3` on PATH that
+   does. **The consequence is that `finalize`'s logic check degrades to
+   "Logic check SKIPPED"** — you keep working, one verification tier lower.
+   Nothing is printed about it either: `activate` puts the venv's executable
+   directory on PATH, so the off-PATH stderr notice below does not apply. To get
+   the tier back, install the engine into that venv with `setup`, or deactivate it
 2. the first PATH candidate (`python3`, `python`, `py -3.12`/`-3.11`/`-3`, `py`)
    that **carries pyrewire 1.0.3 or newer**
 3. the interpreter in `~/.factlog-venv` — the fixed path the PEP 668 guidance
@@ -50,9 +56,11 @@ When `$FACTLOG_PYTHON` is unset, the selection order is:
    this is never a hard failure
 
 Picking an interpreter from outside PATH prints one line to stderr naming it. No
-venv other than those two fixed paths is ever searched for. The result is **not
-cached**: every call re-executes its candidate, so a change to an interpreter
-takes effect immediately.
+venv is ever **searched for**: the only candidates are one fixed path,
+`~/.factlog-venv`, and whatever `$VIRTUAL_ENV` names — the latter is not a fixed
+path but a value you set by activating it. The result is **not cached**: every
+call re-executes its candidate, so a change to an interpreter takes effect
+immediately.
 
 If your Python is externally managed (PEP 668), pip will refuse to install into it; `setup` prints venv guidance instead of forcing the install. Create and activate a venv, then re-run `setup`:
 

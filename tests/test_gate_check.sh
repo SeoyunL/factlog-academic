@@ -520,6 +520,116 @@ fi
 rm -rf "$KB_NOTE" "$NOTE_RUNNER" "$note_err"
 
 # ---------------------------------------------------------------------------
+# CASE 19: how many times ONE gate evaluation execs the runner.
+#
+# The number carries two arguments — "one probe answers both questions, so the
+# dependency check adds no spawn" in tools/factlog_python.sh, and the timing that
+# justified removing the resolution cache. It was written as a constant and
+# drifted into three mutually inconsistent values, because it is not a constant:
+# given a usable Python 3.11+ it is 3, 5, or 6, decided by the target alone —
+# and WITHOUT one it is 1 for every target, because the fail-closed probe below
+# is that single exec. This case fixes the whole table so the next reader
+# measures nothing.
+#
+# A counting wrapper stands in for the runner via FACTLOG_PYTHON_RUNNER — the
+# same seam CASE 16/18 use — so the count cannot depend on the developer's PATH.
+# ---------------------------------------------------------------------------
+COUNT_DIR="$(mktemp -d)"
+COUNT_RUNNER="$COUNT_DIR/runner.sh"
+cat > "$COUNT_RUNNER" <<'RUNNER'
+#!/usr/bin/env bash
+printf 'x\n' >> "$GATE_RUNNER_CALLS"
+exec "${BASH:-bash}" "$GATE_REAL_RUNNER" "$@"
+RUNNER
+
+# A runner that finds no usable Python 3.11+ — exit 127 is the launcher's own
+# contract for that state, so the gate sees exactly what a Store-stub-only
+# Windows box gives it.
+DEAD_RUNNER="$COUNT_DIR/dead-runner.sh"
+cat > "$DEAD_RUNNER" <<'RUNNER'
+#!/usr/bin/env bash
+echo "[factlog] no usable Python 3.11+ found. Set FACTLOG_PYTHON to a venv/system python." >&2
+exit 127
+RUNNER
+
+# count_execs <desc> <expected-execs> <kb-root> <payload> [expected-exit] [inner-runner]
+count_execs() {
+  local desc="$1" expected="$2" kb_root="$3" payload="$4"
+  local expected_exit="${5:-}" inner="${6:-$PYTHON_RUNNER}" actual rc=0
+  : > "$COUNT_DIR/calls"
+  GATE_RUNNER_CALLS="$COUNT_DIR/calls" GATE_REAL_RUNNER="$inner" \
+    FACTLOG_PYTHON_RUNNER="$COUNT_RUNNER" FACTLOG_ROOT="$kb_root" \
+    bash "$GATE" <<< "$payload" >/dev/null 2>&1 || rc=$?
+  actual="$(wc -l < "$COUNT_DIR/calls" | tr -d ' ')"
+  if [ "$actual" != "$expected" ]; then
+    echo "FAIL: $desc — expected $expected runner execs, got $actual"
+    fail=$((fail + 1))
+    return
+  fi
+  if [ -n "$expected_exit" ] && [ "$rc" != "$expected_exit" ]; then
+    echo "FAIL: $desc — $actual runner execs but exit $rc, expected $expected_exit"
+    fail=$((fail + 1))
+    return
+  fi
+  echo "PASS: $desc ($actual runner execs)"
+  pass=$((pass + 1))
+}
+
+# Populated KB: both engine inputs on disk, report fresh, so every verdict below
+# is allow.
+KB_EXEC="$(mktemp -d)"
+make_kb "$KB_EXEC"
+touch_file "$KB_EXEC/facts/accepted.dl"
+touch_file "$KB_EXEC/facts/query.dl"
+set_mtime_past "$KB_EXEC/facts/accepted.dl"
+set_mtime_past "$KB_EXEC/facts/query.dl"
+touch_file "$KB_EXEC/facts/logic_report.txt"
+clear_config
+
+count_execs "no file_path in payload — gate exits before canonicalising" \
+  3 "$KB_EXEC" '{"tool":"Write"}'
+count_execs "unparseable payload — same early exit" \
+  3 "$KB_EXEC" 'not json at all'
+count_execs "accepted.dl — engine-input loop breaks on its first entry" \
+  5 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/accepted.dl")"
+count_execs "query.dl — loop reaches its second entry" \
+  6 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/query.dl")"
+count_execs "non-engine target — loop runs both entries, matches neither" \
+  6 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/candidates.csv")"
+
+# The same targets in a bare KB: no report and no engine inputs, so the verdicts
+# flip to bootstrap-allow and deny. The counts must NOT move. That is the half of
+# the claim which says KB state is not a determinant — and it is exactly the
+# assumption the drifted comments got wrong.
+KB_BARE="$(mktemp -d)"
+make_kb "$KB_BARE"
+clear_config
+
+count_execs "bare KB, accepted.dl — count unchanged by KB state" \
+  5 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/facts/accepted.dl")"
+count_execs "bare KB, query.dl — count unchanged by KB state" \
+  6 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/facts/query.dl")"
+count_execs "bare KB, non-engine target — count unchanged by KB state" \
+  6 "$KB_BARE" "$(printf '{"file_path":"%s"}' "$KB_BARE/notes.md")"
+
+# The one row the ENVIRONMENT decides, not the target. With no usable Python
+# 3.11+ the fail-closed probe is the first exec and DENIES on the spot, so every
+# target above collapses to 1 — including the two that read 3, which no reading
+# of "the target decides" would predict. The exit code is asserted alongside the
+# count: 1 exec on its own could equally mean the gate gave up and allowed, which
+# is the opposite of what this branch must do.
+count_execs "no usable Python — accepted.dl collapses to the fail-closed probe" \
+  1 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/accepted.dl")" 2 "$DEAD_RUNNER"
+count_execs "no usable Python — query.dl collapses too" \
+  1 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/query.dl")" 2 "$DEAD_RUNNER"
+count_execs "no usable Python — a non-engine target denies as well" \
+  1 "$KB_EXEC" "$(printf '{"file_path":"%s"}' "$KB_EXEC/facts/candidates.csv")" 2 "$DEAD_RUNNER"
+count_execs "no usable Python — even a pathless payload never reaches 3" \
+  1 "$KB_EXEC" '{"tool":"Write"}' 2 "$DEAD_RUNNER"
+
+rm -rf "$COUNT_DIR" "$KB_EXEC" "$KB_BARE"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
