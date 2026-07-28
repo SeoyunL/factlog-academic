@@ -948,9 +948,18 @@ before writing it back.
 
 **Precondition:** `facts/logic_report.txt` must exist and must be fresh (i.e.,
 `/factlog check` must have been run after the last edit to `facts/accepted.dl`
-or `facts/query.dl`). The PreToolUse hook enforces this: it will deny any
-attempt to write or edit `facts/accepted.dl` or `facts/query.dl` when
-`facts/logic_report.txt` is absent or stale.
+or `facts/query.dl`). The PreToolUse hook enforces this: it denies a write or edit
+to `facts/accepted.dl` or `facts/query.dl` when `facts/logic_report.txt` is absent
+or older than an engine input that already exists on disk.
+
+One exception, deliberate and pinned (CASE 7/8 of `tests/test_gate_check.sh`):
+**bootstrap**. When the report is absent *and the target file itself does not yet
+exist*, the first creation is allowed — `factlog init` seeds neither file, so no
+report could have preceded it. Measured on a freshly initialised KB: a Write to
+either `facts/accepted.dl` or `facts/query.dl` exits `0`. Once either file exists,
+the deny above applies. The gate is also only as wide as `hooks/hooks.json` routes
+it, which is `Write` and `Edit`; nothing here claims a tool outside that matcher is
+stopped.
 
 **Execution order:**
 

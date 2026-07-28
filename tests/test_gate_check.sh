@@ -491,9 +491,14 @@ rm -rf "$KB_CWD"
 # a one-line stderr note AND still degrade to the prior ${FACTLOG_ROOT:-cwd}
 # behaviour (no exit-code / path-matching regression).
 #
-# resolve_root(None) always yields a non-empty path (cwd fallback), so the only
-# way resolved_root goes empty is the factlog import failing in the child. We
-# reproduce that deterministically WITHOUT breaking the real install: a fake
+# resolve_root(None) RETURNS a non-empty path on every path through it (cwd
+# fallback), so the import failing in the child is ONE way resolved_root goes empty.
+# It is not the only one — resolve_root can raise, and the hook's `2>/dev/null ||
+# true` turns that into the same empty string (FACTLOG_ROOT='~nosuchuser12345/kb'
+# does it; the hook's own comment there records the measurement). This case pins the
+# import-failure way; the raise way reaches the same branch and is not pinned here.
+# We reproduce the import failure deterministically WITHOUT breaking the real
+# install: a fake
 # plugin root whose factlog/__init__.py raises ImportError. The gate inserts that
 # fake root at sys.path[0] (FACTLOG_HOOK_PLUGIN_ROOT="$HOOK_DIR/.."), so the
 # broken package shadows the installed one for the resolver invocation only. The
@@ -1137,7 +1142,9 @@ rm -rf "$KB_NB" "$KB_NB_FRESH" "$nb_err"
 # denied everything it was asked, including writes whose report was fresh. The
 # deny it emitted ("could not read mtime") was executed by NO row in this file:
 # instrumenting that branch and running the whole suite scored 0 hits across all
-# 66 rows, and 0 on CASE 22's own fixture, whose comment used to claim it reached
+# 66 rows THIS FILE HAD THEN (77 at 279d37f — the count moves as cases are added,
+# and the branch is gone, so this figure is history, not something to re-check),
+# and 0 on CASE 22's own fixture, whose comment used to claim it reached
 # `stat` incidentally (it exits at "report does not exist" first — see there).
 #
 # So this case does not pin that deny. #600 removed it: the comparison is now
