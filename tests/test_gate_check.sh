@@ -244,28 +244,99 @@ rm -rf "$TMPBASE"
 # DENY before it ever reaches a probe — so a future edit that reorders the
 # top-of-file fail-closed check below the probes is caught here.
 #
-# Hermetic simulation: run with an empty throwaway PATH, deliberately omitting
-# python3/python/py. The test does not depend on the host Python location.
+# Hermetic simulation (#595): an empty throwaway PATH is NOT enough, and this
+# case spent its whole life proving that. tools/factlog_python.sh reaches three
+# places PATH cannot describe — $FACTLOG_PYTHON, an activated $VIRTUAL_ENV, and
+# the documented $HOME/.factlog-venv fallback (#578) — so on any machine that
+# followed SKILL.md's PEP 668 instructions the runner found an interpreter, the
+# gate sailed past the fail-closed check, and the deny below came from the
+# ordinary stale-guard instead. Measured on the dev machine before the fix:
+#
+#   [factlog] using ~/.factlog-venv/bin/python (PATH has no python with pyrewire...)
+#   [factlog GATE] DENIED: facts/logic_report.txt does not exist.   ← wrong branch
+#
+# Right code, wrong reason. Isolating HOME to a throwaway dir and clearing the
+# two env signals is what actually removes every interpreter from reach.
+#
+# Which is also why the deny REASON is asserted and not just the code: 2 is the
+# gate's ONLY deny code, so an exit-code assertion cannot tell this branch from
+# any other deny, and a case that names itself the fail-closed invariant while
+# being satisfied by a stale report guarantees nothing.
+#
+# The third check pins the other direction, and it COUNTS rather than matching a
+# string. The gate has four deny reasons — fail-closed, "report does not exist",
+# "could not read mtime", "report is stale" — and only the first may appear here;
+# any of the other three means the predicate was evaluated without a usable
+# Python. Naming just one of them (the first draft grepped for "does not exist",
+# which is the only one this fixture can currently reach) would state a general
+# claim while covering a single site: change the fixture, or route the predicate
+# to a different reason, and it goes quiet. "Exactly one DENIED line, and it is
+# the fail-closed one" excludes all three at once and needs no update when a
+# fifth reason is added.
+#
+# A note for whoever adds the next row to this file. Most deny rows here assert
+# the exit code alone, and that is deliberate rather than an oversight: each is
+# PAIRED with an allow row taken in the same environment, so an environment-borne
+# fail-closed deny leaking into a row cannot go unnoticed — it turns the paired
+# allow red. The same argument is what holds up CASE 22's "the deny below can
+# only come from the probe". So: a NEW deny row must either come with a paired
+# allow row in the same environment, or assert its reason. One without the other
+# is how this case passed for its whole life.
+#
+# Branch C ("could not read mtime") is reachable but exercised by no row in this
+# file — the gate denies a fresh-report KB when PATH is empty, because _mtime
+# shells out to `stat`. That is tracked in #600, not pinned here.
 # ---------------------------------------------------------------------------
 KB_NOPY="$(mktemp -d)"
 make_kb "$KB_NOPY"
 touch_file "$KB_NOPY/facts/accepted.dl"  # existing engine input (not bootstrap)
 
 SHIM_PATH="$(mktemp -d)"
+NOPY_HOME="$(mktemp -d)"   # no .factlog-venv here — that is the point
 BASH_BIN="${BASH:-$(command -v bash)}"
 
+nopy_err="$(mktemp)"
 nopy_exit=0
-PATH="$SHIM_PATH" FACTLOG_ROOT="$KB_NOPY" \
-  "$BASH_BIN" "$GATE" <<< "$(envelope "$KB_NOPY/facts/accepted.dl")" \
-  >/dev/null 2>&1 || nopy_exit=$?
+(
+  unset FACTLOG_PYTHON VIRTUAL_ENV FACTLOG_PYTHON_RUNNER
+  PATH="$SHIM_PATH" HOME="$NOPY_HOME" FACTLOG_ROOT="$KB_NOPY" \
+    "$BASH_BIN" "$GATE" <<< "$(envelope "$KB_NOPY/facts/accepted.dl")" \
+    >/dev/null 2>"$nopy_err"
+) || nopy_exit=$?
+
 if [ "$nopy_exit" -eq 2 ]; then
-  echo "PASS: python3 unavailable on engine-input write — fail-closed deny (exit $nopy_exit)"
+  echo "PASS: no usable Python on engine-input write — fail-closed deny (exit $nopy_exit)"
   pass=$((pass + 1))
 else
-  echo "FAIL: python3 unavailable — expected fail-closed exit 2, got $nopy_exit"
+  echo "FAIL: no usable Python — expected fail-closed exit 2, got $nopy_exit; stderr=$(cat "$nopy_err")"
   fail=$((fail + 1))
 fi
-rm -rf "$KB_NOPY" "$SHIM_PATH"
+
+if grep -qF "usable Python 3.11+ is required" "$nopy_err"; then
+  echo "PASS: the deny names the fail-closed reason (branch actually executed)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: deny did not come from the fail-closed branch; exit=$nopy_exit stderr=$(cat "$nopy_err")"
+  fail=$((fail + 1))
+fi
+
+# `grep -c` exits 1 on a zero count, so both counts are isolated behind `|| true`
+# — an unguarded assignment would abort this whole file under `set -e` and take
+# every later case with it. An empty count is a distinct, named failure: it means
+# grep produced no number at all, which is not the same as "no DENIED lines".
+nopy_denied="$(grep -cF "[factlog GATE] DENIED:" "$nopy_err" || true)"
+nopy_failclosed="$(grep -cF "[factlog GATE] DENIED: usable Python 3.11+ is required" "$nopy_err" || true)"
+if [ -z "$nopy_denied" ] || [ -z "$nopy_failclosed" ]; then
+  echo "FAIL: could not count DENIED lines on the fail-closed stderr (grep emitted no count for $nopy_err)"
+  fail=$((fail + 1))
+elif [ "$nopy_denied" -eq 1 ] && [ "$nopy_failclosed" -eq 1 ]; then
+  echo "PASS: exactly one DENIED line and it is the fail-closed one — the predicate was never evaluated"
+  pass=$((pass + 1))
+else
+  echo "FAIL: expected exactly one DENIED line, the fail-closed one; got $nopy_denied DENIED line(s), $nopy_failclosed fail-closed. stderr=$(cat "$nopy_err")"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_NOPY" "$SHIM_PATH" "$NOPY_HOME" "$nopy_err"
 
 # ---------------------------------------------------------------------------
 # CASE 12: WINDOWS STORE STUB REGRESSION — python3 exists but cannot execute.
