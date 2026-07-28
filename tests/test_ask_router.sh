@@ -25,6 +25,18 @@
 set -euo pipefail
 
 export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
+# Several checks below pin RANKED ORDER (#31 relevance, #572 directory grade, #573
+# path damping), and those guarantees are scoped to the bundled lexical path:
+# _semantic_rerank reorders the whole result list whenever FACTLOG_EMBED_MODULE names
+# an importable backend, so the var inherited from a developer's shell turns them into
+# false alarms. Measured on b0618a6 — this file WITHOUT the unset below, run with
+# FACTLOG_EMBED_MODULE naming a stub whose `rank` returns ascending scores (an exact
+# reversal): 241 passed, 7 failed, and all seven failures are order pins. Same
+# reasoning as tests/test_ask_wiki_search.sh, which unsets it for its own pins (#589).
+# The cases that exercise the backend-ON path set the var as a single-command prefix
+# (`FACTLOG_EMBED_MODULE=..._stub "$PYTHON" "$ROUTER" ...`), which applies to that one
+# command and nothing after it — unsetting here does not disable them.
+unset FACTLOG_EMBED_MODULE
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
