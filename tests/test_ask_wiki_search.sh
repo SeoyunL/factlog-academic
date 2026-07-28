@@ -38,10 +38,16 @@ _TMP_KB="$(mktemp -d)"
 trap 'rm -rf "$_TMP_CFG" "$_TMP_KB"' EXIT
 
 export XDG_CONFIG_HOME="$_TMP_CFG/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
-# This is the repo's only harness that pins RANKED ORDER, so the optional neural
-# re-rank must be OFF. FACTLOG_EMBED_MODULE inherited from the developer's shell
-# reorders search() results and would fail PIN3/PIN4 as a false alarm — a pinned
-# baseline that reports defects the code does not have is worse than none.
+# This harness pins RANKED ORDER — the FULL ordered ref list of a corpus, per
+# question — so the optional neural re-rank must be OFF. FACTLOG_EMBED_MODULE
+# inherited from the developer's shell reorders search() results and would fail
+# PIN3/PIN4 as a false alarm — a pinned baseline that reports defects the code does
+# not have is worse than none.
+# It is not the only file that pins order, and saying so would misplace the risk:
+# tests/test_ask_router.sh's #572 cases (a), (b) and (e) pin the grade key and the
+# tie order too. The difference is width, not existence — a leaked backend surfaces
+# there as one flipped row and here as every pin at once, which is why the unset
+# lives at the top of both files rather than beside a single check.
 # (tests/test_ask_router.sh unsets it at the top for the same reason since #589, and
 # switches it back ON only as a single-command prefix on the cases that test the
 # backend-ON path — a form that cannot leak into the next check, so no count of those
