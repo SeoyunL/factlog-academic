@@ -1337,6 +1337,19 @@ def _sanitize(line: str) -> str:
 # leave those 155 non-corpus citations scoring like prose. facts/, templates/ and
 # bare runs/ measure zero hits there but stay in the set: it is the scaffold's
 # closed list, and the extension whitelist below bounds what they can misfire on.
+#
+# "Closed set" is looser than it sounds in one direction and tighter in the other, and
+# both were checked so the next reader does not have to re-run it. `factlog init`
+# scaffolds NINE directories; this tuple names eight. The missing one is
+# `policy/prompts`, and it does not need naming, because the only consumer here is
+# _PATH_CITATION_RE below, whose body consumes the rest of the path after the root:
+# `policy/prompts/extract.md` is already masked through the `policy` entry (measured;
+# a root outside the set, `notarealdir/x.md`, is left alone). By the same measurement
+# `runs/sources` is redundant FOR MASKING — with that entry deleted, bare `runs`
+# still masks `runs/sources/report.pdf.md`. It is in the tuple because the tuple is
+# DERIVED from WIKI_SOURCE_DIRS rather than hand-listed, which is the property worth
+# keeping. So a nested scaffold dir needs its own entry only if its parent is absent
+# from the set — and none currently is.
 _CITED_KB_DIRS = (
     *WIKI_SOURCE_DIRS,
     *WIKI_SUPPLEMENTARY_DIRS,
