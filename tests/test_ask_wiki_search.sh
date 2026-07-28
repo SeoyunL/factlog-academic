@@ -455,6 +455,14 @@ same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄�
 # 1(브리지된 질문 어절 '신경기호' 하나), 빈도 1(브리지한 accepted 사실 하나)이므로
 # 커버리지 2 인 kim 발췌 뒤, supplementary 앞이다. 어휘 경유 행을 0점으로 두는 대안은
 # 이 픽스처에서는 같은 순서를 내지만 실 KB 에서는 렌더 상한 밖으로 밀려 보이지 않는다.
+#
+# #594 는 이 값을 움직이지 않는다 — 그리고 그것은 실측으로 확인한 무영향이 아니라
+# 무커버리지다. #594 는 "이미 렉시컬로 인용된 파일" 에 KB 어휘 백킹을 가산하는데, Q_KO
+# 에서 그 조건을 만족하는 파일이 하나도 없다: 이 질문이 브리지하는 accepted 어휘는
+# faronius(승격 행, 인용 안 됨) 하나뿐이고, 인용된 kim-2024 는 candidates.csv 에 아예
+# 없다. 게다가 kim 은 이미 1·2위라 가산해도 순서가 바뀔 수 없다. 이 축을 Q_KO 로 보게
+# 하려면 코퍼스 파일을 새로 넣어야 하는데, 그러면 PIN2 의 발췌 수(4)가 이 이슈와 무관한
+# 이유로 움직인다. 그래서 축은 PIN9 가 자기 질문으로 본다.
 same "PIN3 한국어 질문의 랭킹 순서 — 등급이 커버리지·빈도보다 우선한다 (#572/#576 이 바꿨다)" \
   "sources/kim-2024-neurosymbolic-grounding.md:4
 sources/kim-2024-neurosymbolic-grounding.md:14
@@ -858,6 +866,114 @@ facts = KbContext.for_root('$KB').load_accepted_facts()
 mixed = a._bridge_terms('AI nlp neurosymbolic 신경기호')
 print(mixed, a._bridge_terms('AI ML QA NN RL'), len(a._bridged_facts('''$Q_ASCII''', facts)))
 " || true)"
+
+# =============================================================================
+# PIN 9 — 이미 인용된 행에 붙는 KB 어휘 백킹 (#594)
+# =============================================================================
+# #576 은 브리지를 한쪽에만 채점했다: 스캔이 인용하지 않은 파일은 승격 행이 됐지만,
+# 인용한 파일은 그 파일에서 추출된 accepted 사실에 대해 아무 가산도 받지 못했다.
+# 소스 제목이 차용어인 코퍼스(실 KB 의 neurosymbolic 논문들)에서는 그 규칙이 정확히
+# 맞는 파일만 배제한다 — 주제가 맞을수록 렉시컬로 먼저 걸리기 때문이다. 실측: 이슈
+# 본문 질문의 28행 중 primary 22행이 전부 (1,1,1) 로 평평했고(나머지 6행은
+# supplementary 라 등급으로 이미 분리돼 있었다), 근거 파일 tilwani 는 13위, 브리지가
+# 더한 두 행은 주제 외곽(CRISPR·확산모델)에서 21·22위였다.
+#
+# 이 축은 위의 어떤 pin 으로도 볼 수 없다 (PIN3 주석 참고). 그래서 전용 질문을 쓴다.
+# 코퍼스 파일도 fact 파일도 추가하지 않는다 — 질문 하나만 더 던진다. 그래서 PIN2 의
+# 발췌 수도, PIN7 의 픽스처 크기(accepted 5 / candidates 5)도 이 이슈 때문에 움직이지
+# 않는다.
+Q_BACK='신경기호 추론 evidence'
+
+# 픽스처를 먼저 단언한다. 이 축의 pin 은 "인용된 파일에 백킹이 있다" 는 전제가 살아
+# 있어야만 의미가 있고, 그 전제가 깨지면 아래 순서 pin 은 "가산할 것이 없어서 순서가
+# 그대로" 인 상태를 통과로 읽는다 (#575 가 찾은 공허한 체크와 같은 형태).
+#   - 결과가 4행이다: 절단 뮤턴트가 통과하지 못하도록 크기를 먼저 고정한다.
+#   - 브리지가 닿는 파일은 faronius 하나이고, 그 파일은 렉시컬로도 인용된다
+#     ('evidence'). 그래서 승격 행은 0 이다 — 이슈가 말한 구조적 상황 그대로다:
+#     KB 가 가장 할 말이 많은 파일에서 브리지가 아무것도 하지 못한다.
+#   - 그 파일 어디에도 '신경기호' 는 없다. 즉 아래 순위 상승은 렉시컬로 설명될 수 없다.
+if py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+kb = pathlib.Path('$KB')
+rows = a.search('''$Q_BACK''', kb, limit=None)
+assert len(rows) == 4, [r['file'] for r in rows]
+assert [r for r in rows if r.get('via')] == [], [r['file'] for r in rows if r.get('via')]
+bridged = a.kb_vocabulary_bridge('''$Q_BACK''', kb)
+assert list(bridged) == ['sources/faronius-2025-attention-budget.md'], list(bridged)
+assert bridged['sources/faronius-2025-attention-budget.md']['terms'] == ['신경기호']
+assert len(bridged['sources/faronius-2025-attention-budget.md']['facts']) == 2
+text = (kb / 'sources/faronius-2025-attention-budget.md').read_text(encoding='utf-8')
+assert '신경기호' not in text
+assert 'evidence' in text.lower()
+" 2>/dev/null; then ok "PIN9 픽스처 전제: 4행, 승격 0건, 백킹은 인용된 faronius 에만 (그 파일에 '신경기호' 는 없다)"; else bad "PIN9 픽스처 전제가 깨졌다 — 이 축의 pin 이 공허해진다: $(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+kb = pathlib.Path('$KB')
+rows = a.search('''$Q_BACK''', kb, limit=None)
+print(len(rows), [r['file'] for r in rows if r.get('via')], list(a.kb_vocabulary_bridge('''$Q_BACK''', kb)))
+")"; fi
+
+# 순서. 이 값은 #594 가 갱신했다 — 이전 값은
+#   sources/kim-2024-neurosymbolic-grounding.md:4 / :14 / faronius:19 / decisions:3
+# 였다. kim 은 '신경기호'·'추론' 을 본문에서 둘 다 담아 커버리지 2, faronius 는
+# 'evidence' 하나로 커버리지 1 이었다. 이제 faronius 는 렉시컬 1 에 KB 어휘 '신경기호'
+# 가 합류해 커버리지 2, 빈도는 렉시컬 1 + 백킹 사실 2 = 3 이므로 kim(2,2)을 앞선다.
+# 두 성분이 모두 필요하다: 커버리지만 가산하면 (2,1) 로 kim 뒤, 빈도만 가산하면 (1,3)
+# 으로 역시 kim 뒤다. 그래서 이 pin 은 한쪽만 죽인 뮤턴트도 잡는다.
+back_refs="$(refs "$Q_BACK")"
+same "PIN9 인용된 행이 KB 어휘 백킹으로 앞선다 (#594 가 바꿨다; 이전에는 kim 두 발췌가 1·2위)" \
+  "sources/faronius-2025-attention-budget.md:19
+sources/kim-2024-neurosymbolic-grounding.md:4
+sources/kim-2024-neurosymbolic-grounding.md:14
+decisions/open-questions.md:3" \
+  "$back_refs"
+
+# 화이트박스로 성분을 따로 고정한다. 위 순서 pin 은 두 성분의 합만 보므로, 한쪽을
+# 두 배로 키우고 다른 쪽을 죽인 뮤턴트가 같은 순서를 낼 수 있다.
+# 값의 읽는 법: (렉시컬로 매치한 질문 어절, 그 발췌의 매치 횟수) + (백킹 어절, 백킹 사실 수).
+same "PIN9 백킹은 커버리지와 빈도에 각각 합류한다 — 렉시컬 (1,1) + 백킹 (1,2) = (2,3)" \
+  "['evidence'] 1 ['신경기호'] 2" \
+  "$(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+kb = pathlib.Path('$KB')
+ref = 'sources/faronius-2025-attention-budget.md'
+row = next(r for r in a.search('''$Q_BACK''', kb, limit=None) if r['file'] == ref)
+hits, freq = a._keyword_hits(str(row['excerpt']), a._keywords('''$Q_BACK'''))
+entry = a.kb_vocabulary_bridge('''$Q_BACK''', kb)[ref]
+print(sorted(hits), freq, entry['terms'], len(entry['facts']))
+")"
+
+# 계약. 순위가 올라가도 그 행은 렉시컬 행이지 어휘 경유 행이 아니다 — #576 의 태그는
+# "렉시컬로 매치되지 '않고' KB 어휘로 닿았다" 는 뜻이므로, 인용된 행에 그 태그가 붙으면
+# 거짓을 말한다. 그리고 UNVERIFIED 블록 밖으로 새지 않는다(수용 기준 3).
+back_answer="$(router wiki "$Q_BACK" --reason 'unknown entity' || true)"
+[ -n "$back_answer" ] || bad "PIN9 wiki 렌더가 아무것도 출력하지 않았다 (이후 PIN9 계약 체크는 이 사실의 파생)"
+via_lines="$(printf '%s\n' "$back_answer" | grep -cF "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print(a.VIA_KB_VOCABULARY_TAG)
+")" || true)"
+acc_lines="$(printf '%s\n' "$back_answer" | grep -c '← accepted:' || true)"
+ver_lines="$(printf '%s\n' "$back_answer" | grep -c '^VERIFIED' || true)"
+if [ -z "$via_lines" ] || [ -z "$acc_lines" ] || [ -z "$ver_lines" ]; then
+  # grep -c 는 0건에서 종료코드 1을 낸다. `|| true` 로 격리했으므로 빈 값은 세지 못한
+  # 상태이고, 그것을 통과로 읽으면 이 체크가 조용히 사라진다.
+  bad "PIN9 계약 체크가 줄 수를 세지 못했다 (via=[$via_lines] accepted=[$acc_lines] verified=[$ver_lines])"
+else
+  same "PIN9 백킹으로 오른 행은 어휘 경유 태그를 달지 않고 UNVERIFIED 에 남는다" "0 0 0" \
+    "$via_lines $acc_lines $ver_lines"
+fi
+if printf '%s\n' "$back_answer" | head -1 | grep -q '^UNVERIFIED — wiki exploration$'; then
+  ok "PIN9 백킹이 붙은 답변도 UNVERIFIED 머리로 시작한다"
+else
+  bad "PIN9 답변의 머리가 UNVERIFIED 가 아니다: [$(printf '%s\n' "$back_answer" | head -1)]"
+fi
 
 echo ""
 echo "========================================"

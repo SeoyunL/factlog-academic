@@ -1020,6 +1020,43 @@ _PATH_CITATION_RE = re.compile(
 )
 
 
+def _keyword_hits(
+    excerpt: str,
+    keywords: list[tuple[str, re.Pattern[str]]],
+) -> tuple[set[str], int]:
+    """The distinct question terms *excerpt* matches, NFC-folded, and the total
+    match count — the two halves of :func:`_excerpt_score`, with the coverage half
+    kept as the SET of terms rather than its size.
+
+    search() needs the set, not the count: a row's coverage is now the union of the
+    terms it matched in the text and the terms the KB vocabulary bridged to its file
+    (#594), and a union of counts would double-count a term reached both ways.
+
+    The NFC fold is LOAD-BEARING; removing it changes results today. The other side
+    of the union (_bridge_terms) folds its copy of the same keyword list, so the two
+    sides differ on any question term that is not already NFC — and such a term does
+    reach the bridge. _is_cjk is `any()` over the token: '漢' + NFD('글자') contains a
+    CJK ideograph, so it passes the script filter with its Hangul still decomposed,
+    and the two channels then hold two spellings of one word. Unfolded, that word is
+    counted twice and the row outranks one that really does cover more of the
+    question (reproduced end-to-end: the two files swap places).
+
+    An ALL-Hangul NFD term does not get that far — decomposed Hangul is conjoining
+    jamo and nothing else in the token passes _is_cjk — which is why the first cut of
+    this docstring called the fold defensive. That reasoning generalized from the
+    pure case to a filter that is `any()`, and the mixed case is the counter-example.
+    Both are pinned in tests/unit/test_ask_kb_backing_rank.py.
+
+    Masking and match rules live here alone; _excerpt_score is a thin count over
+    this. Two copies of the path mask (#573) is exactly the "equivalent rule
+    duplicated" shape common.py's fact_key warns about.
+    """
+    low = _PATH_CITATION_RE.sub(" ", excerpt.lower())
+    hits = {_nfc(term) for term, pattern in keywords if pattern.search(low)}
+    frequency = sum(len(pattern.findall(low)) for _term, pattern in keywords)
+    return hits, frequency
+
+
 def _excerpt_score(excerpt: str, patterns: list[re.Pattern[str]]) -> tuple[int, int]:
     """Relevance of an excerpt to the query: (distinct keyword coverage, total
     match frequency). An excerpt covering more of the query's keywords ranks
@@ -1048,11 +1085,14 @@ def _excerpt_score(excerpt: str, patterns: list[re.Pattern[str]]) -> tuple[int, 
     search()'s `limit` cap (measured: with the default cap of 10, a demoted
     decisions/ excerpt drops out of the top 10). That demotion is the intended
     effect; deciding an excerpt is unciteable is not this issue's scope.
+
+    Pattern-only callers keep this entry point. The positional index stands in for
+    the surface term: _keyword_hits keys its set by term, and callers that hold
+    patterns alone have no terms to give — indices are unique, which is all the set
+    needs to count each pattern once.
     """
-    low = _PATH_CITATION_RE.sub(" ", excerpt.lower())
-    coverage = sum(1 for pat in patterns if pat.search(low))
-    frequency = sum(len(pat.findall(low)) for pat in patterns)
-    return (coverage, frequency)
+    hits, frequency = _keyword_hits(excerpt, [(str(i), pat) for i, pat in enumerate(patterns)])
+    return (len(hits), frequency)
 
 
 def _semantic_rerank(question: str, results: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -1118,7 +1158,8 @@ def _fill_recall(
 
 
 # ---------------------------------------------------------------------------
-# KB-vocabulary bridge (#576) — reaching a source the lexical scan cannot
+# KB-vocabulary bridge (#576) — reaching a source the lexical scan cannot,
+# and (#594) crediting the one it already reached
 # ---------------------------------------------------------------------------
 # The engine's facts are normalized to Korean (relation '이점', object
 # '설명가능성_향상'); the sources they were extracted FROM are English abstracts.
@@ -1140,10 +1181,21 @@ def _fill_recall(
 #     that no one checked; reaching it through an accepted fact says the FACT was
 #     accepted, not the sentence. Rendering it inside the UNVERIFIED block with an
 #     explicit tag is the whole contract (수용 기준 3).
-#   - It does not re-score sources the lexical scan already found. Their
-#     KB-vocabulary backing would justify a higher rank (the issue's observation
-#     that coverage flattens to 1), but that is a change to the ranking key, which
-#     is #572/#573's ground, not this one.
+#   - It does not label a file the scan already cited. That file gets the same
+#     backing credited to its ranking key (#594, search()), but no tag and no
+#     '← accepted:' lines: the tag means "reached this way and NOT lexically", so
+#     wearing it would say something false about a row the reader's own keyword
+#     produced. #576 left the credit out and called it #572/#573's ground; both
+#     closed without taking it, and the omission is what this corpus feels most —
+#     a source whose title borrows the English term is found lexically, so the
+#     "already cited" rule dropped the KB's evidence about exactly the files that
+#     match, and kept it only for the ones no keyword reached. Measured on the
+#     reference KB, question 'neurosymbolic 접근이 순수 신경망 대비 해석가능성에서
+#     어떤 이점을 갖는가': 22 of the 28 rows — every PRIMARY one — scored (1,1,1),
+#     so the KB channel decided nothing and the order was the filename's. (The
+#     remaining 6 are supplementary and the grade key had already separated them.)
+#     The issue's own evidence file (tilwani-2024) sat at 13 with the same key as
+#     every other primary row.
 #   - It does not touch the #575 recall tally. A bridged term still occurs nowhere
 #     in the corpus text; counting it as matched would make that diagnostic claim
 #     the corpus contains wording it does not.
@@ -1380,7 +1432,7 @@ def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, objec
 
 
 def _bridge_rows(
-    question: str,
+    bridged: dict[str, dict[str, object]],
     root: Path,
     cited: set[str],
     ignored_patterns: list[str],
@@ -1405,8 +1457,11 @@ def _bridge_rows(
     because the scan also collapses overlapping windows against `last_end`, which a
     single promoted excerpt has no analogue for. Whoever reworks the window has to
     change both, or a bridged excerpt keeps the geometry #574 removed.
+
+    *bridged* is :func:`kb_vocabulary_bridge`'s map, taken as an argument rather than
+    computed here: since #594 the SAME map also credits the rows the scan did cite,
+    and two calls could disagree only by reading the KB twice mid-question.
     """
-    bridged = kb_vocabulary_bridge(question, root)
     if not bridged:
         return []
     rows: list[tuple[tuple[int, int, int], dict[str, object]]] = []
@@ -1475,6 +1530,14 @@ def search(
     alongside the lexical excerpts and stay UNVERIFIED; no other row gains a key, so
     a KB with no bridge returns byte-identical output.
 
+    A file the scan DID cite is credited with that same vocabulary instead of being
+    tagged with it (#594): its coverage becomes the union of the terms it matched in
+    the text and the terms bridged to it, and its frequency gains the backing facts.
+    The credit is ordering only — no key, no tag, no row added or removed, and it
+    ranks below the directory grade — so the rows returned are the same rows in a
+    different order, and a KB whose fact files are absent or join nothing ranks
+    exactly as before.
+
     When *recall* is given it is filled with {'matched': [...], 'unmatched': [...]}
     — which of the question's keywords the corpus contains (#575). It is a pure
     side report: nothing below reads it, so it cannot influence scoring, ordering
@@ -1507,6 +1570,11 @@ def search(
     scored: list[tuple[tuple[int, int, int], dict[str, object]]] = []
     cited: set[str] = set()  # files the lexical scan cited — the bridge below skips them
     ignored_patterns = sync_ignore_patterns(root)
+    # Read ONCE, before the scan, and used twice: to credit the rows the scan cites
+    # (#594, below) and to build rows for the files it never cites (#576). Reading it
+    # here also means the KB join happens once per search() instead of once per call
+    # site.
+    bridged = kb_vocabulary_bridge(question, root)
     for rel, label, grade in _wiki_corpus():
         base = root / rel
         if not base.is_dir():
@@ -1555,8 +1623,44 @@ def search(
                     "excerpt": excerpt,
                     "dir": label,
                 }
-                coverage, frequency = _excerpt_score(excerpt, patterns)
-                scored.append(((grade, coverage, frequency), result))
+                hits, frequency = _keyword_hits(excerpt, keywords)
+                # KB-vocabulary backing (#594): the engine's accepted facts reach this
+                # file through question words the text does not spell. #576 left this
+                # credit out and named it #572/#573's ground; both closed without
+                # taking it, and the omission is what made the bridge weakest exactly
+                # where the KB is richest — a source whose title borrows the English
+                # term is found lexically, so the rule "do not promote a cited file"
+                # dropped the KB's own evidence about the best-matching files and kept
+                # it only for the ones no keyword reached.
+                #
+                # Credited into the SAME two components, in the same reading: coverage
+                # is how much of the question this row answers, frequency is how much
+                # evidence says so. A bridged term is a question word answered on the
+                # other channel, an accepted fact is evidence for it. The union is what
+                # keeps a Korean source (whose text spells the term AND whose facts
+                # bridge it) from being counted twice — in COVERAGE. Frequency is a
+                # sum and is not deduplicated: a term found both ways adds on both
+                # sides there, which is the same reading (two independent pieces of
+                # evidence), and it only ever breaks a coverage tie.
+                #
+                # KNOWN COST, measured, not fixed here: the backing is a per-FILE
+                # constant added to EVERY excerpt of that file, so a file with many
+                # excerpts rises as a block and can take most of the render cap. On
+                # the reference KB, '오메가-3 보충이 COPD 환자에게 효과있음을 보인
+                # 연구는?': distinct papers in the default top 10 fall from 9 to 3
+                # (5 + 4 + 1 excerpts of three files). Over a 26-question sample the
+                # total distinct-file count over each top 10 falls 197 -> 190, and an
+                # independent 30-question sample measured 175 -> 169 — i.e. the whole
+                # loss is that one question shape, "which studies …?" over a corpus
+                # where one paper carries many matching excerpts. Damping it (crediting
+                # only a file's best excerpt, or a diversity term in the sort key) is a
+                # change to the ranking key's shape and is left to a follow-up; the
+                # numbers above are here so that follow-up can reproduce the baseline.
+                backing = bridged.get(_nfc(ref))
+                if backing:
+                    hits = hits | set(backing["terms"])
+                    frequency += len(backing["facts"])
+                scored.append(((grade, len(hits), frequency), result))
                 # NFC-folded: this set is compared against refs read out of
                 # candidates.csv, and the two spellings of one Korean filename are
                 # equal to every renderer and unequal to `in`. Unfolded, the same
@@ -1569,7 +1673,7 @@ def search(
     # instead of being pinned to either end of the list. Their rows carry 'via'; no
     # other row does, so a caller that never looks at it sees exactly what it saw
     # before on a KB with no bridge.
-    scored.extend(_bridge_rows(question, root, cited, ignored_patterns))
+    scored.extend(_bridge_rows(bridged, root, cited, ignored_patterns))
     # Taken before the sort and the cap below, so neither the grade key (#572) nor
     # the render budget can make recall look worse than the corpus is (#575).
     _fill_recall(recall, keywords, pending)
