@@ -1931,12 +1931,29 @@ def decomposition_candidates(
         draft = decomposition_query(relation, obj)
         try:
             decision = classify(draft, accepted)
-            # A verified negative is excluded with the same gate cmd_render branches
-            # on: it is an engine answer, but proposing "ask this, it has no rows" is
-            # not a decomposition of anything. By construction every pair here comes
-            # from an accepted fact, so this and the 0-row guard below are defensive —
-            # they are what keeps 수용 기준 2 true if a future value-hierarchy or alias
-            # rule makes the round trip lossy.
+            # The route check is what enforces 수용 기준 2, and which of these two
+            # conditions does that depends on the SHAPE of *accepted* — so both are
+            # stated with the measurement that decides them, not with a claim:
+            #
+            #   route == "engine" — load-bearing TODAY, on a fact list carrying a
+            #     status column. classify() reads status (entity_set keeps only
+            #     ENGINE_STATUSES rows), evaluate_relation does not, so a
+            #     candidate/needs_review/superseded/'' row routes wiki and STILL
+            #     answers with its row: measured route=wiki, rows=1 for all four
+            #     values. Without this condition that row is proposed as a "verified
+            #     row" of a fact the KB has not accepted. cmd_wiki does not reach it
+            #     because load_accepted_facts() returns subject/relation/object only
+            #     (measured: 2055 of 2055 rows on the reference KB carry no status) —
+            #     but load_facts(), used two functions away in fact_signals(), returns
+            #     exactly the shape that does. tests/unit/test_ask_decomposition.py's
+            #     TestTheValidatorGate pins it, and removing this condition fails those
+            #     four cases.
+            #   not decision["negative"] — mirrors the scope gate cmd_render branches
+            #     on, and changes NO result here: a draft built from a fact that is
+            #     present cannot classify as fact_absent, and if it somehow did, the
+            #     0-row guard below would drop it anyway. Measured — removing this half
+            #     alone fails no test in either suite. It is kept so the two call sites
+            #     read as one contract, not because it decides anything.
             rows = (
                 evaluate_relation(draft, accepted)
                 if decision["route"] == "engine" and not decision["negative"]

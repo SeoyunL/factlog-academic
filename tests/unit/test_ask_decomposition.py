@@ -14,6 +14,8 @@ the proposals under test are decided by the accepted facts alone.
 """
 from __future__ import annotations
 
+import pytest
+
 import ask_router
 
 # Two conditions, five facts each, and the first condition's vocabulary sorts BEFORE
@@ -94,6 +96,65 @@ class TestWhatBecomesAProposal:
     def test_the_matching_question_words_are_reported_per_proposal(self):
         result = ask_router.decomposition_candidates(COMBINED_QUESTION, TWO_CONDITIONS)
         assert {tuple(c["terms"]) for c in result["candidates"]} == {("알파개념",), ("베타개념",)}
+
+
+class TestTheValidatorGate:
+    """수용 기준 2, on the fact shape where the gate actually decides something.
+
+    ``load_accepted_facts()`` (what cmd_wiki passes) returns subject/relation/object
+    and nothing else, and on that shape a proposal built from an accepted fact always
+    validates — which is why 'only proposals that pass classify_query are shown' reads
+    like a tautology and why removing the gate broke no test in the first round of
+    mutation testing.
+
+    It is not a tautology on the OTHER fact shape this module already handles:
+    ``load_facts()`` (facts/candidates.csv, used two functions away in
+    ``fact_signals``) carries a status column, and ``classify`` reads status —
+    entity_set keeps only ENGINE_STATUSES rows, so a candidate/needs_review/superseded
+    row is not accepted vocabulary. ``evaluate_relation`` does NOT read status and
+    still answers with the row. So the two disagree, and the gate is the only thing
+    standing between that disagreement and a proposal that says 'verified row' about a
+    fact the KB has not accepted.
+    """
+
+    # The four values measured to route away from the engine while still evaluating to
+    # a row. '' is in the list because a row with an EMPTY status is the shape a
+    # half-written CSV leaves behind, and it must not be read as permissive.
+    NON_ENGINE = ["candidate", "needs_review", "superseded", ""]
+
+    def _with_status(self, status):
+        return [
+            dict(TWO_CONDITIONS[0], status=status),
+            dict(TWO_CONDITIONS[5], status=status),
+        ]
+
+    @pytest.mark.parametrize("status", NON_ENGINE)
+    def test_a_row_the_validator_refuses_is_never_proposed(self, status):
+        accepted = self._with_status(status)
+        draft = ask_router.decomposition_query("가_관계", "알파개념_0")
+        # The premise, asserted before the conclusion: this pair still EVALUATES to a
+        # row, so a generator that trusted its own construction would print it as a
+        # verified one. Without these two lines the assertion below would also hold for
+        # a KB where nothing matched at all.
+        assert len(ask_router.evaluate_relation(draft, accepted)) == 1
+        assert ask_router.classify(draft, accepted)["route"] == "wiki"
+        result = ask_router.decomposition_candidates(COMBINED_QUESTION, accepted)
+        assert result["candidates"] == []
+        # Generated and then refused — not "never found". The counters are what the
+        # rendered block reports, so they have to tell those two apart.
+        assert result["generated"] == 2 and result["rejected"] == 2
+
+    @pytest.mark.parametrize("status", ["accepted", "confirmed"])
+    def test_an_engine_status_still_proposes(self, status):
+        # The control that keeps the test above from passing for the wrong reason: a
+        # gate that refused every fact carrying a status column at all would satisfy it
+        # while making the feature silent on the shape it was extended to handle.
+        result = ask_router.decomposition_candidates(COMBINED_QUESTION, self._with_status(status))
+        assert queries(result) == [
+            'relation(X, "가_관계", "알파개념_0")?',
+            'relation(X, "하_관계", "베타개념_0")?',
+        ]
+        assert result["rejected"] == 0
 
 
 class TestOrdering:
