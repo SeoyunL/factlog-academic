@@ -1186,6 +1186,18 @@ cap, the default block shows **no** `decisions/` excerpt at all — that is
 expected, not a recall failure. Supplementary excerpts are ranked, never
 filtered: use `--all` to see them (and to audit what the cap hid).
 
+Keyword relevance counts **both** channels: the question's words found in the
+excerpt, and the question's words the engine's accepted vocabulary reaches that
+file through. So a source ranks higher for carrying accepted facts about what you
+asked, even where the corpus spells it in another language — and a question whose
+Korean terms match no prose still orders the answer by something other than
+filename. The two channels are counted as one set of question words, so a term
+found both ways counts once, and this credit sits **below** the directory grade:
+it can never lift a `decisions/` excerpt above a source. It changes **order
+only** — no row becomes verified, gains a tag, or enters the block because of it.
+A row reached ONLY through that vocabulary is a different thing and still says so
+with `[via KB vocabulary — still UNVERIFIED]`.
+
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
 ```
