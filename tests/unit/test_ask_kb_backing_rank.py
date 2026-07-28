@@ -6,8 +6,9 @@ became a promoted row, and a file it DID cite got no credit for the accepted fac
 that reach it. On a corpus whose sources borrow the English term as their title —
 the reference KB's `neurosymbolic` papers — that rule subtracts exactly the right
 files, because a topically-matching source is the one the lexical scan finds. The
-issue's own evidence file ranked 13th of 28 with a flat (1,1,1) key, and the only
-rows the bridge added were the two off-topic ones at 21 and 22.
+issue's own evidence file ranked 13th of 28 with a flat (1,1,1) key — the key every
+one of the 22 primary rows had, the other 6 being supplementary and already separated
+by grade — and the only rows the bridge added were the two off-topic ones at 21 and 22.
 
 So the credit has to reach the cited rows, and these assert the shape of it: what
 it counts, what it must not count twice, what it may not overrule, and what it
@@ -116,22 +117,48 @@ class TestCoverageCredit:
             "sources/a-backed.md:3",
         ]
 
-    def test_an_nfd_question_reaches_the_bridge_in_neither_composition(self, tmp_path):
-        # Why the union above can be a plain set union, and what would break it.
+    def test_one_word_in_two_compositions_is_still_one_word(self, tmp_path):
+        # The union is by STRING, and only ONE of its two sides is folded:
+        # _keyword_hits carries what the question typed, _bridge_terms folds its copy
+        # to NFC to join candidates.csv. A term that is not already NFC therefore
+        # enters the union twice — one over-credit, no error, and a ranking that
+        # merely looks like a different judgement call.
         #
-        # The two sides come from ONE keyword list, but only one of them is folded:
-        # _keyword_hits carries the question's surface term, _bridge_terms folds its
-        # copy to NFC to join candidates.csv. An NFD-typed question would therefore
-        # put two spellings of one word into the union — a silent over-credit that
-        # no ranking assertion would look wrong.
-        #
-        # It cannot happen today, and this pins the reason rather than assuming it:
-        # NFD Hangul decomposes to conjoining jamo, which _is_cjk does not accept, so
-        # _bridge_terms drops the term before it can differ. Measured, not assumed —
-        # writing the same question in NFC bridges the identical word. If a future
-        # normalizer (#581) widens that filter, this test fails and the fold in
-        # _keyword_hits becomes load-bearing instead of defensive.
+        # A term gets that far because _is_cjk is `any()` over the token: '漢' with
+        # decomposed Hangul after it passes on the ideograph alone, Hangul still in
+        # NFD. This is the whole reason the fold in _keyword_hits is load-bearing
+        # rather than defensive, so it is asserted end-to-end (unfolded, the two files
+        # below swap) instead of on the helper.
+        mixed = "漢" + unicodedata.normalize("NFD", "글자")
+        assert ask_router._is_cjk(mixed)
+        assert mixed != unicodedata.normalize("NFC", mixed)
+        root = build(
+            tmp_path,
+            {"a-backed": f"{mixed} benchmark 결과.", "c-plain": f"{mixed} benchmark alpha 결과."},
+            accepted=f'relation("s", "이점", "{unicodedata.normalize("NFC", mixed)}_향상").\n',
+            candidates=csv_rows(
+                f"s,이점,{unicodedata.normalize('NFC', mixed)}_향상,sources/a-backed.md,confirmed,0.9,"
+            ),
+        )
+        # Premise: this term really does bridge (in its folded spelling), otherwise
+        # there is no second channel and the test proves nothing.
+        assert ask_router._bridge_terms(f"{mixed} benchmark") == [
+            unicodedata.normalize("NFC", mixed)
+        ]
+        assert refs(ask_router.search(f"{mixed} benchmark alpha", root, limit=None)) == [
+            "sources/c-plain.md:3",
+            "sources/a-backed.md:3",
+        ]
+
+    def test_an_all_hangul_nfd_term_does_not_reach_the_bridge_at_all(self, tmp_path):
+        # The other half of the same filter, and the narrower case: with no ideograph
+        # to carry it, an NFD term is conjoining jamo and _is_cjk rejects it outright,
+        # so it never reaches the bridge in either composition. Pinned because it is
+        # what makes the mixed case above the ONLY way the two channels diverge — and
+        # because reading this case alone is what produced the wrong conclusion that
+        # the fold changes nothing.
         nfd = unicodedata.normalize("NFD", "설명가능성")
+        assert not ask_router._is_cjk(nfd)
         assert ask_router._bridge_terms(f"{nfd} benchmark") == []
         assert ask_router._bridge_terms("설명가능성 benchmark") == ["설명가능성"]
 

@@ -1032,14 +1032,20 @@ def _keyword_hits(
     terms it matched in the text and the terms the KB vocabulary bridged to its file
     (#594), and a union of counts would double-count a term reached both ways.
 
-    The NFC fold is DEFENSIVE, not load-bearing, and is measured as such: the other
-    side of that union (_bridge_terms) folds its copy of the SAME keyword list, so
-    the two can differ only on an NFD-typed question — and an NFD question reaches
-    the bridge in neither composition, because decomposed Hangul is conjoining jamo
-    and _is_cjk does not accept it. Folding here means a future normalizer (#581)
-    widening that filter cannot become a silent over-credit; today it changes no
-    result, and a mutant that removes it fails no test (the unit layer pins the
-    premise instead).
+    The NFC fold is LOAD-BEARING; removing it changes results today. The other side
+    of the union (_bridge_terms) folds its copy of the same keyword list, so the two
+    sides differ on any question term that is not already NFC — and such a term does
+    reach the bridge. _is_cjk is `any()` over the token: '漢' + NFD('글자') contains a
+    CJK ideograph, so it passes the script filter with its Hangul still decomposed,
+    and the two channels then hold two spellings of one word. Unfolded, that word is
+    counted twice and the row outranks one that really does cover more of the
+    question (reproduced end-to-end: the two files swap places).
+
+    An ALL-Hangul NFD term does not get that far — decomposed Hangul is conjoining
+    jamo and nothing else in the token passes _is_cjk — which is why the first cut of
+    this docstring called the fold defensive. That reasoning generalized from the
+    pure case to a filter that is `any()`, and the mixed case is the counter-example.
+    Both are pinned in tests/unit/test_ask_kb_backing_rank.py.
 
     Masking and match rules live here alone; _excerpt_score is a thin count over
     this. Two copies of the path mask (#573) is exactly the "equivalent rule
@@ -1185,9 +1191,11 @@ def _fill_recall(
 #     "already cited" rule dropped the KB's evidence about exactly the files that
 #     match, and kept it only for the ones no keyword reached. Measured on the
 #     reference KB, question 'neurosymbolic 접근이 순수 신경망 대비 해석가능성에서
-#     어떤 이점을 갖는가': all 28 rows scored (1,1,1) — the KB channel decided
-#     nothing at all, and the order was the filename's. The issue's own evidence
-#     file (tilwani-2024) sat at 13 with the same key as every other row.
+#     어떤 이점을 갖는가': 22 of the 28 rows — every PRIMARY one — scored (1,1,1),
+#     so the KB channel decided nothing and the order was the filename's. (The
+#     remaining 6 are supplementary and the grade key had already separated them.)
+#     The issue's own evidence file (tilwani-2024) sat at 13 with the same key as
+#     every other primary row.
 #   - It does not touch the #575 recall tally. A bridged term still occurs nowhere
 #     in the corpus text; counting it as matched would make that diagnostic claim
 #     the corpus contains wording it does not.
@@ -1630,7 +1638,24 @@ def search(
                 # evidence says so. A bridged term is a question word answered on the
                 # other channel, an accepted fact is evidence for it. The union is what
                 # keeps a Korean source (whose text spells the term AND whose facts
-                # bridge it) from being counted twice.
+                # bridge it) from being counted twice — in COVERAGE. Frequency is a
+                # sum and is not deduplicated: a term found both ways adds on both
+                # sides there, which is the same reading (two independent pieces of
+                # evidence), and it only ever breaks a coverage tie.
+                #
+                # KNOWN COST, measured, not fixed here: the backing is a per-FILE
+                # constant added to EVERY excerpt of that file, so a file with many
+                # excerpts rises as a block and can take most of the render cap. On
+                # the reference KB, '오메가-3 보충이 COPD 환자에게 효과있음을 보인
+                # 연구는?': distinct papers in the default top 10 fall from 9 to 3
+                # (5 + 4 + 1 excerpts of three files). Over a 26-question sample the
+                # total distinct-file count over each top 10 falls 197 -> 190, and an
+                # independent 30-question sample measured 175 -> 169 — i.e. the whole
+                # loss is that one question shape, "which studies …?" over a corpus
+                # where one paper carries many matching excerpts. Damping it (crediting
+                # only a file's best excerpt, or a diversity term in the sort key) is a
+                # change to the ranking key's shape and is left to a follow-up; the
+                # numbers above are here so that follow-up can reproduce the baseline.
                 backing = bridged.get(_nfc(ref))
                 if backing:
                     hits = hits | set(backing["terms"])
