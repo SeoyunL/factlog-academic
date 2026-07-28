@@ -782,28 +782,55 @@ def _cjk_stopword(word: str) -> bool:
     return word in _CJK_QUESTION_STOPWORDS
 
 
-# ASCII tokens must exceed 2 characters to become keywords. The reason is not
-# substring noise — the ASCII branch matches with lookaround boundaries, so 'ai'
-# never matches inside 'training' — it is that at two characters the English
-# function words are the highest-reach tokens in an English corpus. The relaxed
-# floor is the recovery stage's only concession, not a general loosening.
-_ASCII_MIN = 3
-_ASCII_MIN_RELAXED = 2
+# ASCII tokens of 2+ characters become keywords, so a two-letter CONTENT initialism
+# ('AI', 'ML', 'RL', 'QA', 'NN') is a search term like any other (#583). It is only
+# 1-character tokens that are dropped for length.
+#
+# The floor used to be 3, on the reasoning that at two characters the English function
+# words are the highest-reach tokens in an English corpus. Measured, length was never
+# what bounded reach. All figures below are over the corpus search() ACTUALLY reads —
+# 127 files, being sources/ + runs/sources/ + decisions/ minus the 60 sync-ignored
+# files under sources/arxiv_corpus/** — and count files whose PROSE a token's own
+# matcher hits:
+#
+#   already admitted at 3 chars:  and 123  the 120  for 110  doi 103  are 67
+#   best 2-char NOT on the list:  10 105   11 18    12 18    il 17    ai 15
+#
+# The three highest-reaching tokens the old floor already let through beat the highest
+# 2-character one, so lowering the floor adds no reach class the default path did not
+# already carry. What bounds reach is the function-word list below, and that list keeps
+# working at the lower floor — it is in fact the only thing doing the work now.
+#
+# The same measurement answers the digit/fragment worry (#583 기준 3) without a further
+# guard: after 10 the unlisted 2-character tokens fall off a cliff (18, 18, 17, 15,
+# 13 …), and the numerals among them are ordinary prose numbers, not a distinct noise
+# source.
+#
+# Reach must be read as PROSE reach, and against THIS corpus. Ranked by TOTAL reach
+# over the raw file tree the top unlisted token looks like `id` at 60 — but its prose
+# reach is 0 (all 60 are the one-line sync comment `<!-- factlog sync … | id:… -->`)
+# AND all 60 files are sync-ignored, so its reach here is 0 by two independent routes.
+# 19 tokens in this corpus are metadata-only (07=59, 49=25, 44=6 …); a total-reach
+# ranking would have mistaken every one of them for a recall risk.
+_ASCII_MIN = 2
 
 # 2-character English function words, excluded from the keyword set. Same purpose as
-# _CJK_QUESTION_STOPWORDS in the other language: the relaxed floor exists to rescue a
-# short CONTENT initialism ('AI', 'ML', 'QA'), and by length alone those are
-# indistinguishable from 'of'/'in'. Measured over the KB's 186 readable source files,
-# by how many files contain the token: of 182, in 181, to 175, we 135, is 134, on 131,
-# by 127, as 117, an 105, be 73, or 65, at 57 — against ai 56 for the best-reaching
-# content initialism. Promoting one of these makes the question's ENGLISH grammar the
-# entire query, which is #571's defect in another language: measured, a question like
-# '이것은 무엇인가 of 그것은' returned 451 excerpts on 'of' alone.
+# _CJK_QUESTION_STOPWORDS in the other language: the floor above admits a short CONTENT
+# initialism ('AI', 'ML', 'QA'), and by length alone those are indistinguishable from
+# 'of'/'in'. Measured over the same 127 searchable files, by prose reach: of 124,
+# in 123, to 116, is 88, we 86, by 84, on 84, as 79, an 66, be 50, or 45, at 43 —
+# against ai 15, the best-reaching content initialism. Promoting one of these makes the
+# question's ENGLISH grammar the entire query, which is #571's defect in another
+# language: measured, '이것은 무엇인가 of 그것은' returned 451 excerpts on 'of' alone.
 #
-# EVERY entry is exactly 2 characters, so this list cannot affect the strict floor —
-# it only constrains what the relaxed floor is allowed to let back in. Longer English
-# function words ('the', 'and', 'which') are keywords today and stay that way; changing
-# that is a recall decision for the English side, not part of #571.
+# EVERY entry is exactly 2 characters. Under the old floor of 3 that made the list
+# unreachable from the default path and only a constraint on the recovery stage; since
+# #583 lowered the floor to 2 the list is LOAD-BEARING on the default path — it is now
+# the only thing keeping 'of'/'in' out of an ordinary question — while the invariant
+# still bounds what the list may remove: at exactly 2 characters it cannot silently
+# swallow a longer word. Longer English function words ('the', 'and', 'which') are
+# keywords today and stay that way; changing that is a recall decision for the English
+# side, not part of #571 or #583.
 _ASCII_FUNCTION_WORDS = frozenset(
     {
         "am", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it",
@@ -812,11 +839,16 @@ _ASCII_FUNCTION_WORDS = frozenset(
 )
 
 
-def _tokenize_keywords(question: str, *, ascii_min: int) -> list[tuple[str, re.Pattern[str]]]:
-    """Token→(term, matcher) pass shared by both stages of _keywords.
+def _tokenize_keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
+    """The single token→(term, matcher) pass behind _keywords.
 
-    *ascii_min* is the minimum ASCII token length. Korean question function words
-    are always dropped — there is no mode that keeps them (#571 기준 2).
+    Korean question function words are always dropped — there is no mode that keeps
+    them (#571 기준 2) — and so are the 2-character English ones. There is exactly
+    ONE pass: #571 added a second, relaxed-floor stage to rescue a short initialism
+    when the first came back empty, and #583 removed it by letting the default floor
+    admit those initialisms outright. A stage that re-ran this function with the same
+    floor could not change any result, and leaving it in would advertise a recovery
+    path that recovers nothing.
 
     The surface term is carried ALONGSIDE its compiled matcher, never re-derived
     from `pattern.pattern`: the ASCII branch wraps the token in lookarounds and
@@ -846,7 +878,7 @@ def _tokenize_keywords(question: str, *, ascii_min: int) -> list[tuple[str, re.P
             if len(word) >= 2:
                 seen.add(word)
                 keywords.append((word, re.compile(re.escape(word))))
-        elif len(word) >= ascii_min and word not in _ASCII_FUNCTION_WORDS:
+        elif len(word) >= _ASCII_MIN and word not in _ASCII_FUNCTION_WORDS:
             seen.add(word)
             # Lookaround boundaries (not \b) so punctuation-edged tokens like
             # 'c++' / 'c#' match while 'api' still does not match inside
@@ -867,6 +899,13 @@ def _tokenize_keywords(question: str, *, ascii_min: int) -> list[tuple[str, re.P
 #   - a function word: a listed Korean 어절, or a 2-letter English function word
 #   - a single-character token: dropped by the length floor in either script
 # Naming only the first told someone who typed '왜?' to stop using function words.
+#
+# Both causes are now decided on ONE pass (#583 removed the relaxed-floor recovery
+# stage), so this note fires exactly when that pass yields nothing — there is no
+# second stage that could refill the set after the diagnostic's premise was formed.
+# The counterpart wording, '(no matching source excerpts found)', is emitted only
+# when there WAS a keyword and the corpus had no line for it; the two remain
+# mutually exclusive because the keyword set is either empty or it is not.
 NO_QUERY_TERM_NOTE = (
     "(no searchable keyword in the question: question function words and "
     "single-character tokens do not become keywords, and nothing else was left. "
@@ -878,8 +917,9 @@ NO_QUERY_TERM_NOTE = (
 def _keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
     """The question's keywords as (surface term, matcher) pairs, bilingual:
 
-    - ASCII words (len>2): word-boundary match — avoids substring false positives
-      (e.g. 'api' in 'therapist').
+    - ASCII words (len>=2): word-boundary match — avoids substring false positives
+      (e.g. 'api' in 'therapist'), and lets a two-letter initialism ('AI', 'QA') be
+      a keyword on this path rather than only in a recovery stage (#583).
     - CJK words (len>=2): substring match — CJK content words are commonly two
       characters, and substring tolerates attached particles/조사 (e.g. '근거'
       matches '근거는'). CJK compounding has no word delimiters, so a 2-char
@@ -895,16 +935,14 @@ def _keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
     behaviour — reproduced the exact defect this filter exists to remove: measured
     on the real KB, '이 논문은?' came back citing a retracted trial as its only
     evidence, because that notice is the one file in 186 containing '논문은'.
+
+    'AI 논문은 어디에 있나' keeps 'ai' — but by the floor, not by a fallback: the
+    recovery stage #571 needed for that question is gone (#583), so a question whose
+    every token is a function word or a single character now empties the set on the
+    only path there is. That is what keeps NO_QUERY_TERM_NOTE's two stated causes
+    exhaustive.
     """
-    keywords = _tokenize_keywords(question, ascii_min=_ASCII_MIN)
-    if not keywords:
-        # Recovery stage — usually it is the ASCII floor, not the stop-word list,
-        # that emptied the set: 'AI 논문은 어디에 있나' loses 'ai' to len>2 and
-        # everything else to the filter. Relax the floor and KEEP the filter, so
-        # the question is answered by its own short content word. This is the only
-        # widening; there is no stage that gives the function words back.
-        keywords = _tokenize_keywords(question, ascii_min=_ASCII_MIN_RELAXED)
-    return keywords
+    return _tokenize_keywords(question)
 
 
 def _keyword_patterns(question: str) -> list[re.Pattern[str]]:

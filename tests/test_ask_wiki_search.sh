@@ -259,11 +259,55 @@ with (kb / "facts" / "candidates.csv").open("a", encoding="utf-8") as out:
     )
 PY
 
+# (9)+(10) The 2-character ASCII axis (#583). Until #583 this baseline could not see
+#     that axis AT ALL: the two questions below were chosen for other properties and
+#     neither contains a 2-char ASCII token — Q_KO has no ASCII token whatsoever and
+#     Q_PATH's only one is 13 characters — so moving _ASCII_MIN between 3 and 2 left
+#     every pin in this file byte-identical. A baseline that cannot move is not
+#     evidence that nothing moved; it is the vacuous-fixture failure #575 found, in
+#     another axis.
+#
+#     Two files, because a keyword-set pin alone never reaches the corpus. (9) holds
+#     the whole query; (10) holds ONLY the 2-char token. Under the old floor of 3 'ai'
+#     is not a keyword, the query is carried by 정렬/평가 alone and (10) is unreachable;
+#     under the floor of 2 it is cited. So the RESULT SET, not just the pattern list,
+#     separates the two floors.
+#
+#     Neither file may contain a token of Q_KO or Q_PATH ('신경기호', '근거' — matched
+#     as a SUBSTRING — 'neurosymbolic', '논문은', '추론의', '제시하는가'), or it would
+#     join those queries' result sets and move PIN2/PIN3/PIN4/PIN5 for a reason that
+#     has nothing to do with this axis. PIN8 checks that separation by consequence.
+#
+#     They are also kept out of the #576 bridge: neither file's tokens appear in any
+#     accepted object above, so PIN7's promoted-row geometry cannot move because of
+#     them. PIN8 asserts that too — a 2-char token cannot form the 3-char prefix the
+#     bridge matches on, so the two features are orthogonal BY CONSTRUCTION, and that
+#     is checked rather than assumed.
+cat > "$KB/sources/ai-alignment-eval.md" <<'EOF'
+# AI 정렬 평가 지침
+
+AI 정렬 평가 지표는 아직 표준이 없다.
+
+QA 절차는 별도로 관리한다.
+EOF
+
+cat > "$KB/sources/ai-safety-brief.md" <<'EOF'
+# AI 안전 브리핑
+
+AI 시스템의 위험 목록을 분류한다.
+
+이 문서는 내부 검토용이다.
+EOF
+
 # The Korean question. Written the way a researcher actually types one: content
 # words carry particles (조사) and the sentence ends in an interrogative form.
 Q_KO='이 논문은 신경기호 추론의 근거를 어떻게 제시하는가'
 # A second probe whose ASCII keyword also occurs inside KB filenames.
 Q_PATH='neurosymbolic 근거'
+# A third probe carrying a 2-char ASCII CONTENT token (#583). Kept separate from the
+# two above on purpose: their pins are load-bearing for #571/#573/#574/#576 and must
+# not start depending on the ASCII floor.
+Q_ASCII='AI 정렬 평가'
 
 router() { "$PYTHON" "$ROUTER" "$@" --target "$KB"; }
 
@@ -704,6 +748,115 @@ sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$degrade
 import ask_router as a
 from pathlib import Path
 print(a.kb_vocabulary_bridge('''$Q_KO''', Path('$degraded')))
+" || true)"
+
+# =============================================================================
+# PIN 8 — the 2-character ASCII floor (#583). 이 파일이 이전에는 보지 못하던 축이다.
+# =============================================================================
+# 픽스처를 먼저 단언한다. 이 축의 pin 은 코퍼스에 그 토큰이 실제로 있어야만 의미가
+# 있는데, 그 전제가 깨지면 아래 pin 들은 "매치 0건 == 매치 0건" 으로 조용히 통과한다
+# (#575 가 찾은 공허한 체크와 같은 형태). 그래서 코퍼스 크기와 토큰 분포를 값으로 고정한다:
+# 'ai' 는 새로 넣은 두 파일에만 있고 기존 6개 파일에는 없다 — 그래야 하한을 내렸을 때
+# 늘어나는 발췌가 이 축 때문이라고 말할 수 있다.
+# facts/ 는 wiki 코퍼스가 아니므로 #576 이 넣은 accepted.dl/candidates.csv 는 이 8에
+# 포함되지 않는다. 그 값이 8이 아니라 10이 된다면 코퍼스 정의가 움직였다는 뜻이다.
+if py "
+import os, re, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+kb = pathlib.Path('$KB')
+names = []
+for rel, _label, _grade in a._wiki_corpus():
+    base = kb / rel
+    if base.is_dir():
+        names += [p.relative_to(kb).as_posix() for p in sorted(base.rglob('*')) if p.is_file()]
+names.sort()
+assert len(names) == 8, names
+pat = re.compile(r'(?<!\w)ai(?!\w)')
+hit = [n for n in names if pat.search((kb / n).read_text(encoding='utf-8').lower())]
+assert hit == ['sources/ai-alignment-eval.md', 'sources/ai-safety-brief.md'], hit
+# ...and the query's CJK keywords must reach only (9), so (10) is reachable by the
+# 2-char token alone. That is what makes the floor observable at corpus level.
+for term in ('정렬', '평가'):
+    f = [n for n in names if term in (kb / n).read_text(encoding='utf-8')]
+    assert f == ['sources/ai-alignment-eval.md'], (term, f)
+" 2>/dev/null; then ok "PIN8 픽스처 전제: 코퍼스 8개 파일, 'ai' 는 새 파일 2개에만, 정렬/평가 는 1개에만"; else bad "PIN8 픽스처 전제가 깨졌다 — 이 축의 pin 이 공허해진다: $(py "
+import os, re, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+kb = pathlib.Path('$KB')
+names = []
+for rel, _label, _grade in a._wiki_corpus():
+    base = kb / rel
+    if base.is_dir():
+        names += [p.relative_to(kb).as_posix() for p in sorted(base.rglob('*')) if p.is_file()]
+names.sort()
+pat = re.compile(r'(?<!\w)ai(?!\w)')
+print(len(names), 'ai in:', [n for n in names if pat.search((kb / n).read_text(encoding='utf-8').lower())])
+")"; fi
+
+# 키워드 집합. 이 값은 **수정 후** 값이다 (결함을 고정한 pin 이 아니다).
+# 하한이 3 이던 시절의 값은 ['정렬', '평가'] 였고 'ai' 는 유실됐다 — #583 이 뒤집은 것이
+# 바로 그 값이다. 두 값이 다르다는 사실 자체가 이 파일이 이 축을 본다는 증거다.
+same "PIN8 2자 ASCII 콘텐츠 토큰이 키워드가 된다 (#583 이후 값; 이전 값은 ['정렬', '평가'])" \
+  "['(?<!\\\\w)ai(?!\\\\w)', '정렬', '평가']" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([p.pattern for p in a._keyword_patterns('''$Q_ASCII''')])
+")"
+
+# 코퍼스 수준. 하한 3 에서는 (10) 이 어떤 키워드로도 닿지 않으므로 인용될 수 없었다.
+ascii_files="$(refs "$Q_ASCII" | sed 's/:.*//' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+same "PIN8 2자 토큰만 담은 문서가 결과에 들어온다 (#583 이후 값; 이전에는 alignment 파일 하나뿐)" \
+  "sources/ai-alignment-eval.md sources/ai-safety-brief.md" "$ascii_files"
+
+# 렌더까지 도달하는지 — search JSON 만 보면 렌더 캡이나 등급이 삼키는 경우를 놓친다.
+ascii_answer="$(router wiki "$Q_ASCII" --reason 'unknown entity' || true)"
+if printf '%s\n' "$ascii_answer" | grep -qF 'sources/ai-safety-brief.md'; then
+  ok "PIN8 그 문서가 렌더된 wiki 답변에도 인용된다"
+else
+  bad "PIN8 2자 토큰으로만 닿는 문서가 렌더에서 빠졌다"
+fi
+
+# 기존 두 질의는 이 축과 무관해야 한다. 새 픽스처 파일이 PIN2/PIN4 의 결과 집합에
+# 끼어들면 이 파일의 다른 pin 들이 이 이슈 때문에 움직인 것처럼 보인다.
+if refs "$Q_KO" | grep -qE '^sources/ai-(alignment-eval|safety-brief)\.md:'; then
+  bad "PIN8 새 픽스처 파일이 Q_KO 결과에 끼어들었다 — PIN2/PIN3/PIN5/PIN7 이 오염된다"
+else
+  ok "PIN8 새 픽스처 파일은 Q_KO 결과에 끼어들지 않는다"
+fi
+if refs "$Q_PATH" | grep -qE '^sources/ai-(alignment-eval|safety-brief)\.md:'; then
+  bad "PIN8 새 픽스처 파일이 Q_PATH 결과에 끼어들었다 — PIN4 가 오염된다"
+else
+  ok "PIN8 새 픽스처 파일은 Q_PATH 결과에 끼어들지 않는다"
+fi
+
+# #583 과 #576 의 상호작용. 하한 인하가 브리지 표면을 넓히지 않는다는 것을 확인하되,
+# 그 이유를 "2자는 3글자 접두를 만들 수 없어서" 로 적으면 틀린다 — 실측하면 그 규칙은
+# ASCII 항에 대해 아예 조회되지 않는다. _bridge_terms 가 `_is_cjk(term)` 로 ASCII
+# 키워드를 **길이와 무관하게** 통째로 제외하기 때문이다.
+#
+# 반례로 확인했다: 'neurosymbolic'(13자)은 accepted 객체 'neurosymbolic_retrieval' 과
+# 13자 접두를 공유하는데도 브리지하지 않는다. 'nlp'(3자)는 #583 이전에도 키워드였고
+# 'nlp_파이프라인' 과 정확히 _BRIDGE_PREFIX_MIN 만큼 접두를 공유하는데도 브리지 항이
+# 0이다. 접두 하한이 장벽이었다면 둘 다 통과했어야 한다.
+#
+# 그래서 고정하는 불변식은 길이 조건이 아니라 스크립트 조건이다: 질문의 ASCII 항은
+# 길이가 2든 3이든 13이든 브리지 어휘가 되지 않고, CJK 항만 남는다. 이 값이 움직이면
+# 하한 인하가 아니라 _bridge_terms 의 필터가 바뀐 것이므로 #576 의 pin 을 다시 재야 한다.
+same "PIN8 ASCII 키워드는 길이와 무관하게 브리지 어휘가 되지 못한다 (#576 과 직교)" \
+  "['신경기호'] [] 0" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+from common import KbContext
+facts = KbContext.for_root('$KB').load_accepted_facts()
+# 2자/3자/13자 ASCII 를 한 질문에 섞고, CJK 항 하나만 살아남는지 본다.
+mixed = a._bridge_terms('AI nlp neurosymbolic 신경기호')
+print(mixed, a._bridge_terms('AI ML QA NN RL'), len(a._bridged_facts('''$Q_ASCII''', facts)))
 " || true)"
 
 echo ""
