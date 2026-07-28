@@ -572,8 +572,13 @@ class TestTheFourBootstrapsDoNotDrift:
         # ``test_a_broken_install_is_not_silently_routed_around``.
         assert 'importlib.util.find_spec("factlog") is None' in block
         # The membership guard is what keeps ``test_two_trees_produce_two_different_lines``
-        # working: that test fronts a tree on PYTHONPATH that already lists _ROOT, and
-        # without this line the insertion below would overtake it.
+        # working — through ``factlog_config.py``'s copy, and only that one. That test
+        # fronts a tree on PYTHONPATH that already lists _ROOT, and without this line the
+        # insertion below would overtake it. Dropping the guard from ``common.py``,
+        # ``compile_facts.py`` or ``literal_types.py`` instead leaves that test green
+        # (measured at bb3909c, one wrapper at a time; the bootstrap comment in
+        # ``tools/factlog_config.py`` carries the numbers and the import-order reason).
+        # The assertion below is textual, so it fires for all four regardless of that.
         assert "if str(_ROOT) not in sys.path:" in block
 
     def test_only_those_four_scripts_insert_the_distribution_root(self):
