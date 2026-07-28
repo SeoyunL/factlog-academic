@@ -326,3 +326,70 @@ class TestRendering:
         gated = ask_router.decomposition_candidates("알파개념", TWO_CONDITIONS)
         assert gated["generated"] == 5 and gated["candidates"] == []
         assert ask_router.render_wiki_answer("q", "r", rows, decomposition=gated) == baseline
+
+
+class TestTheDeclaredSynonymAxis:
+    """#606 — the proposals a combined question could not reach at all.
+
+    #577's issue body names two queries its author found BY HAND, and the generator
+    above produces one of them. The other is unreachable by construction: the question
+    writes '해석가능성' where the KB writes '설명가능성', two words for one concept
+    whose shared prefix is zero, so no value of _BRIDGE_PREFIX_MIN reaches it. The
+    comment above decomposition_candidates recorded that as a known loss. A declared
+    synonym group is what closes it, and these pin both halves — that the proposal is
+    generated, and that a reader can tell it needed a policy file to exist.
+    """
+
+    ISSUE_FACTS = [
+        {"subject": "arXiv_2411.03225", "relation": "이점", "object": "설명가능성_향상"},
+        {"subject": "arXiv_2505.0001", "relation": "비교_대상", "object": "신경망_기반_모델"},
+    ]
+    ISSUE_QUESTION = "neurosymbolic 접근이 순수 신경망 대비 해석가능성에서 낫다고 주장하는 논문은?"
+
+    def test_the_issue_example_is_out_of_reach_without_a_declaration(self):
+        # The baseline this axis exists against, asserted rather than described: the
+        # '비교_대상' half is proposed today and the '이점' half is not a candidate.
+        result = ask_router.decomposition_candidates(self.ISSUE_QUESTION, self.ISSUE_FACTS)
+        assert queries(result) == []
+        assert result["generated"] == 1
+
+    def test_a_declaration_generates_the_issue_example(self):
+        # #606 수용 기준 4. Both halves now generate, so the two-relation gate opens
+        # and #577's own evidence is complete for the first time.
+        result = ask_router.decomposition_candidates(
+            self.ISSUE_QUESTION, self.ISSUE_FACTS, synonyms=[["해석가능성", "설명가능성"]]
+        )
+        # Order is the question's own: '신경망' is asked before '해석가능성에서', and
+        # the round-robin takes round 0 of each matched word in that order.
+        assert queries(result) == [
+            'relation(X, "비교_대상", "신경망_기반_모델")?',
+            'relation(X, "이점", "설명가능성_향상")?',
+        ]
+
+    def test_the_proposal_that_needed_the_file_says_so(self):
+        # A query line is COPIED. A reader who takes '설명가능성' for their own wording
+        # has no way to know a policy file supplied it, so the hop is named on its own
+        # line under the query — inline in the '←' list it would be indistinguishable
+        # from a word the user typed.
+        result = ask_router.decomposition_candidates(
+            self.ISSUE_QUESTION, self.ISSUE_FACTS, synonyms=[["해석가능성", "설명가능성"]]
+        )
+        out = ask_router.render_wiki_answer("q", "r", [], decomposition=result)
+        lines = out.splitlines()
+        at = lines.index('  relation(X, "이점", "설명가능성_향상")?  — 1 verified row ← 해석가능성에서')
+        assert lines[at + 1] == "    ← synonym: 해석가능성에서 ≈ 설명가능성 (policy/vocabulary-synonyms.md)"
+        # The half the question reached by spelling carries no such line.
+        direct = lines.index('  relation(X, "비교_대상", "신경망_기반_모델")?  — 1 verified row ← 신경망')
+        assert "← synonym" not in lines[direct + 1]
+
+    def test_no_declaration_renders_the_block_byte_for_byte(self):
+        # #606 수용 기준 1 on this path: a KB with no synonym file gets #577's block.
+        plain = ask_router.decomposition_candidates(COMBINED_QUESTION, TWO_CONDITIONS)
+        declared_elsewhere = ask_router.decomposition_candidates(
+            COMBINED_QUESTION, TWO_CONDITIONS, synonyms=[["부작용", "이상반응"]]
+        )
+        assert plain == declared_elsewhere
+        assert all("synonyms" not in c for c in plain["candidates"])
+        assert ask_router.render_wiki_answer(
+            "q", "r", [], decomposition=plain
+        ) == ask_router.render_wiki_answer("q", "r", [], decomposition=declared_elsewhere)
