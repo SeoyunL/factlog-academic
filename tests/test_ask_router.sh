@@ -25,6 +25,18 @@
 set -euo pipefail
 
 export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
+# Several checks below pin RANKED ORDER (#31 relevance, #572 directory grade, #573
+# path damping), and those guarantees are scoped to the bundled lexical path:
+# _semantic_rerank reorders the whole result list whenever FACTLOG_EMBED_MODULE names
+# an importable backend, so the var inherited from a developer's shell turns them into
+# false alarms. Measured on b0618a6 — this file WITHOUT the unset below, run with
+# FACTLOG_EMBED_MODULE naming a stub whose `rank` returns ascending scores (an exact
+# reversal): 241 passed, 7 failed, and all seven failures are order pins. Same
+# reasoning as tests/test_ask_wiki_search.sh, which unsets it for its own pins (#589).
+# The cases that exercise the backend-ON path set the var as a single-command prefix
+# (`FACTLOG_EMBED_MODULE=..._stub "$PYTHON" "$ROUTER" ...`), which applies to that one
+# command and nothing after it — unsetting here does not disable them.
+unset FACTLOG_EMBED_MODULE
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -1032,6 +1044,55 @@ EMB="$(mktemp -d)"; printf 'def rank(q, texts):\n    return [float(i) for i in r
 act0="$(FACTLOG_EMBED_MODULE=embed_stub PYTHONPATH="$PLUGIN_ROOT:$EMB" "$PYTHON" "$ROUTER" search "검색 문서 자료 항목" --target "$KB" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d['results'][0]['file'] if d['results'] else '')")"
 if [ -n "$act0" ] && [ "$act0" != "$top" ]; then ok "optional embedding backend reorders results (seam invoked, graceful when absent)"; else bad "embedding seam did not reorder (lex=$top act=$act0)"; fi
 rm -f "$KB/sources/rank-hi.md" "$KB/sources/rank-lo.md"
+
+# --- #589: with a backend ON, the lexical score still decides MEMBERSHIP --------
+# The unset at the top of this file scopes every order pin above to the bundled
+# lexical path. The half of the contract that does NOT go away when a backend is on
+# is the cap: search() slices to `limit` BEFORE calling _semantic_rerank, so the
+# backend only orders excerpts the lexical score already selected. That is reason (a)
+# in _semantic_rerank's docstring, and no check held it. Measured against a mutant that
+# reranks BEFORE the slice: tests/unit (6224 passed, 1 skipped) and
+# tests/test_ask_wiki_search.sh (52 passed) stay green, and this harness reports
+# exactly one failure — the membership check below. The mutant hides that well because
+# the rerank is a no-op unless a backend is on, and the other cases that turn one on
+# read only position 0 of a result set the cap never trimmed.
+# 10 files tie at (coverage 1, frequency 2) and fill the default cap of 10; the 11th
+# scores strictly lower (frequency 1) and is last in corpus order, so the reversing
+# stub would put it FIRST if it were reranked before the slice.
+CAPKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$CAPKB" >/dev/null
+rm -f "$CAPKB"/sources/* "$CAPKB"/decisions/*
+for i in 01 02 03 04 05 06 07 08 09 10; do
+  printf '# c%s\n\nwidgetterm widgetterm here.\n' "$i" > "$CAPKB/sources/cap-$i.md"
+done
+printf '# low\n\nwidgetterm once.\n' > "$CAPKB/sources/cap-zz-low.md"
+cap_files() { "$PYTHON" -c "
+import json, sys
+print(','.join(r['file'] for r in json.load(sys.stdin)['results']))"; }
+CEMB="$(mktemp -d)"; printf 'def rank(q, texts):\n    return [float(i) for i in range(len(texts))]\n' > "$CEMB/cap_stub.py"
+cap_lex="$("$PYTHON" "$ROUTER" search "widgetterm" --target "$CAPKB" | cap_files)"
+cap_on="$(FACTLOG_EMBED_MODULE=cap_stub PYTHONPATH="$PLUGIN_ROOT:$CEMB" "$PYTHON" "$ROUTER" search "widgetterm" --target "$CAPKB" | cap_files)"
+rm -rf "$CEMB"
+# fixture guard: an empty or short capped set would make the membership check below
+# pass for the wrong reason, so name that failure instead of inheriting it.
+if [ "$cap_lex" = "sources/cap-01.md,sources/cap-02.md,sources/cap-03.md,sources/cap-04.md,sources/cap-05.md,sources/cap-06.md,sources/cap-07.md,sources/cap-08.md,sources/cap-09.md,sources/cap-10.md" ]; then
+  ok "#589 캡 픽스처: 어휘 경로가 상위 10건을 채우고 최하위 발췌는 캡 밖이다"
+else
+  bad "#589 캡 픽스처가 깨졌다 — 어휘 결과가 예상과 다르다 (got [$cap_lex])"
+fi
+# and the backend must actually be running, or the membership check is vacuous.
+if [ -n "$cap_on" ] && [ "$cap_on" != "$cap_lex" ]; then
+  ok "#589 캡 케이스에서 재랭크 백엔드가 실제로 동작한다 (순서가 어휘 순서와 다르다)"
+else
+  bad "#589 캡 케이스에서 백엔드가 재정렬하지 않았다 (lex=[$cap_lex] on=[$cap_on]) — 아래 멤버십 체크는 무의미하다"
+fi
+case ",$cap_on," in
+  *,sources/cap-zz-low.md,*)
+    bad "#589 캡보다 재랭크가 먼저 돌았다 — 어휘 점수가 캡 밖으로 밀어낸 발췌를 백엔드가 끌어올렸다 (on=[$cap_on])" ;;
+  *)
+    ok "#589 백엔드가 켜져도 캡 멤버십은 어휘 점수가 정한다 (재랭크는 선택된 집합의 순서만 바꾼다)" ;;
+esac
+rm -rf "$(dirname "$CAPKB")"
 
 # --- #573: cited file paths must not feed the keyword frequency score ---
 # primary vs primary ON PURPOSE: both files live in sources/, so a directory-grade
