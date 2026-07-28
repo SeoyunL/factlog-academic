@@ -1798,16 +1798,28 @@ def grounding_facts(question: str, accepted: list[dict[str, str]]) -> list[dict[
 # questions — '<A> 이면서 <B> 인 것은?', A/B sampled (seed 577) from the 1128
 # vocabulary words long enough to bridge:
 #   proposals per question: median 3, p75 4, p90 8, p95 14, max 41
-#   40 of 300 questions generate more than 6
 #   a SINGLE question word contributes up to 25 of them (p90 7)
-# Six is where those two facts meet: 260 of 300 questions are shown whole (no cut at
-# all), and for the two-condition shape this feature exists for it still leaves three
-# per condition — the count the issue's reviewer found useful in a list of 14.
+#   questions cut, by cap:  4 -> 74   5 -> 56   6 -> 40   7 -> 34   8 -> 27   10 -> 18
 #
-# The last line is why the cut is round-robin over the matched question words rather
-# than a flat head of one ranking: one word out of two can generate 25 proposals, so
-# any flat cut is free to spend the whole budget on ONE of the conditions and drop the
-# other entirely — which deletes the decomposition from a decomposition proposal.
+# That curve is SMOOTH. Six is a judgement on it, not a threshold discovered in it:
+# nothing in the data distinguishes 6 from 5 or 7, and this constant should not be read
+# as if something did. What the choice buys is stated as a cost, both directions
+# measured: at 6, 260 of 300 questions are shown whole, and the 40 that are cut lose
+# proposals that were never validated (the block says so). Tightening to 4 doubles the
+# cut questions to 74; loosening to 10 leaves 18, at the price of a list of ten long
+# query lines to choose between, which is the complaint this cap exists to answer.
+#
+# The claim NOT made: that a cut question keeps three proposals per condition. Measured
+# over the 40 cut at cap 6, the minimum surviving per condition is 1 and the median 2 —
+# a condition with two proposals keeps two and the budget goes to the other, which is
+# the intended behaviour and not a symmetric split.
+#
+# What the round-robin does guarantee, and why the cut is not a flat head of one
+# ranking: no matched question word is ever silenced while the cap has room. One word
+# of two can generate 25 proposals, so a flat cut is free to spend the whole budget on
+# ONE condition and drop the other entirely — deleting the decomposition from a
+# decomposition proposal. Measured across all 40 cut questions, the minimum per
+# condition is 1, never 0.
 DECOMPOSITION_CANDIDATE_CAP = 6
 
 # Greppable header. It has to carry the whole contract, because this block is the one

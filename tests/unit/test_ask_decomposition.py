@@ -195,6 +195,19 @@ class TestCapAndTruncation:
         assert len(shown) == 6
         assert shown.count("알파개념") == 3 and shown.count("베타개념") == 3
 
+    def test_a_thin_condition_keeps_its_proposal_and_yields_the_rest(self):
+        # The guarantee is "no matched question word is silenced while the cap has
+        # room", NOT a symmetric split — measured over the reference KB's cut
+        # questions, the per-condition minimum is 1 and the median 2. Here 베타개념 has
+        # one proposal to give: it keeps it, and the other five slots go to 알파개념
+        # rather than being reserved and wasted.
+        accepted = TWO_CONDITIONS[:5] + [
+            {"subject": "b", "relation": "하_관계", "object": "베타개념_유일"},
+        ]
+        result = ask_router.decomposition_candidates(COMBINED_QUESTION, accepted)
+        shown = [c["terms"][0] for c in result["candidates"]]
+        assert shown.count("베타개념") == 1 and shown.count("알파개념") == 5
+
     def test_what_was_cut_is_counted_and_not_claimed(self):
         # 조용한 절단 금지. The count is of pairs GENERATED and not shown; they were
         # never verified, and _decomposition_lines says so — this asserts the number
