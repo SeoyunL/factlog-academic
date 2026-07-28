@@ -1666,6 +1666,167 @@ same "PIN14 그런 표는 열화해서 표 없는 동작으로 돌아간다" "" 
 rm -f "$SYN"
 same "PIN14 표를 지우면 답변이 기준으로 되돌아온다 (수용 기준 1, 양방향)" "$syn_base" "$(router wiki "$Q_KO")"
 
+# =============================================================================
+# PIN 15 — KB 어휘 백킹의 입도: 파일 하나에 한 발췌 (#602)
+# =============================================================================
+# PIN9 는 백킹이 인용된 행을 올린다는 것을 고정한다. 그 축은 발췌가 하나뿐인 파일로
+# 세워져 있어서(faronius 는 결과 3행 중 1행), **몇 행이** 올라가는지는 보지 못한다.
+# #594 가 남긴 비용이 정확히 거기에 있었다: 백킹은 파일 단위 상수인데 그 파일의 모든
+# 발췌에 더해져, 발췌 많은 파일이 한 덩어리로 올라가 렌더 상한을 독식했다. 실 KB 측정,
+# '오메가-3 보충이 COPD 환자에게 효과있음을 보인 연구는?': 기본 10행의 서로 다른 논문
+# 수가 3편(5+4+1 발췌)이고, 백킹 없는 순위에서는 9편이었다.
+#
+# 별도 KB 를 쓴다 — PIN10 이 같은 이유로 그렇게 한다. 공유 픽스처의 accepted.dl 에
+# 사실을 더하면 PIN2/PIN3/PIN7/PIN9 의 브리지 기하가 이 이슈와 무관하게 움직인다.
+#
+# 픽스처의 모양이 이 pin 의 전부다. f-backed 는 발췌 3개를 내고 백킹 사실 3건을 갖는다.
+# b-thin·c-thin 은 발췌 1개씩에 사실 1건씩, z-plain 은 백킹이 없고 렉시컬로만 두 어절을
+# 덮는다. 그래서 두 규칙이 서로 다른 답을 낸다: 발췌마다 가산하면 f-backed 의 세 행이
+# 나란히 앞서 상한 3을 혼자 채우고(서로 다른 파일 1개), 파일마다 한 번 가산하면
+# f-backed 의 최고 발췌 하나만 앞서고 나머지 두 행은 백킹 이전 키로 z-plain 아래에
+# 남는다(서로 다른 파일 3개).
+KB602="$_TMP_KB/backing-granularity"
+"$PYTHON" -m factlog init --target "$KB602" >/dev/null
+: > "$KB602/policy/logic-policy.dl"
+rm -f "$KB602"/sources/* "$KB602"/decisions/*
+# 발췌 사이의 빈 줄은 장식이 아니다: search() 는 창이 겹치는 발췌를 접으므로(_EXCERPT_
+# WINDOW=3), 3·12·21 행으로 떨어뜨려야 세 발췌가 실제로 세 행으로 나온다. 아래 전제
+# 단언이 그 수를 먼저 고정한다.
+#
+# 세 발췌는 렉시컬 키가 서로 같다. 그래서 이 픽스처는 "파일당 하나" 뿐 아니라 "동점이면
+# 어느 하나" 까지 본다: 가산을 마지막 발췌에 주는 뮤턴트가 아래 순서 pin 을 깬다. 상한
+# pin 은 그래도 살아 있다 — f-backed 의 백킹 사실이 3건이라 가산 받은 발췌의 빈도가
+# b-thin·c-thin(1건)을 앞선다(실측: 이 픽스처에서 #594 의 발췌별 가산은 상한 3 을
+# f-backed 세 행으로 채운다).
+{
+  echo '# 해석 연구'
+  echo ''
+  echo '해석가능성 결과.'
+  for _blank in 1 2 3 4 5 6 7 8; do echo ''; done
+  echo '해석가능성 결과.'
+  for _blank in 1 2 3 4 5 6 7 8; do echo ''; done
+  echo '해석가능성 결과.'
+} > "$KB602/sources/f-backed.md"
+printf '# 얇은 연구 1\n\n해석가능성 결과.\n' > "$KB602/sources/b-thin.md"
+printf '# 얇은 연구 2\n\n해석가능성 결과.\n' > "$KB602/sources/c-thin.md"
+printf '# 평범 연구\n\n해석가능성 그리고 설명가능성 결과.\n' > "$KB602/sources/z-plain.md"
+# 두 번째 축(어느 발췌가 받는가)을 위한 파일. 어휘를 위 픽스처와 겹치지 않게 골랐다 —
+# 겹치면 아래 질문이 위 세 파일을 승격 행으로 끌어와 두 pin 이 서로를 흔든다.
+{
+  echo '# 재현 연구'
+  echo ''
+  echo '재현가능성 재현가능성 재현가능성 결과.'
+  for _blank in 1 2 3 4 5 6 7 8; do echo ''; done
+  echo 'alpha 결과.'
+} > "$KB602/sources/g-union.md"
+{
+  echo 'relation("s1", "이점", "설명가능성_향상").'
+  echo 'relation("s2", "핵심_기법", "설명가능성_분석").'
+  echo 'relation("s3", "다룬_주제", "설명가능성_평가").'
+  echo 'relation("s4", "이점", "재현가능성_향상").'
+  echo 'relation("s5", "핵심_기법", "검증가능성_향상").'
+} > "$KB602/facts/accepted.dl"
+{
+  echo 'subject,relation,object,source,status,confidence,note'
+  echo 's1,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,'
+  echo 's2,핵심_기법,설명가능성_분석,sources/f-backed.md,confirmed,0.9,'
+  echo 's3,다룬_주제,설명가능성_평가,sources/f-backed.md,confirmed,0.9,'
+  echo 's1,이점,설명가능성_향상,sources/b-thin.md,confirmed,0.9,'
+  echo 's1,이점,설명가능성_향상,sources/c-thin.md,confirmed,0.9,'
+  echo 's4,이점,재현가능성_향상,sources/g-union.md,confirmed,0.9,'
+  echo 's5,핵심_기법,검증가능성_향상,sources/g-union.md,confirmed,0.9,'
+} > "$KB602/facts/candidates.csv"
+Q_GRAIN='해석가능성에서 설명가능성을'
+Q_PICK='재현가능성에서 alpha 검증가능성을'
+
+# 전제를 먼저 단언한다. 발췌가 실제로 3개가 아니거나, 백킹이 닿지 않거나, '설명가능성'
+# 이 f-backed 본문에 있으면 아래 순서 pin 은 "가산할 것이 없어서 순서가 그대로" 인
+# 상태를 통과로 읽는다 — PIN9 가 자기 전제를 먼저 단언하는 것과 같은 이유다.
+#   - f-backed 발췌 3개: 접힘이 이 픽스처를 2행으로 만들면 독식을 볼 수 없다.
+#   - 승격 행 0건: 백킹 대상 세 파일 모두 렉시컬로 인용되므로 #576 의 승격 경로는
+#     비어 있다. 아래 순서는 전부 인용된 행의 순서다.
+#   - '설명가능성' 은 f-backed 어디에도 없다. 즉 그 파일의 순위 상승은 렉시컬로 설명될
+#     수 없다.
+if py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB602'
+import ask_router as a
+kb = pathlib.Path('$KB602')
+rows = a.search('''$Q_GRAIN''', kb, limit=None)
+assert len([r for r in rows if r['file'] == 'sources/f-backed.md']) == 3, [r['file'] for r in rows]
+assert [r for r in rows if r.get('via')] == [], [r['file'] for r in rows if r.get('via')]
+bridged = a.kb_vocabulary_bridge('''$Q_GRAIN''', kb)
+assert sorted(bridged) == ['sources/b-thin.md', 'sources/c-thin.md', 'sources/f-backed.md'], sorted(bridged)
+assert len(bridged['sources/f-backed.md']['facts']) == 3
+assert bridged['sources/f-backed.md']['terms'] == ['설명가능성을']
+assert '설명가능성' not in (kb / 'sources/f-backed.md').read_text(encoding='utf-8')
+" 2>/dev/null; then ok "PIN15 픽스처 전제: f-backed 발췌 3개, 승격 0건, 백킹 3건이고 '설명가능성' 은 그 파일에 없다"; else bad "PIN15 픽스처 전제가 깨졌다 — 이 축의 pin 이 공허해진다: $(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB602'
+import ask_router as a
+kb = pathlib.Path('$KB602')
+rows = a.search('''$Q_GRAIN''', kb, limit=None)
+print([r['file'] for r in rows], [r['file'] for r in rows if r.get('via')], sorted(a.kb_vocabulary_bridge('''$Q_GRAIN''', kb)))
+")"; fi
+
+# 순서. 가산을 받는 발췌는 f-backed:3 하나이고, 나머지 두 발췌는 백킹 이전 키
+# (커버리지 1)를 그대로 들고 z-plain(2,2) **아래**에 남는다. 발췌마다 가산하면 그 두
+# 행이 (2,4) 가 되어 z-plain 위로 올라오므로, z-plain 의 위치가 이 pin 의 신호다.
+grain_refs="$(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB602'
+import ask_router as a
+for r in a.search('''$Q_GRAIN''', pathlib.Path('$KB602'), limit=None):
+    print(f\"{r['file']}:{r['line']}\")
+" || true)"
+[ -n "$grain_refs" ] || bad "PIN15 순서 측정이 빈 값을 냈다 (이후 체크가 공허해진다)"
+same "PIN15 백킹은 파일당 한 발췌만 올린다 — 나머지 발췌는 백킹 이전 키로 z-plain 아래에 남는다" \
+  "sources/f-backed.md:3
+sources/b-thin.md:3
+sources/c-thin.md:3
+sources/z-plain.md:3
+sources/f-backed.md:12
+sources/f-backed.md:21" \
+  "$grain_refs"
+
+# 상한. 이슈가 말하는 피해는 순서가 아니라 답변이 보여주는 논문 수다. 상한 3에서
+# #594 는 f-backed 를 세 번 보여줬다(서로 다른 파일 1개) — 사용자에게는 KB 에 그런
+# 자료가 하나뿐이라는 뜻으로 읽힌다.
+grain_cap="$(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB602'
+import ask_router as a
+rows = a.search('''$Q_GRAIN''', pathlib.Path('$KB602'), limit=3)
+print(len({r['file'] for r in rows}), ' '.join(r['file'] for r in rows))
+" || true)"
+[ -n "$grain_cap" ] || bad "PIN15 상한 측정이 빈 값을 냈다 (이후 체크가 공허해진다)"
+same "PIN15 상한 3 을 한 파일이 독식하지 못한다 — 서로 다른 파일 3개 (#594 에서는 1개였다)" \
+  "3 sources/f-backed.md sources/b-thin.md sources/c-thin.md" \
+  "$grain_cap"
+
+# 두 번째 축: 파일당 하나라면, **어느** 발췌인가. 위 두 체크는 이 축을 보지 못한다
+# (실측으로 확인했다 — 선택 규칙을 가산 이전 키로 바꾼 뮤턴트가 위 셋을 모두 통과한다).
+#
+# 가산은 상수가 아니다: 커버리지는 합집합이라, 브리지된 어절을 이미 본문에 담은 발췌는
+# 그 가산에서 덜 얻는다. g-union:3 은 '재현가능성' 을 세 번 담아 렉시컬 키가 더 크지만
+# 가산으로는 '검증가능성을' 하나만 얻어 커버리지 2 에 그치고, g-union:12 는 'alpha' 하나
+# 뿐이지만 브리지된 두 어절을 모두 얻어 커버리지 3 이 된다. 즉 가산 이전 키로 고르면
+# 가산이 실제로 가장 멀리 올리는 발췌를 놓친다.
+#
+# 동점 시 어느 발췌인가는 위 순서 pin 이 본다 (f-backed 의 세 발췌가 동점이다).
+pick_refs="$(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB602'
+import ask_router as a
+for r in a.search('''$Q_PICK''', pathlib.Path('$KB602'), limit=None):
+    print(f\"{r['file']}:{r['line']}\")
+" || true)"
+[ -n "$pick_refs" ] || bad "PIN15 선택 규칙 측정이 빈 값을 냈다 (이후 체크가 공허해진다)"
+same "PIN15 가산은 그것이 가장 멀리 올리는 발췌가 받는다 — 가산 이전 키로 고르면 순서가 뒤집힌다" \
+  "sources/g-union.md:12
+sources/g-union.md:3" \
+  "$pick_refs"
+
 echo ""
 echo "========================================"
 echo "test_ask_wiki_search: $pass passed, $fail failed"
