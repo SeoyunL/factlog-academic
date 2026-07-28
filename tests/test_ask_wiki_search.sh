@@ -950,7 +950,7 @@ assert len(bridged['sources/faronius-2025-attention-budget.md']['facts']) == 2
 text = (kb / 'sources/faronius-2025-attention-budget.md').read_text(encoding='utf-8')
 assert '신경기호' not in text
 assert 'evidence' in text.lower()
-" 2>/dev/null; then ok "PIN9 픽스처 전제: 4행, 승격 0건, 백킹은 인용된 faronius 에만 (그 파일에 '신경기호' 는 없다)"; else bad "PIN9 픽스처 전제가 깨졌다 — 이 축의 pin 이 공허해진다: $(py "
+" 2>/dev/null; then ok "PIN9 픽스처 전제: 3행, 승격 0건, 백킹은 인용된 faronius 에만 (그 파일에 '신경기호' 는 없다)"; else bad "PIN9 픽스처 전제가 깨졌다 — 이 축의 pin 이 공허해진다: $(py "
 import os, sys, pathlib
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
