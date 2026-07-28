@@ -2010,6 +2010,64 @@ def _bridge_rows(
     return rows
 
 
+def _credit_backing(
+    scored: list[tuple[tuple[int, int, int], dict[str, object]]],
+    backed: dict[str, list[tuple[int, set[str], int]]],
+    bridged: dict[str, dict[str, object]],
+) -> None:
+    """Apply #594's KB-vocabulary credit ONCE per backed file, to one excerpt of it.
+
+    The credit is a fact about the FILE — these accepted facts were extracted from
+    it, and they carry these question words. #594 added it to every excerpt of that
+    file, which reads one piece of evidence as many and moves the file's excerpts as
+    a block: on the reference KB, '오메가-3 보충이 COPD 환자에게 효과있음을 보인
+    연구는?' answered with three papers over ten rows (5 + 4 + 1 excerpts), because
+    15+ files tie at the same credited key and the render cap then slices that tie in
+    corpus order. A question of the shape "which studies …?" is answered by one paper
+    filling nine tenths of the list, which reads as "the KB holds one such paper".
+
+    So the credit goes to the file's single best excerpt, and every OTHER excerpt of
+    that file keeps exactly the key it had before #594 — the standing #576 left it
+    with. That is the whole change. The key's components are untouched: the excerpt
+    that receives the credit gets it in both, coverage by union and frequency by sum,
+    which is the reading PIN9 fixes white-box. What changes is only how many ROWS one
+    file-level fact may lift, and #594's own ranking gain is a property of the file's
+    best excerpt, so it survives — measured on that question, the three papers #594
+    put on top hold ranks 1-3 and the distinct-paper count over the default 10 goes
+    3 -> 10.
+
+    'Best' is measured AFTER the credit, not before, because the credit is not a
+    constant: coverage is a UNION, so an excerpt whose lexical hits already include a
+    bridged term gains less from it than one whose hits are disjoint. Picking by the
+    pre-credit key would hand the credit to an excerpt it does not in fact lift
+    furthest. Ties go to the excerpt the scan emitted first (lowest index — earliest
+    line of the earliest-sorted file), which is the order the sort below already
+    keeps for equal keys, so the choice is deterministic on a given corpus.
+
+    The credited terms are the bridge entry's, whatever reached them: a word matched
+    against the KB's own spelling and one that needed a declared synonym (#606) are
+    the same 'terms' list here, so the declared axis is damped per file exactly like
+    the spelled one. This function does not distinguish them, and should not — the
+    granularity defect is about the credit being per-file, and a synonym-reached term
+    is per-file for the same reason.
+
+    *backed* is what the scan recorded for the files :func:`kb_vocabulary_bridge`
+    reached: {ref: [(index into *scored*, that row's lexical hits, its frequency)]}.
+    Scores are rewritten in place, BEFORE the sort and before the bridged rows are
+    appended, so a promoted row (#576) still competes against the credited row on the
+    same key it did.
+    """
+    for ref, rows in backed.items():
+        entry = bridged[ref]
+        terms = set(entry["terms"])
+        facts = len(entry["facts"])
+        index, hits, frequency = max(
+            rows, key=lambda row: (len(row[1] | terms), row[2] + facts, -row[0])
+        )
+        grade = scored[index][0][0]
+        scored[index] = ((grade, len(hits | terms), frequency + facts), scored[index][1])
+
+
 def search(
     question: str,
     root: Path,
@@ -2035,10 +2093,12 @@ def search(
     A file the scan DID cite is credited with that same vocabulary instead of being
     tagged with it (#594): its coverage becomes the union of the terms it matched in
     the text and the terms bridged to it, and its frequency gains the backing facts.
-    The credit is ordering only — no key, no tag, no row added or removed, and it
-    ranks below the directory grade — so the rows returned are the same rows in a
-    different order, and a KB whose fact files are absent or join nothing ranks
-    exactly as before.
+    The credit is a fact about the FILE, so it is applied to ONE excerpt of it — the
+    one it lifts furthest (#602, :func:`_credit_backing`) — and the file's other
+    excerpts keep the key the lexical scan gave them. The credit is ordering only —
+    no key, no tag, no row added or removed, and it ranks below the directory grade —
+    so the rows returned are the same rows in a different order, and a KB whose fact
+    files are absent or join nothing ranks exactly as before.
 
     When *recall* is given it is filled with {'matched': [...], 'unmatched': [...]}
     — which of the question's keywords the corpus contains (#575). It is a pure
@@ -2071,6 +2131,9 @@ def search(
         return []
     scored: list[tuple[tuple[int, int, int], dict[str, object]]] = []
     cited: set[str] = set()  # files the lexical scan cited — the bridge below skips them
+    # {ref: [(index into `scored`, that row's lexical hits, its frequency)]} for the
+    # files the KB backs — what _credit_backing needs to pick one excerpt per file.
+    backed: dict[str, list[tuple[int, set[str], int]]] = {}
     ignored_patterns = sync_ignore_patterns(root)
     # Read ONCE, before the scan, and used twice: to credit the rows the scan cites
     # (#594, below) and to build rows for the files it never cites (#576). Reading it
@@ -2154,43 +2217,49 @@ def search(
                 # sides there, which is the same reading (two independent pieces of
                 # evidence), and it only ever breaks a coverage tie.
                 #
-                # KNOWN COST, measured, not fixed here: the backing is a per-FILE
-                # constant added to EVERY excerpt of that file, so a file with many
-                # excerpts rises as a block and can take most of the render cap. On
-                # the reference KB, '오메가-3 보충이 COPD 환자에게 효과있음을 보인
-                # 연구는?': distinct papers in the default top 10 fall from 9 to 3
-                # (5 + 4 + 1 excerpts of three files). Over a 26-question sample the
-                # total distinct-file count over each top 10 falls 197 -> 190, and an
-                # independent 30-question sample measured 175 -> 169 — i.e. the whole
-                # loss is that one question shape, "which studies …?" over a corpus
-                # where one paper carries many matching excerpts. Damping it (crediting
-                # only a file's best excerpt, or a diversity term in the sort key) is a
-                # change to the ranking key's shape and is left to a follow-up; the
-                # numbers above are here so that follow-up can reproduce the baseline.
+                # The credit itself is NOT applied here, and the granularity is why
+                # (#602). It is a per-FILE constant, so adding it to every excerpt of
+                # the file lifted them as a block and one paper took most of the render
+                # cap: on the reference KB, '오메가-3 보충이 COPD 환자에게 효과있음을
+                # 보인 연구는?' returned 3 distinct papers over the default 10 rows
+                # (5 + 4 + 1) where the uncredited ranking returned 9. So the scan
+                # records what each excerpt scored LEXICALLY and _credit_backing applies
+                # the file's credit once, below, to the excerpt it lifts furthest. This
+                # row therefore carries the pre-#594 key until then, and if it is not
+                # the chosen one it keeps it.
                 #
-                # A term the KB reached through a DECLARED synonym (#606) is credited
-                # here on the same footing as one it reached by spelling, and that is a
-                # decision, not an oversight. This map is built once and read twice —
-                # the credit here and the tagged rows below — and the two readings have
-                # to be the same reading or the bridge is weakest exactly where #594
-                # found it weakest: a source whose title borrows the English term is
-                # found lexically, so a synonym excluded here would move the FILES NO
-                # KEYWORD REACHED up and leave the best-matching file's own KB evidence
-                # uncounted. The cost is that this credit is invisible — ordering only,
-                # no key, no tag — so a synonym declaration can reorder an answer with
-                # nothing on the page saying so. That is #594's existing shape, not
-                # something #606 introduces, and exposing it is #603's axis.
-                backing = bridged.get(_nfc(ref))
-                if backing:
-                    hits = hits | set(backing["terms"])
-                    frequency += len(backing["facts"])
+                # A term the KB reached through a DECLARED synonym (#606) is part of
+                # that credit on the same footing as one it reached by spelling, and
+                # that is a decision, not an oversight. This map is built once and read
+                # twice — the credit and the tagged rows below — and the two readings
+                # have to be the same reading or the bridge is weakest exactly where
+                # #594 found it weakest: a source whose title borrows the English term
+                # is found lexically, so a synonym excluded from the credit would move
+                # the FILES NO KEYWORD REACHED up and leave the best-matching file's own
+                # KB evidence uncounted. #602 changes how many ROWS that credit may
+                # lift, not which terms enter it — the declared axis is damped exactly
+                # like the spelled one, per file rather than per excerpt. The cost is
+                # that the credit is invisible — ordering only, no key, no tag — so a
+                # synonym declaration can reorder an answer with nothing on the page
+                # saying so. That is #594's existing shape, not something #606
+                # introduces, and exposing it is #603's axis.
                 scored.append(((grade, len(hits), frequency), result))
+                # The scan's own record, not a second read of the KB: the credit needs
+                # each excerpt's hit SET (coverage is a union, not a sum) and its
+                # frequency, and neither survives in the score tuple above.
+                if _nfc(ref) in bridged:
+                    backed.setdefault(_nfc(ref), []).append((len(scored) - 1, hits, frequency))
                 # NFC-folded: this set is compared against refs read out of
                 # candidates.csv, and the two spellings of one Korean filename are
                 # equal to every renderer and unequal to `in`. Unfolded, the same
                 # file came back as a lexical row AND as a row tagged "not a lexical
                 # match" (reproduced: sources/해석연구.md at lines 9 and 7).
                 cited.add(_nfc(ref))
+    # KB-vocabulary backing (#594), applied per FILE rather than per excerpt (#602).
+    # Before the bridge rows are appended, so a promoted row still meets the credited
+    # row on the same key, and before the sort, so the credit decides order and not
+    # a re-sort of an already-ranked list.
+    _credit_backing(scored, backed, bridged)
     # KB-vocabulary bridge (#576): sources the question reached through the engine's
     # own Korean vocabulary rather than through the corpus text. Appended AFTER the
     # scan and BEFORE the sort, so bridged rows compete on the same ranking key

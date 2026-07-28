@@ -29,12 +29,14 @@ SOURCE_MD = """\
 """
 
 
-def build(tmp_path, sources, *, accepted=None, candidates=None, supplementary=None):
+def build(tmp_path, sources, *, accepted=None, candidates=None, supplementary=None, synonyms=None):
     """A KB root with the given {name: body} sources and optional fact files."""
     root = tmp_path / "kb"
     (root / "facts").mkdir(parents=True)
     (root / "sources").mkdir()
     (root / "policy").mkdir()
+    if synonyms is not None:
+        (root / "policy" / "vocabulary-synonyms.md").write_text(synonyms, encoding="utf-8")
     for name, body in sources.items():
         (root / "sources" / f"{name}.md").write_text(
             SOURCE_MD.format(title=name, body=body), encoding="utf-8"
@@ -230,6 +232,184 @@ class TestCoverageCredit:
         assert results[0]["file"] == f"sources/{nfd}.md"
         # ...and not by being promoted: it was cited lexically, like the other file.
         assert all("via" not in r for r in results)
+
+
+class TestOneCreditPerFile:
+    """The credit is a fact about the FILE, so it lifts ONE excerpt of it (#602).
+
+    #594 added it to every excerpt, which reads one piece of evidence as many: a
+    file's excerpts then rose as a block and one paper took most of the render cap.
+    Measured on the reference KB, '오메가-3 보충이 COPD 환자에게 효과있음을 보인
+    연구는?' answered with 3 distinct papers over the default 10 rows (5 + 4 + 1
+    excerpts) where the uncredited ranking answered with 9.
+
+    Each fixture below puts TWO excerpts in one backed file, far enough apart that
+    search()'s window collapse does not merge them, plus a plain file that sits
+    between them once only one of the two is credited. Asserting the full order is
+    what makes them discriminating: the plain file's position is the whole signal.
+    """
+
+    def test_a_files_other_excerpts_keep_their_lexical_key(self, tmp_path):
+        # The invariant, stated as an order: the credit lifts f-backed's stronger
+        # excerpt above the plain file, and its weaker one stays BELOW that plain
+        # file — exactly where the lexical scan alone put it, i.e. where #576 left
+        # it. Under #594's per-excerpt credit both excerpts of f-backed came out
+        # above z-plain (the weaker one at (2,2), tied with z-plain and ahead of it
+        # on corpus order), which is the block movement this issue is about.
+        root = build(
+            tmp_path,
+            {
+                "f-backed": "해석가능성 해석가능성 해석가능성 결과.\n" + "\n" * 8 + "해석가능성 결과.",
+                "z-plain": "해석가능성 그리고 설명가능성 결과.",
+            },
+            accepted='relation("s", "이점", "설명가능성_향상").\n',
+            candidates=csv_rows("s,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,"),
+        )
+        question = "해석가능성에서 설명가능성을"
+        # Premise: the file really is backed, and by a term its text never spells —
+        # otherwise there is no credit to place and the order below proves nothing.
+        bridged = ask_router.kb_vocabulary_bridge(question, root)
+        assert list(bridged) == ["sources/f-backed.md"]
+        assert bridged["sources/f-backed.md"]["terms"] == ["설명가능성을"]
+        assert "설명가능성" not in (root / "sources" / "f-backed.md").read_text(encoding="utf-8")
+        assert refs(ask_router.search(question, root, limit=None)) == [
+            "sources/f-backed.md:3",  # credited: (2, 3 + 1)
+            "sources/z-plain.md:3",  # lexical only: (2, 2)
+            "sources/f-backed.md:12",  # uncredited: (1, 1)
+        ]
+
+    def test_the_credit_goes_to_the_excerpt_it_lifts_furthest(self, tmp_path):
+        # Which excerpt gets it is decided AFTER the credit, not before. Coverage is
+        # a union, so the credit is not a constant: f-backed:3 already spells one of
+        # the bridged terms and gains only the other, while f-backed:12 spells
+        # neither and gains both. Ranked before the credit, :3 wins (its lexical key
+        # (1,3) beats :12's (1,1)) — and that is the wrong excerpt, because the
+        # credit takes :12 to coverage 3 and :3 only to 2. z-plain sits between the
+        # two outcomes, so a pre-credit pick shows up here as an order change.
+        root = build(
+            tmp_path,
+            {
+                "f-backed": "해석가능성 해석가능성 해석가능성 결과.\n" + "\n" * 8 + "alpha 결과.",
+                "z-plain": "해석가능성 그리고 설명가능성 결과.",
+            },
+            accepted=(
+                'relation("s1", "이점", "해석가능성_향상").\n'
+                'relation("s2", "이점", "설명가능성_향상").\n'
+            ),
+            candidates=csv_rows(
+                "s1,이점,해석가능성_향상,sources/f-backed.md,confirmed,0.9,",
+                "s2,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,",
+            ),
+        )
+        question = "해석가능성에서 alpha 설명가능성을"
+        assert refs(ask_router.search(question, root, limit=None)) == [
+            "sources/f-backed.md:12",  # credited: ({alpha} | 2 bridged terms, 1 + 2)
+            "sources/z-plain.md:3",  # lexical only: (2, 2)
+            "sources/f-backed.md:3",  # uncredited: (1, 3)
+        ]
+
+    def test_a_tie_goes_to_the_excerpt_the_scan_emitted_first(self, tmp_path):
+        # Two excerpts of one file with identical keys before AND after the credit.
+        # Nothing about the rows can break that tie, so the rule has to name an
+        # order, and it names the scan's: earliest line of the earliest-sorted file.
+        # z-plain ties with the credited row at (2,2) and is emitted after both, so
+        # crediting the LATER excerpt instead would show up as z-plain moving up.
+        root = build(
+            tmp_path,
+            {
+                "f-backed": "해석가능성 결과.\n" + "\n" * 8 + "해석가능성 결과.",
+                "z-plain": "해석가능성 그리고 설명가능성 결과.",
+            },
+            accepted='relation("s", "이점", "설명가능성_향상").\n',
+            candidates=csv_rows("s,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,"),
+        )
+        assert refs(ask_router.search("해석가능성에서 설명가능성을", root, limit=None)) == [
+            "sources/f-backed.md:3",  # credited: (2, 2)
+            "sources/z-plain.md:3",  # (2, 2), same key, emitted later
+            "sources/f-backed.md:12",  # uncredited: (1, 1)
+        ]
+
+    def test_a_backed_file_no_longer_takes_the_whole_render_cap(self, tmp_path):
+        # The issue's own shape, minimized: one file with many matching excerpts and
+        # the richest backing, against two thinner files. Under a per-excerpt credit
+        # every row of a-fat outranked b-thin and c-thin together, so a cap of 3
+        # answered a "which studies …?" question with ONE paper three times — the
+        # reader's evidence that the KB holds one such paper. The cap is what makes
+        # this visible, and it is the default render budget, not a test artifact.
+        root = build(
+            tmp_path,
+            {
+                "a-fat": "\n".join(["alpha 결과."] + [""] * 8 + ["alpha 결과."] + [""] * 8 + ["alpha 결과."]),
+                "b-thin": "alpha 결과.",
+                "c-thin": "alpha 결과.",
+            },
+            accepted=(
+                'relation("s1", "이점", "설명가능성_향상").\n'
+                'relation("s2", "핵심_기법", "설명가능성_분석").\n'
+                'relation("s3", "다룬_주제", "설명가능성_평가").\n'
+            ),
+            candidates=csv_rows(
+                "s1,이점,설명가능성_향상,sources/a-fat.md,confirmed,0.9,",
+                "s2,핵심_기법,설명가능성_분석,sources/a-fat.md,confirmed,0.9,",
+                "s3,다룬_주제,설명가능성_평가,sources/a-fat.md,confirmed,0.9,",
+                "s1,이점,설명가능성_향상,sources/b-thin.md,confirmed,0.9,",
+                "s1,이점,설명가능성_향상,sources/c-thin.md,confirmed,0.9,",
+            ),
+        )
+        question = "alpha 설명가능성을"
+        # Premise: a-fat really does contribute three excerpts, so a cap of 3 is a
+        # cap it could fill on its own.
+        everything = ask_router.search(question, root, limit=None)
+        assert len([r for r in everything if r["file"] == "sources/a-fat.md"]) == 3
+        top = ask_router.search(question, root, limit=3)
+        assert refs(top) == [
+            "sources/a-fat.md:3",  # credited: (2, 1 + 3)
+            "sources/b-thin.md:3",  # credited: (2, 1 + 1)
+            "sources/c-thin.md:3",  # credited: (2, 1 + 1)
+        ]
+        assert len({r["file"] for r in top}) == 3
+
+
+    def test_a_credit_reached_through_a_declared_synonym_is_damped_the_same_way(self, tmp_path):
+        # #606 lets a question word reach the KB's vocabulary through
+        # policy/vocabulary-synonyms.md, and that term joins #594's credit like any
+        # other. So it inherits this defect too: it is still a per-FILE constant, and
+        # without the damping a single declaration would lift every excerpt of the
+        # declared file as a block. The rule does not distinguish how a term was
+        # reached — asserted here rather than left to read off _credit_backing,
+        # because the two channels meet in kb_vocabulary_bridge and a change on
+        # either side could quietly exempt one.
+        #
+        # Same geometry as the first test in this class: the credit lifts f-backed's
+        # first excerpt above z-plain and leaves its second below.
+        root = build(
+            tmp_path,
+            {
+                "f-backed": "해석가능성 해석가능성 해석가능성 결과.\n" + "\n" * 8 + "해석가능성 결과.",
+                "z-plain": "해석가능성 그리고 재현가능성 결과.",
+            },
+            accepted='relation("s", "이점", "설명가능성_향상").\n',
+            candidates=csv_rows("s,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,"),
+            synonyms="- `재현가능성` = `설명가능성`\n",
+        )
+        question = "해석가능성에서 재현가능성을"
+        # Premise: the reach really is the table's. '재현가능성' shares no prefix with
+        # '설명가능성' — without the declaration this question backs nothing at all,
+        # and the assertion below would be about the previous test's axis.
+        bridged = ask_router.kb_vocabulary_bridge(question, root)
+        assert list(bridged) == ["sources/f-backed.md"]
+        assert bridged["sources/f-backed.md"]["synonyms"] == [["재현가능성을", "설명가능성"]]
+        assert ask_router.kb_vocabulary_bridge(question, build(
+            tmp_path / "nosyn",
+            {"f-backed": "해석가능성 결과."},
+            accepted='relation("s", "이점", "설명가능성_향상").\n',
+            candidates=csv_rows("s,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,"),
+        )) == {}
+        assert refs(ask_router.search(question, root, limit=None)) == [
+            "sources/f-backed.md:3",  # credited: (2, 3 + 1)
+            "sources/z-plain.md:3",  # lexical only: (2, 2)
+            "sources/f-backed.md:12",  # uncredited: (1, 1)
+        ]
 
 
 class TestWhatTheCreditMayNotOverrule:
