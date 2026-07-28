@@ -48,6 +48,37 @@ fail=0
 ok() { echo "PASS: $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 
+# One PASS/FAIL per NAMED invariant, from a probe that reports them all in one run.
+#
+# Why this exists (#586 F1). The stop-word blocks used to prove five invariants inside a
+# single `if`, so any one of them failing printed the same message and the same dump of
+# the whole list. A reader could not tell "an entry was added" from "an entry survived
+# filtering" from "a 계열 lost a row" without taking the asserts apart and re-running
+# them by hand, which is what #571's review actually had to do. A shared message is not
+# a cosmetic problem: it makes the suite report WHERE it looked instead of WHAT broke.
+#
+# Contract for a probe: print one TAB-separated line per invariant, 'OK<TAB>name' or
+# 'FAIL<TAB>name<TAB>detail'. A probe that dies before printing anything is itself a
+# named failure — silence must never read as success (the same hazard as an unguarded
+# `grep -c` in a `set -e` script).
+report_probe() {
+  local label="$1" out="$2" status name detail
+  if [ -z "$out" ]; then
+    bad "$label: the invariant probe printed nothing — it died before reporting"
+    return
+  fi
+  while IFS="$(printf '\t')" read -r status name detail; do
+    [ -n "$status" ] || continue
+    case "$status" in
+      OK) ok "$name" ;;
+      FAIL) bad "$name — $detail" ;;
+      *) bad "$label: unparseable probe line: $status $name $detail" ;;
+    esac
+  done <<EOF
+$out
+EOF
+}
+
 # A minimal KB with two accepted relation facts and NO compiled policy
 # (policy/logic-policy.dl intentionally absent — ask must tolerate it).
 KB="$(mktemp -d)/wiki"
@@ -561,57 +592,94 @@ if [ "$noterm_diag" = "True" ] && [ "$nomatch_diag" = "False" ]; then ok "search
 # proves every listed form is droppable, but it cannot notice a form that was
 # DELETED — the loop simply stops testing it. So the expected set is written out
 # here: adding or removing any entry fails with the difference named.
-if "$PYTHON" -c "
+#
+# Six invariants, six PASS/FAIL lines (#586 F1). They were one `if` and one message
+# until #586; the split is the point, not the packaging.
+#
+# The 계열 grids below are spelled out LITERALLY. Since #586 the module builds its
+# demonstratives as a product of two tuples, and a test that read those tuples back
+# would assert that a comprehension comprehends — it would pass no matter which
+# 의존명사 someone deleted from the module. Writing the grid here is what makes it a pin.
+cjk_probe="$("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
-want = {
-    '거기', '거기서', '그거', '그것', '그것은', '그것이', '그런', '그렇게', '논문은', '논문을',
-    '논문이', '논문인가', '누가', '누구', '누구인가', '누구인가요', '맞나', '맞는가', '무엇',
-    '무엇에', '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지', '뭐가', '뭐야', '뭔가',
-    '어느', '어디', '어디까지', '어디서', '어디에', '어디에서', '어디인가', '어떠한', '어떤',
-    '어떻게', '언제', '언제까지', '언제부터', '언제인가', '얼마나', '없나', '없나요', '없는가',
-    '여기', '여기서', '이거', '이것', '이것은', '이것이', '이런', '이렇게', '있나', '있나요',
-    '있는가', '있는지', '저거', '저것', '저것은', '저것이', '저기', '저기서', '저런', '저렇게',
-}
+
+def report(name, detail):
+    print(('FAIL' if detail else 'OK') + chr(9) + name + chr(9) + (detail or ''))
+
+def guarded(name, fn):
+    try:
+        report(name, fn())
+    except Exception as exc:
+        report(name, 'probe raised ' + repr(exc))
+
 got = set(a._CJK_QUESTION_STOPWORDS)
-assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
-# 이/그/저 계열은 대칭이어야 한다. 한 계열에서만 형태가 빠지면 그 지시어를 쓴 질문에서만
-# 조용히 필터가 새고, 목록을 훑어보는 것으로는 알아채기 어렵다.
-for suffix in ('', '이', '은'):
-    assert {b + suffix for b in ('이것', '그것', '저것')} <= got, suffix
-for suffix in ('', '서'):
-    assert {b + suffix for b in ('여기', '거기', '저기')} <= got, suffix
-" 2>/dev/null; then ok "stop-word list membership pinned (66 forms, 이/그/저 대칭)"; else bad "stop-word list membership moved: $("$PYTHON" -c "
-import sys, os
-sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
-import ask_router as a
-print(sorted(a._CJK_QUESTION_STOPWORDS))
-")"; fi
-# ...and every pinned form must actually be dropped, be a CJK 어절 of len>=2 (a
+want = {
+    '거기', '거기서', '그거', '그것', '그곳', '그때', '그런', '그렇게', '그만치', '그만큼',
+    '그쪽', '논문은', '논문을', '논문이', '논문인가', '누가', '누구', '누구인가', '누구인가요',
+    '맞나', '맞는가', '무엇', '무엇에', '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지',
+    '뭐가', '뭐야', '뭔가', '어느', '어디', '어디까지', '어디서', '어디에', '어디에서',
+    '어디인가', '어떠한', '어떤', '어떻게', '언제', '언제까지', '언제부터', '언제인가', '얼마나',
+    '없나', '없나요', '없는가', '여기', '여기서', '이거', '이것', '이곳', '이때', '이런',
+    '이렇게', '이만치', '이만큼', '이쪽', '있나', '있나요', '있는가', '있는지', '저거', '저것',
+    '저곳', '저기', '저기서', '저때', '저런', '저렇게', '저만치', '저만큼', '저쪽',
+}
+guarded('stop-word list membership pinned (75 forms)', lambda: '' if got == want else
+        'added ' + repr(sorted(got - want)) + ' removed ' + repr(sorted(want - got)))
+
+# #586 F2 — 계열 대칭. 한 계열에서만 형태가 빠지면 그 지시어를 쓴 질문에서만 조용히 필터가
+# 새고, 목록을 훑어보는 것으로는 알아채기 어렵다. #571 은 '것' 과 '기' 두 계열만 고정했다.
+# 여기서는 이/그/저 가 붙는 의존명사 전부를 격자로 편다.
+BOUND = ('것', '거', '곳', '쪽', '때', '런', '렇게', '만큼', '만치')
+guarded('이/그/저 계열이 모든 의존명사에 대해 대칭이다 (9 x 3 = 27 forms)', lambda: '' if all(
+        {det + noun for det in ('이', '그', '저')} <= got for noun in BOUND)
+        else repr(sorted(noun for noun in BOUND
+                         if not {det + noun for det in ('이', '그', '저')} <= got)))
+guarded('장소 대명사 여기/거기/저기 와 그 서-형이 대칭이다', lambda: '' if all(
+        {base + suffix for base in ('여기', '거기', '저기')} <= got for suffix in ('', '서'))
+        else repr(sorted(got & {b + s for b in ('여기', '거기', '저기') for s in ('', '서')})))
+
+# #586 F3 — the 조사 side, checked by DROP BEHAVIOUR rather than by membership. Under
+# #571's membership-only assert the suffix set was (∅, 이, 은) and '이것을' was absent
+# from all three 계열, so the symmetry held while the whole '을' row leaked — the exact
+# defect #586 was filed for. Behaviour closes that: '이것을' is still not a member (the
+# module lists stems, not inflections) but it must not survive, because #581's stem
+# guard reduces it onto one. The grid is mechanical and includes combinations no one
+# would say ('그때으로'); the filter must not depend on a token being grammatical.
+PARTICLES = ('', '이', '은', '을', '에', '에서', '으로', '까지', '부터')
+def particle_rows():
+    leaked = []
+    for det in ('이', '그', '저'):
+        for noun in ('것', '거', '곳', '쪽', '때', '만큼', '만치'):
+            for particle in PARTICLES:
+                form = det + noun + particle
+                if [p.pattern for p in a._keyword_patterns('신경기호 ' + form)] != ['신경기호']:
+                    leaked.append(form)
+    for base in ('여기', '거기', '저기'):
+        for particle in PARTICLES + ('서',):
+            form = base + particle
+            if [p.pattern for p in a._keyword_patterns('신경기호 ' + form)] != ['신경기호']:
+                leaked.append(form)
+    return repr(sorted(leaked)) if leaked else ''
+guarded('지시 어간 + 임의 조사 는 전부 탈락한다 (을-행 포함, 189 + 30 조합)', particle_rows)
+
+# ...and every listed form must actually be dropped, be a CJK 어절 of len>=2 (a
 # 1-char entry would be filtered by the length floor anyway, promising a guarantee
 # this list does not give), and never be a bare content stem (#571 기준 4).
-if "$PYTHON" -c "
-import sys, os
-sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
-import ask_router as a
-broken = []
-for w in sorted(a._CJK_QUESTION_STOPWORDS):
-    if len(w) < 2 or not a._is_cjk(w):
-        broken.append(('not a CJK 어절 of len>=2', w))
-        continue
-    got = [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]
-    if got != ['신경기호']:
-        broken.append(('survived', w, got))
-broken += [('bare stem listed', s) for s in ('논문', '방법') if s in a._CJK_QUESTION_STOPWORDS]
-assert not broken, broken
-" 2>/dev/null; then ok "every listed form is dropped, none is a bare stem (#571)"; else bad "stop-word list contract broken: $("$PYTHON" -c "
-import sys, os
-sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
-import ask_router as a
-print([(w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]) for w in sorted(a._CJK_QUESTION_STOPWORDS)
-       if [p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호']])
-")"; fi
+guarded('every listed form is actually dropped', lambda: repr(sorted(
+        (w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)])
+        for w in got if [p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호']
+    )) if any([p.pattern for p in a._keyword_patterns('신경기호 ' + w)] != ['신경기호'] for w in got) else '')
+guarded('every listed form is a CJK 어절 of len>=2', lambda: repr(sorted(
+        w for w in got if len(w) < 2 or not a._is_cjk(w))
+    ) if any(len(w) < 2 or not a._is_cjk(w) for w in got) else '')
+guarded('no bare content stem is listed (#571 기준 4)', lambda: repr(
+        [s for s in ('논문', '방법', '이론', '이유', '저널') if s in got]
+    ) if any(s in got for s in ('논문', '방법', '이론', '이유', '저널')) else '')
+" 2>&1 || true)"
+report_probe "CJK stop-word list" "$cjk_probe"
+
 # The English list is pinned the same way, and every entry must be EXACTLY 2 chars.
 # The invariant is unchanged; its MEANING was reversed by #583. Under the old floor of
 # 3 the length was what made the list harmless on the default path — nothing 2 chars
@@ -623,24 +691,36 @@ print([(w, [p.pattern for p in a._keyword_patterns('신경기호 ' + w)]) for w 
 # The invariant still earns its place, for the other reason: at exactly 2 characters
 # the list can only remove tokens the floor itself just admitted. A 3-char entry would
 # reach past the floor and silently filter a word no measurement here covers.
-if "$PYTHON" -c "
+#
+# Three invariants, three PASS/FAIL lines (#586 F1) — membership, length, and drop
+# behaviour fail for different reasons and are fixed in different places.
+ascii_probe="$("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
+
+def report(name, detail):
+    print(('FAIL' if detail else 'OK') + chr(9) + name + chr(9) + (detail or ''))
+
+def guarded(name, fn):
+    try:
+        report(name, fn())
+    except Exception as exc:
+        report(name, 'probe raised ' + repr(exc))
+
+got = set(a._ASCII_FUNCTION_WORDS)
 want = {'am', 'an', 'as', 'at', 'be', 'by', 'do', 'he', 'if', 'in', 'is', 'it',
         'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up', 'us', 'we'}
-got = set(a._ASCII_FUNCTION_WORDS)
-assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
-assert all(len(w) == 2 for w in got), sorted(w for w in got if len(w) != 2)
-for w in sorted(got):
-    kw = [p.pattern for p in a._keyword_patterns('논문은 어디에 ' + w)]
-    assert kw == [], (w, kw)
-" 2>/dev/null; then ok "2-char English function words pinned (23 forms, all len 2, all dropped)"; else bad "English function-word list moved: $("$PYTHON" -c "
-import sys, os
-sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
-import ask_router as a
-print(sorted(a._ASCII_FUNCTION_WORDS))
-")"; fi
+guarded('2-char English function words pinned (23 forms)', lambda: '' if got == want else
+        'added ' + repr(sorted(got - want)) + ' removed ' + repr(sorted(want - got)))
+guarded('every English function word is EXACTLY 2 characters', lambda: repr(
+        sorted(w for w in got if len(w) != 2)) if any(len(w) != 2 for w in got) else '')
+guarded('every English function word is actually dropped', lambda: repr(sorted(
+        (w, [p.pattern for p in a._keyword_patterns('논문은 어디에 ' + w)])
+        for w in got if a._keyword_patterns('논문은 어디에 ' + w)
+    )) if any(a._keyword_patterns('논문은 어디에 ' + w) for w in got) else '')
+" 2>&1 || true)"
+report_probe "English function-word list" "$ascii_probe"
 
 # Ordering contract for #581: a filtered 어절 must leave NOTHING behind — not the
 # token, and not a stem derived from it. Checked by consequence rather than by
@@ -738,10 +818,18 @@ match_is "오분리해도 원 표층형이 닿던 문장은 그대로 닿는다"
 # '이것…' in the corpus, which is #571's defect arriving through #581's code path.
 kw_is "어간이 기능어면 그 어절도 기능어다 — '이것을'/'여기에' 는 키워드가 되지 않는다" \
   '이것을 여기에 무엇인가' "[]"
-# ...but it is a WHOLE-TOKEN check on the stem, not a prefix rule: an unlisted stem
-# stays a keyword. ('이곳' is not in the list; #586 owns that gap, not this file.)
-kw_is "목록에 없는 어간은 키워드로 남는다 — '이곳에서' -> '이곳'" \
-  '이곳에서 무엇인가' "['이곳']"
+# ...but it is a WHOLE-TOKEN check on the stem, not a prefix rule: a stem that merely
+# BEGINS with a listed form stays a keyword.
+#
+# '이곳에서' was this pin's example until #586 listed the stem '이곳', which is the gap
+# the pin's own comment handed to that issue. The invariant it was really testing is the
+# prefix one, so it is re-pinned — not deleted — on a stem no listing will ever swallow:
+# '저기압' (低氣壓) begins with the listed '저기' and is a content noun. Measured over the
+# 127 files search() reads, a 1-character prefix rule would drop all 10 Korean 어절 that
+# begin with 이/그/저 — '저널', '저자', '이론', '이름', '이후' among them — costing 76
+# file-reaches, 66 of those from '저널' alone.
+kw_is "어간 검사는 접두가 아니라 전체 일치다 — '저기압에서' -> '저기압' 은 키워드로 남는다" \
+  '저기압에서 무엇인가' "['저기압']"
 
 # 어간이 다시 조사·어미면 그 어절엔 콘텐츠가 없다 — 분리를 거부하고 표층형을 남긴다.
 # 이걸 빼면 '하는가'->'하는', '으로만'->'으로' 가 되어, 한국어 산문 대부분에 걸리는
