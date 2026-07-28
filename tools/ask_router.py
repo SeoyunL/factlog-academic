@@ -361,6 +361,20 @@ def coverage_hint(
     # membership check is a defensive guard (never fabricate a hint for an unknown
     # subject) aligned with the canonical counting below — so an amount/date
     # compound subject is matched consistently, not by raw string.
+    #
+    # "Defensive" is measured, not assumed, and the measurement is written down so the
+    # next reader can check whether its PREMISE still holds rather than re-run it on
+    # faith. The premise is structural: route == "engine" means classify_query returned
+    # QUERY_OK or QUERY_FACT_ABSENT, and for a non-variable subject — which the
+    # is_quoted_string gate above has already required — both are past
+    # QueryVocabulary.accepts_subject, which tests canonical_value(subject) against
+    # {canonical_value(e) for e in entity_set(facts)}: the same fold over the same set
+    # the next line builds. Confirmed two ways over tests/unit at 279d37f (6237 passed,
+    # 1 skipped both times): deleting the guard leaves the suite green, and replacing
+    # its `return None` with a raise ALSO leaves it green — so the branch is not merely
+    # unasserted, it is never taken. If classify's routing codes, entity_set's default
+    # arguments, or canonical_value's identity on either side ever diverge from this
+    # line's, that is what to re-check; the guard is cheap and stays either way.
     accepted_entities_c = {canonical_value(e) for e in entity_set(facts)}
     if canonical_value(subject) not in accepted_entities_c:
         return None
@@ -993,15 +1007,29 @@ def _korean_stem(word: str) -> str:
 # what bounded reach. All figures below are over the corpus search() ACTUALLY reads —
 # 127 files, being sources/ + runs/sources/ + decisions/ minus the 60 sync-ignored
 # files under sources/arxiv_corpus/** — and count files whose PROSE a token's own
-# matcher hits:
+# matcher hits. PROSE means the BODY BELOW the front-matter fence, and the word has to
+# be read that way or the table does not reproduce: counting whole files instead moves
+# 'ai' from 15 to 26 (arXiv front matter carries `cs.AI`) and 'and' from 123 to 126,
+# while leaving every other figure here unchanged.
 #
 #   already admitted at 3 chars:  and 123  the 120  for 110  doi 103  are 67
 #   best 2-char NOT on the list:  10 105   11 18    12 18    il 17    ai 15
 #
 # The three highest-reaching tokens the old floor already let through beat the highest
 # 2-character one, so lowering the floor adds no reach class the default path did not
-# already carry. What bounds reach is the function-word list below, and that list keeps
-# working at the lower floor — it is in fact the only thing doing the work now.
+# already carry. Bounding the 2-character class is the function-word list's job, and
+# that list keeps working at the lower floor.
+#
+# The floor is NOT thereby inert, and reading it as inert is how it gets deleted. It is
+# the only guard on the 1-character class, and that class outreaches everything the
+# list does not name: by the same measurement 'a' reaches 116 files — above the best
+# unlisted 2-character token ('10', 105) and above 'for' (110) — and '1'/'2'/'3' reach
+# 76/67/70. The list cannot absorb them, because every entry in it is exactly 2
+# characters (tests/test_ask_router.sh asserts that as its own row). Measured: with
+# _ASCII_MIN at 1, 'what is a benefit of ai in 3 systems' tokenizes to
+# [what, a, benefit, ai, 3, systems] instead of [what, benefit, ai, systems]; with the
+# list emptied and the floor left at 2 it tokenizes to [what, is, benefit, of, ai, in,
+# systems]. The two guards exclude disjoint classes and neither stands in for the other.
 #
 # The same measurement answers the digit/fragment worry (#583 기준 3) without a further
 # guard: after 10 the unlisted 2-character tokens fall off a cliff (18, 18, 17, 15,
@@ -1570,10 +1598,19 @@ def _fill_recall(
 # 11 are about 해석가능 or 신경망. Going higher does not buy precision, it buys
 # silence: floor 4 already drops '신경망', the question's most literal content word,
 # and by floor 6 the bridge answers nothing at all.
-# The same floor is what makes the function-word class structurally unreachable
-# instead of filtered: '논문' is two characters, so no question containing it can
-# bridge at all — the noise #571 needed a stop-word enumeration against cannot
-# arise on this path.
+# What the floor does to the function-word class, stated no wider than it holds — the
+# first cut of this comment said the class was "structurally unreachable instead of
+# filtered", and that is true of less than half of it. Of the 75
+# _CJK_QUESTION_STOPWORDS, 34 are 2 characters ('논문', '이점'); for those it IS
+# structural, since a 2-character word can never reach a 3-character shared prefix, so
+# no question can bridge VIA one. The other 41 are 3+ characters ('무엇인가', '어떻게',
+# '논문은') and this floor does not touch them. What excludes THEM is the filter:
+# _bridge_terms reuses _keywords instead of re-tokenizing, so #571's stop-word list is
+# in force here too (see its docstring). On the reference KB none of the 41 would
+# bridge even without that filter — measured, 0 of the 41 shares a 3-character prefix
+# with any of the 1656 vocabulary words — but that is a property of one KB's
+# vocabulary, not a structure, so it is a measurement and not the guarantee. The
+# guarantee for those 41 is the filter, and deleting it is not covered by this floor.
 #
 # The cost is real and deliberate: a two-syllable CONTENT noun ('근거', '추론')
 # cannot bridge either. Buying those back means telling '근거' from '대비', which is
@@ -2348,9 +2385,16 @@ def decomposition_candidates(
             #   not decision["negative"] — mirrors the scope gate cmd_render branches
             #     on, and changes NO result here: a draft built from a fact that is
             #     present cannot classify as fact_absent, and if it somehow did, the
-            #     0-row guard below would drop it anyway. Measured — removing this half
-            #     alone fails no test in either suite. It is kept so the two call sites
-            #     read as one contract, not because it decides anything.
+            #     0-row guard below would drop it anyway. Measured at 279d37f, with the
+            #     suites named so the claim can be re-run rather than believed: removing
+            #     this half alone moves nothing — tests/unit 6237 passed / 1 skipped,
+            #     tests/test_ask_router.sh 258 passed, tests/test_ask_wiki_search.sh 76
+            #     passed, all identical to baseline. Removing the ROUTE half instead
+            #     fails the four TestTheValidatorGate cases named above — measured on
+            #     tests/unit/test_ask_decomposition.py, 4 failed / 24 passed; whether
+            #     that mutant also moves anything outside that file was not measured.
+            #     The two halves are not interchangeable. This one is kept so the two
+            #     call sites read as one contract, not because it decides anything.
             rows = (
                 evaluate_relation(draft, accepted)
                 if decision["route"] == "engine" and not decision["negative"]
