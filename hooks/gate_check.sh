@@ -117,10 +117,23 @@ if [ -n "$resolved_root" ]; then
   KB_ROOT="$resolved_root"
 else
   # Python IS available (the fail-closed check above passed) yet the resolver
-  # returned nothing. resolve_root(None) always yields a non-empty absolute path
-  # (its final fallback is cwd), so the only way to reach here is the factlog
-  # package failing to import in the child (corrupt/missing package under the
-  # plugin root). That silent, permissive degrade to ${FACTLOG_ROOT:-cwd} is
+  # returned nothing. resolve_root(None) RETURNS a non-empty absolute path on every
+  # path through it (its final fallback is cwd), so a corrupt or missing factlog
+  # package under the plugin root is ONE way to land here, and CASE 16 of
+  # tests/test_gate_check.sh reproduces that one deterministically.
+  #
+  # It is not the only way, and this comment used to say it was. resolve_root can also
+  # RAISE, and the child's `2>/dev/null || true` collapses a raise into the same empty
+  # string a failed import produces. Measured on Python 3.12.13: with
+  # FACTLOG_ROOT='~nosuchuser12345/kb', Path.expanduser() raises RuntimeError ("Could
+  # not determine home directory") and this branch fires while the package imports
+  # perfectly —
+  #   FACTLOG_ROOT='~nosuchuser12345/kb' bash hooks/gate_check.sh <<< '<Write envelope>'
+  #   -> "[factlog GATE] note: factlog config resolver unavailable ... ", exit 0
+  # So read the note below as "the resolver produced nothing", which is all it can
+  # honestly report. The verdict is the same either way; the diagnosis is not, and an
+  # operator sent looking for a broken install would not find one.
+  # That silent, permissive degrade to ${FACTLOG_ROOT:-cwd} is
   # intentional (fail-to-previous-behaviour, protects bootstrap/first-run UX and
   # opens no new hole) — but make it OBSERVABLE with a one-line stderr note so an
   # operator can see the resolver was bypassed. This does NOT change the
@@ -307,8 +320,10 @@ fi
 # Two things were wrong with that, and #600 separates them:
 #
 #   COVERAGE — no row in tests/test_gate_check.sh ever executed that deny.
-#   Instrumenting the branch and running the file scored 0 hits across all 66
-#   rows. CASE 22's comment claimed its empty-PATH row reached `stat`
+#   Instrumenting the branch and running the file scored 0 hits across all 66 rows
+#   the file HAD THEN (it has 77 at 279d37f, and the branch is gone, so the figure
+#   cannot be re-taken — it is here as the reason the deny was removed, not as a
+#   live invariant). CASE 22's comment claimed its empty-PATH row reached `stat`
 #   "incidentally"; it does not — that KB has no report, so the deny just above
 #   returns first, and the same instrumentation scores 0 on that fixture alone.
 #
