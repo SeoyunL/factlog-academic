@@ -1012,6 +1012,114 @@ run_payload_case "backslash separator (JSON-escaped Windows path) — deny" \
 rm -rf "$KB_NOGREP" "$NOGREP_RUNNER"
 
 # ---------------------------------------------------------------------------
+# CASE 23 (#596): what hooks.json actually routes here, and what becomes of a
+# payload whose target key this gate does not read.
+#
+# #596 reported NotebookEdit (target at tool_input.notebook_path) reaching the
+# gate, failing extraction, and being denied on a marker in its cell content. The
+# premise was routing: "Edit" inside the matcher "Write|Edit" matching
+# "NotebookEdit" as an unanchored regex. Measured on Claude Code 2.1.220 it does
+# not — a matcher of only [A-Za-z0-9_|, -] is split on |/, and compared to the
+# tool name by exact equality. A live session with "Write|Edit", "NotebookEdit"
+# and "Notebook.*" registered side by side saw one NotebookEdit call fire the
+# latter two and not the first, and one Write call fire only the first.
+#
+# So the extraction keys were left alone: an added key can only turn an unresolved
+# DENY into a resolved ALLOW, and no routing path at the measured version buys it.
+# What is pinned instead is the repo-side half of that reasoning — the matcher has
+# to stay a plain list of tools whose target key this gate reads. Claude Code's
+# half cannot be pinned from here; it is a measurement of one version.
+HOOKS_JSON="$(dirname "$GATE")/hooks.json"
+matcher_check="$(bash "$PYTHON_RUNNER" -c '
+import json, re, sys
+d = json.load(open(sys.argv[1]))
+entries = [e for e in d.get("hooks", {}).get("PreToolUse", [])
+           if any("gate_check.sh" in h.get("command", "") for h in e.get("hooks", []))]
+if len(entries) != 1:
+    print("expected exactly one PreToolUse entry running gate_check.sh, found %d" % len(entries))
+    sys.exit(0)
+m = entries[0].get("matcher") or ""
+if not re.fullmatch(r"[A-Za-z0-9_|, -]+", m):
+    print("matcher %r carries a regex metacharacter, so Claude Code applies it as an "
+          "UNANCHORED regex and may route tools whose target key this gate cannot read" % m)
+    sys.exit(0)
+readable = {"Write", "Edit"}   # tools whose payload puts the target at tool_input.file_path
+unknown = [t for t in (x.strip() for x in re.split(r"[|,]", m)) if t and t not in readable]
+if unknown:
+    print("matcher routes %s; this gate reads no target key for it, so it would be judged "
+          "on raw payload text alone" % ", ".join(unknown))
+    sys.exit(0)
+print("OK")
+' "$HOOKS_JSON" 2>&1)"
+if [ "$matcher_check" = "OK" ]; then
+  echo "PASS: hooks.json matcher stays a plain list of tools whose target key the gate reads"
+  pass=$((pass + 1))
+elif [ -z "$matcher_check" ]; then
+  echo "FAIL: matcher shape check produced no output — the check itself did not run"
+  fail=$((fail + 1))
+else
+  echo "FAIL: hooks.json matcher — $matcher_check"
+  fail=$((fail + 1))
+fi
+
+# The behavioural half: IF such a payload ever does reach the gate (a hand-run
+# pipe today, a routing or schema change tomorrow), fail-closed still holds and is
+# still escapable. The KB has an engine input on disk and no report, so DENY is
+# the correct verdict for anything judged an engine input.
+#
+# These three rows are a matched set on purpose. The deny row and the allow row
+# below it differ ONLY in the cell text, in the same KB with the same shape, so a
+# broken fixture shows up as both rows agreeing rather than as a green deny. Teach
+# the extractor notebook_path and the deny row flips to allow — deliberately, so
+# that change cannot land without re-arguing the trade-off recorded in the hook
+# header.
+nb_payload() {
+  # nb_payload <notebook_path> <cell source text>
+  printf '{"session_id":"s0","cwd":"/","hook_event_name":"PreToolUse","tool_name":"NotebookEdit","tool_input":{"notebook_path":"%s","cell_id":"c0","new_source":"%s"},"tool_use_id":"u0"}' \
+    "$1" "$2"
+}
+
+KB_NB="$(mktemp -d)"
+make_kb "$KB_NB"
+touch_file "$KB_NB/facts/accepted.dl"
+clear_config
+
+run_payload_case "NotebookEdit shape, cell text names an engine input — deny (target key unread, fail-closed)" \
+  "$KB_NB" "$(nb_payload "$KB_NB/nb.ipynb" "open(\\\"facts/accepted.dl\\\")")" 2
+run_payload_case "NotebookEdit shape, same KB, cell text names nothing — allow (content, not shape, drove the deny)" \
+  "$KB_NB" "$(nb_payload "$KB_NB/nb.ipynb" "print(42)")" 0
+
+# Escapable, like every other unresolved deny in CASE 21: with a fresh report the
+# same payload is allowed, so a user who hits the false positive runs
+# /factlog check rather than losing the ability to edit notebooks.
+KB_NB_FRESH="$(mktemp -d)"
+make_kb "$KB_NB_FRESH"
+touch_file "$KB_NB_FRESH/facts/accepted.dl"
+set_mtime_past "$KB_NB_FRESH/facts/accepted.dl"
+touch_file "$KB_NB_FRESH/facts/logic_report.txt"
+run_payload_case "same NotebookEdit payload, report fresh — allow (predicate decides, not the shape)" \
+  "$KB_NB_FRESH" "$(nb_payload "$KB_NB_FRESH/nb.ipynb" "open(\\\"facts/accepted.dl\\\")")" 0
+
+# And the deny above must come from the unresolved branch, not from some other
+# path that happens to also exit 2 — otherwise the rows would survive a gate that
+# resolved notebook_path and then denied it for the wrong reason.
+nb_err="$(mktemp)"
+nb_exit=0
+FACTLOG_ROOT="$KB_NB" bash "$GATE" \
+  <<< "$(nb_payload "$KB_NB/nb.ipynb" "open(\\\"facts/accepted.dl\\\")")" \
+  >/dev/null 2>"$nb_err" || nb_exit=$?
+nb_hits="$(grep -cF "could not extract a target path" "$nb_err" || true)"
+if [ "$nb_exit" -eq 2 ] && [ "${nb_hits:-0}" -ge 1 ]; then
+  echo "PASS: NotebookEdit-shaped deny is the unresolved-target branch, announced on stderr"
+  pass=$((pass + 1))
+else
+  echo "FAIL: NotebookEdit-shaped deny came from elsewhere; exit=$nb_exit hits=${nb_hits:-unset} stderr=$(cat "$nb_err")"
+  fail=$((fail + 1))
+fi
+
+rm -rf "$KB_NB" "$KB_NB_FRESH" "$nb_err"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
