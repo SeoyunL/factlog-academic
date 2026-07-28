@@ -1229,6 +1229,24 @@ enters the block because of it.
 A row reached ONLY through that vocabulary is a different thing and still says so
 with `[via KB vocabulary — still UNVERIFIED]`.
 
+That credit is **invisible on the page**: it adds no key, no tag and no row, so one
+source can outrank another for a reason the answer never states. Add `--why` when the
+question is "why is this row here" — an expected source is missing, an unexpected one
+leads, or an edit under `policy/` changed the order. It appends a
+`DIAGNOSTIC — ranking components` block **after** the answer, naming for each shown
+row: its grade (primary / supplementary), its coverage and frequency, which of the
+question's words were found in the text, and which were reached through the engine's
+accepted vocabulary — and for those, whether the reach used the KB's own spelling
+(`← direct:`) or needed a declared line of `policy/vocabulary-synonyms.md`
+(`← synonym:`). Because the credit is applied to **one excerpt per file**, the block
+also says which excerpt of a file received it and where it went otherwise. Two limits,
+both deliberate: the numbers are retrieval bookkeeping, **not** a confidence score —
+every row they order is still UNVERIFIED — and they cover only the rows the answer
+showed, so add `--all` to see the ones the cap hid. Without the flag the output is
+byte-identical, so show the block only when the user asked why, and never lift its
+numbers up beside an excerpt in a normal answer. `search --why` is the same report as
+a top-level `why` array parallel to `results`; the row objects are unchanged.
+
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/tools/factlog_python.sh" "${CLAUDE_PLUGIN_ROOT}/tools/ask_router.py" note "<question>" --target "$FACTLOG_ROOT"
 ```
