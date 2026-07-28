@@ -383,7 +383,12 @@ def _flush_skipped_sources(skipped: dict[str, int], *, show_counts: bool = True)
             message += f" ({count} row{'s' if count != 1 else ''})"
         print(message, file=sys.stderr)
     # Not load-bearing today (see above) -- kept so a future second flush in one
-    # run reports only what accumulated since the last one.
+    # run reports only what accumulated since the last one.  Measured at bb3909c by
+    # deleting this call: tests/test_merge_no_data_loss.sh 11 passed / 0 failed,
+    # tests/test_sync_ignore.sh 23 passed / 0 failed, `pytest tests/unit -q` 6288
+    # passed / 1 skipped -- a surviving mutant, which is all "not load-bearing today"
+    # is entitled to mean.  Add the second flush and re-run those three before
+    # believing this line again.
     skipped.clear()
 
 

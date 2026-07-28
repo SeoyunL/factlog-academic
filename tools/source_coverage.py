@@ -420,13 +420,19 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: dict[str, 
     """
     if not run_orphans:
         return
-    # The early return above is the ONLY redundant guard here, and calling the
-    # three of them one defence would be a costly misreading. With an empty
-    # *run_orphans* both lists below are empty, so both loops and both `if` bodies
-    # are no-ops: deleting the early return changes the output for no input at
-    # all. A mutation run reports it as a survivor; it is an equivalent mutant.
+    # The early return above is the ONLY redundant guard here, and reading the four
+    # guards below as one defence would be a costly misreading. With an empty
+    # *run_orphans* all four lists below are empty, so all four loops and all four
+    # `if` bodies are no-ops: deleting the early return changes the output for no
+    # input at all. A mutation run reports it as a survivor; it is an equivalent
+    # mutant — and here is how to re-check that instead of taking it on trust.
+    # Measured at bb3909c with the guard replaced by `if False:`:
+    # tests/test_coverage.sh 83 passed / 0 failed, tests/test_drop_visibility.sh
+    # 31 / 0, `pytest tests/unit -q` 6288 passed / 1 skipped — every figure identical
+    # to baseline. (These counts read "both" and "three" until #617 re-counted them:
+    # EJECT_BLOCKED made every one of them four and the prose was never re-read.)
     #
-    # The three `if` blocks below are NOT that. None is redundant with the early
+    # The four `if` blocks below are NOT that. None is redundant with the early
     # return nor with the others: each guards the case where only the OTHER classes
     # are present, which is the ordinary state of a KB. Break one and a report
     # carrying a single class starts printing another class's summary at zero —
