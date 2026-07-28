@@ -796,6 +796,132 @@ def _cjk_stopword(word: str) -> bool:
     return word in _CJK_QUESTION_STOPWORDS
 
 
+# Korean CJK tokens shorter than this never become keywords, and neither does a stem
+# stripped down past it (#581 수용 기준 3). ONE constant for both because they are one
+# rule: whatever length is too short to be a search term when the user typed it is too
+# short when a suffix rule produced it. The floor is what makes the stripper below safe
+# at all — '평가'→'평', '국가'→'국', '온도'→'온', '길이'→'길', '종이'→'종' are all
+# rejected here, so the 2-character nouns that end in a particle SYLLABLE never lose it.
+_CJK_MIN = 2
+
+# Trailing Korean 조사·어미, stripped from a question 어절 to get its stem (#581).
+#
+# Why this is needed at all: CJK keywords match by SUBSTRING, and the docstring of
+# _keywords used to justify that as tolerating attached particles — '근거' matches
+# '근거는'. That is true in exactly one direction, question-stem → document-particle,
+# and a natural Korean question is almost always the other one: it is the QUESTION
+# that carries the 조사. Measured on origin/main, '해석가능성에서' does not match a
+# document writing '해석가능성', '주장하는' does not match '주장', '근거를' does not
+# match '근거 로그는 최소 5년 보존한다'. Stripping the suffix makes the matcher's
+# reach a SUPERSET of the surface form's — 'X' matches every line 'X<조사>' does —
+# so this closes the missing direction without giving up the one that worked.
+#
+# Why these entries, and not others. Three groups, each admitted for a stated reason:
+#
+#  1. 격조사·보조사 that attach to the noun a question is ABOUT ('근거를', '방법은',
+#     '모델에서'). This is the group the issue is named for.
+#  2. Stacked forms ('에서는', '으로서', '에게는'). They are listed as whole strings
+#     rather than stripped iteratively: one pass removes at most ONE entry, so the
+#     worst over-strip this table can cause is bounded by the worst SINGLE entry and
+#     can be measured entry by entry. Iterating would compound — '중요도가' would
+#     lose '가' and then '도' and land on '중요', a word the question never contained.
+#  3. 어미 of the 하-/되- verb frames a question predicate is built from ('주장하는',
+#     '제시하는가', '분석한'). These reduce to the noun root ('주장', '제시', '분석'),
+#     which is what the document actually spells in any of its inflections — '주장하는'
+#     as a literal misses '주장한다' and '주장했다' alike, '주장' hits all three.
+#
+# What is deliberately NOT here: any rule that is not a literal suffix. Korean 조사·
+# 어미 are productive and no enumeration closes them (#571's stop-word list says the
+# same about its own membership), so this table is a bounded improvement, not a
+# morphological analyzer — which the issue puts out of scope because an analyzer means
+# a model or a dictionary, and both break the offline/deterministic CI contract that
+# keeps _semantic_rerank opt-in.
+#
+# KNOWN, MEASURED over-strip. An entry that is also the last syllable of a real noun
+# mis-strips it, and the floor above only rescues the 2-character cases:
+#   '가': the agentive suffix — '전문가'→'전문', '이론가'→'이론'
+#   '이': '어린이'→'어린'
+#   '도': the degree suffix — '정확도'→'정확', '신뢰도'→'신뢰', '중요도'→'중요'
+# They are kept because the cost is bounded and one-sided: substring matching makes
+# the stem's match set a SUPERSET, so a mis-strip can only ADD documents, never hide
+# the ones the surface form found. Measured over the reference KB's 494 distinct Korean
+# 어절 of length>=_CJK_MIN, against the 127 files search() actually reads: 99 어절 (20%)
+# get a different matcher, and the files they reach go up by a median of 0 (84 of them
+# add nothing at all), a mean of 1.48, and a maximum of 67.
+#
+# That corpus DOES contain mis-strips — 17 found by reading all 99 pairs, among them
+# '오메가'→'오메', '서베이'→'서베', '몬테카를로'→'몬테카를', '폴딩속도'→'폴딩속', and
+# a set of verb inflections that leave a fragment rather than a root ('쓰지만'→'쓰지').
+# Their measured added-file cost is 0, all 17 of them: the fragment is a prefix of the
+# word it came from, so on this corpus it reaches the same file and no other. The whole
+# +1.48 comes from CORRECT strips, and both large ones ('코퍼스에'→'코퍼스' +67,
+# '초록이'→'초록' +66) land on one boilerplate comment line the demo corpus repeats in
+# 67 files — reach the bare forms always had, so it is a property of that corpus rather
+# than something the stripper invented.
+#
+# Dropping '가'/'이'/'도' would cost the most common question frames in Korean
+# ('무엇이', '차이가', 'X도 있는가') to buy back at most 1 file per mis-strip
+# ('이론가'→'이론' +1, '정확도'→'정확' +1, '신뢰도'→'신뢰' +1, and 전문가/소설가/
+# 정치가/어린이/중요도/민감도 all +0). The mis-strips above are pinned as tests so a
+# future widening cannot lose them.
+_KOREAN_TRAILING_SUFFIXES = tuple(
+    sorted(
+        {
+            # 1. 격조사 / 보조사
+            "이", "가", "을", "를", "은", "는", "의", "에", "도", "만",
+            "로", "와", "과", "에서", "에게", "에는", "에도", "으로",
+            "부터", "까지", "처럼", "보다", "마다", "조차", "마저",
+            # 2. 스택된 표층형
+            "에서는", "에서도", "에서의", "으로는", "으로도", "으로서", "으로써",
+            "로서", "로써", "로는", "로도", "에게는", "에게서", "와는", "과는",
+            "와의", "과의", "라도", "이라도", "라는", "이라는", "라고", "이라고",
+            # 3. 하-/되- 용언 프레임의 어미, 그리고 서술격 '이다' 계열
+            "하는", "하는가", "하는지", "하나", "하다", "한다", "하고", "하여",
+            "해서", "했나", "했는가", "한", "되는", "되는가", "되나", "된다",
+            "된", "인가", "인지",
+        },
+        key=lambda suffix: (-len(suffix), suffix),
+    )
+)
+
+
+def _korean_stem(word: str) -> str:
+    """*word* with one trailing 조사/어미 removed, or *word* unchanged.
+
+    The LONGEST matching entry decides, and it decides ALONE: if the stem it leaves
+    is not usable, the 어절 keeps its surface form rather than falling through to a
+    shorter entry. Falling through is what a first draft did, and it manufactured
+    keywords out of grammar — '이라는' has no usable stem under '이라는' itself, and
+    the fall-through then cut '는' off and produced '이라'; '것으로' produced '것으'.
+    Under one deciding entry those tokens are left alone, which is the honest answer:
+    the table matched the whole 어절, so the 어절 named no subject.
+
+    Three ways a stem is unusable, each measured rather than assumed:
+
+    - shorter than _CJK_MIN. This is 수용 기준 3 and it is what keeps '평가'→'평',
+      '국가'→'국', '온도'→'온' from happening.
+    - nothing CJK left. _is_cjk is `any()`, so 'ai가' reaches this branch; stripping
+      it would hand the CJK branch the bare token 'ai', and that branch matches by
+      SUBSTRING with no word boundaries — 'ai' would match 'available', 'training',
+      'chain'. The ASCII branch's lookarounds exist precisely to prevent that (they
+      are why 'api' does not match 'therapist'), so an ASCII-only stem is refused.
+    - the stem is ITSELF an entry in the table. Then the 어절 is two stacked 조사/
+      어미 and no content: '하는가' would otherwise yield '하는' and '으로만' would
+      yield '으로', each of which substring-matches a large share of ordinary Korean
+      prose and adds a near-constant to every document's coverage. Measured on the
+      wiki fixture corpus before this rule was added, '전문가 평가는 어떻게 하는가'
+      returned 3 files on '하는' alone against the 1 the question is about.
+    """
+    for suffix in _KOREAN_TRAILING_SUFFIXES:
+        if not word.endswith(suffix):
+            continue
+        stem = word[: -len(suffix)]
+        if len(stem) < _CJK_MIN or not _is_cjk(stem) or stem in _KOREAN_TRAILING_SUFFIXES:
+            return word
+        return stem
+    return word
+
+
 # ASCII tokens of 2+ characters become keywords, so a two-letter CONTENT initialism
 # ('AI', 'ML', 'RL', 'QA', 'NN') is a search term like any other (#583). It is only
 # 1-character tokens that are dropped for length.
@@ -865,34 +991,63 @@ def _tokenize_keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
     path that recovers nothing.
 
     The surface term is carried ALONGSIDE its compiled matcher, never re-derived
-    from `pattern.pattern`: the ASCII branch wraps the token in lookarounds and
-    both branches re-escape it, so unwrapping that string back into what the user
-    typed is a parser for this function's own output. The recall report (#575)
-    prints these terms, and printing `(?<!\\w)neurosymbolic(?!\\w)` at a human is
-    not a report.
+    from `pattern.pattern`: the ASCII branch wraps the token in lookarounds, both
+    branches re-escape it, and since #581 the CJK branch may have stripped a 조사
+    off it — so unwrapping that string back into what the user typed is a parser
+    for this function's own output, and for one of the three it is not even
+    invertible. The recall report (#575) prints these terms, and printing
+    `(?<!\\w)neurosymbolic(?!\\w)` at a human is not a report.
     """
+    # What has already claimed a matcher — the MATCHED string, not the surface token.
+    # Since #581 those differ: '근거를' and '근거가' in one question reduce to the same
+    # stem '근거', and admitting both would register two keywords for one query concept.
+    # _keyword_hits counts distinct terms, so the row that happens to contain '근거'
+    # would score coverage 2 against a row that covers two genuinely different words —
+    # and frequency would count every occurrence twice on top of that. Keying on the
+    # matcher makes ONE stem ONE keyword, which is #581 수용 기준 5 with no change to
+    # _excerpt_score's shape. The surface term of the FIRST 어절 is what gets carried,
+    # so the recall report (#575) still prints something the user typed.
+    # A CJK stem and an ASCII token can never collide here: _korean_stem refuses a
+    # strip whose result has no CJK character left.
     seen: set[str] = set()
     keywords: list[tuple[str, re.Pattern[str]]] = []
     # Tokenizer captures programming-term punctuation: internal '.'/'-' (node.js,
     # 도구가) and trailing '+'/'#' (c++, c#, f#), while excluding trailing
     # sentence punctuation. Plain \w runs (incl. CJK) still tokenize as before.
     for word in re.findall(r"\w+(?:[.+#-]+\w+)*[+#]*", question.lower(), flags=re.UNICODE):
-        if word in seen:
-            continue
         if _is_cjk(word):
             # Stop-word removal runs on the RAW 어절, and a token it drops produces
-            # NO pattern at all — not even a derived one. #581's 조사 stripper must
-            # therefore be added BELOW this guard (inside the len>=2 branch): run
+            # NO pattern at all — not even a derived one. #581's 조사 stripper is
+            # therefore BELOW this guard (inside the len>=_CJK_MIN branch): run
             # above it, '논문은' would first become the stem '논문' — 67 of 186
             # measured source files, against 1 for the surface form — and #571 would
             # get wider instead of fixed. No stage of _keyword_patterns bypasses
             # this guard, so there is no second path a stripper could slip through.
             if _cjk_stopword(word):
                 continue
-            if len(word) >= 2:
-                seen.add(word)
-                keywords.append((word, re.compile(re.escape(word))))
+            if len(word) < _CJK_MIN:
+                continue
+            term = _korean_stem(word)
+            # The guard again, on the STEM. The list is defined over standalone 어절
+            # surface forms, so a stem that IS one of those forms proves the 어절 was
+            # that function word carrying a particle: '이것을' → '이것', '여기에' →
+            # '여기'. Without this the stripper would take a function word the raw
+            # guard happens not to spell and make it WIDER than it was — pattern
+            # '이것' reaches every line pattern '이것을' reached and more — which is
+            # #571's defect re-entering through the new code path. Content words are
+            # not at risk from it: matching stays whole-token, so '반박논문은' → the
+            # stem '반박논문', which is not a listed form and stays a keyword. (This
+            # incidentally drops some of the 어절 #586 reports; #586's own scope —
+            # the stop-word list and the no-keyword diagnostic — is untouched here.)
+            if term != word and _cjk_stopword(term):
+                continue
+            if term in seen:
+                continue
+            seen.add(term)
+            keywords.append((word, re.compile(re.escape(term))))
         elif len(word) >= _ASCII_MIN and word not in _ASCII_FUNCTION_WORDS:
+            if word in seen:
+                continue
             seen.add(word)
             # Lookaround boundaries (not \b) so punctuation-edged tokens like
             # 'c++' / 'c#' match while 'api' still does not match inside
@@ -934,12 +1089,17 @@ def _keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
     - ASCII words (len>=2): word-boundary match — avoids substring false positives
       (e.g. 'api' in 'therapist'), and lets a two-letter initialism ('AI', 'QA') be
       a keyword on this path rather than only in a recovery stage (#583).
-    - CJK words (len>=2): substring match — CJK content words are commonly two
-      characters, and substring tolerates attached particles/조사 (e.g. '근거'
-      matches '근거는'). CJK compounding has no word delimiters, so a 2-char
-      query can substring-match inside an unrelated compound; this recall-over-
-      precision trade-off is acceptable for the UNVERIFIED exploration surface,
-      but do NOT reuse this matcher on a precision-sensitive path.
+    - CJK words (len>=_CJK_MIN): substring match on the token's STEM — one trailing
+      조사/어미 is removed first (#581, _korean_stem). Substring alone only ever
+      tolerated the particle on the DOCUMENT side ('근거' matches '근거는'); a real
+      Korean question carries the particle on the QUESTION side, and there substring
+      fails structurally ('근거를' misses '근거'). Stripping restores the missing
+      direction and keeps the other, because the stem's match set contains the
+      surface form's. CJK compounding has no word delimiters, so a 2-char query can
+      substring-match inside an unrelated compound, and a stem is by construction no
+      longer than the 어절 it came from; this recall-over-precision trade-off is
+      acceptable for the UNVERIFIED exploration surface, but do NOT reuse this
+      matcher on a precision-sensitive path.
     - Korean question function words (_CJK_QUESTION_STOPWORDS) are dropped, so the
       grammar of the question does not become a search term (#571).
 
