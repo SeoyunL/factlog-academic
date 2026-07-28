@@ -369,8 +369,17 @@ a_ign="$(extract_ignored "$allnote")"
 # 9. #229: a conversion whose body is only the provenance header (a scanned/
 #    image PDF -> pdftotext exits 0 with empty text) is counted as
 #    converted-but-empty and distinguished by `sources`/`status`, while a normal
-#    text PDF is unaffected. Guarded on pdftotext (the only converter that can
-#    exit 0 with empty output; the built-in converters treat empty as failure).
+#    text PDF is unaffected. Guarded on pdftotext because that is the converter
+#    THIS case needs — not because it is the only one that can reach the state.
+#    It is not, and the claim that it was is what #617 removed. Measured at
+#    bb3909c on a fresh KB: an empty `sources/x.html` and a minimal empty RTF
+#    (`{\rtf1\ansi}`) each go through pandoc, which exits 0 and writes a
+#    non-empty file, and `factlog ingest --scan` reports both as
+#    `converted-but-empty (likely scanned/needs OCR)`. What survives of the old
+#    parenthetical is narrower and still true: the BUILT-IN converters treat an
+#    empty extraction as failure (_conv_hwpx/_conv_hwp/_conv_pptx return False),
+#    and factlog/ingest.py:167 counts a zero-byte output as failure for every
+#    converter.
 # ---------------------------------------------------------------------------
 if command -v pdftotext >/dev/null 2>&1; then
   EMPTYKB="$(mktemp -d)/wiki"

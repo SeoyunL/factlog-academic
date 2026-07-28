@@ -306,8 +306,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # A brand-new KB has no candidates.csv. entity_audit prints a line and exits
     # 0 there; raising a traceback instead would make this unusable in the very
-    # automation the --strict gate is for (and contradicts the documented
-    # "always exits 0").
+    # automation the --strict gate is for, and would break this tool's own documented
+    # contract. Quoted exactly, because the two tools do not promise the same thing:
+    # "always exit 0" is entity_audit's wording (tools/entity_audit.py:8), while
+    # value_audit promises "Exit 0 by default" (module docstring) / "exits 0 by
+    # default" (docs/reference/value-audit.en.md). The narrower promise is the true
+    # one — this main() returns 1 for a blank --target above, and 1 under --strict
+    # when leaks are found.
     ensure_dirs()
     if not CANDIDATES_CSV.is_file():
         print("value_audit: no candidate facts")

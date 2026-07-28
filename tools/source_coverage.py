@@ -542,8 +542,29 @@ _LOST_CODES = frozenset({QUERY_RELATION_NOT_ACCEPTED, QUERY_ENTITY_NOT_ACCEPTED}
 _STATE_ORDER = ("resolvable", "lost", "unusable", "review")
 
 # Every state a question can land in, summary order. `lost` is the only one the
-# `--strict-questions` gate fires on: it is THE #537/#538 loss, and it is the only
-# verdict that does not rest on an estimate.
+# `--strict-questions` gate fires on — main() gates on `args.strict_questions and
+# unresolvable`, and report_questions returns exactly by_state["lost"]. It is THE
+# #537/#538 loss.
+#
+# It is NOT "the only verdict that does not rest on an estimate", which this comment
+# claimed until #617 and which is false in both readings. estimated_verdict() returns
+# `lost` itself (its `missing` branch), so the gate does fire on estimates; and
+# `review`/`unusable` are reachable only from draft_verdict(), so those are the states
+# that never rest on one. Reproduced at bb3909c on a KB carrying one declared question
+# naming `uses`, one needs_review row with that relation, an empty facts/accepted.dl
+# and no facts/query.dl:
+#
+#   $ python3 tools/source_coverage.py --target "$KB" --strict-questions; echo $?
+#   questions: 1 declared; 0 with resolvable vocabulary, 1 unresolvable
+#     (facts/query.dl absent — run /factlog query; questions estimated from text)
+#     - [q1] Which systems have uses rows?  (no query draft; estimated from the
+#       question text: relation 'uses' has no rows in engine input)
+#   --strict-questions: 1 declared question(s) with no engine-input vocabulary
+#   1
+#
+# What the gate does rest on: `lost` means a relation the KB still declares and engine
+# input no longer carries, on either route. Which route produced a given row is what
+# the `estimated` field and the `_ESTIMATE` reason prefix are for.
 _STATES = ("resolvable", "lost", "review", "no_vocabulary", "unmatched", "unusable")
 
 # What a fallback (no query draft) verdict prefixes its reason with, so a reader
