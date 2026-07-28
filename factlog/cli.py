@@ -720,6 +720,36 @@ explanation of its purpose.
 # - `league_rank` : ordinal as rank_value
 # - `valuation` : amount as valuation_won (억=1e8, 만=1e4, 원=1)
 """,
+    "policy/vocabulary-synonyms.md": """\
+# Vocabulary synonyms (two words for one concept)
+#
+# `/factlog ask` reaches an English source through the KB's own Korean facts by
+# matching a question word against an accepted relation name or object. That
+# matcher compares SPELLING, so it joins '해석가능성에서' to '해석가능한' and can
+# never join '해석가능성' to '설명가능성' — the two mean the same thing and differ
+# at the first character. Declare that pair here and the search crosses it; leave
+# this file empty and the search behaves exactly as it does without it.
+#
+# One group per line; every member wrapped in `backticks`, joined by '='
+# ('#' comments and '-' bullets allowed). A group is symmetric — asking with any
+# member reaches the vocabulary of every other:
+#
+#   - `해석가능성` = `설명가능성`
+#   - `부작용` = `이상반응` = `유해사례`
+#
+# Nothing is guessed: a pair that is not written here is not matched. A match made
+# through this file is LABELLED as such in the answer, so a reader can see which
+# declaration put a source in front of them — and a source reached this way stays
+# UNVERIFIED, like every other wiki excerpt.
+#
+# Two kinds of member are accepted but do nothing, because the matcher compares a
+# 3-character prefix over CJK words: a member shorter than 3 characters, and one
+# with no CJK in it (an all-ASCII question word already matches English source
+# text directly).
+#
+# Example (remove the leading '# ' to activate):
+# - `해석가능성` = `설명가능성`
+""",
     "policy/sync-ignore.md": """\
 # Sync-ignore list
 #

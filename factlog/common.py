@@ -205,6 +205,9 @@ class KbContext:
     def attribute_relations(self) -> set[str]:
         return _relation_names_from(self.policy_dir / "attribute-relations.md")
 
+    def vocabulary_synonyms(self) -> list[list[str]]:
+        return vocabulary_synonyms(self.root)
+
     def relation_aliases(self) -> dict[str, str]:
         # Resolving THIS KB's attribute relations needs THIS KB's alias map; reading
         # it from the ambient root made one KB answer differently under --target than
@@ -2126,6 +2129,114 @@ def canonical_variants_of(relation: str, aliases: dict[str, str]) -> set[str]:
     classify_query).
     """
     return surface_variants(unicodedata.normalize("NFC", relation), aliases)
+
+
+# --- vocabulary synonyms (policy/vocabulary-synonyms.md) ---------------------
+# Two words that mean the same thing and share no spelling. The engine's own
+# vocabulary cannot supply that relation and no rule can derive it: '해석가능성'
+# and '설명가능성' differ at the FIRST character, so every string-shaped rule —
+# prefix, substring, edit distance at any usable threshold — separates them, and
+# the only thing that joins them is somebody knowing what the two words mean.
+# Hence a declaration file, on the same terms as attribute-relations.md /
+# typed-relations.md / sync-ignore.md: the KB owner writes it, one line at a time,
+# and the tool does exactly what the line says and nothing else (#606).
+#
+# Parsing only. What a declared synonym is allowed to REACH is ask_router's rule,
+# not this file's — a group is a statement about words, and the KB-vocabulary
+# bridge is the only thing that currently reads one.
+
+# A group line: two or more backtick-quoted members joined by '='.
+#
+# Backticks are REQUIRED on every member, as in relation-aliases.md, and for the
+# same reason: without them a member's boundary is guesswork (a trailing space, a
+# member containing '=') and a mis-declared line reads as a valid one. '=' rather
+# than an arrow because synonymy has no direction — relation-aliases.md's `->`
+# means "rewrite the left as the right", and reading a synonym group that way
+# would say the KB's word replaces the user's.
+_SYNONYM_GROUP_RE = re.compile(r"^`[^`]+`(?:\s*=\s*`[^`]+`)+$")
+_BACKTICKED_RE = re.compile(r"`([^`]+)`")
+
+
+def vocabulary_synonyms(root: Path | None = None) -> list[list[str]]:
+    """Declared synonym groups from ``policy/vocabulary-synonyms.md``.
+
+    One group per line, every member backtick-quoted, joined by ``=``; '#'
+    comments and '-' bullets are allowed::
+
+        - `해석가능성` = `설명가능성`
+
+    Members are NFC-folded (the file is written by whatever editor touched it
+    last, and an NFD member would compare unequal to an NFC fact character by
+    character) and de-duplicated within their group, order preserved. Groups are
+    returned in file order and are NOT merged across lines: a member appearing in
+    two groups belongs to both, and a reader of this list sees exactly the lines
+    the author wrote.
+
+    Absent file → ``[]`` → every caller behaves as it did before the file existed.
+    *root* selects the KB (mirrors ``sync_ignore_patterns(root)``); ``None`` → the
+    module ``POLICY_DIR``.
+
+    A bad line is SKIPPED WITH A WARNING, never raised. relation_aliases() raises
+    on a bad mapping because an alias decides what a fact MEANS; a synonym group
+    only widens which sources an already-unverified answer may explore, so
+    aborting the answer over one malformed line would cost more than the line is
+    worth. Silence is not the alternative — an unapplied declaration is invisible
+    at the call site, which is the failure mode value-hierarchy.md's warnings
+    exist for.
+
+    Two shapes are dropped:
+
+    * a member holding an unprintable character. The file is hand-written, so a
+      pasted value can carry an ANSI escape or a C1 control, and the members are
+      rendered into an answer verbatim. This is the only place that check can be
+      made once: past here a group is an ordinary pair of strings.
+    * a group whose members collapse to one. ``\\`x\\` = \\`x\\``` declares
+      nothing, and a caller cannot tell it from a group that was meant to say
+      something.
+    """
+    base = (root / "policy") if root is not None else POLICY_DIR
+    path = base / "vocabulary-synonyms.md"
+    if not path.is_file():
+        return []
+    groups: list[list[str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = re.sub(r"^\s*[-*]\s+", "", line.strip()).strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not _SYNONYM_GROUP_RE.fullmatch(stripped):
+            # A line that MEANT to be a group — it carries the separator or a
+            # backtick — and is not one. Skipping it silently leaves the author
+            # believing a synonym is in force when it is not, which is the exact
+            # miss this file exists to close.
+            if "=" in stripped or "`" in stripped:
+                print(
+                    f"vocabulary-synonyms.md: skipping malformed line {line.strip()!r} "
+                    "(a group is two or more backticked members joined by '=': "
+                    "`a` = `b`)",
+                    file=sys.stderr,
+                )
+            continue
+        members: list[str] = []
+        for raw in _BACKTICKED_RE.findall(stripped):
+            member = unicodedata.normalize("NFC", raw.strip())
+            if member and member not in members:
+                members.append(member)
+        if any(not member.isprintable() for member in members):
+            print(
+                f"vocabulary-synonyms.md: skipping line {line.strip()!r} — a member "
+                "holds an unprintable character",
+                file=sys.stderr,
+            )
+            continue
+        if len(members) < 2:
+            print(
+                f"vocabulary-synonyms.md: skipping line {line.strip()!r} — a group of "
+                "one declares nothing",
+                file=sys.stderr,
+            )
+            continue
+        groups.append(members)
+    return groups
 
 
 def attribute_relations() -> set[str]:
