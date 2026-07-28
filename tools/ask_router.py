@@ -1791,6 +1791,24 @@ def grounding_facts(question: str, accepted: list[dict[str, str]]) -> list[dict[
 #     candidate status decides which SOURCE the bridge may quote (kb_vocabulary_bridge)
 #     but not whether the engine can answer a query — asking the two files the same
 #     question would report a proposal as unanswerable that the engine does answer.
+#
+# What this does NOT reach, measured on the issue's own example. #577 names two queries
+# its author found by hand; this generator produces one of them and can never produce
+# the other:
+#   relation(X, "비교_대상", "신경망_기반_모델")?   generated — 5th of 11, inside the cap
+#   relation(X, "이점", "설명가능성_향상")?         never a candidate
+# The second is not lost to the cap. The fact is in the reference KB (1 accepted fact),
+# but the question writes '해석가능성에서' where the KB writes '설명가능성' — synonyms
+# whose shared prefix is ZERO characters ('해' differs from '설' at the first one). So
+# no value of _BRIDGE_PREFIX_MIN reaches it: lowering the floor is not the missing
+# piece, a synonym relation is, and the author found that pair by knowing the two words
+# mean the same thing. What the bridge can reach is #576's design and widening it is
+# not this issue's scope (#577 is the proposal mechanism), so this is RECORDED, not
+# worked around — half of the issue's evidence is out of reach of the fix it motivated,
+# and a reader who does not know that will read the missing proposal as a bug here.
+# The pair is not unreachable in general: a question that types the KB's own word
+# proposes exactly that query today (measured on '지식그래프를 쓰면서 설명가능성도
+# 확보하는 연구는?').
 
 # How many proposals one answer may carry.
 #
