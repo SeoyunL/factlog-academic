@@ -298,30 +298,70 @@ if [ ! -f "$report" ]; then
   exit 2
 fi
 
-_mtime() {
-  local value
-  if value="$(stat -c %Y "$1" 2>/dev/null)" || value="$(stat -f %m "$1" 2>/dev/null)"; then
-    printf '%s\n' "$value"
-    return 0
-  fi
-  echo "[factlog GATE] DENIED: could not read mtime for $1" >&2
-  exit 2
-}
-
-# Find the most recently modified engine input file that exists.
-newest_input_mtime=0
+# FRESHNESS (predicate branch C): deny unless the report post-dates every engine
+# input that exists. `-ot` is bash's own mtime comparison, so this needs no
+# external command — the whole predicate below runs on builtins.
+#
+# It used to materialise the numbers with `stat` (-c %Y for GNU, then -f %m for
+# BSD) and, when neither form produced one, deny with "could not read mtime".
+# Two things were wrong with that, and #600 separates them:
+#
+#   COVERAGE — no row in tests/test_gate_check.sh ever executed that deny.
+#   Instrumenting the branch and running the file scored 0 hits across all 66
+#   rows. CASE 22's comment claimed its empty-PATH row reached `stat`
+#   "incidentally"; it does not — that KB has no report, so the deny just above
+#   returns first, and the same instrumentation scores 0 on that fixture alone.
+#
+#   VERDICT — the deny was wrong on its own terms. "stat is not on PATH" is a
+#   fact about the environment, not about the KB. By that point the gate has
+#   established the report EXISTS; it then denied a write whose report may well
+#   have been fresh, because a coreutil was out of reach. Measured: a KB with an
+#   existing accepted.dl and a newer logic_report.txt, targeted by a Write, exits
+#   0 normally and exited 2 "could not read mtime" with PATH emptied and the
+#   interpreter reached by absolute path (so the fail-closed python check above
+#   still passes and the deny provably came from here).
+#
+# That is the defect #591 removed from the engine-input probe one branch up, in
+# the same shape: an external command deciding a security verdict on whether
+# PATH happens to carry it. #591's answer was not to pick a safer direction for
+# the missing-command case but to stop needing the command, and the answer here
+# is the same. With `-ot` the state "cannot read mtime because stat is absent"
+# no longer exists, so there is no longer a verdict to get wrong — which is also
+# why this ships without a case pinning that deny: the branch is gone, not
+# merely untested.
+#
+# Deleting a deny moves verdicts deny -> allow, which #596 treats as widening the
+# trust boundary, so name the set that moves: exactly {report exists AND report
+# is genuinely fresh AND stat unreachable}. Nothing in it is payload-controlled
+# — PATH is not an input this gate is a boundary against, since whoever sets it
+# also chose the bash and the interpreter running this file — and the
+# complementary set {report exists AND genuinely stale AND stat unreachable}
+# still denies. CASE 24 pins both halves as a pair in one environment.
+#
+# Resolution, measured rather than assumed. On bash 3.2.57 (macOS /bin/bash)
+# `-ot` compares whole seconds, identical to `stat -f %m`: two files 0.10s and
+# 0.90s into the SAME second compare as not-older. GNU bash compares finer. That
+# divergence cannot open the guard in either direction, because sec(a) < sec(b)
+# implies ns(a) < ns(b) — a finer comparison denies a superset of what a coarser
+# one denies, never a different set. Equal mtimes are not "older" at either
+# resolution, which keeps the >= in the header exact (CASE 24 pins that row).
+# The sub-second window is the one part that moves with the bash build and is
+# deliberately left unasserted; where it moves is toward factlog's other copy of
+# this predicate, `factlog status`, which reads st_mtime as a float.
+#
+# Residual, stated rather than dismissed: `-ot` re-stats paths that `[ -f ]` just
+# stated, and reports a failed stat as a boolean rather than as an error. A file
+# that vanishes between the two calls is judged "not older", i.e. allowed. That
+# window is not measured here and is not claimed to be impossible.
+report_stale=false
 for f in "$accepted" "$query"; do
-  if [ -f "$f" ]; then
-    mtime="$(_mtime "$f")"
-    if [ "$mtime" -gt "$newest_input_mtime" ]; then
-      newest_input_mtime="$mtime"
-    fi
+  if [ -f "$f" ] && [ "$report" -ot "$f" ]; then
+    report_stale=true
+    break
   fi
 done
 
-report_mtime="$(_mtime "$report")"
-
-if [ "$report_mtime" -lt "$newest_input_mtime" ]; then
+if [ "$report_stale" = true ]; then
   echo "[factlog GATE] DENIED: facts/logic_report.txt is stale." >&2
   echo "  The report predates the last modification to facts/accepted.dl or facts/query.dl." >&2
   echo "  Run /factlog check (\"\${CLAUDE_PLUGIN_ROOT}\"/tools/factlog_python.sh \"\${CLAUDE_PLUGIN_ROOT}\"/tools/run_logic_check.py)" >&2
