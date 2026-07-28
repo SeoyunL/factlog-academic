@@ -29,12 +29,14 @@ SOURCE_MD = """\
 """
 
 
-def build(tmp_path, sources, *, accepted=None, candidates=None, supplementary=None):
+def build(tmp_path, sources, *, accepted=None, candidates=None, supplementary=None, synonyms=None):
     """A KB root with the given {name: body} sources and optional fact files."""
     root = tmp_path / "kb"
     (root / "facts").mkdir(parents=True)
     (root / "sources").mkdir()
     (root / "policy").mkdir()
+    if synonyms is not None:
+        (root / "policy" / "vocabulary-synonyms.md").write_text(synonyms, encoding="utf-8")
     for name, body in sources.items():
         (root / "sources" / f"{name}.md").write_text(
             SOURCE_MD.format(title=name, body=body), encoding="utf-8"
@@ -366,6 +368,48 @@ class TestOneCreditPerFile:
             "sources/c-thin.md:3",  # credited: (2, 1 + 1)
         ]
         assert len({r["file"] for r in top}) == 3
+
+
+    def test_a_credit_reached_through_a_declared_synonym_is_damped_the_same_way(self, tmp_path):
+        # #606 lets a question word reach the KB's vocabulary through
+        # policy/vocabulary-synonyms.md, and that term joins #594's credit like any
+        # other. So it inherits this defect too: it is still a per-FILE constant, and
+        # without the damping a single declaration would lift every excerpt of the
+        # declared file as a block. The rule does not distinguish how a term was
+        # reached — asserted here rather than left to read off _credit_backing,
+        # because the two channels meet in kb_vocabulary_bridge and a change on
+        # either side could quietly exempt one.
+        #
+        # Same geometry as the first test in this class: the credit lifts f-backed's
+        # first excerpt above z-plain and leaves its second below.
+        root = build(
+            tmp_path,
+            {
+                "f-backed": "해석가능성 해석가능성 해석가능성 결과.\n" + "\n" * 8 + "해석가능성 결과.",
+                "z-plain": "해석가능성 그리고 재현가능성 결과.",
+            },
+            accepted='relation("s", "이점", "설명가능성_향상").\n',
+            candidates=csv_rows("s,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,"),
+            synonyms="- `재현가능성` = `설명가능성`\n",
+        )
+        question = "해석가능성에서 재현가능성을"
+        # Premise: the reach really is the table's. '재현가능성' shares no prefix with
+        # '설명가능성' — without the declaration this question backs nothing at all,
+        # and the assertion below would be about the previous test's axis.
+        bridged = ask_router.kb_vocabulary_bridge(question, root)
+        assert list(bridged) == ["sources/f-backed.md"]
+        assert bridged["sources/f-backed.md"]["synonyms"] == [["재현가능성을", "설명가능성"]]
+        assert ask_router.kb_vocabulary_bridge(question, build(
+            tmp_path / "nosyn",
+            {"f-backed": "해석가능성 결과."},
+            accepted='relation("s", "이점", "설명가능성_향상").\n',
+            candidates=csv_rows("s,이점,설명가능성_향상,sources/f-backed.md,confirmed,0.9,"),
+        )) == {}
+        assert refs(ask_router.search(question, root, limit=None)) == [
+            "sources/f-backed.md:3",  # credited: (2, 3 + 1)
+            "sources/z-plain.md:3",  # lexical only: (2, 2)
+            "sources/f-backed.md:12",  # uncredited: (1, 1)
+        ]
 
 
 class TestWhatTheCreditMayNotOverrule:
