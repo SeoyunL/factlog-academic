@@ -370,8 +370,10 @@ def coverage_hint(
     # is_quoted_string gate above has already required — both are past
     # QueryVocabulary.accepts_subject, which tests canonical_value(subject) against
     # {canonical_value(e) for e in entity_set(facts)}: the same fold over the same set
-    # the next line builds. Confirmed two ways over tests/unit at 279d37f (6237 passed,
-    # 1 skipped both times): deleting the guard leaves the suite green, and replacing
+    # the next line builds. Confirmed two ways at ff34eee, by
+    # `python -m pytest tests/unit -q` (6288 passed, 1 skipped both times, matching
+    # baseline; identical at f03b816, so the result survived a base change):
+    # deleting the guard leaves the suite green, and replacing
     # its `return None` with a raise ALSO leaves it green — so the branch is not merely
     # unasserted, it is never taken. If classify's routing codes, entity_set's default
     # arguments, or canonical_value's identity on either side ever diverge from this
@@ -1621,10 +1623,15 @@ def _fill_recall(
 # '논문은') and this floor does not touch them. What excludes THEM is the filter:
 # _bridge_terms reuses _keywords instead of re-tokenizing, so #571's stop-word list is
 # in force here too (see its docstring). On the reference KB none of the 41 would
-# bridge even without that filter — measured, 0 of the 41 shares a 3-character prefix
-# with any of the 1656 vocabulary words — but that is a property of one KB's
-# vocabulary, not a structure, so it is a measurement and not the guarantee. The
-# guarantee for those 41 is the filter, and deleting it is not covered by this floor.
+# bridge even without that filter — measured at ff34eee, 0 of the 41 shares a
+# 3-character prefix with any of its 1656 vocabulary words — but that is a property of
+# one KB's vocabulary, not a structure, so it is a measurement and not the guarantee.
+# It is also scoped to the DIRECT hop: since #606 a term can reach the vocabulary
+# through a declared synonym group as well, so that count enumerates every way to
+# bridge only on a KB with no policy/vocabulary-synonyms.md — which the reference KB
+# is (measured: vocabulary_synonyms() returns [], the file is absent). Declare groups
+# and a 3+ character function word could reach one. The guarantee for those 41 is
+# therefore the filter alone, and deleting it is not covered by this floor.
 #
 # The cost is real and deliberate: a two-syllable CONTENT noun ('근거', '추론')
 # cannot bridge either. Buying those back means telling '근거' from '대비', which is
@@ -2329,13 +2336,32 @@ def search(
     # excerpt must never displace a primary one no matter how many times it repeats
     # a keyword. The consequence is deliberate: because grade is the top key and the
     # cap is applied to the SORTED list, a KB whose primary excerpts alone fill the
-    # cap shows no supplementary excerpt at all. Measured on the reference KB with
-    # the query '오메가-3 보충이 COPD 환자에게 효과있음을 보인 연구는?', which returns
-    # 134 excerpts — 124 primary, 10 supplementary: before this change the top 10
-    # held 4 supplementary excerpts INCLUDING rank 1; after it the 10 supplementary
-    # excerpts occupy ranks 125-134, none inside the default cap. That is the
-    # intended reading of "supplementary": context for a question the sources do
-    # not answer, not a competitor to them.
+    # cap shows no supplementary excerpt at all.
+    #
+    # Measured, with the definition and the invocation written down because this
+    # comment has already gone stale on bare numbers once (#601). The measurement is
+    # search() over the reference KB with FACTLOG_EMBED_MODULE unset — the bundled
+    # lexical path — asked '오메가-3 보충이 COPD 환자에게 효과있음을 보인 연구는?',
+    # counting the rows of search(q, root, limit=None) by their 'dir', then the rows of
+    # search(q, root) at ITS default limit of 10 (not DEFAULT_RENDER_ROW_LIMIT):
+    #
+    #   at ff34eee, post-#602: 169 excerpts — 141 primary, 28 supplementary. The 28
+    #   occupy ranks 142-169, and the default 10 rows are 10 primary excerpts from 10
+    #   distinct files — NO supplementary excerpt inside the cap.
+    #
+    # Those three totals are dated, not invariant: they read 134/124/10 when #572 wrote
+    # this, and #576's bridge and #594's backing have added rows since. What does not
+    # move is the LAST clause, and that is the contract — supplementary lands entirely
+    # behind primary, so a cap primary alone fills shows none of it. #602 changed how
+    # many rows one file's backing may lift and did NOT move any of these figures, which
+    # is structural rather than lucky: grade is the top key, so _credit_backing reorders
+    # only WITHIN a grade group and cannot carry a row across the primary/supplementary
+    # split. Re-measured after that merge and again at ff34eee — identical both times.
+    # The state #572 replaced is no longer samplable: its top 10 held
+    # 4 supplementary excerpts INCLUDING rank 1, recorded here because it is why the
+    # grade key leads, not as something to re-check. That is the intended reading of
+    # "supplementary": context for a question the sources do not answer, not a
+    # competitor to them.
     # Supplementary excerpts are never FILTERED — they are collected and ranked as
     # before and reappear as soon as primary matches run short (or under `--all`,
     # which passes limit=None).
@@ -2643,13 +2669,18 @@ def decomposition_candidates(
             #   not decision["negative"] — mirrors the scope gate cmd_render branches
             #     on, and changes NO result here: a draft built from a fact that is
             #     present cannot classify as fact_absent, and if it somehow did, the
-            #     0-row guard below would drop it anyway. Measured at 279d37f, with the
-            #     suites named so the claim can be re-run rather than believed: removing
-            #     this half alone moves nothing — tests/unit 6237 passed / 1 skipped,
-            #     tests/test_ask_router.sh 258 passed, tests/test_ask_wiki_search.sh 76
-            #     passed, all identical to baseline. Removing the ROUTE half instead
-            #     fails the four TestTheValidatorGate cases named above — measured on
-            #     tests/unit/test_ask_decomposition.py, 4 failed / 24 passed; whether
+            #     0-row guard below would drop it anyway. Measured at ff34eee (and
+            #     identical at f03b816), with the suites and their INVOCATIONS named so
+            #     the claim can be re-run rather than believed: removing this half
+            #     alone moves nothing —
+            #     `python -m pytest tests/unit -q` 6288 passed / 1 skipped,
+            #     `PYTHON=<venv>/bin/python bash tests/test_ask_router.sh` 278 passed
+            #     (that harness reads PYTHON, not FACTLOG_PYTHON; with the default
+            #     interpreter it reports 258 and the difference is 20 pyrewire SKIPs),
+            #     `bash tests/test_ask_wiki_search.sh` 90 passed — all identical to
+            #     baseline. Removing the ROUTE half instead fails the four
+            #     TestTheValidatorGate cases named above — measured on
+            #     tests/unit/test_ask_decomposition.py, 4 failed / 28 passed; whether
             #     that mutant also moves anything outside that file was not measured.
             #     The two halves are not interchangeable. This one is kept so the two
             #     call sites read as one contract, not because it decides anything.
