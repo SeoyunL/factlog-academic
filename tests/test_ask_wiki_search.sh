@@ -376,7 +376,12 @@ ko_refs="$(refs "$Q_KO" || true)"
 # accepted 어휘를 경유해 한 건 추가된다. 승격 대상이 4건이 아니라 1건인 것이 이 값의
 # 요점이다 — 나머지 셋은 status(superseded/needs_review)와 이미 인용된 파일이라는
 # 이유로 걸러진다 (아래 PIN7).
-same "PIN2 한국어 질문의 발췌 수 (#581 이 바꾼다)" "4" "$(printf '%s\n' "$ko_refs" | grep -c .)"
+# 4 -> 3 은 #574 가 바꿨다 (값 갱신, pin 유지). kim-2024 는 front matter 의 title 행
+# (:4) 과 본문 제목행 (:14) 에서 각각 한 건씩 나왔는데, 둘 다 산문 0줄이었다. #574 가
+# :4 발췌에 본문 첫 줄을 붙이면서 겹침 축약 지점이 그 본문 줄까지 내려가고, 사이에
+# 있던 :14 발췌(메타데이터 + 헤딩뿐)가 흡수된다. 사라진 것은 발췌 하나이지 파일이
+# 아니다 — kim-2024 는 여전히 :4 로 인용되고, 이제 초록 문장을 싣는다 (PIN5).
+same "PIN2 한국어 질문의 발췌 수 (#581 이 바꾼다)" "3" "$(printf '%s\n' "$ko_refs" | grep -c .)"
 
 # 이 값은 현재 결함을 고정한 것이다. 이슈 #581 이 이를 바꾼다. '근거를' 은 어간 '근거'
 # 를 담은 이 파일을 매치하지 못한다 — 조사가 분리되면 이 파일이 결과에 들어와야 한다.
@@ -419,6 +424,12 @@ ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
 # 배치의 부수 효과이자 증거다.
 # 제안이 3건인 것도 이 pin 이 함께 고정한다: 브리지된 accepted 사실은 4건인데, 0005 는
 # U+2028 을 담고 있어 질의 줄로 적을 수 없어 떨어진다(그 사실이 마지막 줄로 보고된다).
+#
+# #574 는 'source excerpts' 줄 하나만 4 -> 3 으로 움직인다 (값 갱신, pin 유지). 이유는
+# PIN2 발췌 수 pin 과 같다. 매치 실적 줄(3/4)과 제안 블록이 함께 움직이지 않는 것이
+# 이 갱신의 요점이다: 리콜 집계는 방출이 아니라 스캔 시점에 잡히므로 (search() 의
+# docstring 이 last_end 축약을 그 이유로 명시한다), 발췌가 흡수되어도 그 줄이 담던
+# 키워드는 여전히 matched 다. 두 줄이 같이 움직였다면 #575 의 계약이 깨진 것이다.
 ko_head="$(printf '%s\n' "$ko_answer" | awk '/^\[/{exit} {print}')"
 same "PIN2 답변 머리 블록 전체 — 매치 실적 진단과 분해 제안이 붙는다 (#575/#577 이 바꿨다)" \
   "UNVERIFIED — wiki exploration
@@ -426,7 +437,7 @@ question: $Q_KO
 reason: unknown entity
 WARNING: unverified candidates — do not treat as confirmed facts.
 sources searched: sources, runs/sources, decisions (supplementary)
-source excerpts: 4
+source excerpts: 3
 keywords matched: 3/4 — 신경기호, 추론의, 근거를
 keywords unmatched: 제시하는가
 
@@ -478,9 +489,14 @@ same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄�
 # 없다. 게다가 kim 은 이미 1·2위라 가산해도 순서가 바뀔 수 없다. 이 축을 Q_KO 로 보게
 # 하려면 코퍼스 파일을 새로 넣어야 하는데, 그러면 PIN2 의 발췌 수(4)가 이 이슈와 무관한
 # 이유로 움직인다. 그래서 축은 PIN9 가 자기 질문으로 본다.
+#
+# #574 는 kim-2024 의 두 번째 발췌(:14)만 지운다 (값 갱신, pin 유지). 남은 세 행의
+# 상대 순서도, 각 행의 점수도 움직이지 않는다 — #574 가 붙이는 본문 줄은 표시 전용이고
+# 채점은 창(lines[start:end])에 대해 그대로 이루어진다. 실측: kim:4 (2,2), faronius:16
+# 어휘 경유 (1,1), decisions:3 (3,5). 이 pin 이 고정하는 것(등급이 최상위 키다)은 세
+# 행만으로도 그대로 보인다: decisions 는 두 성분 모두 최고인데 여전히 꼴찌다.
 same "PIN3 한국어 질문의 랭킹 순서 — 등급이 커버리지·빈도보다 우선한다 (#572/#576 이 바꿨다)" \
   "sources/kim-2024-neurosymbolic-grounding.md:4
-sources/kim-2024-neurosymbolic-grounding.md:14
 sources/faronius-2025-attention-budget.md:16
 decisions/open-questions.md:3" \
   "$ko_refs"
@@ -588,36 +604,41 @@ else
 fi
 
 # =============================================================================
-# PIN 5 — excerpt window: front matter swallows the window, prose is suppressed
+# PIN 5 — excerpt window: front matter 앵커 발췌가 본문 첫 줄에 닿는다 (#574)
 # =============================================================================
 fm_excerpt="$(excerpt_of "$Q_KO" 'sources/kim-2024-neurosymbolic-grounding.md:4' || true)"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #574 가 이를 바꾼다. 발췌 창(_EXCERPT_WINDOW=3)
-# 이 front matter 안의 title 행에 앵커되면, 7줄 전부가 YAML 메타데이터고 산문은 0줄이다.
-same "PIN5 front matter 앵커 발췌는 산문 0줄이다 (#574 가 바꾼다)" \
+# 이 세 값은 #574 가 갱신했다. 그 전에는 결함을 고정하고 있었다: 발췌 창
+# (_EXCERPT_WINDOW=3)이 front matter 안의 title 행에 앵커되면 7줄 전부가 YAML
+# 메타데이터고 산문은 0줄이었다. 이제 그 7줄 뒤에 생략 표시와 문서의 첫 본문 줄이
+# 붙는다. 결함 pin 이 아니라 회귀 가드가 됐다.
+#
+# 창을 키우지 않은 이유가 이 값 안에 있다: 창으로 line 4 에서 line 18 에 닿으려면
+# 반경 13 이 필요하고 그러면 코퍼스의 모든 발췌가 27줄이 된다. 여기서 늘어난 것은
+# 2줄이다.
+same "PIN5 front matter 앵커 발췌에 본문 첫 줄이 붙는다 (#574 가 바꿨다)" \
   '---
 zotero_key: "K2M4N6P8"
 item_type: "journalArticle"
 title: "신경기호 추론의 근거 추적"
 authors: ["Kim, Jisoo", "Park, Minho"]
 year: "2024"
-journal: "인지과학회지"' \
+journal: "인지과학회지"
+…
+이 논문은 신경기호 추론이 산출한 결론의 근거를 역추적하는 절차를 제안한다.' \
   "$fm_excerpt"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #574 가 이를 바꾼다. 두 번째 발췌는 본문
-# 제목행에 앵커되지만 '## Abstract' 헤딩에서 끊긴다 — 초록 본문은 창 밖이다.
-same "PIN5 두 번째 발췌는 '## Abstract' 헤딩에서 끝난다 (#574 가 바꾼다)" \
-  'imported_at: "2024-03-01T00:00:00Z"
----
+# 이 값도 #574 가 갱신했다. 그 전에는 본문 제목행(:14)에 앵커된 두 번째 발췌가 있었고
+# 그것도 메타데이터와 헤딩뿐이었다. 위 발췌의 겹침 축약 지점이 본문 줄까지 내려가면서
+# 그 발췌는 흡수되어 사라진다 — 빈 문자열이 기대값이다.
+# 사라진 것이 발췌이지 파일이 아니라는 것은 위 fm_excerpt 가 함께 고정한다.
+same "PIN5 헤딩에서 끝나던 두 번째 발췌는 흡수되어 사라진다 (#574 가 바꿨다)" \
+  "" \
+  "$(excerpt_of "$Q_KO" 'sources/kim-2024-neurosymbolic-grounding.md:14' || true)"
 
-# 신경기호 추론의 근거 추적
-
-## Abstract' \
-  "$(excerpt_of "$Q_KO" 'sources/kim-2024-neurosymbolic-grounding.md:14')"
-
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #574 가 이를 바꾼다. 초록 문장은 이 파일에서
-# 키워드 커버리지가 가장 높은 행(신경기호/근거를 = 2개 매치, 파일 내 최대)인데도, 바로
-# 앞 발췌의 last_end 안에 들어가 억제되어 어떤 발췌에도 나타나지 않는다.
+# 초록 문장은 이 파일에서 키워드 커버리지가 가장 높은 행(신경기호/근거를 = 2개 매치,
+# 파일 내 최대)이다. #574 이전에는 그 사실이 바로 앞 발췌의 last_end 에 억제되어
+# 답변 어디에도 나타나지 않았다.
 # (3,3) -> (2,2) 는 #571 이 바꿨다: 이 문장의 '이 논문은' 이 기능어로 빠졌다.
 if py "
 import os, sys
@@ -628,10 +649,12 @@ assert a._excerpt_score(line, a._keyword_patterns('''$Q_KO''')) == (2, 2), a._ex
     line, a._keyword_patterns('''$Q_KO'''))
 " 2>/dev/null; then ok "PIN5 초록 문장은 파일 내 최고 커버리지 행이다 (2개 키워드 매치)"; else bad "PIN5 초록 문장의 점수가 이동했다 — 픽스처를 확인하라"; fi
 
+# 이 pin 은 #574 가 뒤집었다 (그 전에는 "억제되어 답변에 없다" 는 결함을 고정했다).
+# 결함 pin 이 아니라 회귀 가드가 됐다: 이 문장이 다시 사라지면 본문 부착이 끊겼다는 뜻이다.
 if printf '%s\n' "$ko_answer" | grep -qF '역추적하는 절차를 제안한다'; then
-  bad "PIN5 초록 문장이 이미 노출된다 — #574 가 머지됐다면 이 pin 을 갱신하라"
+  ok "PIN5 최고 커버리지 초록 문장이 답변에 노출된다 (#574 가 바꿨다)"
 else
-  ok "PIN5 최고 커버리지 초록 문장이 last_end 로 억제되어 답변에 없다 (#574 가 바꾼다)"
+  bad "PIN5 초록 문장이 답변에 없다 — #574 의 본문 부착이 동작하지 않는다"
 fi
 
 # =============================================================================
@@ -751,9 +774,11 @@ print(len(a._bridged_facts('논문 근거 추론', KbContext.for_root('$KB').loa
 degraded="$_TMP_KB/degraded"
 cp -R "$KB" "$degraded"
 rm -f "$degraded/facts/candidates.csv"
+# kim-2024 의 :14 발췌는 #574 가 흡수했다 (값 갱신, pin 유지). 이 pin 이 고정하는 것은
+# "승격 행이 0 이고 렉시컬 결과는 그대로" 이므로, 렉시컬 쪽 발췌 기하가 바뀌면 값도
+# 같이 움직인다 — PIN3 의 목록에서 같은 행이 같은 이유로 빠진 것과 짝을 이룬다.
 same "PIN7 candidates.csv 가 없으면 승격 없이 기존 렉시컬 결과만 남는다 (수용 기준 5)" \
   "sources/kim-2024-neurosymbolic-grounding.md:4
-sources/kim-2024-neurosymbolic-grounding.md:14
 decisions/open-questions.md:3" \
   "$("$PYTHON" "$ROUTER" search "$Q_KO" --all --target "$degraded" | "$PYTHON" -c "
 import json, sys
@@ -902,7 +927,10 @@ Q_BACK='신경기호 추론 evidence'
 # 픽스처를 먼저 단언한다. 이 축의 pin 은 "인용된 파일에 백킹이 있다" 는 전제가 살아
 # 있어야만 의미가 있고, 그 전제가 깨지면 아래 순서 pin 은 "가산할 것이 없어서 순서가
 # 그대로" 인 상태를 통과로 읽는다 (#575 가 찾은 공허한 체크와 같은 형태).
-#   - 결과가 4행이다: 절단 뮤턴트가 통과하지 못하도록 크기를 먼저 고정한다.
+#   - 결과가 3행이다: 절단 뮤턴트가 통과하지 못하도록 크기를 먼저 고정한다.
+#     4 -> 3 은 #574 가 바꿨다 (값 갱신, pin 유지) — kim-2024 의 :14 발췌가 :4 발췌에
+#     흡수됐다. 이 축(백킹)과는 무관한 이유이고, 아래 순서 pin 이 그 사실을 함께 보인다:
+#     남은 세 행의 상대 순서는 그대로다.
 #   - 브리지가 닿는 파일은 faronius 하나이고, 그 파일은 렉시컬로도 인용된다
 #     ('evidence'). 그래서 승격 행은 0 이다 — 이슈가 말한 구조적 상황 그대로다:
 #     KB 가 가장 할 말이 많은 파일에서 브리지가 아무것도 하지 못한다.
@@ -913,7 +941,7 @@ sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 kb = pathlib.Path('$KB')
 rows = a.search('''$Q_BACK''', kb, limit=None)
-assert len(rows) == 4, [r['file'] for r in rows]
+assert len(rows) == 3, [r['file'] for r in rows]
 assert [r for r in rows if r.get('via')] == [], [r['file'] for r in rows if r.get('via')]
 bridged = a.kb_vocabulary_bridge('''$Q_BACK''', kb)
 assert list(bridged) == ['sources/faronius-2025-attention-budget.md'], list(bridged)
@@ -938,11 +966,19 @@ print(len(rows), [r['file'] for r in rows if r.get('via')], list(a.kb_vocabulary
 # 가 합류해 커버리지 2, 빈도는 렉시컬 1 + 백킹 사실 2 = 3 이므로 kim(2,2)을 앞선다.
 # 두 성분이 모두 필요하다: 커버리지만 가산하면 (2,1) 로 kim 뒤, 빈도만 가산하면 (1,3)
 # 으로 역시 kim 뒤다. 그래서 이 pin 은 한쪽만 죽인 뮤턴트도 잡는다.
+#
+# #574 는 이 목록에서 kim 의 :14 행만 지운다 (값 갱신, pin 유지). 이 축의 판별력은
+# 그대로다 — 실측으로 확인했다: 이 픽스처에서 kb_vocabulary_bridge 를 통째로 죽이면
+# 순서가 kim:4 -> faronius:19 로 뒤집힌다. #574 가 붙이는 본문 줄이 채점에 들어가지
+# 않는 이유가 정확히 이것이다. 채점에 넣으면 kim:4 의 빈도가 (2,2) -> (2,4) 로 올라
+# faronius(2,3)를 앞서고, 그 상태에서는 백킹을 완전히 제거해도 이 목록이 한 글자도
+# 바뀌지 않는다 — 이 pin 이 자기 축을 못 보게 된다. 질문을 바꿔서 되살릴 수도 없다:
+# 브리지가 조인하는 어절('신경기호')은 title 과 초록에 모두 있으므로 front matter 행이
+# 항상 그 어절을 두 번 얻는다 (후보 질문 36개를 이 픽스처에서 훑어 확인).
 back_refs="$(refs "$Q_BACK")"
 same "PIN9 인용된 행이 KB 어휘 백킹으로 앞선다 (#594 가 바꿨다; 이전에는 kim 두 발췌가 1·2위)" \
   "sources/faronius-2025-attention-budget.md:19
 sources/kim-2024-neurosymbolic-grounding.md:4
-sources/kim-2024-neurosymbolic-grounding.md:14
 decisions/open-questions.md:3" \
   "$back_refs"
 
@@ -1135,6 +1171,147 @@ case "$cap_block" in
   *)
     bad "PIN10 절단 보고가 없다 — 10건 중 6건만 보이는데 나머지 4건은 침묵했다: [$cap_block]" ;;
 esac
+
+# =============================================================================
+# PIN 11 — front matter 본문 부착 (#574): 경계, 표시/채점 분리, 두 번째 사이트
+# =============================================================================
+# PIN5 는 이 동작이 공유 픽스처의 한 파일에서 무엇을 내는지 고정한다. 여기서 고정하는
+# 것은 그 하나의 발췌가 보여줄 수 없는 축들이다: 부착이 일어나지 **않는** 조건들, 붙인
+# 줄이 점수에 들어가지 않는다는 것, 그리고 브리지 경로(#576)의 두 번째 발췌 사이트.
+
+# --- 경계: 부착이 일어나지 않는 다섯 가지 (수용 기준 2) ----------------------
+# 화이트박스로 본다. 이 축들은 코퍼스 파일을 새로 넣어야 종단으로 볼 수 있는데, 넣으면
+# PIN2 의 발췌 수와 PIN3 의 순서가 이 이슈와 무관한 이유로 움직인다 — 이 파일이 머리말
+# 에서 "가장 진단하기 어려운 pin 실패" 라고 부르는 그 형태다.
+#
+# 각 항목은 '기존 동작으로 축약된다' 를 값으로 적는다. `None` 이나 예외가 아니라
+# 창(lines[start:end])과 end-1 이 그대로 나오는 것이 계약이다.
+#
+# 성공은 마지막 줄의 토큰으로 확인한다. 단언이 깨지면 그 자리의 트레이스백이 값으로
+# 나와 어느 경우가 움직였는지 그대로 보인다. 토큰이 막는 것은 딱 하나다: 스크립트가
+# 아예 실행되지 못하거나 아무것도 출력하지 못한 상태가 통과로 읽히는 것. 단언을 지우고
+# print 만 남기면 이 체크는 여전히 통과하므로, 토큰은 공허함 전반에 대한 보증이 아니다.
+same "PIN11 부착 경계 — front matter 뿐/미닫힘/없음/본문 매치/창이 이미 닿음은 기존 창 그대로다 (수용 기준 2)" \
+  "EDGES PINNED" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+
+def span(text, start, end, match):
+    lines = text.splitlines()
+    return a._excerpt_span(lines, start, end, match, a._body_anchor(text, lines))
+
+# (1) 문서 전체가 front matter 뿐이다 — 구할 본문이 없다 (수용 기준 2).
+only_fm = '---\ntitle: \"t\"\nimported_at: \"z\"\n---\n'
+assert a._body_anchor(only_fm, only_fm.splitlines()) is None
+assert span(only_fm, 0, 3, 1) == (['---', 'title: \"t\"', 'imported_at: \"z\"'], 2)
+
+# (2) 닫는 펜스가 없다 — front matter 의 범위를 모르므로 아무것도 본문이라 부르지 않는다.
+unclosed = '---\ntitle: \"t\"\n\n어떤 산문.\n'
+assert a._body_anchor(unclosed, unclosed.splitlines()) is None
+assert span(unclosed, 0, 3, 1)[0] == ['---', 'title: \"t\"', '']
+
+# (3) front matter 가 아예 없는 문서 — 바이트 단위로 이전과 같다.
+plain = '# 제목\n\n어떤 산문.\n또 한 줄.\n'
+assert a._body_anchor(plain, plain.splitlines()) is None
+assert span(plain, 0, 3, 1) == (['# 제목', '', '어떤 산문.'], 2)
+
+# (4) 매치가 front matter 밖(본문)에 있다 — 부착 대상이 아니다.
+doc = '---\na: 1\nb: 2\n---\n\n# 제목\n\n## Abstract\n\n산문 첫 줄.\n꼬리.\n'
+assert a._body_anchor(doc, doc.splitlines()) == (3, 9)
+assert span(doc, 6, 11, 9) == (['', '## Abstract', '', '산문 첫 줄.', '꼬리.'], 10)
+# 같은 축을 펜스 바로 아래(헤딩 행)에서 한 번 더 본다. 위 경우는 창이 이미 본문을 넘어서
+# 있어 두 조건 중 어느 쪽이 막았는지 구분하지 못한다 — 여기서는 창이 정확히 본문 첫 줄
+# 앞에서 끝나므로, 막는 것은 '매치가 front matter 안인가' 하나뿐이다. 이 줄이 없으면
+# 그 조건을 지운 뮤턴트가 스위트 전체를 통과한다 (실측으로 확인하고 추가했다).
+assert span(doc, 2, 9, 5) == (['b: 2', '---', '', '# 제목', '', '## Abstract', ''], 8)
+
+# (5) 창이 이미 본문에 닿는다 — 생략 표시도, 붙는 줄도 없다.
+near = '---\na: 1\n---\n산문 첫 줄.\n'
+assert a._body_anchor(near, near.splitlines()) == (2, 3)
+assert span(near, 0, 4, 1) == (['---', 'a: 1', '---', '산문 첫 줄.'], 3)
+
+# 그리고 부착이 일어나는 경우: 헤딩과 빈 줄을 건너뛰고 첫 산문 줄을 붙인다.
+assert span(doc, 0, 4, 1) == (['---', 'a: 1', 'b: 2', '---', '…', '산문 첫 줄.'], 9)
+# 간격이 0 이면 생략 표시는 붙지 않는다 — 이어진 발췌에 '건너뛰었다' 고 적으면 거짓이다.
+gapless = '---\na: 1\n---\n산문.\n'
+assert span(gapless, 0, 3, 1) == (['---', 'a: 1', '---', '산문.'], 3)
+
+print('EDGES PINNED')
+" 2>&1 | tail -3 || true)"
+
+# --- 붙인 줄은 표시 전용이다: 점수는 창으로 매긴다 ---------------------------
+# 이것이 PIN9 가 자기 축을 계속 볼 수 있는 이유다 (그 pin 의 주석이 실측을 적어 둔다).
+# 여기서는 그 분리를 값으로 고정한다: kim:4 발췌를 눈에 보이는 대로 다시 채점하면
+# (2,4) 가 나오는데, search() 가 실제로 쓴 점수는 창만 본 (2,2) 다.
+same "PIN11 붙인 본문 줄은 표시에만 들어간다 — 창 채점 (2,2) 대 발췌 재채점 (2,4)" \
+  "(2, 2) (2, 4)" \
+  "$(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+kb = pathlib.Path('$KB')
+row = next(r for r in a.search('신경기호 추론 evidence', kb, limit=None)
+           if r['file'].endswith('kim-2024-neurosymbolic-grounding.md'))
+lines = (kb / row['file']).read_text(encoding='utf-8').splitlines()
+window = '\n'.join(lines[max(0, row['line'] - 1 - a._EXCERPT_WINDOW):row['line'] + a._EXCERPT_WINDOW])
+kws = a._keywords('신경기호 추론 evidence')
+print(a._excerpt_score(window, [p for _t, p in kws]), a._excerpt_score(str(row['excerpt']), [p for _t, p in kws]))
+" || true)"
+
+# 생략 표시 자체는 절대 키워드를 만들지 않는다. 이 표시에 단어나 숫자를 적으면 (예:
+# '… (line 18)') 그 토큰이 발췌 텍스트의 일부가 되어, 'line' 이나 '18' 을 물은 질문이
+# 코퍼스의 모든 front matter 발췌에 자기 자신을 매치시킨다.
+same "PIN11 생략 표시는 어떤 키워드도 만들지 않는다 (자기 매치 금지)" \
+  "0 0 0" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+marker = a._EXCERPT_ELISION
+print(len(a._keywords(marker)),
+      len([p for _t, p in a._keywords('line 18 라인') if p.search(marker)]),
+      sum(a._excerpt_score(marker, [p for _t, p in a._keywords('line 18 라인 elision …')])))
+" || true)"
+
+# --- 두 번째 사이트: 브리지 승격 발췌 (#576) ---------------------------------
+# 별도 KB 를 쓴다. 공유 픽스처의 candidates.csv 를 고치면 PIN7/PIN9 의 브리지 기하가
+# 통째로 움직인다.
+#
+# 앵커 없는 프로비넌스는 _anchor_line 이 line 1 로 떨어뜨린다 — front matter 한복판이고,
+# #574 이전에는 그 승격 행이 YAML 7줄에 산문 0줄이었다. 공유 픽스처에서 그 경로를 타는
+# 파일(2019-evidence-logging.md)은 front matter 가 없어서 이 축을 볼 수 없다. 그래서
+# 여기서는 faronius 의 프로비넌스에서 '#abstract' 만 떼어 같은 파일을 fallback 으로 몬다.
+fm_kb="$_TMP_KB/fm-bridge"
+cp -R "$KB" "$fm_kb"
+sed 's|faronius-2025-attention-budget.md#abstract|faronius-2025-attention-budget.md|' \
+  "$KB/facts/candidates.csv" > "$fm_kb/facts/candidates.csv"
+# 전제를 먼저 값으로 고정한다: 앵커가 실제로 풀리지 않아 :1 로 떨어져야 이 축이 의미가 있다.
+fm_bridge_ref="$("$PYTHON" "$ROUTER" search "$Q_KO" --all --target "$fm_kb" | "$PYTHON" -c "
+import json, sys
+for r in json.load(sys.stdin)['results']:
+    if r.get('via') and 'faronius' in r['file']:
+        print(f\"{r['file']}:{r['line']}\")
+        break
+" || true)"
+same "PIN11 픽스처 전제: 앵커를 뗀 프로비넌스는 승격 발췌를 line 1 로 떨어뜨린다" \
+  "sources/faronius-2025-attention-budget.md:1" "$fm_bridge_ref"
+# 그리고 그 fallback 발췌도 산문에 닿는다 — 스캔과 같은 규칙이 같은 함수로 걸린다.
+same "PIN11 앵커 fallback 으로 front matter 에 잡힌 승격 발췌에도 본문 첫 줄이 붙는다 (#576 사이트)" \
+  '---
+zotero_key: "F5A7B9C1"
+item_type: "journalArticle"
+title: "Attention Budgets in Neurosymbolic Retrieval"
+…
+This paper measures how a neurosymbolic retriever spends its attention budget and' \
+  "$("$PYTHON" "$ROUTER" search "$Q_KO" --all --target "$fm_kb" | "$PYTHON" -c "
+import json, sys
+for r in json.load(sys.stdin)['results']:
+    if r.get('via') and 'faronius' in r['file']:
+        print(r['excerpt'])
+        break
+" || true)"
 
 echo ""
 echo "========================================"
