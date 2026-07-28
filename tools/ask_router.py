@@ -128,6 +128,7 @@ from common import (  # noqa: E402
     run_wirelog,
     is_sync_ignored,
     sync_ignore_patterns,
+    vocabulary_synonyms,
 )
 from factlog import ingest, literal_types  # noqa: E402
 from factlog.front_matter_scan import front_matter_body, front_matter_end_line  # noqa: E402
@@ -1585,6 +1586,50 @@ _BRIDGE_PREFIX_MIN = 3
 # reaching it that way changed nothing about its standing.
 VIA_KB_VOCABULARY_TAG = "[via KB vocabulary — still UNVERIFIED]"
 
+# The declaration file that supplies the synonym axis (#606), named in the answer
+# so a reader who disagrees with a match knows which line to edit.
+SYNONYM_POLICY_FILE = "policy/vocabulary-synonyms.md"
+
+# The synonym axis (#606) — what the prefix rule above cannot reach, at any value.
+#
+# _BRIDGE_PREFIX_MIN reads a shared STEM off two surface forms. That works because
+# Korean inflects on the right, and it is why the constant is a floor rather than a
+# switch. It says nothing at all about two words that mean the same thing and are
+# spelled differently from the first character:
+#
+#   '해석가능성에서'[0] = 해      '설명가능성_향상'[0] = 설      shared prefix 0
+#
+# Zero, not "below the floor". Lowering _BRIDGE_PREFIX_MIN to 1 does not reach it,
+# and neither would any other string rule at a usable threshold — the two forms have
+# nothing in common to measure. #577's own evidence names this pair, and half of that
+# issue's motivating example was out of reach of the fix it motivated for exactly this
+# reason (the comment above decomposition_candidates records the measurement).
+#
+# So the axis is DECLARED, not derived: common.vocabulary_synonyms() reads a group
+# out of policy/vocabulary-synonyms.md and the two hops below are the same comparison
+# the direct match already uses —
+#
+#   question word  --prefix-->  a declared member  ==group==  another member  --prefix-->  KB word
+#
+# One rule in three positions, not a second matcher. The prefix hop on the QUESTION
+# side is what lets a declaration be written in dictionary form ('해석가능성') and
+# still meet an inflected 어절 ('해석가능성에서'), without this path growing its own
+# opinion about Korean morphology. It also carries the floor's structural
+# consequences unchanged: a declared member under 3 characters cannot be reached from
+# either side, so a group naming '이점' or '논문' is inert rather than a new noise
+# source, and the function-word immunity PIN7 pins is not weakened by anything a KB
+# owner can write in this file.
+#
+# What the table does NOT do:
+#   - It does not guess. A pair not written down is not matched; there is no
+#     transitive closure across groups and no similarity fallback.
+#   - It does not change an excerpt's standing. A row reached through a declared
+#     synonym is a bridged row like any other: UNVERIFIED, no '← accepted:' claim it
+#     did not earn.
+#   - It does not silently take credit. A term that reached a fact DIRECTLY is
+#     reported as direct even when a group would also have reached it — the table is
+#     credited only where it was necessary, so the label means what it says.
+
 
 def _nfc(value: str) -> str:
     """NFC-fold for bridge comparison. accepted.dl and candidates.csv are written
@@ -1628,11 +1673,63 @@ def _bridge_terms(question: str) -> list[str]:
     return [_nfc(term) for term, _pattern in _keywords(question) if _is_cjk(term)]
 
 
+def _declared_synonyms(term: str, groups: list[list[str]]) -> list[str]:
+    """The declared members of every group a question word reaches.
+
+    The word meets a group through the SAME prefix comparison that meets the KB's
+    vocabulary, so '해석가능성에서' finds a group written '해석가능성'. The comparison
+    is asymmetric in exactly the way the direct match is — the KB's side and the
+    policy file's side are lowercased, the user's word is taken as typed — so the two
+    hops meet on one rule.
+
+    A member the word ALREADY reaches is left in the result, and it costs nothing:
+    shared-prefix length satisfies prefix(a, c) >= min(prefix(a, b), prefix(b, c)), so
+    a vocabulary word reachable through such a member is reachable from the word
+    itself, i.e. the fact is a DIRECT match and _bridged_facts reports it as one.
+    The first cut of this filtered such members out, and restoring that filter is
+    invisible in every result — measured, not assumed: with it back in place, all 108
+    tests across test_vocabulary_synonyms / test_ask_synonym_bridge /
+    test_ask_decomposition / test_ask_kb_vocabulary_bridge and all 86 checks in
+    tests/test_ask_wiki_search.sh stay green, i.e. nothing can tell the two apart and
+    the filter was a guard that could not fail. What keeps a group from taking credit
+    for a reach the bridge already had is _bridged_facts' `term not in direct` — one
+    rule in one place, and one mutation does kill it.
+
+    Empty when no group is declared, which is every KB without the file (#606).
+    """
+    if not groups:
+        return []
+
+    def reached(member: str) -> bool:
+        return _shared_prefix_len(term, member.lower()) >= _BRIDGE_PREFIX_MIN
+
+    out: set[str] = set()
+    for group in groups:
+        if any(reached(member) for member in group):
+            out.update(group)
+    return sorted(out)
+
+
 def _bridged_facts(
     question: str,
     accepted: list[dict[str, str]],
-) -> dict[tuple[str, str, str], list[str]]:
-    """{(subject, relation, object): [question word that reached it, ...]}.
+    synonyms: list[list[str]] | None = None,
+) -> dict[tuple[str, str, str], dict[str, list[str]]]:
+    """{(subject, relation, object): {question word: [declared synonym it went through]}}.
+
+    A question word that reached the fact DIRECTLY maps to an empty list; one that
+    only reached it through policy/vocabulary-synonyms.md maps to the members that
+    carried it (#606). The two are kept apart per (fact, word) rather than per
+    question because they are different claims about how this row got here, and the
+    renderer states them separately — a word that matched the KB's own spelling must
+    not be reported as needing a declaration, and a word that needed one must not be
+    presented as a spelling match.
+
+    *synonyms* is common.vocabulary_synonyms()' group list, passed in rather than
+    read here so this function stays pure over its arguments (decomposition_candidates
+    documents the same property) and one question reads the policy file once.
+    Defaulting it to none is the KB-without-the-file case and is byte-for-byte the
+    behaviour of #576.
 
     Matching is relation names and objects only. Subjects are NOT matched here:
     an accepted entity named in the question is _entity_mentioned()/
@@ -1643,19 +1740,34 @@ def _bridged_facts(
     terms = _bridge_terms(question)
     if not terms:
         return {}
-    matched: dict[tuple[str, str, str], list[str]] = {}
+    # Resolved once per question, not once per fact: the reference KB carries 2055
+    # accepted facts and the groups do not depend on which one is being tested.
+    declared = {term: _declared_synonyms(term, synonyms or []) for term in terms}
+    matched: dict[tuple[str, str, str], dict[str, list[str]]] = {}
     for row in accepted:
-        hits: set[str] = set()
+        direct: set[str] = set()
+        mediated: dict[str, set[str]] = {}
         for field in ("relation", "object"):
             for word in _vocabulary_words(row[field]):
+                low = word.lower()
                 for term in terms:
-                    if _shared_prefix_len(word.lower(), term) >= _BRIDGE_PREFIX_MIN:
-                        hits.add(term)
+                    if _shared_prefix_len(low, term) >= _BRIDGE_PREFIX_MIN:
+                        direct.add(term)
+                        continue
+                    for synonym in declared[term]:
+                        if _shared_prefix_len(low, synonym.lower()) >= _BRIDGE_PREFIX_MIN:
+                            mediated.setdefault(term, set()).add(synonym)
+        hits: dict[str, list[str]] = {term: [] for term in direct}
+        hits.update(
+            {term: sorted(members) for term, members in mediated.items() if term not in direct}
+        )
         if hits:
             # NFC-folded key: this dict is looked up with a triple read out of
             # candidates.csv, a different file written by a different tool, and the
             # two must agree on composition or the join silently finds nothing.
-            matched[(_nfc(row["subject"]), _nfc(row["relation"]), _nfc(row["object"]))] = sorted(hits)
+            matched[(_nfc(row["subject"]), _nfc(row["relation"]), _nfc(row["object"]))] = dict(
+                sorted(hits.items())
+            )
     return matched
 
 
@@ -1707,7 +1819,7 @@ def _anchor_line(path: Path, line_count: int, fragment: str) -> int:
 
 
 def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, object]]:
-    """{source ref: {'fragment': str, 'facts': [ 's, r, o', ... ], 'terms': [...]}}.
+    """{source ref: {'fragment': str, 'facts': [...], 'terms': [...], 'synonyms': [...]}}.
 
     Pure join, no corpus I/O: 'fragment' is the anchor as candidates.csv recorded it
     ('abstract', or '' when the row carries none). Resolving it to a line needs the
@@ -1723,9 +1835,18 @@ def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, objec
     block quote evidence the KB has already retired, which is worse than the
     cross-lingual miss this bridge exists to fix.
 
+    'synonyms' lists the declared hops that were NECESSARY to reach this file —
+    'question word ≈ declared member' pairs, and only for words that did not reach it
+    by spelling (#606). The key is ABSENT when the KB declares none, so a KB without
+    policy/vocabulary-synonyms.md returns the same dict #576 returned, byte for byte,
+    through JSON and through the renderer alike.
+
     Graceful degrade is the whole failure policy: a KB with no accepted.dl, no
     candidates.csv, an unreadable/malformed one, or facts that join nothing returns
-    {} and search() behaves exactly as it did before (수용 기준 5).
+    {} and search() behaves exactly as it did before (수용 기준 5). A missing or
+    malformed synonym file degrades on the same terms — vocabulary_synonyms() skips
+    the line it cannot read (loudly, on stderr) and the bridge is left with whatever
+    the engine's own vocabulary reaches.
     """
     if not _bridge_terms(question):
         return {}  # an all-ASCII question reads neither fact file
@@ -1733,7 +1854,7 @@ def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, objec
         kb = KbContext.for_root(root)
         if not kb.accepted_dl.is_file() or not kb.candidates_csv.is_file():
             return {}
-        matched = _bridged_facts(question, kb.load_accepted_facts())
+        matched = _bridged_facts(question, kb.load_accepted_facts(), kb.vocabulary_synonyms())
         if not matched:
             return {}
         candidates = kb.load_facts()
@@ -1761,20 +1882,36 @@ def kb_vocabulary_bridge(question: str, root: Path) -> dict[str, dict[str, objec
         ref, _sep, fragment = _nfc(row["source"]).partition("#")
         if not ref:
             continue
-        entry = bridged.setdefault(ref, {"fragments": set(), "facts": set(), "terms": set()})
+        entry = bridged.setdefault(
+            ref, {"fragments": set(), "facts": set(), "terms": set(), "synonyms": set()}
+        )
         entry["fragments"].add(fragment)
         entry["facts"].add(
             f"{_nfc(row['subject'])}, {_nfc(row['relation'])}, {_nfc(row['object'])}"
         )
-        entry["terms"].update(terms)
+        entry["terms"].update(terms.keys())
+        # The hop is (question word, declared member), not the member alone: two
+        # words of one question can reach the same declaration, and which word
+        # needed it is the part a reader checks the judgement against.
+        entry["synonyms"].update(
+            (term, member) for term, members in terms.items() for member in members
+        )
     # Sorted everywhere below: one file can be the source of several bridged facts
     # with different anchors, and this module treats determinism as a contract — the
     # rendered answer must not depend on CSV row order or set iteration order.
+    #
+    # 'synonyms' is added only when there is one, so a KB that declares no synonym
+    # (and every KB predating #606) gets a dict with exactly #576's keys.
     return {
         ref: {
             "fragment": sorted(entry["fragments"])[0],
             "facts": sorted(entry["facts"]),
             "terms": sorted(entry["terms"]),
+            **(
+                {"synonyms": [list(hop) for hop in sorted(entry["synonyms"])]}
+                if entry["synonyms"]
+                else {}
+            ),
         }
         for ref, entry in sorted(bridged.items())
     }
@@ -1853,7 +1990,14 @@ def _bridge_rows(
             "line": anchor,
             "excerpt": "\n".join(_sanitize(line) for line in span),
             "dir": rel,
-            "via": {"facts": entry["facts"], "terms": entry["terms"]},
+            "via": {
+                "facts": entry["facts"],
+                "terms": entry["terms"],
+                # Carried only when the KB declared one, on the same terms as the
+                # bridge entry it comes from: a caller reading these rows as JSON
+                # sees #576's exact key set when there is no synonym table (#606).
+                **({"synonyms": entry["synonyms"]} if entry.get("synonyms") else {}),
+            },
         }
         # Scored in the SAME (coverage, frequency) space as a lexical excerpt, by
         # the same reading of it — how much of the question this row answers, and
@@ -2023,6 +2167,19 @@ def search(
                 # only a file's best excerpt, or a diversity term in the sort key) is a
                 # change to the ranking key's shape and is left to a follow-up; the
                 # numbers above are here so that follow-up can reproduce the baseline.
+                #
+                # A term the KB reached through a DECLARED synonym (#606) is credited
+                # here on the same footing as one it reached by spelling, and that is a
+                # decision, not an oversight. This map is built once and read twice —
+                # the credit here and the tagged rows below — and the two readings have
+                # to be the same reading or the bridge is weakest exactly where #594
+                # found it weakest: a source whose title borrows the English term is
+                # found lexically, so a synonym excluded here would move the FILES NO
+                # KEYWORD REACHED up and leave the best-matching file's own KB evidence
+                # uncounted. The cost is that this credit is invisible — ordering only,
+                # no key, no tag — so a synonym declaration can reorder an answer with
+                # nothing on the page saying so. That is #594's existing shape, not
+                # something #606 introduces, and exposing it is #603's axis.
                 backing = bridged.get(_nfc(ref))
                 if backing:
                     hits = hits | set(backing["terms"])
@@ -2230,7 +2387,11 @@ def decomposition_query(relation: str, obj: str) -> str:
     return f"relation(X, {json.dumps(relation, ensure_ascii=False)}, {json.dumps(obj, ensure_ascii=False)})?"
 
 
-def _proposal_order(question: str, accepted: list[dict[str, str]]) -> list[dict[str, object]]:
+def _proposal_order(
+    question: str,
+    accepted: list[dict[str, str]],
+    synonyms: list[list[str]] | None = None,
+) -> list[dict[str, object]]:
     """Every (relation, object) the question's words reached, in the order proposed.
 
     Two facts sharing a (relation, object) are ONE proposal — the proposed query has a
@@ -2251,11 +2412,18 @@ def _proposal_order(question: str, accepted: list[dict[str, str]]) -> list[dict[
     """
     terms = _bridge_terms(question)
     pool: dict[tuple[str, str], dict[str, object]] = {}
-    for (_subject, relation, obj), hits in _bridged_facts(question, accepted).items():
+    for (_subject, relation, obj), hits in _bridged_facts(question, accepted, synonyms).items():
         entry = pool.setdefault(
-            (relation, obj), {"relation": relation, "object": obj, "terms": set(), "backing": 0}
+            (relation, obj),
+            {"relation": relation, "object": obj, "terms": set(), "synonyms": set(), "backing": 0},
         )
-        entry["terms"].update(hits)
+        entry["terms"].update(hits.keys())
+        # Merged across the facts of one pair, and only where a synonym was needed:
+        # two facts sharing (relation, object) are ONE proposal, so a hop that reached
+        # either of them reached the proposal.
+        entry["synonyms"].update(
+            (term, member) for term, members in hits.items() for member in members
+        )
         entry["backing"] = int(entry["backing"]) + 1
     groups: dict[int, list[dict[str, object]]] = {}
     for entry in pool.values():
@@ -2279,13 +2447,21 @@ def decomposition_candidates(
     question: str,
     accepted: list[dict[str, str]],
     cap: int = DECOMPOSITION_CANDIDATE_CAP,
+    synonyms: list[list[str]] | None = None,
 ) -> dict[str, object]:
     """Engine-answerable single queries the combined *question* decomposes into.
 
     Returns {'candidates', 'generated', 'not_shown', 'rejected', 'unrenderable'} —
     every count the rendered block needs to state what it left out. Pure: reads only
-    the accepted facts passed in (plus the optional policy program classify() already
-    consults), writes nothing, and never touches facts/query.dl.
+    the accepted facts and synonym groups passed in (plus the optional policy program
+    classify() already consults), writes nothing, and never touches facts/query.dl.
+
+    *synonyms* is common.vocabulary_synonyms()' group list (#606). It widens which
+    pairs the question reaches and nothing else — the gate, the cap, the round-robin
+    and the validator all run on the widened pool unchanged. This is where the
+    reachability #577 recorded as lost comes back: that issue's own example
+    ``relation(X, "이점", "설명가능성_향상")?`` is generated once a KB declares
+    '해석가능성' = '설명가능성', and a proposal that needed the declaration says so.
 
     GATE (수용 기준 1): at least two DISTINCT accepted relation names among the
     generated pairs. One relation is not a decomposition — the question named one
@@ -2301,7 +2477,7 @@ def decomposition_candidates(
     neither verified nor shown, which is a weaker claim than "there are 35 more valid
     queries" and the only one this function is entitled to make.
     """
-    pool = _proposal_order(question, accepted)
+    pool = _proposal_order(question, accepted, synonyms)
     empty = {"candidates": [], "generated": len(pool), "not_shown": 0, "rejected": 0, "unrenderable": 0}
     if len({entry["relation"] for entry in pool}) < 2:
         return empty
@@ -2363,7 +2539,20 @@ def decomposition_candidates(
         if not rows:
             rejected += 1
             continue
-        kept.append({"query": draft, "rows": len(rows), "terms": sorted(entry["terms"])})
+        kept.append(
+            {
+                "query": draft,
+                "rows": len(rows),
+                "terms": sorted(entry["terms"]),
+                # Absent when nothing was declared, so a KB without the file produces
+                # the candidate dicts #577 produced.
+                **(
+                    {"synonyms": [list(hop) for hop in sorted(entry["synonyms"])]}
+                    if entry["synonyms"]
+                    else {}
+                ),
+            }
+        )
     return {
         "candidates": kept,
         "generated": len(pool),
@@ -2395,6 +2584,13 @@ def _decomposition_lines(decomposition: dict[str, object] | None) -> list[str]:
         lines.append(
             f"  {candidate['query']}  — {rows} verified row{'' if rows == 1 else 's'} ← {reached}"
         )
+        # A proposal the question could not have reached without a declaration says
+        # which one, on its own line under the query (#606). Inline in the `←` list it
+        # would be indistinguishable from a word the user actually typed, and this
+        # block is copied from — a reader who takes '설명가능성' for their own wording
+        # will not think to check the file that supplied it.
+        for term, member in candidate.get("synonyms", []):
+            lines.append(f"    ← synonym: {term} ≈ {member} ({SYNONYM_POLICY_FILE})")
     # Silent truncation is the failure this block is most exposed to: it already shows
     # a short list of long strings, so a reader has no way to notice that a whole
     # condition was dropped. Each cut says its own count and its own reason.
@@ -2560,6 +2756,22 @@ def render_wiki_answer(
                 header += f" {VIA_KB_VOCABULARY_TAG}"
             lines.append(header)
             if via:
+                # The declared hop comes FIRST, above the accepted facts, because it
+                # is the earlier half of the same path and the one the reader is least
+                # able to reconstruct: '← accepted:' shows the KB's own words, and
+                # without this line a reader whose question never contained those
+                # words has no way to see why they are being shown at all. Naming the
+                # file is what makes the label actionable — a match the reader
+                # disagrees with is one line in one policy file, and this says which.
+                #
+                # It is a SEPARATE line rather than a second header tag: the header's
+                # existing tag says "reached through the KB's vocabulary and not
+                # lexically", which stays exactly as true for these rows. What a
+                # declared synonym adds is a different claim — that a human wrote down
+                # the equivalence the search then used — and folding the two into one
+                # marker would leave neither one checkable.
+                for term, member in via.get("synonyms", []):
+                    lines.append(f"    ← synonym: {term} ≈ {member} ({SYNONYM_POLICY_FILE})")
                 # The accepted facts are named individually, not summarized: they are
                 # the entire justification for this file being in the answer, and a
                 # count would leave the reader unable to check the bridge's judgement.
@@ -2772,7 +2984,13 @@ def cmd_wiki(args: argparse.Namespace) -> int:
         limit=None if args.all else DEFAULT_RENDER_ROW_LIMIT,
         total_results=total_results,
         recall=recall,
-        decomposition=decomposition_candidates(args.text, accepted),
+        # The proposal path reads the synonym table through the same loader search()
+        # already used above, but as a second call: the two run over different inputs
+        # (accepted.dl here, the candidates join there) and threading one list through
+        # would couple a proposal to whether the excerpt search found anything.
+        decomposition=decomposition_candidates(
+            args.text, accepted, synonyms=vocabulary_synonyms(root)
+        ),
     ))
     # A wiki answer is already UNVERIFIED, but an uncompiled-but-authored policy
     # is a separate, actionable defect the author should fix — surface it (#193).
