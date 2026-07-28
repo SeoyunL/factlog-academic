@@ -314,9 +314,16 @@ print([p.pattern for p in a._keyword_patterns(sys.argv[1])])
   if [ "$got" = "$3" ]; then ok "$1"; else bad "$1 — expected $3, got $got"; fi
 }
 
-kw_is "question grammar drops out of the keyword set (#571)" \
+# #581 updated the VALUE, not the pin: the surviving tokens now match by their stem.
+# What this case pins is unchanged and is checked by the same list — '논문은' and
+# '어떻게' are still absent, so the stop-word filter still runs, and it still runs
+# BEFORE the stripper (a stripper running first would have turned '논문은' into '논문'
+# and left it in). '제시하는가' -> '제시' is the 어미 group of _KOREAN_TRAILING_SUFFIXES:
+# the 하-verb frame reduces to its noun root, so the question now reaches '제시한다',
+# '제시했다' and '제시' alike instead of only the literal '제시하는가'.
+kw_is "question grammar drops out of the keyword set, the rest matches by stem (#571/#581)" \
   '이 논문은 신경기호 추론의 근거를 어떻게 제시하는가' \
-  "['신경기호', '추론의', '근거를', '제시하는가']"
+  "['신경기호', '추론', '근거', '제시']"
 ko_q_out="$(router search '이 논문은 신경기호 추론의 근거를 어떻게 제시하는가')"
 if printf '%s' "$ko_q_out" | grep -qF 'sources/571-retraction.md'; then
   bad "function word '논문은' pulled a topically unrelated document into the results"
@@ -336,7 +343,13 @@ if router search "논문 신경기호" | grep -qF 'sources/571-retraction.md'; t
 kw_is "'인지'(cognition) is a content word, not a stop word" '인지 편향' "['인지', '편향']"
 kw_is "'인가'(認可) is a content word, not a stop word" '전압 인가 방식' "['전압', '인가', '방식']"
 # Whole-token match: a compound merely ENDING in a stop word is content.
-kw_is "a compound ending in a stop word is not filtered" '반박논문은 어디에' "['반박논문은']"
+# #581 updated the VALUE (the 조사 '은' comes off), not what this pins. The compound
+# is still a KEYWORD, and that is the whole point: the stop-word check runs on the
+# whole token both times — on the 어절 '반박논문은' and again on the stem '반박논문' —
+# and neither is a listed form, so the content word survives. A suffix-based stop-word
+# rule, which is what #581 could easily have degenerated into, would have deleted it.
+kw_is "a compound ending in a stop word is not filtered, before or after stripping" \
+  '반박논문은 어디에' "['반박논문']"
 # ASCII is untouched by this filter (it is a list of Korean 어절).
 kw_is "ASCII questions are untouched by the stop-word list" 'which paper claims this' \
   "['(?<!\\\\w)which(?!\\\\w)', '(?<!\\\\w)paper(?!\\\\w)', '(?<!\\\\w)claims(?!\\\\w)', '(?<!\\\\w)this(?!\\\\w)']"
@@ -378,8 +391,11 @@ kw_is "'NN' is a default-path keyword (#583)" 'NN 구조 설계' \
   "['(?<!\\\\w)nn(?!\\\\w)', '구조', '설계']"
 # The reported defect verbatim: the initialism used to be dropped and the question was
 # answered by the 총칭명사 left over from its own frame — #571's class in miniature.
+# #581 updated the CJK half of the value ('방법은' -> '방법'); the ASCII half is what
+# this case is about and is byte-identical. That separation is the check: the stripper
+# is inside the CJK branch, so an initialism must not acquire or lose a lookaround.
 kw_is "the reported case keeps its initialism (#583)" 'QA 방법은 무엇인가' \
-  "['(?<!\\\\w)qa(?!\\\\w)', '방법은']"
+  "['(?<!\\\\w)qa(?!\\\\w)', '방법']"
 # A 2-char token is admitted for its LENGTH, not for being a known acronym: digits and
 # fragments become keywords too, and that is the measured decision, not an oversight.
 # The unlisted 2-char token with the highest prose reach in the reference KB is '10'
@@ -646,6 +662,159 @@ import ask_router as a
 print([p.pattern for p in a._keyword_patterns('논문은 신경기호')])
 ")"; fi
 rm -f "$KB/sources/571-retraction.md" "$KB/sources/571-topic.md" "$KB/sources/571-allstop.md"
+
+# --- #581: 조사/어미 stripping, both directions --------------------------------
+# The defect: substring matching was justified as tolerating attached particles, and
+# it does — in ONE direction. Question stem vs document particle ('근거' finds
+# '근거는') works; question particle vs document stem ('근거를' finds '근거') cannot,
+# because a longer needle is not inside a shorter haystack. A Korean question is
+# almost always the second shape, so measured on origin/main the reported question
+# matched 1 of its 9 keywords and the one was a loanword.
+#
+# Both directions are asserted here at MATCH level, not at pattern level: a pattern
+# list says what was compiled, not what it reaches, and the whole defect was that a
+# reasonable-looking pattern reached nothing.
+#
+# match_is <desc> <question> <document text> <expected repr of matching stems>
+match_is() {
+  local got
+  got="$("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([p.pattern for p in a._keyword_patterns(sys.argv[1]) if p.search(sys.argv[2])])
+" "$2" "$3")"
+  if [ "$got" = "$4" ]; then ok "$1"; else bad "$1 — expected $4, got $got"; fi
+}
+
+# Direction 1 — question stem -> document particle. This ALREADY worked; it is the
+# behaviour the old docstring described and the one #581 must not trade away, since
+# stripping shortens the needle and a shorter needle can only match more.
+match_is "질문 어간 -> 문서 조사: '근거' 가 '근거는' 을 매치한다 (기존 방향, 회귀 가드)" \
+  '근거 보존' '근거는 5년 보존한다.' "['근거', '보존']"
+# Direction 2 — question particle -> document stem. This is the defect. Every one of
+# these returned [] before #581.
+# ('기록' does NOT match here, and that is the point of using this document: only the
+# 조사-stripped '근거를' reaches it, so the case cannot pass for an unrelated reason.)
+match_is "질문 조사 -> 문서 어간: '근거를' 이 '근거' 를 매치한다 (#581 이 고쳤다)" \
+  '근거를 어디에 기록하는가' '근거 로그는 최소 5년 보존한다.' "['근거']"
+match_is "질문 조사 -> 문서 어간: '해석가능성에서' 가 '해석가능성' 을 매치한다 (#581)" \
+  '해석가능성에서 낫다고 주장하는 논문은?' '이 연구는 해석가능성 지표를 제안한다.' "['해석가능성']"
+match_is "질문 어미 -> 문서 어간: '주장하는' 이 '주장' 의 다른 활용형을 매치한다 (#581)" \
+  '무엇을 주장하는 논문인가' '저자들은 반대 결론을 주장했다.' "['주장']"
+# ...and the same stem must still reach the inflection the surface form did, so the
+# strip is a superset and not a swap.
+match_is "어간은 표층형이 닿던 문장에도 그대로 닿는다 (교환이 아니라 상위집합)" \
+  '근거를 어디에 기록하는가' '근거를 어디에 기록했는지 확인한다.' "['근거', '기록']"
+
+# 수용 기준 3 — a strip that would leave fewer than _CJK_MIN characters is refused, so
+# a 2-character noun ending in a particle SYLLABLE keeps its whole form. This is the
+# only thing standing between the table and '평'/'국'/'온', each of which substring-
+# matches a large share of any Korean corpus.
+kw_is "어간이 2자 미만이 되는 분리는 거부된다 — '평가'/'국가'/'온도'/'길이'" \
+  '평가 국가 온도 길이' "['평가', '국가', '온도', '길이']"
+kw_is "_CJK_MIN 은 원 토큰과 어간에 같은 값으로 적용된다" \
+  '가' "[]"
+
+# KNOWN, ACCEPTED over-strip, pinned so a later widening cannot lose the record. These
+# are NOT bugs to fix here: the suffix is a real 조사 and the noun merely ends in the
+# same syllable, and no literal table can tell the two apart — that needs an analyzer,
+# which the issue puts out of scope. The cost is one-sided (substring makes the stem a
+# superset, so a mis-strip only ADDS documents, it can never hide one the surface form
+# found) and measured: over the reference KB's 494 distinct Korean 어절, stripping adds
+# a median of 0 and a mean of 1.43 files out of 127.
+kw_is "알려진 오분리: 행위자 접미사 '-가' 와 정도 접미사 '-도' 는 조사와 구분되지 않는다" \
+  '전문가 이론가 정확도 신뢰도' "['전문', '이론', '정확', '신뢰']"
+kw_is "알려진 오분리: 음차 고유명사의 끝음절도 조사와 구분되지 않는다 ('몬테카를로')" \
+  '몬테카를로 샘플링' "['몬테카를', '샘플링']"
+# The mis-strip is one-sided — asserted, not asserted-by-comment. '몬테카를' still
+# reaches every line '몬테카를로' reached.
+match_is "오분리해도 원 표층형이 닿던 문장은 그대로 닿는다" \
+  '몬테카를로 샘플링' '몬테카를로 샘플링을 사용한다.' "['몬테카를', '샘플링']"
+
+# Containment: the stripper must not turn a question function word into a WIDER search
+# term than it was. '이것을' is not in the list but '이것' is, so the stem check has to
+# run too — otherwise the token would go from matching '이것을' to matching every
+# '이것…' in the corpus, which is #571's defect arriving through #581's code path.
+kw_is "어간이 기능어면 그 어절도 기능어다 — '이것을'/'여기에' 는 키워드가 되지 않는다" \
+  '이것을 여기에 무엇인가' "[]"
+# ...but it is a WHOLE-TOKEN check on the stem, not a prefix rule: an unlisted stem
+# stays a keyword. ('이곳' is not in the list; #586 owns that gap, not this file.)
+kw_is "목록에 없는 어간은 키워드로 남는다 — '이곳에서' -> '이곳'" \
+  '이곳에서 무엇인가' "['이곳']"
+
+# 어간이 다시 조사·어미면 그 어절엔 콘텐츠가 없다 — 분리를 거부하고 표층형을 남긴다.
+# 이걸 빼면 '하는가'->'하는', '으로만'->'으로' 가 되어, 한국어 산문 대부분에 걸리는
+# 문자열이 키워드가 되고 모든 문서의 커버리지에 상수를 더한다. 실측(위키 픽스처 코퍼스):
+# 이 규칙 없이 '전문가 평가는 어떻게 하는가' 는 '하는' 만으로 3개 파일을 끌어왔다.
+kw_is "어간이 다시 접미사면 분리하지 않는다 — '하는가'/'으로만' 은 그대로 남는다" \
+  '하는가 으로만' "['하는가', '으로만']"
+# 같은 규칙의 다른 갈래: 가장 긴 일치가 쓸 수 없는 어간을 내면 거기서 끝난다. 더 짧은
+# 접미사로 내려가지 않는다 — 내려가면 '이라는'->'이라', '것으로'->'것으' 처럼 문법에서
+# 키워드를 만들어 낸다.
+kw_is "가장 긴 일치가 결정한다 — 더 짧은 접미사로 내려가지 않는다" \
+  '이라는 것으로 에서는' "['이라는', '것으로', '에서는']"
+
+# A strip that leaves no CJK character is refused: the CJK branch matches by SUBSTRING
+# with no word boundaries, so handing it a bare 'ai' would match 'available',
+# 'training', 'chain' — exactly what the ASCII branch's lookarounds exist to prevent.
+kw_is "CJK 가 남지 않는 분리는 거부된다 — 'ai가' 는 어절 그대로 유지된다" \
+  'ai가 정렬' "['ai가', '정렬']"
+match_is "그래서 'ai가' 는 'available' 을 매치하지 않는다" \
+  'ai가 정렬' 'the data is available for alignment.' "[]"
+
+# 수용 기준 5 — one stem is ONE keyword. Two 어절 of the same stem in one question must
+# not each register: _keyword_hits counts DISTINCT terms, so a row containing '근거'
+# once would otherwise score coverage 2 against a row that really covers two different
+# words, and frequency would count every occurrence twice on top of that.
+kw_is "같은 어간으로 줄어드는 어절들은 키워드 하나가 된다 (커버리지 이중 계산 방지)" \
+  '근거를 근거가 근거는 신경기호' "['근거', '신경기호']"
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+line = '근거 로그의 근거 항목'
+one = a._excerpt_score(line, a._keyword_patterns('근거를 신경기호'))
+many = a._excerpt_score(line, a._keyword_patterns('근거를 근거가 근거는 신경기호'))
+assert one == many == (1, 2), (one, many)
+" 2>/dev/null; then ok "채점도 이중 계산하지 않는다 — 커버리지·빈도 모두 어절 수와 무관하다 (#581 수용 기준 5)"; else bad "같은 어간의 어절이 점수를 이중 계산한다: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+line = '근거 로그의 근거 항목'
+print(a._excerpt_score(line, a._keyword_patterns('근거를 신경기호')),
+      a._excerpt_score(line, a._keyword_patterns('근거를 근거가 근거는 신경기호')))
+")"; fi
+# The surface term is still what the recall report (#575) prints — the FIRST 어절 that
+# claimed the stem, never the stem itself. A report that echoes a word the user did not
+# type is the #575 defect in another form.
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+got = [t for t, _p in a._keywords('근거를 근거가 해석가능성에서')]
+assert got == ['근거를', '해석가능성에서'], got
+" 2>/dev/null; then ok "리콜 리포트가 싣는 것은 어간이 아니라 사용자가 친 어절이다 (#575 와의 계약)"; else bad "키워드의 표층 term 이 어간으로 바뀌었다: $("$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([t for t, _p in a._keywords('근거를 근거가 해석가능성에서')])
+")"; fi
+
+# The suffix table's own contract. Every entry must be Hangul (it is stripped inside
+# the CJK branch and nowhere else) and non-empty, and the table must be ordered
+# longest-first — the order is what makes '제시하는가' reduce to '제시' rather than
+# stopping at the shorter '가' and yielding '제시하는'.
+if "$PYTHON" -c "
+import sys, os
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+t = a._KOREAN_TRAILING_SUFFIXES
+assert t == tuple(sorted(set(t), key=lambda s: (-len(s), s))), 'not longest-first / has duplicates'
+bad = [s for s in t if not s or not a._is_cjk(s)]
+assert not bad, bad
+assert a._korean_stem('제시하는가') == '제시', a._korean_stem('제시하는가')
+" 2>/dev/null; then ok "_KOREAN_TRAILING_SUFFIXES 는 중복 없이 긴 것부터 정렬된 한글 접미사 목록이다"; else bad "_KOREAN_TRAILING_SUFFIXES 의 계약이 깨졌다"; fi
 
 # --- #575: the wiki block reports keyword match record and low recall ---------
 # The defect: an answer whose keywords mostly missed the corpus is shaped exactly
