@@ -59,10 +59,14 @@ the only ... / structurally / 항상 / 절대 / 모든 경우
   아니라 한 버전에 대한 측정이다 — `hooks/gate_check.sh` 의 matcher 주석(#596),
   `"a property of a program this repo does not ship, so it is a measurement, not a
   guarantee"`.
-- **측정에는 정의와 시점을 붙인다.** 한 단어가 여러 뜻이면 재현이 안 된다(#601 에서
+- **측정에는 정의·시점·명령을 붙인다.** 한 단어가 여러 뜻이면 재현이 안 된다(#601 에서
   "PROSE 도달 수"가 front matter 포함 여부에 따라 갈렸다). 살아 있는 KB나 자라는
   스위트를 상대로 잰 수치에는 **언제 잰 값인지** 적는다(`66 rows` 는 지금 77,
-  `134 excerpts` 는 지금 169).
+  `134 excerpts` 는 지금 169). 그리고 **잰 명령을 그대로** 적는다 — 숫자만으로는
+  같은 조건인지 알 수 없다. `tests/test_ask_router.sh` 가 그 함정이다: 인터프리터를
+  `PYTHON` 으로 받는데 `FACTLOG_PYTHON` 을 설정하면 조건이 바뀌지 않아 조용히 258 이
+  나오고, `PYTHON=…/bin/python` 으로 주면 278 이 나온다(차이 20 은 pyrewire 부재 시
+  SKIP 되는 검사들이다). 이 혼동은 #601·#602 에서 각각 한 번씩, 두 번 났다.
 - **확인이 불가능하면 "확인 불가"라고 적는다.** 추측을 측정처럼 쓰지 않는다. 좋은
   형태가 `hooks/gate_check.sh` 의 `-ot` 잔여 위험에 있다 — `"That window is not
   measured here and is not claimed to be impossible."`
