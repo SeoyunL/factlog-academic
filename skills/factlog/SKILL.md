@@ -1166,6 +1166,18 @@ excerpt — a bridged excerpt is source prose no one checked, exactly like every
 other row in this block, and must never be glossed as verified because an accepted
 fact led to it.
 
+A `SUGGESTION — decomposable single queries` block appears when the question binds
+two or more conditions the query language cannot express in one line ("A 이면서 B 인
+것은?") while each condition, asked alone, *is* engine-answerable. Every listed query
+has already been validated (it routes to the engine) and carries the number of rows it
+would return. **Show it verbatim and stop there.** Do NOT run the listed queries, and
+do NOT pick one and present its rows as the answer: the block exists so the *user*
+chooses which condition to verify, and answering one unasked turns a proposal into a
+VERIFIED-looking answer nobody requested. When the user picks one, re-enter Step 3a
+with that exact query line. The list is capped at 6 — when more were generated the
+block says how many it left out and that those were never validated, so report that
+line too instead of implying the list is exhaustive.
+
 Optionally record the unanswered
 question for later review (a non-engine-input sink, never `facts/query.dl`):
 

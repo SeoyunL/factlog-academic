@@ -1766,6 +1766,291 @@ def grounding_facts(question: str, accepted: list[dict[str, str]]) -> list[dict[
     return out
 
 
+# ---------------------------------------------------------------------------
+# Decomposition proposals (#577) — the single queries a combined question hides
+# ---------------------------------------------------------------------------
+# A question that binds two conditions ("A 이면서 B 인 것은?") has no shape in this
+# query language: classify_query validates ONE predicate line, so the combined form
+# leaves through review_required and the user gets UNVERIFIED excerpts although each
+# half, asked alone, is an engine-verifiable query. Measured on the reference KB, the
+# issue's own question decomposes into 11 such queries, and every one of them routes
+# to the engine.
+#
+# The generator is the #576 bridge's matcher, not a second one: _bridged_facts already
+# answers "which accepted relation/object did this question's words reach", which is
+# exactly the input a proposal needs. What is added here is the (relation, object)
+# grouping, the verification, and the cap.
+#
+# Deliberate limits, so the block stays a proposal and not a second answer:
+#   - Nothing is executed as an answer. The row COUNT is pre-computed (수용 기준 5:
+#     a 0-row proposal is worth knowing about before you ask it) but no rows are
+#     rendered, so what becomes a verified answer stays the reader's decision.
+#   - Only proposals that pass classify_query are shown (수용 기준 2), verified one at
+#     a time through the SAME classify() every other caller routes on.
+#   - candidates.csv is not read. The engine answers out of accepted.dl, so a fact's
+#     candidate status decides which SOURCE the bridge may quote (kb_vocabulary_bridge)
+#     but not whether the engine can answer a query — asking the two files the same
+#     question would report a proposal as unanswerable that the engine does answer.
+#
+# What this does NOT reach, measured on the issue's own example. #577 names two queries
+# its author found by hand; this generator produces one of them and can never produce
+# the other:
+#   relation(X, "비교_대상", "신경망_기반_모델")?   generated — 5th of 11, inside the cap
+#   relation(X, "이점", "설명가능성_향상")?         never a candidate
+# The second is not lost to the cap. The fact is in the reference KB (1 accepted fact),
+# but the question writes '해석가능성에서' where the KB writes '설명가능성' — synonyms
+# whose shared prefix is ZERO characters ('해' differs from '설' at the first one). So
+# no value of _BRIDGE_PREFIX_MIN reaches it: lowering the floor is not the missing
+# piece, a synonym relation is, and the author found that pair by knowing the two words
+# mean the same thing. What the bridge can reach is #576's design and widening it is
+# not this issue's scope (#577 is the proposal mechanism), so this is RECORDED, not
+# worked around — half of the issue's evidence is out of reach of the fix it motivated,
+# and a reader who does not know that will read the missing proposal as a bug here.
+# The pair is not unreachable in general: a question that types the KB's own word
+# proposes exactly that query today (measured on '지식그래프를 쓰면서 설명가능성도
+# 확보하는 연구는?').
+
+# How many proposals one answer may carry.
+#
+# Measured on the reference KB (2055 accepted facts) over 300 synthetic two-condition
+# questions — '<A> 이면서 <B> 인 것은?', A/B sampled (seed 577) from the 1128
+# vocabulary words long enough to bridge:
+#   proposals per question: median 3, p75 4, p90 8, p95 14, max 41
+#   a SINGLE question word contributes up to 25 of them (p90 7)
+#   questions cut, by cap:  4 -> 74   5 -> 56   6 -> 40   7 -> 34   8 -> 27   10 -> 18
+#
+# That curve is SMOOTH. Six is a judgement on it, not a threshold discovered in it:
+# nothing in the data distinguishes 6 from 5 or 7, and this constant should not be read
+# as if something did. What the choice buys is stated as a cost, both directions
+# measured: at 6, 260 of 300 questions are shown whole, and the 40 that are cut lose
+# proposals that were never validated (the block says so). Tightening to 4 doubles the
+# cut questions to 74; loosening to 10 leaves 18, at the price of a list of ten long
+# query lines to choose between, which is the complaint this cap exists to answer.
+#
+# The claim NOT made: that a cut question keeps three proposals per condition. Measured
+# over the 40 cut at cap 6, the minimum surviving per condition is 1 and the median 2 —
+# a condition with two proposals keeps two and the budget goes to the other, which is
+# the intended behaviour and not a symmetric split.
+#
+# What the round-robin does guarantee, and why the cut is not a flat head of one
+# ranking: no matched question word is ever silenced while the cap has room. One word
+# of two can generate 25 proposals, so a flat cut is free to spend the whole budget on
+# ONE condition and drop the other entirely — deleting the decomposition from a
+# decomposition proposal. Measured across all 40 cut questions, the minimum per
+# condition is 1, never 0.
+DECOMPOSITION_CANDIDATE_CAP = 6
+
+# Greppable header. It has to carry the whole contract, because this block is the one
+# place in an UNVERIFIED answer that shows engine-answerable queries: a reader who
+# takes these for results has been handed verified-looking text that nobody ran.
+DECOMPOSITION_HEADER = (
+    "SUGGESTION — decomposable single queries. PROPOSALS, not an answer: the row "
+    "count below was counted, but no rows were fetched and nothing was answered for "
+    "you. Ask one to get a VERIFIED answer:"
+)
+
+
+def decomposition_query(relation: str, obj: str) -> str:
+    """The single-predicate query line proposing (relation, object).
+
+    Constants are spelled with json.dumps because that is literally how the parser
+    reads them back — common.py's is_quoted_string json-decodes the argument. Naive
+    f-string interpolation produces a broken line for any value holding a quote or a
+    backslash, and the reference KB has one (`amount(44000,"시간")`, a compound
+    literal): the proposal would be shown, be unparseable when pasted, and take the
+    reader's trust in the whole block with it.
+    """
+    return f"relation(X, {json.dumps(relation, ensure_ascii=False)}, {json.dumps(obj, ensure_ascii=False)})?"
+
+
+def _proposal_order(question: str, accepted: list[dict[str, str]]) -> list[dict[str, object]]:
+    """Every (relation, object) the question's words reached, in the order proposed.
+
+    Two facts sharing a (relation, object) are ONE proposal — the proposed query has a
+    variable subject, so it would return both of them; listing it twice would present
+    the same query as two suggestions.
+
+    Ordering, outermost key first:
+      1. round — the proposal's rank inside its own question word's group. Taking
+         round 0 of every word before round 1 of any is what makes the cap spend the
+         budget across the conditions instead of inside one (see the cap's comment).
+      2. the question word's position in the question, so the first condition asked is
+         the first condition proposed.
+      3. how many of the question's words the pair reached (descending): a pair both
+         conditions reached is the closest thing in the KB to the combined question the
+         language cannot express, so it leads its group.
+      4. how many accepted facts back it, then the pair itself — total and
+         deterministic, so a proposal list never depends on dict iteration order.
+    """
+    terms = _bridge_terms(question)
+    pool: dict[tuple[str, str], dict[str, object]] = {}
+    for (_subject, relation, obj), hits in _bridged_facts(question, accepted).items():
+        entry = pool.setdefault(
+            (relation, obj), {"relation": relation, "object": obj, "terms": set(), "backing": 0}
+        )
+        entry["terms"].update(hits)
+        entry["backing"] = int(entry["backing"]) + 1
+    groups: dict[int, list[dict[str, object]]] = {}
+    for entry in pool.values():
+        # The word that OPENS this proposal's group: the earliest one in the question
+        # that reached it. Grouping on every matching word instead would list a
+        # two-condition pair once per condition.
+        primary = min(terms.index(term) for term in entry["terms"])
+        entry["primary"] = primary
+        groups.setdefault(primary, []).append(entry)
+    ordered: list[dict[str, object]] = []
+    for group in groups.values():
+        group.sort(key=lambda e: (-len(e["terms"]), -int(e["backing"]), e["relation"], e["object"]))
+        for round_index, entry in enumerate(group):
+            entry["round"] = round_index
+            ordered.append(entry)
+    ordered.sort(key=lambda e: (e["round"], e["primary"], -len(e["terms"]), e["relation"], e["object"]))
+    return ordered
+
+
+def decomposition_candidates(
+    question: str,
+    accepted: list[dict[str, str]],
+    cap: int = DECOMPOSITION_CANDIDATE_CAP,
+) -> dict[str, object]:
+    """Engine-answerable single queries the combined *question* decomposes into.
+
+    Returns {'candidates', 'generated', 'not_shown', 'rejected', 'unrenderable'} —
+    every count the rendered block needs to state what it left out. Pure: reads only
+    the accepted facts passed in (plus the optional policy program classify() already
+    consults), writes nothing, and never touches facts/query.dl.
+
+    GATE (수용 기준 1): at least two DISTINCT accepted relation names among the
+    generated pairs. One relation is not a decomposition — the question named one
+    condition and the wiki answer is the honest response to it. The gate is read off
+    the generated pairs, not the surviving ones, because that is the question the
+    criterion asks ("how many accepted relation names does this question match").
+
+    VERIFICATION is lazy, in proposal order, and stops once *cap* have been kept: a
+    question can generate 41 pairs on the reference KB and each classify() costs ~11 ms
+    over 2055 facts, so verifying all of them would spend half a second to throw most
+    of the answers away. The consequence is reported rather than hidden — the pairs
+    past the cap are counted in 'not_shown' and the rendered line says they were
+    neither verified nor shown, which is a weaker claim than "there are 35 more valid
+    queries" and the only one this function is entitled to make.
+    """
+    pool = _proposal_order(question, accepted)
+    empty = {"candidates": [], "generated": len(pool), "not_shown": 0, "rejected": 0, "unrenderable": 0}
+    if len({entry["relation"] for entry in pool}) < 2:
+        return empty
+    kept: list[dict[str, object]] = []
+    examined = rejected = unrenderable = 0
+    for entry in pool:
+        if len(kept) >= cap:
+            break
+        examined += 1
+        relation, obj = str(entry["relation"]), str(entry["object"])
+        # A value that does not survive _sanitize cannot be proposed at all, and this
+        # is the one block where dropping it beats escaping it. Everything else in a
+        # wiki answer is quoted evidence, where a sanitized rendering still informs;
+        # a query line is meant to be COPIED, so a sanitized one is a lie the reader
+        # cannot see. It is also the #576 forging class (an accepted object may hold
+        # U+2028 — common.py's reader keeps it deliberately — and str.splitlines()
+        # then turns the tail into a top-level line, forging a 'VERIFIED — engine'
+        # header inside the UNVERIFIED block). Measured on the reference KB: 0 of 2055
+        # accepted facts carry such a character, so this costs nothing there and is
+        # asserted against a fixture that does.
+        if _sanitize(relation) != relation or _sanitize(obj) != obj:
+            unrenderable += 1
+            continue
+        draft = decomposition_query(relation, obj)
+        try:
+            decision = classify(draft, accepted)
+            # The route check is what enforces 수용 기준 2, and which of these two
+            # conditions does that depends on the SHAPE of *accepted* — so both are
+            # stated with the measurement that decides them, not with a claim:
+            #
+            #   route == "engine" — load-bearing TODAY, on a fact list carrying a
+            #     status column. classify() reads status (entity_set keeps only
+            #     ENGINE_STATUSES rows), evaluate_relation does not, so a
+            #     candidate/needs_review/superseded/'' row routes wiki and STILL
+            #     answers with its row: measured route=wiki, rows=1 for all four
+            #     values. Without this condition that row is proposed as a "verified
+            #     row" of a fact the KB has not accepted. cmd_wiki does not reach it
+            #     because load_accepted_facts() returns subject/relation/object only
+            #     (measured: 2055 of 2055 rows on the reference KB carry no status) —
+            #     but load_facts(), used two functions away in fact_signals(), returns
+            #     exactly the shape that does. tests/unit/test_ask_decomposition.py's
+            #     TestTheValidatorGate pins it, and removing this condition fails those
+            #     four cases.
+            #   not decision["negative"] — mirrors the scope gate cmd_render branches
+            #     on, and changes NO result here: a draft built from a fact that is
+            #     present cannot classify as fact_absent, and if it somehow did, the
+            #     0-row guard below would drop it anyway. Measured — removing this half
+            #     alone fails no test in either suite. It is kept so the two call sites
+            #     read as one contract, not because it decides anything.
+            rows = (
+                evaluate_relation(draft, accepted)
+                if decision["route"] == "engine" and not decision["negative"]
+                else []
+            )
+        except (FactlogError, ValueError):
+            # A hand-edited fact file must not turn a wiki answer into a crash; the
+            # excerpts above the block are still worth returning.
+            rows = []
+        if not rows:
+            rejected += 1
+            continue
+        kept.append({"query": draft, "rows": len(rows), "terms": sorted(entry["terms"])})
+    return {
+        "candidates": kept,
+        "generated": len(pool),
+        "not_shown": len(pool) - examined,
+        "rejected": rejected,
+        "unrenderable": unrenderable,
+    }
+
+
+def _decomposition_lines(decomposition: dict[str, object] | None) -> list[str]:
+    """The proposal block (#577), or nothing at all.
+
+    Nothing at all is the common case and it is exact: no proposal survived, so the
+    answer is byte-identical to the one rendered before this feature existed
+    (수용 기준 4). Pure formatting — it decides nothing and re-verifies nothing.
+    """
+    if not decomposition:
+        return []
+    candidates = decomposition.get("candidates") or []
+    if not candidates:
+        return []
+    lines = ["", DECOMPOSITION_HEADER]
+    for candidate in candidates:
+        rows = int(candidate["rows"])
+        # The question words are named, not counted: they are why THIS pair is being
+        # proposed for THIS question, and a reader who disagrees with the match can
+        # only see that from the word.
+        reached = ", ".join(str(term) for term in candidate["terms"])
+        lines.append(
+            f"  {candidate['query']}  — {rows} verified row{'' if rows == 1 else 's'} ← {reached}"
+        )
+    # Silent truncation is the failure this block is most exposed to: it already shows
+    # a short list of long strings, so a reader has no way to notice that a whole
+    # condition was dropped. Each cut says its own count and its own reason.
+    not_shown = int(decomposition.get("not_shown") or 0)
+    if not_shown:
+        lines.append(
+            f"  … {not_shown} further candidate(s) generated and NOT shown (cap "
+            f"{DECOMPOSITION_CANDIDATE_CAP}, filled one per matched question word in "
+            "turn). They were not verified, so they may or may not be answerable."
+        )
+    rejected = int(decomposition.get("rejected") or 0)
+    if rejected:
+        lines.append(f"  … {rejected} candidate(s) dropped: the query validator did not accept them.")
+    unrenderable = int(decomposition.get("unrenderable") or 0)
+    if unrenderable:
+        lines.append(
+            f"  … {unrenderable} candidate(s) dropped: the accepted vocabulary they use "
+            "cannot be spelled on a query line."
+        )
+    lines.append("")
+    return lines
+
+
 # Emitted when most of the question's keywords occur nowhere in the corpus (#575).
 # It is a RETRIEVAL report, not an evidence claim: the excerpts above it are real
 # matches, but they were selected by a minority of what the user asked. Read without
@@ -1843,6 +2128,7 @@ def render_wiki_answer(
     limit: int | None = DEFAULT_RENDER_ROW_LIMIT,
     total_results: int | None = None,
     recall: dict[str, list[str]] | None = None,
+    decomposition: dict[str, object] | None = None,
 ) -> str:
     """Render the UNVERIFIED — wiki exploration answer block.
 
@@ -1856,6 +2142,9 @@ def render_wiki_answer(
     reports which of the question's keywords the corpus contains (#575). Omitting
     it renders exactly the block this function rendered before — the match record
     is additive, so a caller that has no tally never prints a wrong one.
+
+    *decomposition* is :func:`decomposition_candidates`' proposal set (#577), on the
+    same additive terms.
     """
     lines = [
         "UNVERIFIED — wiki exploration",
@@ -1882,6 +2171,14 @@ def render_wiki_answer(
     # got — and BEFORE the excerpts, so the coverage caveat is read before the
     # excerpts it qualifies, not after the reader has already drawn a conclusion.
     lines.extend(_recall_lines(recall))
+    # The proposals sit between the recall report and the excerpts, and that position
+    # is the argument: #575's line says the corpus does not spell most of what you
+    # asked and to retry with wording it does use; these are that wording, taken from
+    # the engine's own vocabulary. Read as one thought they are a diagnosis and its
+    # remedy. Appended after the excerpts instead, the remedy lands below up to 20
+    # citations — off-screen in the case it exists for. The excerpts still follow
+    # their coverage caveat, which is #575's own placement contract.
+    lines.extend(_decomposition_lines(decomposition))
     visible_results = results if limit is None else results[:_render_limit(limit)]
     if visible_results:
         for r in visible_results:
@@ -2095,6 +2392,10 @@ def cmd_wiki(args: argparse.Namespace) -> int:
     accepted = load_accepted_facts() if ACCEPTED_DL.is_file() else []
     grounding = grounding_facts(args.text, accepted)
     hints = did_you_mean_hints(args.draft, accepted) if args.draft else []
+    # --all is deliberately NOT wired to the proposal cap. The other caps hide ROWS of
+    # one answer, so lifting them is lossless; this one bounds how many queries a
+    # reader is asked to choose between, and 41 of them is the defect the cap exists
+    # for, not a shorter view of it. The suppressed count is printed instead.
     print(render_wiki_answer(
         args.text,
         args.reason,
@@ -2104,6 +2405,7 @@ def cmd_wiki(args: argparse.Namespace) -> int:
         limit=None if args.all else DEFAULT_RENDER_ROW_LIMIT,
         total_results=total_results,
         recall=recall,
+        decomposition=decomposition_candidates(args.text, accepted),
     ))
     # A wiki answer is already UNVERIFIED, but an uncompiled-but-authored policy
     # is a separate, actionable defect the author should fix — surface it (#193).
