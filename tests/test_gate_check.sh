@@ -261,9 +261,31 @@ rm -rf "$TMPBASE"
 # Which is also why the deny REASON is asserted and not just the code: 2 is the
 # gate's ONLY deny code, so an exit-code assertion cannot tell this branch from
 # any other deny, and a case that names itself the fail-closed invariant while
-# being satisfied by a stale report guarantees nothing. The third check pins the
-# other direction — the stale-guard message must be ABSENT, since reaching it at
-# all would mean the gate evaluated the predicate without a usable Python.
+# being satisfied by a stale report guarantees nothing.
+#
+# The third check pins the other direction, and it COUNTS rather than matching a
+# string. The gate has four deny reasons — fail-closed, "report does not exist",
+# "could not read mtime", "report is stale" — and only the first may appear here;
+# any of the other three means the predicate was evaluated without a usable
+# Python. Naming just one of them (the first draft grepped for "does not exist",
+# which is the only one this fixture can currently reach) would state a general
+# claim while covering a single site: change the fixture, or route the predicate
+# to a different reason, and it goes quiet. "Exactly one DENIED line, and it is
+# the fail-closed one" excludes all three at once and needs no update when a
+# fifth reason is added.
+#
+# A note for whoever adds the next row to this file. Most deny rows here assert
+# the exit code alone, and that is deliberate rather than an oversight: each is
+# PAIRED with an allow row taken in the same environment, so an environment-borne
+# fail-closed deny leaking into a row cannot go unnoticed — it turns the paired
+# allow red. The same argument is what holds up CASE 22's "the deny below can
+# only come from the probe". So: a NEW deny row must either come with a paired
+# allow row in the same environment, or assert its reason. One without the other
+# is how this case passed for its whole life.
+#
+# Branch C ("could not read mtime") is reachable but exercised by no row in this
+# file — the gate denies a fresh-report KB when PATH is empty, because _mtime
+# shells out to `stat`. That is tracked in #600, not pinned here.
 # ---------------------------------------------------------------------------
 KB_NOPY="$(mktemp -d)"
 make_kb "$KB_NOPY"
@@ -298,12 +320,21 @@ else
   fail=$((fail + 1))
 fi
 
-if grep -qF "logic_report.txt does not exist" "$nopy_err"; then
-  echo "FAIL: gate evaluated the freshness predicate without a usable Python; stderr=$(cat "$nopy_err")"
+# `grep -c` exits 1 on a zero count, so both counts are isolated behind `|| true`
+# — an unguarded assignment would abort this whole file under `set -e` and take
+# every later case with it. An empty count is a distinct, named failure: it means
+# grep produced no number at all, which is not the same as "no DENIED lines".
+nopy_denied="$(grep -cF "[factlog GATE] DENIED:" "$nopy_err" || true)"
+nopy_failclosed="$(grep -cF "[factlog GATE] DENIED: usable Python 3.11+ is required" "$nopy_err" || true)"
+if [ -z "$nopy_denied" ] || [ -z "$nopy_failclosed" ]; then
+  echo "FAIL: could not count DENIED lines on the fail-closed stderr (grep emitted no count for $nopy_err)"
   fail=$((fail + 1))
-else
-  echo "PASS: no stale-guard reason on the stderr — the predicate was never evaluated"
+elif [ "$nopy_denied" -eq 1 ] && [ "$nopy_failclosed" -eq 1 ]; then
+  echo "PASS: exactly one DENIED line and it is the fail-closed one — the predicate was never evaluated"
   pass=$((pass + 1))
+else
+  echo "FAIL: expected exactly one DENIED line, the fail-closed one; got $nopy_denied DENIED line(s), $nopy_failclosed fail-closed. stderr=$(cat "$nopy_err")"
+  fail=$((fail + 1))
 fi
 rm -rf "$KB_NOPY" "$SHIM_PATH" "$NOPY_HOME" "$nopy_err"
 
