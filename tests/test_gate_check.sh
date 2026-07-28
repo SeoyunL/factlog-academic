@@ -264,9 +264,10 @@ rm -rf "$TMPBASE"
 # being satisfied by a stale report guarantees nothing.
 #
 # The third check pins the other direction, and it COUNTS rather than matching a
-# string. The gate has four deny reasons — fail-closed, "report does not exist",
-# "could not read mtime", "report is stale" — and only the first may appear here;
-# any of the other three means the predicate was evaluated without a usable
+# string. The gate has three deny reasons — fail-closed, "report does not exist",
+# "report is stale" (#600 removed a fourth, "could not read mtime", along with the
+# `stat` dependency that produced it) — and only the first may appear here; any of
+# the others means the predicate was evaluated without a usable
 # Python. Naming just one of them (the first draft grepped for "does not exist",
 # which is the only one this fixture can currently reach) would state a general
 # claim while covering a single site: change the fixture, or route the predicate
@@ -283,9 +284,8 @@ rm -rf "$TMPBASE"
 # allow row in the same environment, or assert its reason. One without the other
 # is how this case passed for its whole life.
 #
-# Branch C ("could not read mtime") is reachable but exercised by no row in this
-# file — the gate denies a fresh-report KB when PATH is empty, because _mtime
-# shells out to `stat`. That is tracked in #600, not pinned here.
+# CASE 24 is that rule applied to the freshness comparison, which is where #600
+# found the deny reason this paragraph used to list as reachable-but-unexercised.
 # ---------------------------------------------------------------------------
 KB_NOPY="$(mktemp -d)"
 make_kb "$KB_NOPY"
@@ -956,8 +956,17 @@ rm -rf "$KB_SHAPE" "$shape_err" "$quiet_err"
 # Hermetic setup: PATH is emptied, but a runner stub execs an interpreter by
 # ABSOLUTE path, so Python stays available and we are NOT in the fail-closed
 # python-availability window — the deny below can only come from the probe.
-# Everything the gate runs after that point (stat, the shell builtins) must also
-# survive an empty PATH, which this row incidentally pins too.
+#
+# What this row does NOT pin, corrected in #600: it used to claim that
+# "everything the gate runs after that point (stat, the shell builtins) must also
+# survive an empty PATH, which this row incidentally pins too". It does not reach
+# them. This KB has an engine input and no report, so the gate returns at
+# "logic_report.txt does not exist", which is above the freshness comparison
+# entirely. Measured by instrumenting the mtime read and running this fixture:
+# 0 hits, and 0 across all 66 rows of the file as it then stood. That gap is what
+# left the `stat` dependency below unnoticed until #600; the empty-PATH coverage
+# the sentence claimed now exists for real, in CASE 24, which reaches the
+# comparison because its KBs HAVE a report.
 KB_NOGREP="$(mktemp -d)"
 make_kb "$KB_NOGREP"
 touch_file "$KB_NOGREP/facts/accepted.dl"   # existing engine input, no report → deny
@@ -1118,6 +1127,201 @@ else
 fi
 
 rm -rf "$KB_NB" "$KB_NB_FRESH" "$nb_err"
+
+# ---------------------------------------------------------------------------
+# CASE 24 (#600): the freshness predicate must not depend on an external command
+# either — and the verdict must be a function of the KB, not of PATH.
+#
+# CASE 22 pinned that for the engine-input probe, one branch earlier. Below it
+# the predicate still shelled out to `stat`, and with `stat` out of reach it
+# denied everything it was asked, including writes whose report was fresh. The
+# deny it emitted ("could not read mtime") was executed by NO row in this file:
+# instrumenting that branch and running the whole suite scored 0 hits across all
+# 66 rows, and 0 on CASE 22's own fixture, whose comment used to claim it reached
+# `stat` incidentally (it exits at "report does not exist" first — see there).
+#
+# So this case does not pin that deny. #600 removed it: the comparison is now
+# bash's `-ot`, and "stat is missing" is no longer a state the gate can be in.
+# What is pinned instead is the property that makes the removal checkable —
+# THE SAME KB MUST PRODUCE THE SAME VERDICT WITH AND WITHOUT A PATH. That is
+# strictly stronger than an exit-code row: a gate that denies everything on an
+# empty PATH fails it (fresh disagrees), and so does a gate that allows
+# everything (stale disagrees).
+#
+# The three KBs are a matched set in one environment, per CASE 11's rule for new
+# deny rows: fresh -> allow, stale -> deny, equal -> allow. The deny sits between
+# two allows taken the same way, so an environment-borne deny leaking in cannot
+# pass as green, and the deny's REASON is asserted as well.
+#
+# The equal-mtime row is not filler. It is what distinguishes `-ot` from a
+# negated `-nt`, and it is where the header's ">=" lives: a report written in the
+# same instant as its input is current, not stale. It also holds at either
+# comparison resolution (equal is not "older" whether bash compares seconds or
+# nanoseconds), so it does not smuggle in a claim about which bash is running.
+#
+# Hermetic setup is CASE 22's: PATH emptied, interpreter reached by ABSOLUTE path
+# through a stub runner, so the fail-closed python check above still passes and
+# these verdicts provably come from the predicate.
+#
+# Between them, CASE 22 and the rows below now walk the hook end to end on an
+# empty PATH — the fail-closed probe, the config resolver, target extraction, the
+# `case` probe, path canonicalisation, the existence tests and the freshness
+# comparison — and reach allow, stale-deny and absent-report-deny. `stat` was the
+# last word in the script that PATH had to supply; what remains is the runner
+# array's "${BASH:-bash}", and bash sets BASH itself, which is what lets these
+# rows run at all.
+# ---------------------------------------------------------------------------
+MTIME_PY="$(bash "$PYTHON_RUNNER" -c 'import sys; print(sys.executable)' 2>/dev/null)"
+MTIME_RUNNER="$(mktemp)"
+cat > "$MTIME_RUNNER" <<RUNNER
+#!/usr/bin/env bash
+exec "$MTIME_PY" "\$@"
+RUNNER
+
+# Sets the globals mt_exit / mt_err for one gate run against <kb>.
+# path_mode: "empty" strips PATH and routes the interpreter through the stub
+# runner; "full" leaves the harness environment alone.
+mtime_run() {
+  local kb="$1" path_mode="$2"
+  local payload; payload="$(envelope "$kb/facts/accepted.dl")"
+  mt_err="$(mktemp)"
+  mt_exit=0
+  if [ "$path_mode" = empty ]; then
+    PATH="" FACTLOG_PYTHON_RUNNER="$MTIME_RUNNER" FACTLOG_ROOT="$kb" \
+      "$BASH_BIN" "$GATE" <<< "$payload" >/dev/null 2>"$mt_err" || mt_exit=$?
+  else
+    FACTLOG_ROOT="$kb" "$BASH_BIN" "$GATE" <<< "$payload" >/dev/null 2>"$mt_err" || mt_exit=$?
+  fi
+}
+
+if [ -z "$MTIME_PY" ] || [ ! -x "$MTIME_PY" ]; then
+  echo "FAIL: empty-PATH freshness — could not resolve an absolute interpreter for the stub runner (got '$MTIME_PY')"
+  fail=$((fail + 1))
+else
+  clear_config
+
+  # fresh: report post-dates the input by ~2s.
+  KB_MT_FRESH="$(mktemp -d)"
+  make_kb "$KB_MT_FRESH"
+  touch_file "$KB_MT_FRESH/facts/accepted.dl"
+  set_mtime_past "$KB_MT_FRESH/facts/accepted.dl"
+  touch_file "$KB_MT_FRESH/facts/logic_report.txt"
+
+  # stale: report predates the input by ~2s.
+  KB_MT_STALE="$(mktemp -d)"
+  make_kb "$KB_MT_STALE"
+  touch_file "$KB_MT_STALE/facts/logic_report.txt"
+  set_mtime_past "$KB_MT_STALE/facts/logic_report.txt"
+  touch_file "$KB_MT_STALE/facts/accepted.dl"
+
+  # equal: report and input share one mtime, copied rather than raced for.
+  KB_MT_EQ="$(mktemp -d)"
+  make_kb "$KB_MT_EQ"
+  touch_file "$KB_MT_EQ/facts/accepted.dl"
+  touch -r "$KB_MT_EQ/facts/accepted.dl" "$KB_MT_EQ/facts/logic_report.txt"
+  # A fixture that failed to copy the timestamp would make the row vacuous
+  # (it would silently become a "fresh" or "stale" row), so verify it here.
+  eq_same="$(bash "$PYTHON_RUNNER" -c \
+    'import os,sys; a=os.stat(sys.argv[1]).st_mtime_ns; b=os.stat(sys.argv[2]).st_mtime_ns; print("same" if a==b else "%d!=%d"%(a,b))' \
+    "$KB_MT_EQ/facts/accepted.dl" "$KB_MT_EQ/facts/logic_report.txt" 2>&1)"
+  if [ "$eq_same" = same ]; then
+    echo "PASS: equal-mtime fixture really has equal mtimes (row is not vacuous)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: equal-mtime fixture did not copy the timestamp — $eq_same"
+    fail=$((fail + 1))
+  fi
+
+  # Collected so the "no stat dependency" check below can look at every run at
+  # once rather than at one hand-picked stderr.
+  mtime_all_err="$(mktemp)"
+
+  mtime_verdict_case() {
+    # mtime_verdict_case <desc> <kb> <expected_exit>
+    local desc="$1" kb="$2" expected="$3"
+    local empty_exit full_exit empty_err
+
+    mtime_run "$kb" empty
+    empty_exit=$mt_exit
+    empty_err="$mt_err"
+    cat "$mt_err" >> "$mtime_all_err"
+
+    mtime_run "$kb" full
+    full_exit=$mt_exit
+    cat "$mt_err" >> "$mtime_all_err"
+    rm -f "$mt_err"
+
+    if [ "$empty_exit" -eq "$expected" ]; then
+      echo "PASS: $desc — empty PATH gives exit $empty_exit"
+      pass=$((pass + 1))
+    else
+      echo "FAIL: $desc — empty PATH expected exit $expected, got $empty_exit; stderr=$(cat "$empty_err")"
+      fail=$((fail + 1))
+    fi
+
+    if [ "$empty_exit" -eq "$full_exit" ]; then
+      echo "PASS: $desc — same verdict with and without a PATH (verdict is a function of the KB)"
+      pass=$((pass + 1))
+    else
+      echo "FAIL: $desc — verdict depends on PATH: empty=$empty_exit full=$full_exit; stderr=$(cat "$empty_err")"
+      fail=$((fail + 1))
+    fi
+    rm -f "$empty_err"
+  }
+
+  # A directory sitting where facts/query.dl would be. `-ot` compares anything
+  # with an mtime, so without the `[ -f ]` guard beside it this KB's fresh report
+  # would read as stale against a directory that is not an engine input at all,
+  # and a write to accepted.dl would be denied over it. Dropping the guard is
+  # otherwise invisible — a plain missing query.dl and a dangling symlink both
+  # measure the same with and without it — so this is the row that makes the
+  # guard falsifiable rather than decorative.
+  KB_MT_DIR="$(mktemp -d)"
+  make_kb "$KB_MT_DIR"
+  touch_file "$KB_MT_DIR/facts/accepted.dl"
+  set_mtime_past "$KB_MT_DIR/facts/accepted.dl"
+  touch_file "$KB_MT_DIR/facts/logic_report.txt"
+  set_mtime_past "$KB_MT_DIR/facts/logic_report.txt"
+  mkdir -p "$KB_MT_DIR/facts/query.dl"   # newer than the report, and not a file
+
+  mtime_verdict_case "report newer than the engine input" "$KB_MT_FRESH" 0
+  mtime_verdict_case "report older than the engine input" "$KB_MT_STALE" 2
+  mtime_verdict_case "report and engine input share one mtime (>= allows)" "$KB_MT_EQ" 0
+  mtime_verdict_case "a directory at facts/query.dl is not an engine input" "$KB_MT_DIR" 0
+
+  # The deny in the middle of that set must name the stale-report reason. Exit 2
+  # is the gate's only deny code, so without this the stale row would be
+  # satisfied by any other deny that happened to fire on an empty PATH.
+  mtime_run "$KB_MT_STALE" empty
+  if [ "$mt_exit" -eq 2 ] && grep -qF "facts/logic_report.txt is stale" "$mt_err"; then
+    echo "PASS: empty-PATH deny names the stale-report reason (predicate ran, not a fallback)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: empty-PATH deny did not come from the stale branch; exit=$mt_exit stderr=$(cat "$mt_err")"
+    fail=$((fail + 1))
+  fi
+  cat "$mt_err" >> "$mtime_all_err"
+  rm -f "$mt_err"
+
+  # The regression pin proper: re-introducing an mtime read that needs an
+  # external command puts "could not read mtime" back on one of those stderrs.
+  # `grep -c` exits 1 on a zero count, so it is isolated behind `|| true` and an
+  # empty count is a distinct, named failure rather than a silent zero.
+  mtime_stat_hits="$(grep -cF "could not read mtime" "$mtime_all_err" || true)"
+  if [ -z "$mtime_stat_hits" ]; then
+    echo "FAIL: could not count mtime-read failures (grep emitted no number for $mtime_all_err)"
+    fail=$((fail + 1))
+  elif [ "$mtime_stat_hits" -eq 0 ]; then
+    echo "PASS: no run reported an unreadable mtime — the predicate needs no external command"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $mtime_stat_hits run(s) failed to read an mtime; stderr=$(cat "$mtime_all_err")"
+    fail=$((fail + 1))
+  fi
+
+  rm -rf "$KB_MT_FRESH" "$KB_MT_STALE" "$KB_MT_EQ" "$KB_MT_DIR" "$mtime_all_err"
+fi
+rm -f "$MTIME_RUNNER"
 
 # ---------------------------------------------------------------------------
 # Summary
