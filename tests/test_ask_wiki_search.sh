@@ -337,23 +337,27 @@ for r in json.load(sys.stdin)['results']:
 py() { "$PYTHON" -c "$1" "${@:2}"; }
 
 # =============================================================================
-# PIN 1 — keyword generation: whole 어절, no particle stripping, stop words dropped
+# PIN 1 — keyword generation: stop words dropped, the rest matched by its stem
 # =============================================================================
 if py "
 import os, sys
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 got = [p.pattern for p in a._keyword_patterns('''$Q_KO''')]
-# #571 이 기능어 '논문은' '어떻게' 를 제거했다 (이 pin 은 그 시점에 갱신됐다).
-# 남은 값은 여전히 현재 결함을 고정한 것이다. 이슈 #581 이 이를 바꾼다 (조사 분리:
-# '근거를' 은 '근거' 로, '추론의' 는 '추론' 으로 줄어야 한다).
-# '제시하는가' 는 #571 이 제거하지 않는다: 불용어 목록은 닫힌 열거인데 '제시하다' 처럼
-# 임의의 콘텐츠 동사에 의문 어미가 붙는 계열은 열거로 닫히지 않는다. (목록에 있는
-# '있는가' 같은 형태는 '있다' 라는 특정 어휘의 표층형이라 열거가 가능했다.) 이 계열을
-# 일반적으로 처리하려면 어미 분리, 즉 형태소 처리(#581 계열)가 필요하다.
-want = ['신경기호', '추론의', '근거를', '제시하는가']
+# #571 이 기능어 '논문은' '어떻게' 를 제거했다 (이 pin 은 그때 한 번 갱신됐다).
+# #581 이 다시 갱신했다 (값 갱신, pin 유지). 이전 값 ['신경기호', '추론의', '근거를',
+# '제시하는가'] 는 결함을 고정한 것이었다 — 조사가 붙은 어절이 통째로 needle 이 되므로
+# 문서가 어간만 쓰면 영원히 못 찾는다. 이제 어절마다 후행 조사·어미 하나를 벗긴다:
+# '추론의'->'추론', '근거를'->'근거'.
+# '제시하는가'->'제시' 는 이 파일이 전에 "열거로는 닫히지 않는다" 고 적었던 계열이다.
+# 여전히 불용어 목록으로는 닫히지 않지만, 어미 분리로는 닿는다 — '제시' 는 '제시한다',
+# '제시했다', '제시' 를 모두 매치하므로 어휘별 열거가 필요 없다.
+# 개수가 4로 유지되는 것도 이 pin 이 함께 고정한다: 분리는 어절마다 패턴을 추가하는
+# 것이 아니라 그 어절의 matcher 를 어간으로 대체한다 (어간의 매치 집합이 표층형의
+# 상위집합이므로 표층 패턴은 잉여다). 5개가 나온다면 커버리지가 이중 계산된다.
+want = ['신경기호', '추론', '근거', '제시']
 assert got == want, f'got={got}'
-" 2>/dev/null; then ok "PIN1 기능어는 빠지고 조사 붙은 어절은 그대로 키워드가 된다 (#581 이 바꾼다)"; else bad "PIN1 keyword pattern set moved: $(py "
+" 2>/dev/null; then ok "PIN1 기능어는 빠지고 남은 어절은 어간으로 매치한다 (#581 이 바꿨다)"; else bad "PIN1 keyword pattern set moved: $(py "
 import os, sys
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
@@ -370,9 +374,9 @@ print([p.pattern for p in a._keyword_patterns('''$Q_KO''')])
 ko_refs="$(refs "$Q_KO" || true)"
 [ -n "$ko_refs" ] || bad "PIN2 한국어 질문이 발췌를 0건 반환했다 (이후 PIN2/PIN3 는 이 사실의 파생)"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #581 (조사 분리) 이 이를 바꾼다: 4개 키워드
-# 중 코퍼스에 닿는 것은 '신경기호' '추론의' '근거를' 뿐이고, 그중 '추론의' '근거를' 는
-# 조사가 붙은 형태를 그대로 담은 문서에만 걸린다.
+# 3 -> 4 는 #581 이 바꿨다 (값 갱신, pin 유지). 늘어난 한 건은
+# sources/2019-evidence-logging.md:1 — 어간 '근거' 만 담은 파일이고, 조사가 붙은
+# '근거를' 로는 구조적으로 닿을 수 없었다. 바로 아래 pin 이 그 파일을 이름으로 확인한다.
 # 4 -> 3 은 #571 이 바꿨다: 기능어 '논문은' 만으로 걸리던 철회 공지 발췌가 빠졌다.
 # 3 -> 4 는 #576 이 바꿨다 (값 갱신, pin 유지): 렉시컬로는 도달 불가능한 영어 소스가
 # accepted 어휘를 경유해 한 건 추가된다. 승격 대상이 4건이 아니라 1건인 것이 이 값의
@@ -383,14 +387,15 @@ ko_refs="$(refs "$Q_KO" || true)"
 # :4 발췌에 본문 첫 줄을 붙이면서 겹침 축약 지점이 그 본문 줄까지 내려가고, 사이에
 # 있던 :14 발췌(메타데이터 + 헤딩뿐)가 흡수된다. 사라진 것은 발췌 하나이지 파일이
 # 아니다 — kim-2024 는 여전히 :4 로 인용되고, 이제 초록 문장을 싣는다 (PIN5).
-same "PIN2 한국어 질문의 발췌 수 (#581 이 바꾼다)" "3" "$(printf '%s\n' "$ko_refs" | grep -c .)"
+same "PIN2 한국어 질문의 발췌 수 (#581 이 바꿨다)" "4" "$(printf '%s\n' "$ko_refs" | grep -c .)"
 
-# 이 값은 현재 결함을 고정한 것이다. 이슈 #581 이 이를 바꾼다. '근거를' 은 어간 '근거'
-# 를 담은 이 파일을 매치하지 못한다 — 조사가 분리되면 이 파일이 결과에 들어와야 한다.
+# 이 pin 은 #581 이 뒤집은 값이다 (그 전에는 "닿지 않는다" 는 결함을 고정했다).
+# 결함 pin 이 아니라 회귀 가드가 됐다: 이 파일에는 '근거를' 이라는 문자열이 한 번도
+# 없고 '근거' 만 있으므로, 결과에서 사라진다면 조사 분리가 끊겼다는 뜻이다.
 if printf '%s\n' "$ko_refs" | grep -q '2019-evidence-logging'; then
-  bad "PIN2 bare-stem 문서가 이미 매치된다 — #581 이 머지됐다면 이 pin 을 갱신하라"
+  ok "PIN2 조사 붙은 '근거를' 이 어간만 담은 문서에 닿는다 (#581 이 바꿨다)"
 else
-  ok "PIN2 조사 붙은 '근거를' 은 어간만 담은 문서에 닿지 않는다 (#581 이 바꾼다)"
+  bad "PIN2 조사 붙은 '근거를' 이 어간만 담은 문서에 다시 닿지 못한다 — #581 의 조사 분리가 끊겼다"
 fi
 
 # 이 pin 은 #576 이 뒤집은 값이다 (그 전에는 "영어 소스에 닿지 않는다" 는 결함을
@@ -432,6 +437,16 @@ ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
 # 이 갱신의 요점이다: 리콜 집계는 방출이 아니라 스캔 시점에 잡히므로 (search() 의
 # docstring 이 last_end 축약을 그 이유로 명시한다), 발췌가 흡수되어도 그 줄이 담던
 # 키워드는 여전히 matched 다. 두 줄이 같이 움직였다면 #575 의 계약이 깨진 것이다.
+#
+# #581 은 'source excerpts' 를 3 -> 4 로 되돌리고, 그 외 어떤 줄도 건드리지 않는다
+# (값 갱신, pin 유지). 특히 매치 실적 줄이 '3/4 — 신경기호, 추론의, 근거를' 로 그대로인
+# 것이 이 갱신의 요점이자 #581 이 #575 와 맺은 계약이다:
+#  - 분모가 4로 유지된다 — 어간 분리는 어절당 패턴을 늘리지 않고 matcher 를 바꾼다.
+#  - 이름이 표층형('추론의', '근거를')으로 유지된다 — 리포트는 사용자가 친 어절을 싣지,
+#    코드가 파생한 어간('추론', '근거')을 싣지 않는다. 어간을 실었다면 사용자가 쓴 적
+#    없는 단어를 "당신의 키워드" 라고 보고하는 것이고, 그건 #575 가 없애려던 오진이다.
+#  - 분자가 3으로 유지된다 — 늘어난 발췌는 이미 matched 였던 '근거를' 이 닿은 것이고,
+#    unmatched 인 '제시하는가'(어간 '제시')는 이 코퍼스에 정말로 없다.
 ko_head="$(printf '%s\n' "$ko_answer" | awk '/^\[/{exit} {print}')"
 same "PIN2 답변 머리 블록 전체 — 매치 실적 진단과 분해 제안이 붙는다 (#575/#577 이 바꿨다)" \
   "UNVERIFIED — wiki exploration
@@ -439,7 +454,7 @@ question: $Q_KO
 reason: unknown entity
 WARNING: unverified candidates — do not treat as confirmed facts.
 sources searched: sources, runs/sources, decisions (supplementary)
-source excerpts: 3
+source excerpts: 4
 keywords matched: 3/4 — 신경기호, 추론의, 근거를
 keywords unmatched: 제시하는가
 
@@ -497,8 +512,19 @@ same "PIN2 답변은 마지막 발췌 줄로 끝난다 — 뒤에 덧붙는 줄�
 # 채점은 창(lines[start:end])에 대해 그대로 이루어진다. 실측: kim:4 (2,2), faronius:16
 # 어휘 경유 (1,1), decisions:3 (3,5). 이 pin 이 고정하는 것(등급이 최상위 키다)은 세
 # 행만으로도 그대로 보인다: decisions 는 두 성분 모두 최고인데 여전히 꼴찌다.
-same "PIN3 한국어 질문의 랭킹 순서 — 등급이 커버리지·빈도보다 우선한다 (#572/#576 이 바꿨다)" \
+#
+# #581 이 2행을 끼워 넣었다 (값 갱신, pin 유지). 실측한 정렬 키:
+#   kim:4        (등급 1, 커버리지 3, 빈도 3)
+#   2019:1       (등급 1, 커버리지 1, 빈도 2)   <- #581 이 추가한 행
+#   faronius:16  (등급 1, 커버리지 1, 빈도 2)   <- 어휘 경유(#576), 브리지 사실 2건
+#   decisions:3  (등급 0, 커버리지 3, 빈도 6)
+# 2019 와 faronius 는 키가 완전히 동점이고, 순서는 안정 정렬이 정한다: 렉시컬 행은
+# 스캔 중에 쌓이고 어휘 경유 행은 스캔이 끝난 뒤 append 되므로 (search() 의 주석이
+# 그 순서를 명시한다) 렉시컬 쪽이 앞이다. 이 pin 이 고정하는 것은 그대로다 —
+# decisions 는 커버리지·빈도 두 성분 모두 최고인데 여전히 꼴찌다.
+same "PIN3 한국어 질문의 랭킹 순서 — 등급이 커버리지·빈도보다 우선한다 (#572/#576/#581 이 바꿨다)" \
   "sources/kim-2024-neurosymbolic-grounding.md:4
+sources/2019-evidence-logging.md:1
 sources/faronius-2025-attention-budget.md:16
 decisions/open-questions.md:3" \
   "$ko_refs"
@@ -638,18 +664,23 @@ same "PIN5 헤딩에서 끝나던 두 번째 발췌는 흡수되어 사라진다
   "" \
   "$(excerpt_of "$Q_KO" 'sources/kim-2024-neurosymbolic-grounding.md:14' || true)"
 
-# 초록 문장은 이 파일에서 키워드 커버리지가 가장 높은 행(신경기호/근거를 = 2개 매치,
+# 초록 문장은 이 파일에서 키워드 커버리지가 가장 높은 행(신경기호/추론/근거 = 3개 매치,
 # 파일 내 최대)이다. #574 이전에는 그 사실이 바로 앞 발췌의 last_end 에 억제되어
 # 답변 어디에도 나타나지 않았다.
 # (3,3) -> (2,2) 는 #571 이 바꿨다: 이 문장의 '이 논문은' 이 기능어로 빠졌다.
+# (2,2) -> (3,3) 은 #581 이 바꿨다 (값 갱신, pin 유지). 이 문장은 '신경기호 추론이
+# 산출한' 이라고 쓰는데 질문은 '추론의' 라고 물었다 — 조사가 양쪽에 다르게 붙어 있어
+# 표층형끼리는 절대 만나지 못하던 정확히 그 경우다. 어간 '추론' 이 양쪽을 잇는다.
+# 이 pin 이 고정하는 것은 값이 아니라 "이 문장이 파일 내 최대" 라는 사실이고, 그건
+# 3개 매치로도 그대로다.
 if py "
 import os, sys
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 line = '이 논문은 신경기호 추론이 산출한 결론의 근거를 역추적하는 절차를 제안한다.'
-assert a._excerpt_score(line, a._keyword_patterns('''$Q_KO''')) == (2, 2), a._excerpt_score(
+assert a._excerpt_score(line, a._keyword_patterns('''$Q_KO''')) == (3, 3), a._excerpt_score(
     line, a._keyword_patterns('''$Q_KO'''))
-" 2>/dev/null; then ok "PIN5 초록 문장은 파일 내 최고 커버리지 행이다 (2개 키워드 매치)"; else bad "PIN5 초록 문장의 점수가 이동했다 — 픽스처를 확인하라"; fi
+" 2>/dev/null; then ok "PIN5 초록 문장은 파일 내 최고 커버리지 행이다 (3개 키워드 매치)"; else bad "PIN5 초록 문장의 점수가 이동했다 — 픽스처를 확인하라"; fi
 
 # 이 pin 은 #574 가 뒤집었다 (그 전에는 "억제되어 답변에 없다" 는 결함을 고정했다).
 # 결함 pin 이 아니라 회귀 가드가 됐다: 이 문장이 다시 사라지면 본문 부착이 끊겼다는 뜻이다.
@@ -779,8 +810,12 @@ rm -f "$degraded/facts/candidates.csv"
 # kim-2024 의 :14 발췌는 #574 가 흡수했다 (값 갱신, pin 유지). 이 pin 이 고정하는 것은
 # "승격 행이 0 이고 렉시컬 결과는 그대로" 이므로, 렉시컬 쪽 발췌 기하가 바뀌면 값도
 # 같이 움직인다 — PIN3 의 목록에서 같은 행이 같은 이유로 빠진 것과 짝을 이룬다.
+# #581 이 2019-evidence-logging:1 을 더한 것도 같은 이유다 (값 갱신, pin 유지): 그 행은
+# 순수 렉시컬이므로 PIN3 목록과 정확히 같은 자리에 같은 이유로 나타나고, 이 pin 이
+# 고정하는 것(승격 행이 0 이다 = faronius 가 없다)은 그대로다.
 same "PIN7 candidates.csv 가 없으면 승격 없이 기존 렉시컬 결과만 남는다 (수용 기준 5)" \
   "sources/kim-2024-neurosymbolic-grounding.md:4
+sources/2019-evidence-logging.md:1
 decisions/open-questions.md:3" \
   "$("$PYTHON" "$ROUTER" search "$Q_KO" --all --target "$degraded" | "$PYTHON" -c "
 import json, sys
@@ -1314,6 +1349,113 @@ for r in json.load(sys.stdin)['results']:
         print(r['excerpt'])
         break
 " || true)"
+
+# =============================================================================
+# PIN 12 — 조사 분리(#581): 상위집합 불변식과 과대매칭 비용
+# =============================================================================
+# #581 의 안전성 주장은 하나다: 어간의 매치 집합은 표층 어절의 매치 집합을 포함한다.
+# 그래서 오분리('전문가'->'전문')는 문서를 더할 뿐, 표층형이 찾던 문서를 감출 수 없다.
+# 그 주장은 주석으로 적을 것이 아니라 코퍼스 전체에 대해 결과로 확인할 것이다 —
+# 여기가 그 자리다. PIN1/PIN2 는 키워드와 발췌 수를, PIN3 는 순서를 고정하지만, 어느
+# 것도 "잃은 것이 없다" 를 말하지 않는다.
+#
+# 비교 상대인 '#581 이전' 은 별도 구현이 아니라 표층 term 그 자체다. _keywords 가
+# (사용자가 친 어절, 어간 matcher) 쌍을 돌려주므로, 왼쪽 원소를 그대로 needle 로 쓰면
+# 그것이 정확히 이 변경 전의 matcher 다. 이 pin 이 #575 의 표층형 계약(PIN2 머리 블록)에
+# 의존한다는 뜻이기도 하다: term 이 어간으로 바뀌면 이 비교는 조용히 자기 자신과의
+# 비교가 되어 무조건 통과한다. 그래서 아래 첫 체크가 그 전제를 먼저 값으로 고정한다.
+if py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+terms = [t for t, _p in a._keywords('''$Q_KO''')]
+pats = [p.pattern for _t, p in a._keywords('''$Q_KO''')]
+assert terms == ['신경기호', '추론의', '근거를', '제시하는가'], terms
+assert pats == ['신경기호', '추론', '근거', '제시'], pats
+assert terms != pats, 'term 과 matcher 가 같아지면 아래 비교가 무의미해진다'
+" 2>/dev/null; then ok "PIN12 전제: term 은 표층 어절, matcher 는 어간 — 둘이 다르다"; else bad "PIN12 전제가 깨졌다 — term/matcher 가 더는 분리되지 않는다"; fi
+
+# 상위집합 불변식, 코퍼스 전체에 대해. 한 질문이라도 표층형이 닿던 파일을 어간이 놓치면
+# 여기서 이름과 함께 떨어진다.
+supersets="$(py "
+import os, re, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import pathlib
+import ask_router as a
+kb = pathlib.Path('$KB')
+files = []
+for rel, _label, _grade in a._wiki_corpus():
+    base = kb / rel
+    if not base.is_dir():
+        continue
+    for path in sorted(p for p in base.rglob('*') if p.is_file()):
+        try:
+            files.append((path.relative_to(kb).as_posix(), path.read_text(encoding='utf-8').lower()))
+        except (OSError, UnicodeDecodeError):
+            pass
+questions = [
+    '''$Q_KO''',
+    '근거를 어디에 기록하는가',
+    '신경기호 추론의 절차를 제시하는 논문은?',
+    '전문가 평가 방법은?',
+    '철회된 논문의 근거가 무엇인가',
+]
+lost, added = [], 0
+for q in questions:
+    kws = a._keywords(q)
+    before = {ref for ref, text in files if any(re.search(re.escape(t), text) for t, _p in kws)}
+    after = {ref for ref, text in files if any(p.search(text) for _t, p in kws)}
+    lost += [(q, sorted(before - after))] if before - after else []
+    added += len(after - before)
+print(len(lost), added)
+" || true)"
+[ -n "$supersets" ] || bad "PIN12 상위집합 측정이 빈 값을 냈다 (이후 PIN12 는 이 값의 파생)"
+# 왼쪽 0 = 어떤 질문도 파일을 잃지 않았다. 오른쪽 7 은 5개 질문에 걸쳐 늘어난 (질문,
+# 파일) 쌍의 수, 곧 이 픽스처에서의 리콜 증가분이자 과대매칭 비용의 총량이다. 실측 내역:
+#   Q_KO                      +1 (2019-evidence-logging.md — '근거를'->'근거')
+#   '근거를 어디에 기록하는가'    +1 (같은 파일, 같은 이유)
+#   '…절차를 제시하는 논문은?'   +1 (ai-alignment-eval.md — '절차를'->'절차' 가 '절차는')
+#   '전문가 평가 방법은?'        +0 (오분리 '전문가'->'전문' 이 이 코퍼스에서는 비용 0)
+#   '철회된 논문의 근거가…'      +4 (전부 '논문의'->'논문' 이 넓기 때문 — 총칭명사의
+#                                  어간은 정분리여도 넓다. 이 4건이 이 pin 이 보여 주는
+#                                  가장 큰 비용이고, 오분리가 아니라 정분리의 비용이다.)
+# 실 KB 에서의 같은 측정은 scratchpad 의 overmatch.py 가 한다: 494개 어절 중 98개가
+# matcher 를 바꾸고, 파일 증가는 중앙값 +0 / 평균 +1.48 / 최대 +67 이다.
+same "PIN12 어간 분리는 표층형이 닿던 파일을 하나도 잃지 않는다 — 잃은 질문 수, 늘어난 (질문,파일) 쌍" \
+  "0 7" "$supersets"
+
+# 오분리를 결과로 고정한다. '전문가' 의 '가' 는 조사와 구별되지 않으므로 '전문' 으로
+# 줄고, '전문' 만 쓰는 무관한 파일이 결과에 들어온다. 이것은 고칠 결함이 아니라 측정된
+# 비용이다 — 구별하려면 형태소 분석기가 필요하고 이슈가 범위 밖으로 못 박았다. 값이
+# 움직이면 접미사 표가 바뀌었다는 뜻이고, 그때 이 줄이 그 사실을 말한다.
+cat > "$KB/sources/581-overstrip.md" <<'EOF'
+# 전문 인용 지침
+
+전문 인용은 원문 전체를 그대로 옮기는 것을 말한다.
+EOF
+# 질문의 다른 어절은 이 코퍼스에 하나도 없는 것으로 고른다 ('의견'). 그래야 결과 1건이
+# 오분리 때문임이 확정된다 — '평가' 같은 어절을 쓰면 ai-alignment-eval.md 가 정당하게
+# 걸려서 이 pin 이 오분리와 무관한 이유로 통과한다 (실제로 첫 시도가 그랬다).
+overstrip="$(router search '전문가 의견은 무엇인가' --all | py "
+import json, sys
+print(sorted({r['file'].rsplit('/', 1)[-1] for r in json.load(sys.stdin)['results']}))
+" || true)"
+[ -n "$overstrip" ] || bad "PIN12 오분리 질의가 빈 값을 냈다"
+same "PIN12 알려진 오분리 비용: '전문가'->'전문' 이 '전문' 만 쓴 무관 파일을 끌어온다" \
+  "['581-overstrip.md']" "$overstrip"
+# ...그리고 그 비용은 한쪽으로만 난다: 같은 질문이 '전문가' 를 쓴 파일도 계속 찾는다.
+cat > "$KB/sources/581-overstrip-exact.md" <<'EOF'
+# 전문가 소견
+
+전문가 소견은 두 명 이상이 독립으로 작성한다.
+EOF
+overstrip_both="$(router search '전문가 의견은 무엇인가' --all | py "
+import json, sys
+print(sorted({r['file'].rsplit('/', 1)[-1] for r in json.load(sys.stdin)['results']}))
+" || true)"
+same "PIN12 오분리는 더하기만 한다 — 표층형을 쓴 파일도 그대로 찾는다" \
+  "['581-overstrip-exact.md', '581-overstrip.md']" "$overstrip_both"
+rm -f "$KB/sources/581-overstrip.md" "$KB/sources/581-overstrip-exact.md"
 
 echo ""
 echo "========================================"
