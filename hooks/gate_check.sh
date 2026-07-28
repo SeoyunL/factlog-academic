@@ -176,10 +176,39 @@ target_path="$(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c \
 # and Edit in a session, so denying whenever a path cannot be parsed would brick
 # all file editing over a contract that covers exactly two files.
 #
-# The residual false positive is a non-engine write whose CONTENT mentions
-# facts/accepted.dl — reachable only once extraction has ALREADY failed, i.e. in
-# a state that should not occur, and recoverable by running /factlog check
-# (see below: the predicate, not a hard deny, decides the verdict).
+# The residual false positive is a write whose CONTENT mentions facts/accepted.dl
+# while its own target path could not be read. #591 dismissed that as "a state
+# that should not occur"; #596 asked what pins it, since any tool naming its
+# target under another key (NotebookEdit uses notebook_path) would land here on
+# its content alone. What pins it is hooks.json's matcher AND Claude Code's
+# matcher semantics — and the second half is a property of a program this repo
+# does not ship, so it is a measurement, not a guarantee:
+#
+#   Claude Code 2.1.220 does not apply a matcher of only [A-Za-z0-9_|, -] as a
+#   regex at all. It splits on | and , and compares each token to the tool name by
+#   EXACT equality; the regex path is taken only by matchers carrying some other
+#   character. A live session pinned it end to end: with "Write|Edit",
+#   "NotebookEdit" and "Notebook.*" registered side by side, one NotebookEdit call
+#   fired the latter two and NOT "Write|Edit", and one Write call fired only
+#   "Write|Edit".
+#
+# So "Write|Edit" routes exactly Write and Edit, both of which carry
+# tool_input.file_path (CASE 20 pins both shapes) — NotebookEdit never arrives
+# here, and a failed extraction means a payload from outside that routing.
+#
+# Two ways that stops holding, one of which this repo can watch: a matcher edited
+# to carry a regex metacharacter ("Notebook.*|Write|Edit") switches to the regex
+# path, which is unanchored, and routes tools whose target key is not read here —
+# CASE 23 of tests/test_gate_check.sh fails if hooks.json's matcher stops being a
+# plain list of tools this gate can read a path out of. The other is Claude Code
+# changing matcher semantics (it last did at 2.1.195); nothing here pins that.
+#
+# The extraction keys are deliberately NOT widened to cover such a tool. Every
+# added key is a new payload-controlled way to produce a RESOLVED, non-engine
+# target, which can only move verdicts from deny toward allow — paid for a routing
+# path that does not exist at the measured version. And the branch is not a wall:
+# the predicate, not a hard deny, decides the verdict (see below), so running
+# /factlog check clears a false positive.
 #
 # The probe is a shell `case`, not grep. An external command here would decide a
 # security verdict on whether PATH happens to contain it: with grep missing, the
