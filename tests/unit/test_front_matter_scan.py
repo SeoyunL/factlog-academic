@@ -22,6 +22,7 @@ import pytest
 from factlog.integrations.arxiv.source_writer import ArxivSourceWriter
 from factlog.integrations.arxiv.work_parser import ParsedArxivWork
 from factlog.integrations.common.backfill import IMPORTED_AT_KEY
+from factlog import front_matter_scan
 from factlog.front_matter_scan import (
     FRONT_MATTER_CHUNK_CHARS,
     FRONT_MATTER_MAX_CHARS,
@@ -32,6 +33,7 @@ from factlog.front_matter_scan import (
     front_matter_absence,
     front_matter_block,
     front_matter_body,
+    front_matter_end_line,
 )
 from factlog.integrations.common.front_matter import (
     read_first_author,
@@ -556,6 +558,83 @@ class TestFrontMatterBody:
         path = tmp_path / "mojibake.md"
         path.write_bytes(b'---\ntitle: "T"\n---\n\n\xff\xfe body\n')
         assert front_matter_body(path) == ""
+
+
+class TestFrontMatterEndLine:
+    """The same boundary in line coordinates (#574).
+
+    ``front_matter_body`` hands back a suffix, which a caller that needs to know
+    WHICH line numbers are front matter cannot invert without re-finding the fence.
+    These pin that the line index agrees with the block and the body on the same
+    file — the agreement is the whole reason the function lives in this module
+    rather than at its caller — and that the four no-block files answer None.
+    """
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ('---\ntitle: "T"\n---\n\n# H\n\nbody\n', 2),
+            ("---\n---\n\nbody\n", 1),  # empty block: the fences are adjacent
+            ('---\na: 1\nb: 2\n---', 3),  # no trailing newline after the fence
+            ("----\na: 1\n----- trailing\nbody\n", 2),  # neither fence is exactly '---'
+            ("---\ntitle: unclosed\n", None),
+            ("# Only a heading\n\nbody\n", None),
+            ("", None),
+            ("---", None),  # an opening fence and nothing else
+        ],
+    )
+    def test_the_fence_line_is_located(self, text, expected):
+        assert front_matter_end_line(text) == expected
+
+    def test_it_agrees_with_block_and_body_on_the_same_file(self, tmp_path):
+        """One boundary, three readings — the #419 property, checked directly.
+
+        Written as a property over the file rather than as three literals: a
+        literal would still pass if the line index drifted by one against a fixture
+        whose numbers were copied from the same wrong reading. An off-by-one in
+        either direction puts a YAML key or the closing fence on the wrong side of
+        this assertion.
+        """
+        text = '---\nzotero_key: "K"\ntitle: "T"\n---\n\n# T\n\n## Abstract\n\nprose\n'
+        path = tmp_path / "src.md"
+        path.write_text(text, encoding="utf-8")
+        fence = front_matter_end_line(text)
+        lines = text.splitlines()
+        assert lines[fence].startswith("---")
+        assert lines[fence + 1:] == front_matter_body(path).splitlines()
+        assert "\n".join(lines[1:fence]) == front_matter_block(path).lstrip("\n")
+
+    @pytest.mark.parametrize("chunk, cap", [(8, 32), (8, 30), (7, 32)])
+    def test_it_gives_up_where_the_chunked_read_gives_up(self, tmp_path, monkeypatch,
+                                                        chunk, cap):
+        """The two readers abandon the same file, cap-aligned or not.
+
+        The pairs are chosen so the cap is a chunk multiple in one case and not in
+        the other two: ``_locate`` reads whole chunks and only then tests the cap,
+        so its real window is the first chunk multiple at or past it. Reading the
+        raw constant here instead was measured disagreeing — a block ending between
+        the cap and that multiple is located by the file reader and missed by this
+        one, which is the drift #419 exists to prevent, reintroduced at a boundary
+        nobody would think to test with the shipped values (8192 divides 1 MiB).
+        """
+        monkeypatch.setattr(front_matter_scan, "FRONT_MATTER_CHUNK_CHARS", chunk)
+        monkeypatch.setattr(front_matter_scan, "FRONT_MATTER_MAX_CHARS", cap)
+        for filler in range(1, 40):
+            text = "---\n" + "a\n" * filler + "---\nbody\n"
+            path = tmp_path / f"src-{chunk}-{cap}-{filler}.md"
+            path.write_text(text, encoding="utf-8")
+            located = front_matter_scan.front_matter_end_line(text) is not None
+            assert located is (front_matter_block(path) is not None), (chunk, cap, filler)
+
+    def test_an_abandoned_search_is_no_fence(self, tmp_path, monkeypatch):
+        """And when they do give up, this one says None rather than guessing."""
+        monkeypatch.setattr(front_matter_scan, "FRONT_MATTER_CHUNK_CHARS", 8)
+        monkeypatch.setattr(front_matter_scan, "FRONT_MATTER_MAX_CHARS", 32)
+        text = "---\n" + "a: 1\n" * 40 + "---\nbody\n"
+        path = tmp_path / "big.md"
+        path.write_text(text, encoding="utf-8")
+        assert front_matter_scan.front_matter_end_line(text) is None
+        assert front_matter_absence(path) == FRONT_MATTER_UNSCANNED
 
     def test_the_unscanned_reason_names_the_cap_it_stopped_at(self):
         """The number in the message is the constant, not a copy of today's value.

@@ -88,6 +88,28 @@ FRONT_MATTER_UNSCANNED = (
 FRONT_MATTER_UNREADABLE = "the file could not be read as UTF-8 text"
 
 
+def _block_in(head: str) -> str | None:
+    """The block *head* holds, or None — the fence rule itself, written once.
+
+    Both readers below end here: :func:`_locate` after it has read enough of a
+    file, :func:`front_matter_end_line` on text the caller already holds. The rule
+    is *opening fence* = the text starts with ``---``; *closing fence* = the first
+    later line that starts with ``---``; the block is what lies between. Neither
+    fence has to be exactly three dashes and neither has to be alone on its line,
+    because this locates a block and does not parse YAML.
+
+    Written out rather than inlined twice because a caller holding the text in
+    memory instead of a path is exactly the shape that invites the third copy of
+    this scan, and two copies drifting into disagreeing about the same file is
+    what the module exists to have stopped (#419).
+    """
+    if not head.startswith("---"):
+        return None
+    rest = head[3:]
+    end = rest.find("\n---")
+    return None if end == -1 else rest[:end]
+
+
 def _locate(path: Path | str) -> tuple[str | None, str | None]:
     """``(block, absence)`` for a file — exactly one of the two is not None.
 
@@ -115,10 +137,9 @@ def _locate(path: Path | str) -> tuple[str | None, str | None]:
                 head += chunk
     except (OSError, UnicodeDecodeError):
         return None, FRONT_MATTER_UNREADABLE
-    rest = head[3:]
-    end = rest.find("\n---")
-    if end != -1:
-        return rest[:end], None
+    block = _block_in(head)
+    if block is not None:
+        return block, None
     # Which of the two loop exits arrived here is the whole distinction between the
     # remaining reasons, and it is decided by the length alone: every read before
     # EOF returns a full chunk, so the loop's length test can only stop it at
@@ -238,6 +259,48 @@ def front_matter_block(path: Path | str) -> str | None:
     question, not this one's. This stays the reader every caller already has.
     """
     return _locate(path)[0]
+
+
+def front_matter_end_line(text: str) -> int | None:
+    """0-based index of the **closing fence line** in *text*, or None for no block.
+
+    The same claim as :func:`front_matter_block` — where the block ends — answered
+    in line coordinates for a caller that has already read the file and works over
+    ``splitlines()``. :func:`front_matter_body` answers it in text coordinates and
+    hands back a suffix; a caller that needs to know *which line numbers* are front
+    matter (to cite them, or to tell a metadata line from a body line) cannot
+    recover that from a suffix without re-finding the fence, which is the third
+    copy this module exists to prevent (#419).
+
+    Takes text rather than a path on purpose. The caller this was added for
+    (``tools/ask_router.py``'s wiki scan) already holds every corpus file's text in
+    memory and reads each one once; a path-taking reader would re-open and re-decode
+    every file in the corpus on every question.
+
+    The character cap is applied here too, so this and :func:`front_matter_block`
+    give up on the same file. It is applied at the *quantised* ceiling, not at the
+    raw constant, because that is where ``_locate`` actually stops: it reads a
+    whole chunk before testing the cap, so it searches ``chunk``-sized multiples
+    and the first one that reaches the cap is its real window. The module's own
+    note on ``FRONT_MATTER_CHUNK_CHARS`` says the chunk quantises the cap; today's
+    values hide it (8192 divides 1 MiB exactly) and any other pair would not, so
+    the arithmetic is written out rather than assumed away.
+
+    A block with no closing fence is None, not "the whole file" — the same
+    fail-closed policy, for the same reason: an unclosed block's extent is
+    unknowable, so nothing below it can be called body either.
+    """
+    chunks = -(-FRONT_MATTER_MAX_CHARS // FRONT_MATTER_CHUNK_CHARS)  # ceiling division
+    block = _block_in(text[:chunks * FRONT_MATTER_CHUNK_CHARS])
+    if block is None:
+        return None
+    # The same arithmetic :func:`front_matter_body` uses, read as lines instead of
+    # as an offset: the raw text opens with ``---`` + the block + the ``\n`` that
+    # ends the block's last line, and the closing fence begins right after it. A
+    # line's 0-based index is the number of newlines before its first character, so
+    # counting THROUGH that ``\n`` (hence the +1) is the fence's index.
+    close_fence = 3 + len(block)  # index of the ``\n`` preceding the closing ``---``
+    return text.count("\n", 0, close_fence + 1)
 
 
 def front_matter_body(path: Path | str) -> str:

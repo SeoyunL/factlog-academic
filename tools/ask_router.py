@@ -130,7 +130,7 @@ from common import (  # noqa: E402
     sync_ignore_patterns,
 )
 from factlog import ingest, literal_types  # noqa: E402
-from factlog.front_matter_scan import front_matter_body  # noqa: E402
+from factlog.front_matter_scan import front_matter_body, front_matter_end_line  # noqa: E402
 
 # The bridge (#576) resolves a provenance anchor with the SAME function that
 # validates one. Imported as a module, not by symbol, so the call sites read as
@@ -628,6 +628,20 @@ WIKI_SOURCE_DIRS = ("sources", "runs/sources")
 WIKI_SUPPLEMENTARY_DIRS = ("decisions",)
 _EXCERPT_WINDOW = 3
 
+# Stands where an excerpt jumps from a front-matter match to the document's first
+# body line (#574) — the ONE place an excerpt is not a contiguous slice, so the
+# discontinuity is shown rather than left for the reader to infer from a citation
+# line number that no longer describes the whole excerpt.
+#
+# It carries no word and no number ON PURPOSE. The excerpt string is what
+# `_keyword_hits` scores, so any token in this marker is scored as if the source
+# had written it: a marker reading '… (line 18)' self-matches a question about
+# 'line' — or about '18', since a 2-character ASCII token is a keyword (#583) —
+# and every front-matter excerpt in the corpus then gains coverage the source text
+# does not have. U+2026 is one character and is neither ASCII nor CJK, so no
+# keyword pattern can reach it.
+_EXCERPT_ELISION = "…"
+
 # Directory grade — the TOP element of the ranking key (#572). Before this the
 # grade lived only in the display label, so a review note could (and on the
 # reference KB did) take rank 1 over the source text it was reviewing. Only the
@@ -948,6 +962,110 @@ def _keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
 def _keyword_patterns(question: str) -> list[re.Pattern[str]]:
     """The matchers of :func:`_keywords`, for callers that only match, never report."""
     return [pattern for _term, pattern in _keywords(question)]
+
+
+def _body_anchor(text: str, lines: list[str]) -> tuple[int, int] | None:
+    """``(closing fence index, first body prose index)``, or None when neither the
+    front matter nor the prose below it exists — both 0-based indices into *lines*.
+
+    "Body prose" is the first line under the block that is neither blank nor a
+    markdown heading. Headings are excluded because excluding them is the whole
+    point: a ``zotero-import`` source puts ``# <title>`` and ``## Abstract``
+    between the fence and the first sentence, and an excerpt that stops on either
+    of them shows the reader the title they already saw in ``title:`` and nothing
+    they can judge the paper by (#574). A list item ('- DOI: …') is prose here —
+    the rule is stated over blankness and heading-ness, not over a guess at which
+    prose is worth reading.
+
+    Returns None when the file has no closing fence (nothing is known to be front
+    matter, so no line needs rescuing) and also when the block is all there is
+    (nothing to rescue). Both cases leave every caller on the plain window.
+
+    The fence comes from :func:`factlog.front_matter_scan.front_matter_end_line`,
+    not from a local ``startswith('---')`` scan: the fence rule is that module's
+    (#419), and the local copy this replaces would have had to re-decide what an
+    unclosed block means — the case where a hand-written note that merely opens
+    with ``---`` would otherwise have its whole body read as metadata.
+    """
+    fence = front_matter_end_line(text)
+    if fence is None:
+        return None
+    anchor = next(
+        (
+            index
+            for index in range(fence + 1, len(lines))
+            if lines[index].strip() and not lines[index].lstrip().startswith("#")
+        ),
+        None,
+    )
+    return None if anchor is None else (fence, anchor)
+
+
+def _excerpt_span(
+    lines: list[str],
+    start: int,
+    end: int,
+    match: int,
+    anchor: tuple[int, int] | None,
+) -> tuple[list[str], int]:
+    """``(lines to display, last file index the excerpt covers)`` for one match.
+
+    Normally the plain window ``lines[start:end]``. When the match sits INSIDE the
+    front-matter block and that window reaches no further than the first body
+    line, the body line is attached below an elision marker so the excerpt carries
+    at least one line of prose (#574).
+
+    **The attachment is display only — the caller scores the plain window.** That
+    is deliberate and it was measured, not assumed. Scoring the attached line
+    instead is defensible on its face (the reader sees it, so it is part of what
+    the row offers) and it does rank better on the reference KB, but on the wiki
+    harness's fixture it silently guts the #594 regression guard: the attached
+    abstract carries the same terms as the front matter that matched, so the
+    front-matter row's frequency rises (kim-2024 goes (2,2) -> (2,4) on that
+    fixture's Q_BACK) and it overtakes the bridged row whose promotion PIN9 exists
+    to observe. Reproduced: with the attached line scored, deleting #594's credit
+    from search() outright leaves PIN9's pinned order byte-identical — the pin
+    stops seeing its own axis. It is not recoverable by re-picking the question
+    either; every question that reaches the bridge must contain the term the
+    bridge joins on, and that term is in both the title and the abstract, so the
+    front-matter row can only tie or beat the bridged row (searched: 36 candidate
+    questions over that fixture, best case a tie broken by corpus order).
+
+    Display diverging from score is an established shape in this file, not a new
+    one: #573 masks KB path citations out of the score while leaving them in the
+    excerpt, and the bridge's '← accepted:' lines are rendered and never scored.
+    What #574 adds is a line that is shown for orientation and does not claim to
+    be a match — the row's citation line still names where the match was.
+
+    Attaching rather than widening is the point. ``_EXCERPT_WINDOW`` is symmetric
+    and applies to every excerpt in the corpus, and the distance a front-matter
+    match has to cover is not small: measured on the reference KB, all 59 sources
+    with front matter put their first prose line exactly 6 lines below the fence,
+    whose own line runs 10..22 (median 12), so a window that reached prose from a
+    ``title:`` match would have to be 13+ and would make EVERY excerpt 27 lines.
+    Extending this one excerpt contiguously instead is 18 lines of which 11 are
+    the metadata and headings the reader is already looking at; attaching is 9.
+
+    The returned index is what the caller feeds to its overlap collapse, and for
+    the attached case it is the BODY line, not the window's end. That is what
+    makes the fix whole rather than cosmetic: the prose line was already matching
+    and already being suppressed by the previous excerpt's collapse (the defect's
+    second half), so absorbing it into the excerpt that rescued it keeps it from
+    being emitted twice — while the metadata-only excerpt that used to sit between
+    them, anchored on ``# <title>``, now collapses away instead of spending a slot
+    of the render cap on a heading.
+
+    Nothing changes for a match outside the block, for a file with no front matter,
+    for one that is nothing but front matter, or for a block whose body starts
+    close enough that the plain window already covers it (``anchor < end``): all
+    four return the plain window and ``end - 1``, byte for byte as before.
+    """
+    if anchor is not None:
+        fence, body = anchor
+        if match <= fence and end <= body:
+            gap = [_EXCERPT_ELISION] if body > end else []
+            return lines[start:end] + gap + [lines[body]], body
+    return lines[start:end], end - 1
 
 
 def _sanitize(line: str) -> str:
@@ -1321,9 +1439,13 @@ def _anchor_line(path: Path, line_count: int, fragment: str) -> int:
     name, not a line number (measured on the reference KB: 761 of 2139 rows carry
     an anchor, all of them '#abstract'). Resolving it matters because the excerpt
     window is 3 lines either side: anchored at the file head, a bibliographic
-    source yields seven lines of YAML front matter and zero prose — the same
-    window defect #574 addresses, which this function avoids rather than fixes.
-    An unresolvable or absent fragment falls back to line 1 and takes that cost.
+    source yields seven lines of YAML front matter, which is where the prose an
+    excerpt is for does NOT begin. An unresolvable or absent fragment falls back
+    to line 1, and since #574 that fallback lands on the front-matter path in
+    _excerpt_span, which attaches the document's first body line rather than
+    leaving the row prose-free — so the fallback costs the anchor's precision now,
+    not the prose. Resolving remains better: the excerpt is then centred on the
+    section the fact was extracted from instead of on the metadata.
 
     The anchor set comes from ``validate.heading_anchors`` — the SAME function
     ``validate_source_ref`` asks "does this anchor exist", asked here for "where".
@@ -1452,11 +1574,14 @@ def _bridge_rows(
     reached: it is not in WIKI_SOURCE_DIRS, so an engine-derived candidate page still
     cannot enter an answer through this path.
 
-    #574 NOTE — the excerpt window arithmetic below is a SECOND site. search()'s scan
-    computes the same start/end from _EXCERPT_WINDOW; it cannot be shared as written
-    because the scan also collapses overlapping windows against `last_end`, which a
-    single promoted excerpt has no analogue for. Whoever reworks the window has to
-    change both, or a bridged excerpt keeps the geometry #574 removed.
+    The excerpt window arithmetic below is a SECOND site: search()'s scan computes
+    the same start/end from _EXCERPT_WINDOW. The two still compute their own
+    start/end — the scan collapses overlapping windows against `last_end` and a
+    single promoted excerpt has no analogue for that — but since #574 both build the
+    displayed lines through :func:`_excerpt_span`, so the front-matter rule is not
+    duplicated here. The collapse index it returns is discarded on this path (named
+    `_covered`) for the same reason: there is no second excerpt of this file to
+    collapse against.
 
     *bridged* is :func:`kb_vocabulary_bridge`'s map, taken as an argument rather than
     computed here: since #594 the SAME map also credits the rows the scan did cite,
@@ -1490,10 +1615,16 @@ def _bridge_rows(
         anchor = min(_anchor_line(path, len(lines), str(entry["fragment"])), len(lines))
         start = max(0, anchor - 1 - _EXCERPT_WINDOW)
         end = min(len(lines), anchor + _EXCERPT_WINDOW)
+        # Same body attachment as the scan (#574). It is reached here on the
+        # fallback path _anchor_line documents: a bridged row whose provenance
+        # carries no anchor, or one this KB's headings do not resolve, anchors on
+        # line 1 — inside the front matter — and produced the seven metadata lines
+        # and zero prose that #574 is about.
+        span, _covered = _excerpt_span(lines, start, end, anchor - 1, _body_anchor(text, lines))
         result = {
             "file": ref,
             "line": anchor,
-            "excerpt": "\n".join(_sanitize(line) for line in lines[start:end]),
+            "excerpt": "\n".join(_sanitize(line) for line in span),
             "dir": rel,
             "via": {"facts": entry["facts"], "terms": entry["terms"]},
         }
@@ -1597,6 +1728,9 @@ def search(
             if "\x00" in text:
                 continue  # binary (valid-UTF-8-with-NUL) — skip
             lines = text.splitlines()
+            # Once per file, not per match: every excerpt of a file shares one
+            # front-matter boundary, and the scan below can emit several.
+            body = _body_anchor(text, lines)
             last_end = -1  # collapse overlapping windows within this file
             for i, line in enumerate(lines):
                 low = line.lower()
@@ -1615,15 +1749,21 @@ def search(
                 if start <= last_end:
                     continue  # window overlaps the previously emitted excerpt
                 end = min(len(lines), i + _EXCERPT_WINDOW + 1)
-                last_end = end - 1
-                excerpt = "\n".join(_sanitize(line_text) for line_text in lines[start:end])
+                span, last_end = _excerpt_span(lines, start, end, i, body)
+                excerpt = "\n".join(_sanitize(line_text) for line_text in span)
+                # The WINDOW, not the excerpt: an attached body line (#574) is shown
+                # for orientation and is not a match, so it does not score. The two
+                # are the same string for every excerpt that was not attached to,
+                # which is why this is written as a second join rather than as a
+                # flag — the divergence is visible here or it is invisible.
+                scored_text = "\n".join(_sanitize(line_text) for line_text in lines[start:end])
                 result = {
                     "file": ref,
                     "line": i + 1,
                     "excerpt": excerpt,
                     "dir": label,
                 }
-                hits, frequency = _keyword_hits(excerpt, keywords)
+                hits, frequency = _keyword_hits(scored_text, keywords)
                 # KB-vocabulary backing (#594): the engine's accepted facts reach this
                 # file through question words the text does not spell. #576 left this
                 # credit out and named it #572/#573's ground; both closed without

@@ -1166,6 +1166,14 @@ excerpt — a bridged excerpt is source prose no one checked, exactly like every
 other row in this block, and must never be glossed as verified because an accepted
 fact led to it.
 
+An excerpt containing a lone `…` line is not truncated output and not an omission
+for you to fill in. It appears when the matched line was inside a source's YAML
+front matter (a `title:` or `tags:` hit on a `zotero-import`ed paper): the lines
+above the marker are the window around that match, and the line below it is the
+document's first line of body prose, attached so the excerpt carries something a
+reader can judge the paper by. Show it verbatim, marker included — dropping the
+marker would present two distant parts of one file as if they were contiguous.
+
 A `SUGGESTION — decomposable single queries` block appears when the question binds
 two or more conditions the query language cannot express in one line ("A 이면서 B 인
 것은?") while each condition, asked alone, *is* engine-answerable. Every listed query
