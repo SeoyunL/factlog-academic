@@ -410,8 +410,17 @@ ko_answer="$(router wiki "$Q_KO" --reason 'unknown entity' || true)"
 # 줄([ 로 시작) 이전의 머리 블록을 통째로 고정한다 — 어떤 문구로 한 줄이 추가되든
 # 형태가 달라지므로 반드시 트립한다. 이 pin 은 블록 순서 계약(마커 -> question ->
 # reason -> WARNING -> corpus 라벨 -> 발췌 수 -> 매치 실적)과 발췌 수도 함께 고정한다.
+#
+# #577 이 다시 갱신했다 (값 갱신, pin 유지). 매치 실적 줄 뒤에 분해 제안 블록이 붙는다 —
+# 이 질문은 accepted 관계명 두 개(이점/핵심_기법)에 닿으므로 게이트를 통과한다. 위치가
+# 발췌 앞인 것이 계약의 일부다: #575 의 "코퍼스가 쓰지 않는 표현으로 물었다" 바로 뒤에
+# "그 표현은 이것이다" 가 와야 진단과 처방이 한 덩어리로 읽힌다. 뒤에 붙이면 최대 20건의
+# 인용 아래로 밀려 화면 밖으로 나간다. 아래 PIN2 꼬리 pin 이 그대로 통과하는 것이 이
+# 배치의 부수 효과이자 증거다.
+# 제안이 3건인 것도 이 pin 이 함께 고정한다: 브리지된 accepted 사실은 4건인데, 0005 는
+# U+2028 을 담고 있어 질의 줄로 적을 수 없어 떨어진다(그 사실이 마지막 줄로 보고된다).
 ko_head="$(printf '%s\n' "$ko_answer" | awk '/^\[/{exit} {print}')"
-same "PIN2 답변 머리 블록 전체 — 매치 실적 진단이 붙는다 (#575 가 바꿨다)" \
+same "PIN2 답변 머리 블록 전체 — 매치 실적 진단과 분해 제안이 붙는다 (#575/#577 이 바꿨다)" \
   "UNVERIFIED — wiki exploration
 question: $Q_KO
 reason: unknown entity
@@ -419,7 +428,13 @@ WARNING: unverified candidates — do not treat as confirmed facts.
 sources searched: sources, runs/sources, decisions (supplementary)
 source excerpts: 4
 keywords matched: 3/4 — 신경기호, 추론의, 근거를
-keywords unmatched: 제시하는가" \
+keywords unmatched: 제시하는가
+
+SUGGESTION — decomposable single queries. PROPOSALS, not an answer: the row count below was counted, but no rows were fetched and nothing was answered for you. Ask one to get a VERIFIED answer:
+  relation(X, \"이점\", \"신경기호_기반_철회_판정\")?  — 1 verified row ← 신경기호
+  relation(X, \"이점\", \"신경기호_로그_보존\")?  — 1 verified row ← 신경기호
+  relation(X, \"핵심_기법\", \"신경기호_추론_근거_추적\")?  — 1 verified row ← 신경기호
+  … 1 candidate(s) dropped: the accepted vocabulary they use cannot be spelled on a query line." \
   "$ko_head"
 
 # 발췌 수만 3 -> 4 로 움직이고 매치 실적 줄은 그대로인 것이 #576 의 계약이다: 어휘 경유로
@@ -974,6 +989,152 @@ if printf '%s\n' "$back_answer" | head -1 | grep -q '^UNVERIFIED — wiki explor
 else
   bad "PIN9 답변의 머리가 UNVERIFIED 가 아니다: [$(printf '%s\n' "$back_answer" | head -1)]"
 fi
+
+# =============================================================================
+# PIN 10 — 분해 제안 (#577): 게이트, 상한, 라운드로빈 절단, 세 진단의 배타성
+# =============================================================================
+# 제안 블록 자체의 내용과 위치는 PIN2 머리 블록이 이미 고정한다. 여기서 고정하는 것은
+# 그 하나의 답변이 보여줄 수 없는 축들이다: 블록이 나오지 **않는** 조건, 상한이 무엇을
+# 어떻게 자르는지, 그리고 이 답변에 붙을 수 있는 세 진단이 서로를 가리지 않는지.
+
+# --- 게이트: accepted 관계명 하나만 닿는 질문에는 블록이 없다 (수용 기준 1/4) ---
+# 전제를 먼저 값으로 고정한다. 이 질문이 어휘에 아예 닿지 않는다면 아래 "블록이 없다" 는
+# 게이트를 검증하는 게 아니라 무커버리지다 — 브리지가 죽어도 똑같이 통과한다.
+# 실측 전제: 후보 쌍 1개(이점/설명가능성_향상), 즉 관계명 1개.
+Q_ONE_REL='설명가능성 향상은?'
+same "PIN10 픽스처 전제: 이 질문은 후보를 만들지만 관계명은 하나뿐이다" \
+  "1 1" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+from common import KbContext
+facts = KbContext.for_root('$KB').load_accepted_facts()
+pool = a._proposal_order('''$Q_ONE_REL''', facts)
+print(len(pool), len({e['relation'] for e in pool}))
+" || true)"
+
+one_rel_answer="$(router wiki "$Q_ONE_REL" --reason 'unknown entity' || true)"
+[ -n "$one_rel_answer" ] || bad "PIN10 단일 관계명 질문의 wiki 렌더가 비었다 (이후 체크가 공허해진다)"
+case "$one_rel_answer" in
+  *"SUGGESTION — decomposable"*) bad "PIN10 관계명 하나짜리 질문에 분해 제안이 붙었다 — 분해할 결합 조건이 없다" ;;
+  *) ok "PIN10 관계명이 하나면 제안 블록이 없다 (수용 기준 1/4)" ;;
+esac
+
+# --- 제안은 제안일 뿐: 답을 대신 내지 않는다 (수용 기준 3) ---
+# 블록 안에는 질의 줄만 있고, 그 질의가 반환할 행(주체)은 없다. 주체 이름을 답변 전체에서
+# 찾으면 안 된다 — #576 의 '← accepted:' 줄이 주체를 정당하게 인쇄하므로, 범위를 블록
+# 안으로 좁혀야 이 pin 이 의미를 갖는다.
+ko_suggestion="$(printf '%s\n' "$ko_answer" | awk '/^SUGGESTION —/{f=1} f&&/^$/{exit} f{print}' || true)"
+[ -n "$ko_suggestion" ] || bad "PIN10 Q_KO 답변에서 제안 블록을 잘라내지 못했다 (이후 체크가 공허해진다)"
+case "$ko_suggestion" in
+  *arXiv_*) bad "PIN10 제안 블록이 질의 결과 행(주체)까지 인쇄했다 — 제안이 아니라 답이 됐다" ;;
+  *) ok "PIN10 제안 블록은 질의 줄만 담는다 — 행은 사람이 물어야 나온다 (수용 기준 3)" ;;
+esac
+# 위조 헤더 방어의 결과: U+2028 을 담은 0005 는 제안되지 않고, 그 사실이 보고된다
+# (PIN2 머리 블록이 그 줄을 통째로 고정한다). 여기서는 블록 안에 위조된 VERIFIED 헤더가
+# 없다는 반대 방향을 본다.
+#
+# 판정을 grep 이 아니라 python 의 splitlines 로 한다. 위조가 성립하는 곳이 거기이기
+# 때문이다: U+2028 은 셸·awk·grep 에게 줄바꿈이 아니므로 `grep '^VERIFIED'` 는 가드를
+# 통째로 제거해도 통과한다(실측 — 그 뮤턴트에서 이 체크만 살아남았다). str.splitlines 는
+# 그 문자에서 줄을 나누고, 답변을 읽는 쪽이 바로 그 의미론을 쓴다.
+if py "
+import sys
+forged = [line for line in sys.argv[1].splitlines() if line.startswith('VERIFIED')]
+assert not forged, forged
+" "$ko_answer" 2>/dev/null; then
+  ok "PIN10 답변 어디에도 위조된 VERIFIED 헤더가 없다 (python 줄 의미론으로 판정)"
+else
+  bad "PIN10 제안 블록이 VERIFIED 헤더를 위조했다 — 질의 줄의 _sanitize 가드가 사라졌다"
+fi
+
+# --- 세 진단의 배타성 (#571 / #575 / #577) ---
+# 하나의 표로 고정한다. 진단별로 따로 두면 "이 질문에서 이 진단이 나온다" 만 말하고,
+# 정작 중요한 "다른 진단은 나오지 않는다" 는 쪽이 조용히 비게 된다.
+# grep 이 아니라 case 로 판정한다: `set -e` 아래에서 매치 0건인 grep 은 대입 안에서
+# 스크립트를 죽이고, 그러면 이후 체크가 전부 침묵한다.
+Q_ZERO='이것은 무엇인가'                                  # 키워드 0개
+Q_LOW='신경기호 자기지도학습 확산모형 강화학습'            # 4개 중 1개만 코퍼스에 있음
+diag_row() {  # diag_row <question> : "<키워드0> <저리콜> <분해>" 세 칸
+  local ans a b c
+  ans="$(router wiki "$1" --reason 'unknown entity' || true)"
+  if [ -z "$ans" ]; then printf 'RENDER-EMPTY'; return; fi
+  case "$ans" in *"no searchable keyword in the question"*) a=zero-keyword ;; *) a=- ;; esac
+  case "$ans" in *"NOTE: low keyword recall"*) b=low-recall ;; *) b=- ;; esac
+  case "$ans" in *"SUGGESTION — decomposable"*) c=decompose ;; *) c=- ;; esac
+  printf '%s %s %s' "$a" "$b" "$c"
+}
+# 읽는 법: 키워드가 0개면 나머지 둘은 원인 자체가 성립하지 않으므로 반드시 비어야 하고
+# (#571 의 배타 계약), 저리콜과 분해는 **함께** 나오는 것이 정상이다 — "코퍼스가 네
+# 표현을 안 쓴다" 와 "그럼 이 표현으로 물어라" 는 진단과 처방이지 경합이 아니다.
+# 정상 리콜(Q_ASCII)에서는 셋 다 침묵한다.
+same "PIN10 네 원인 클래스의 진단 조합 — 서로를 가리지 않고, 겹칠 때만 겹친다" \
+  "zero  : zero-keyword - -
+low   : - low-recall decompose
+normal: - - -
+decomp: - - decompose" \
+  "$(printf 'zero  : %s\nlow   : %s\nnormal: %s\ndecomp: %s' \
+      "$(diag_row "$Q_ZERO")" "$(diag_row "$Q_LOW")" "$(diag_row "$Q_ASCII")" "$(diag_row "$Q_KO")")"
+
+# --- 상한과 라운드로빈 절단 -------------------------------------------------
+# 별도 KB 를 쓴다. 공유 픽스처의 accepted.dl 에 사실을 더하면 PIN2/PIN3/PIN7 의 브리지
+# 기하가 이 이슈와 무관하게 움직인다.
+#
+# 어휘를 이렇게 고른 이유가 이 pin 의 전부다: '가_관계' 5건이 '하_관계' 5건보다
+# 사전순으로 앞선다. 그래서 평평한 정렬로 앞에서 6개를 자르면 첫 조건이 5건, 둘째 조건이
+# 1건이 되고, 상한을 조금 더 조이면 둘째 조건은 통째로 사라진다 — 분해 제안에서 분해가
+# 사라지는 것이다. 라운드로빈이면 3+3 이다. 두 규칙이 이 픽스처에서 서로 다른 답을
+# 내므로, 이 pin 은 "잘렸다" 가 아니라 "어떻게 잘랐다" 를 본다.
+KB2="$_TMP_KB/decomp"
+"$PYTHON" -m factlog init --target "$KB2" >/dev/null
+: > "$KB2/policy/logic-policy.dl"
+#
+# '알파개념_하나' 를 두 주체가 공유한다: 제안은 주체가 변수이므로 한 줄이어야 하고, 그
+# 줄이 붙이고 다니는 행 수는 2 여야 한다. 이 중복이 없으면 픽스처의 모든 쌍이 1행이라
+# 행 수를 상수 1 로 바꾼 구현도 통과한다 (실측으로 확인한 구멍이다).
+{
+  for n in 하나 둘 셋 넷 다섯; do echo "relation(\"a_$n\", \"가_관계\", \"알파개념_$n\")."; done
+  echo 'relation("a_여섯", "가_관계", "알파개념_하나").'
+  for n in 하나 둘 셋 넷 다섯; do echo "relation(\"b_$n\", \"하_관계\", \"베타개념_$n\")."; done
+} > "$KB2/facts/accepted.dl"
+Q_CAP='알파개념 이면서 베타개념 인 것은?'
+cap_answer="$("$PYTHON" "$ROUTER" wiki "$Q_CAP" --reason 'unknown entity' --target "$KB2" || true)"
+[ -n "$cap_answer" ] || bad "PIN10 상한 픽스처의 wiki 렌더가 비었다 (이후 체크가 공허해진다)"
+cap_block="$(printf '%s\n' "$cap_answer" | awk '/^SUGGESTION —/{f=1} f&&/^$/{exit} f{print}' || true)"
+# 픽스처 크기를 먼저 단언한다. 후보가 애초에 6건 이하로만 생성된다면 아래 절단 pin 은
+# 절단을 지운 뮤턴트에도 통과한다.
+same "PIN10 상한 픽스처 전제: 후보 10건 / 관계명 2개가 생성된다" \
+  "10 2" \
+  "$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB2'
+import ask_router as a
+from common import KbContext
+facts = KbContext.for_root('$KB2').load_accepted_facts()
+pool = a._proposal_order('''$Q_CAP''', facts)
+print(len(pool), len({e['relation'] for e in pool}))
+" || true)"
+same "PIN10 상한 6 이 지켜진다 — 10건 중 6건만 제시된다" \
+  "6" "$(printf '%s\n' "$cap_block" | grep -c '^  relation(' || true)"
+# 행 수는 제안마다 실제로 센 값이다 (수용 기준 5). 사실 2건이 뒷받침하는 쌍은 한 줄로
+# 제안되고 2행을 달고 나온다 — 같은 질의를 두 번 제안하지도, 1행이라고 적지도 않는다.
+same "PIN10 사실 2건이 받치는 쌍은 한 줄 · 2행으로 제안된다" \
+  "  relation(X, \"가_관계\", \"알파개념_하나\")?  — 2 verified rows ← 알파개념" \
+  "$(printf '%s\n' "$cap_block" | grep -F '알파개념_하나' || true)"
+# 절단은 조건별로 공평하다: 평평한 절단이면 5+1, 라운드로빈이면 3+3.
+same "PIN10 절단은 조건마다 3건씩 남긴다 — 한 조건이 예산을 독식하지 않는다 (평평한 절단이면 5 1)" \
+  "3 3" \
+  "$(printf '%s %s' \
+      "$(printf '%s\n' "$cap_block" | grep -c '알파개념' || true)" \
+      "$(printf '%s\n' "$cap_block" | grep -c '베타개념' || true)")"
+# 조용한 절단 금지: 잘라낸 건수와 그 이유가 블록 안에 있어야 한다.
+case "$cap_block" in
+  *"4 further candidate(s) generated and NOT shown"*)
+    ok "PIN10 잘라낸 4건이 건수와 함께 보고된다 (조용한 절단 금지)" ;;
+  *)
+    bad "PIN10 절단 보고가 없다 — 10건 중 6건만 보이는데 나머지 4건은 침묵했다: [$cap_block]" ;;
+esac
 
 echo ""
 echo "========================================"

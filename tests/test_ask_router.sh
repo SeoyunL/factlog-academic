@@ -1465,6 +1465,64 @@ all_search="$("$PYTHON" "$ROUTER" search limitprobe --all --target "$LKB")"
 if printf '%s' "$limited_search" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); assert len(d['results']) == 10 and d['total'] == 11 and d['truncated'] is True"; then ok "#279: JSON search exposes capped total and truncation"; else bad "#279: JSON search cap metadata missing/wrong"; fi
 if printf '%s' "$all_search" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); assert len(d['results']) == 11 and d['total'] == 11 and d['truncated'] is False"; then ok "#279: JSON search --all returns every excerpt"; else bad "#279: JSON search --all is not lossless"; fi
 
+# --- #577: a wiki answer's decomposition proposals really do route to the engine ---
+# The proposal block (rendered by the wiki path, pinned in tests/test_ask_wiki_search.sh)
+# claims every line it prints is engine-answerable. That claim is about ROUTING, which is
+# this file's subject: checked only over there, the renderer would be grading its own
+# homework — claim and check would both come from one module's view of classify_query.
+# Here the PRINTED line is fed back through the `validate` CLI, the same entry point
+# every other routing check in this file uses.
+DKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$DKB" >/dev/null
+printf '// t\n%s\n%s\n%s\n%s\n' \
+  'relation("논문1", "가_관계", "알파개념_하나").' \
+  'relation("논문2", "가_관계", "알파개념_둘").' \
+  'relation("논문3", "하_관계", "베타개념_하나").' \
+  'relation("논문4", "하_관계", "베타개념_둘").' \
+  > "$DKB/facts/accepted.dl"
+drouter() { "$PYTHON" "$ROUTER" "$@" --target "$DKB"; }
+DACCEPTED_BEFORE="$(cat "$DKB/facts/accepted.dl")"
+
+check_field_d() {  # check_field_d <desc> <subcmd> <draft> <key> <expected>
+  local desc="$1" sub="$2" draft="$3" key="$4" expected="$5"
+  local got; got="$(drouter "$sub" "$draft" | field "$key")"
+  if [ "$got" = "$expected" ]; then ok "$desc ($key=$got)"; else bad "$desc — expected $key=$expected, got $got"; fi
+}
+# The premise, measured rather than assumed: the combined condition has no shape in this
+# language, so the conjunction a user would write is not a query at all. If this ever
+# routes engine, the proposals below are the wrong answer to a solved problem.
+check_field_d "#577: a conjunctive draft is not expressible (the defect's premise)" \
+  validate 'relation(X, "가_관계", "알파개념_하나"), relation(X, "하_관계", "베타개념_하나")?' route wiki
+
+d_answer="$(drouter wiki '알파개념 이면서 베타개념 인 것은?' --reason 'review_required' || true)"
+d_props="$(printf '%s\n' "$d_answer" | sed -n 's/^  \(relation(X, .*)?\)  — .*/\1/p' || true)"
+# `|| true` on the count: with `set -e` a grep matching nothing exits 1 inside an
+# assignment and kills the run, and every check after this point would go silent.
+d_count="$(printf '%s\n' "$d_props" | grep -c '^relation(' || true)"
+# The fixture premise first — with zero proposals the loop below inspects nothing and
+# reports success.
+if [ "$d_count" = "4" ]; then ok "#577: the wiki answer proposed 4 single queries"; else bad "#577: expected 4 proposals, got [$d_count] — block: [$d_answer]"; fi
+
+d_bad=0
+while IFS= read -r proposal; do
+  [ -n "$proposal" ] || continue
+  d_json="$(drouter validate "$proposal")"
+  d_route="$(printf '%s' "$d_json" | field route)"
+  d_code="$(printf '%s' "$d_json" | field code)"
+  if [ "$d_route" != "engine" ] || [ "$d_code" != "ok" ]; then
+    d_bad=$((d_bad + 1))
+    echo "  ^ $proposal -> route=$d_route code=$d_code" >&2
+  fi
+done <<EOF
+$d_props
+EOF
+if [ "$d_bad" -eq 0 ]; then ok "#577: every proposed query validates as route=engine code=ok (수용 기준 2)"; else bad "#577: $d_bad proposed query(ies) do not route to the engine"; fi
+
+# Proposed, never executed: the wiki path stays read-only, and no proposal has been
+# turned into a query the KB records.
+if [ -f "$DKB/facts/query.dl" ]; then bad "#577: the proposal path wrote facts/query.dl"; else ok "#577: the proposal path never writes facts/query.dl"; fi
+if [ "$(cat "$DKB/facts/accepted.dl")" = "$DACCEPTED_BEFORE" ]; then ok "#577: the proposal path leaves accepted.dl unchanged"; else bad "#577: the proposal path mutated accepted.dl"; fi
+
 echo ""
 echo "========================================"
 echo "test_ask_router: $pass passed, $fail failed"
