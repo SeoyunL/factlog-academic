@@ -244,28 +244,68 @@ rm -rf "$TMPBASE"
 # DENY before it ever reaches a probe — so a future edit that reorders the
 # top-of-file fail-closed check below the probes is caught here.
 #
-# Hermetic simulation: run with an empty throwaway PATH, deliberately omitting
-# python3/python/py. The test does not depend on the host Python location.
+# Hermetic simulation (#595): an empty throwaway PATH is NOT enough, and this
+# case spent its whole life proving that. tools/factlog_python.sh reaches three
+# places PATH cannot describe — $FACTLOG_PYTHON, an activated $VIRTUAL_ENV, and
+# the documented $HOME/.factlog-venv fallback (#578) — so on any machine that
+# followed SKILL.md's PEP 668 instructions the runner found an interpreter, the
+# gate sailed past the fail-closed check, and the deny below came from the
+# ordinary stale-guard instead. Measured on the dev machine before the fix:
+#
+#   [factlog] using ~/.factlog-venv/bin/python (PATH has no python with pyrewire...)
+#   [factlog GATE] DENIED: facts/logic_report.txt does not exist.   ← wrong branch
+#
+# Right code, wrong reason. Isolating HOME to a throwaway dir and clearing the
+# two env signals is what actually removes every interpreter from reach.
+#
+# Which is also why the deny REASON is asserted and not just the code: 2 is the
+# gate's ONLY deny code, so an exit-code assertion cannot tell this branch from
+# any other deny, and a case that names itself the fail-closed invariant while
+# being satisfied by a stale report guarantees nothing. The third check pins the
+# other direction — the stale-guard message must be ABSENT, since reaching it at
+# all would mean the gate evaluated the predicate without a usable Python.
 # ---------------------------------------------------------------------------
 KB_NOPY="$(mktemp -d)"
 make_kb "$KB_NOPY"
 touch_file "$KB_NOPY/facts/accepted.dl"  # existing engine input (not bootstrap)
 
 SHIM_PATH="$(mktemp -d)"
+NOPY_HOME="$(mktemp -d)"   # no .factlog-venv here — that is the point
 BASH_BIN="${BASH:-$(command -v bash)}"
 
+nopy_err="$(mktemp)"
 nopy_exit=0
-PATH="$SHIM_PATH" FACTLOG_ROOT="$KB_NOPY" \
-  "$BASH_BIN" "$GATE" <<< "$(envelope "$KB_NOPY/facts/accepted.dl")" \
-  >/dev/null 2>&1 || nopy_exit=$?
+(
+  unset FACTLOG_PYTHON VIRTUAL_ENV FACTLOG_PYTHON_RUNNER
+  PATH="$SHIM_PATH" HOME="$NOPY_HOME" FACTLOG_ROOT="$KB_NOPY" \
+    "$BASH_BIN" "$GATE" <<< "$(envelope "$KB_NOPY/facts/accepted.dl")" \
+    >/dev/null 2>"$nopy_err"
+) || nopy_exit=$?
+
 if [ "$nopy_exit" -eq 2 ]; then
-  echo "PASS: python3 unavailable on engine-input write — fail-closed deny (exit $nopy_exit)"
+  echo "PASS: no usable Python on engine-input write — fail-closed deny (exit $nopy_exit)"
   pass=$((pass + 1))
 else
-  echo "FAIL: python3 unavailable — expected fail-closed exit 2, got $nopy_exit"
+  echo "FAIL: no usable Python — expected fail-closed exit 2, got $nopy_exit; stderr=$(cat "$nopy_err")"
   fail=$((fail + 1))
 fi
-rm -rf "$KB_NOPY" "$SHIM_PATH"
+
+if grep -qF "usable Python 3.11+ is required" "$nopy_err"; then
+  echo "PASS: the deny names the fail-closed reason (branch actually executed)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: deny did not come from the fail-closed branch; exit=$nopy_exit stderr=$(cat "$nopy_err")"
+  fail=$((fail + 1))
+fi
+
+if grep -qF "logic_report.txt does not exist" "$nopy_err"; then
+  echo "FAIL: gate evaluated the freshness predicate without a usable Python; stderr=$(cat "$nopy_err")"
+  fail=$((fail + 1))
+else
+  echo "PASS: no stale-guard reason on the stderr — the predicate was never evaluated"
+  pass=$((pass + 1))
+fi
+rm -rf "$KB_NOPY" "$SHIM_PATH" "$NOPY_HOME" "$nopy_err"
 
 # ---------------------------------------------------------------------------
 # CASE 12: WINDOWS STORE STUB REGRESSION — python3 exists but cannot execute.
