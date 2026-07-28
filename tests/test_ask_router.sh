@@ -566,23 +566,27 @@ import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
 want = {
-    '거기', '거기서', '그거', '그것', '그것은', '그것이', '그런', '그렇게', '논문은', '논문을',
-    '논문이', '논문인가', '누가', '누구', '누구인가', '누구인가요', '맞나', '맞는가', '무엇',
-    '무엇에', '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지', '뭐가', '뭐야', '뭔가',
-    '어느', '어디', '어디까지', '어디서', '어디에', '어디에서', '어디인가', '어떠한', '어떤',
-    '어떻게', '언제', '언제까지', '언제부터', '언제인가', '얼마나', '없나', '없나요', '없는가',
-    '여기', '여기서', '이거', '이것', '이것은', '이것이', '이런', '이렇게', '있나', '있나요',
-    '있는가', '있는지', '저거', '저것', '저것은', '저것이', '저기', '저기서', '저런', '저렇게',
+    '거기', '거기서', '그거', '그것', '그곳', '그때', '그런', '그렇게', '그만치', '그만큼',
+    '그쪽', '논문은', '논문을', '논문이', '논문인가', '누가', '누구', '누구인가', '누구인가요',
+    '맞나', '맞는가', '무엇', '무엇에', '무엇을', '무엇이', '무엇인가', '무엇인가요', '무엇인지',
+    '뭐가', '뭐야', '뭔가', '어느', '어디', '어디까지', '어디서', '어디에', '어디에서',
+    '어디인가', '어떠한', '어떤', '어떻게', '언제', '언제까지', '언제부터', '언제인가', '얼마나',
+    '없나', '없나요', '없는가', '여기', '여기서', '이거', '이것', '이곳', '이때', '이런',
+    '이렇게', '이만치', '이만큼', '이쪽', '있나', '있나요', '있는가', '있는지', '저거', '저것',
+    '저곳', '저기', '저기서', '저때', '저런', '저렇게', '저만치', '저만큼', '저쪽',
 }
 got = set(a._CJK_QUESTION_STOPWORDS)
 assert got == want, ('added', sorted(got - want), 'removed', sorted(want - got))
 # 이/그/저 계열은 대칭이어야 한다. 한 계열에서만 형태가 빠지면 그 지시어를 쓴 질문에서만
-# 조용히 필터가 새고, 목록을 훑어보는 것으로는 알아채기 어렵다.
-for suffix in ('', '이', '은'):
-    assert {b + suffix for b in ('이것', '그것', '저것')} <= got, suffix
+# 조용히 필터가 새고, 목록을 훑어보는 것으로는 알아채기 어렵다. #586 이후 목록은 조사가
+# 붙은 표층형이 아니라 어간을 담으므로, 격자도 의존명사 쪽으로 편다 — 그리고 모듈이 곱으로
+# 만드는 튜플을 읽어 오는 대신 여기에 그대로 적는다. 읽어 오면 내포문이 내포한다는 것만
+# 확인하게 되어, 누가 의존명사 하나를 지워도 통과한다.
+for noun in ('것', '거', '곳', '쪽', '때', '런', '렇게', '만큼', '만치'):
+    assert {det + noun for det in ('이', '그', '저')} <= got, noun
 for suffix in ('', '서'):
     assert {b + suffix for b in ('여기', '거기', '저기')} <= got, suffix
-" 2>/dev/null; then ok "stop-word list membership pinned (66 forms, 이/그/저 대칭)"; else bad "stop-word list membership moved: $("$PYTHON" -c "
+" 2>/dev/null; then ok "stop-word list membership pinned (75 forms, 이/그/저 대칭)"; else bad "stop-word list membership moved: $("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
 import ask_router as a
@@ -738,10 +742,18 @@ match_is "오분리해도 원 표층형이 닿던 문장은 그대로 닿는다"
 # '이것…' in the corpus, which is #571's defect arriving through #581's code path.
 kw_is "어간이 기능어면 그 어절도 기능어다 — '이것을'/'여기에' 는 키워드가 되지 않는다" \
   '이것을 여기에 무엇인가' "[]"
-# ...but it is a WHOLE-TOKEN check on the stem, not a prefix rule: an unlisted stem
-# stays a keyword. ('이곳' is not in the list; #586 owns that gap, not this file.)
-kw_is "목록에 없는 어간은 키워드로 남는다 — '이곳에서' -> '이곳'" \
-  '이곳에서 무엇인가' "['이곳']"
+# ...but it is a WHOLE-TOKEN check on the stem, not a prefix rule: a stem that merely
+# BEGINS with a listed form stays a keyword.
+#
+# '이곳에서' was this pin's example until #586 listed the stem '이곳', which is the gap
+# the pin's own comment handed to that issue. The invariant it was really testing is the
+# prefix one, so it is re-pinned — not deleted — on a stem no listing will ever swallow:
+# '저기압' (低氣壓) begins with the listed '저기' and is a content noun. Measured over the
+# 127 files search() reads, a 1-character prefix rule would drop all 10 Korean 어절 that
+# begin with 이/그/저 — '저널', '저자', '이론', '이름', '이후' among them — costing 76
+# file-reaches, 66 of those from '저널' alone.
+kw_is "어간 검사는 접두가 아니라 전체 일치다 — '저기압에서' -> '저기압' 은 키워드로 남는다" \
+  '저기압에서 무엇인가' "['저기압']"
 
 # 어간이 다시 조사·어미면 그 어절엔 콘텐츠가 없다 — 분리를 거부하고 표층형을 남긴다.
 # 이걸 빼면 '하는가'->'하는', '으로만'->'으로' 가 되어, 한국어 산문 대부분에 걸리는

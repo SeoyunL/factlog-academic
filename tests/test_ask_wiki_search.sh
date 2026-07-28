@@ -1457,6 +1457,103 @@ same "PIN12 오분리는 더하기만 한다 — 표층형을 쓴 파일도 그�
   "['581-overstrip-exact.md', '581-overstrip.md']" "$overstrip_both"
 rm -f "$KB/sources/581-overstrip.md" "$KB/sources/581-overstrip-exact.md"
 
+# =============================================================================
+# PIN 13 — 지시 표현(#586): 진단이 '자료 없음' 이 아니라 '검색어 없음' 이어야 한다
+# =============================================================================
+# #586 의 결함은 랭킹이 아니라 진단이다. 미등재 지시 어절이 키워드로 살아남으면 코퍼스에
+# 걸리는 줄이 없고, 사용자는 '(no matching source excerpts found)' 를 받는다 — 즉 자기가
+# 이름조차 대지 않은 주제에 대해 "KB 에 자료가 없다" 는 답을 듣는다. 그래서 이 pin 은
+# 결과 건수가 아니라 렌더된 블록에 어느 문구가 실렸는지를 고정한다.
+#
+# #581 이 어간 검사를 넣으면서 이슈 본문 7건 중 3건('이것을', '여기에', '저것을')은 이미
+# 닫혔다 — 그 어간들이 목록에 있었기 때문이다. 남은 4건('이곳은', '그때는', '이쪽은',
+# '이만큼은')은 어간 자체가 미등재였다. 7건을 모두 여기 적는 이유는, 어느 쪽이 어느
+# 메커니즘으로 닫혔는지를 뒤에 오는 사람이 다시 세지 않아도 되게 하기 위해서다.
+#
+# 검사는 두 문구를 각각 본다. 하나만 보면 배타성이 깨진 상태(둘 다 실림)를 통과시킨다.
+# 실 KB 는 읽지 않는다: 이 픽스처 코퍼스에 지시 어절이 한 줄도 없다는 것이 전제이고,
+# 그 전제는 아래 첫 체크가 값으로 고정한다.
+demo_corpus_hits="$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import pathlib
+import ask_router as a
+kb = pathlib.Path('$KB')
+forms = ['이것', '여기', '이곳', '그때', '이쪽', '이만큼', '저것']
+hits = 0
+for rel, _label, _grade in a._wiki_corpus():
+    base = kb / rel
+    if not base.is_dir():
+        continue
+    for path in sorted(p for p in base.rglob('*') if p.is_file()):
+        try:
+            text = path.read_text(encoding='utf-8').lower()
+        except (OSError, UnicodeDecodeError):
+            continue
+        hits += sum(1 for f in forms if f in text)
+print(hits)
+" || true)"
+[ -n "$demo_corpus_hits" ] || bad "PIN13 전제 측정이 빈 값을 냈다 (이후 PIN13 이 이 값의 파생)"
+# 0 = 이 코퍼스는 어떤 지시 어간도 담고 있지 않다. 그래서 아래에서 '자료 없음' 이 나온다면
+# 그것은 랭킹이 아니라 필터가 지시 어절을 통과시켰다는 뜻으로만 읽힌다.
+same "PIN13 전제: 픽스처 코퍼스에 지시 어간이 한 줄도 없다" "0" "$demo_corpus_hits"
+
+# 이슈 본문 7건 + #581 이후에도 남아 있던 생산적 조사 3건. '이곳에서'/'그쪽으로'/'저만큼은'
+# 은 어느 목록에도 적혀 있지 않다 — 어간(곱)과 조사 분리(#581)의 합성이 처리한다.
+for demo_q in '이것을 무엇인가' '여기에 무엇인가' '이곳은 무엇인가' '그때는 무엇인가' \
+              '이쪽은 무엇인가' '이만큼은 무엇인가' '저것을 무엇인가' \
+              '이곳에서 무엇인가' '그쪽으로 무엇인가' '저만큼은 무엇인가'; do
+  demo_answer="$(router wiki "$demo_q" --reason 'unknown entity' || true)"
+  if [ -z "$demo_answer" ]; then
+    bad "PIN13 [$demo_q] 렌더가 빈 값을 냈다"
+  elif ! printf '%s' "$demo_answer" | grep -qF 'no searchable keyword'; then
+    bad "PIN13 [$demo_q] 이 '검색어 없음' 진단을 받지 못했다"
+  elif printf '%s' "$demo_answer" | grep -qF '(no matching source excerpts found)'; then
+    bad "PIN13 [$demo_q] 이 '자료 없음' 으로 오진됐다 (배타성 위반)"
+  else
+    ok "PIN13 [$demo_q] -> 검색어 없음 진단, '자료 없음' 아님"
+  fi
+done
+
+# 반례. 지시 어간으로 시작하는 콘텐츠 명사는 계속 검색되어야 한다. 이것이 접두 매칭을
+# 고르지 않은 이유이고, 이 pin 이 그 선택을 결과로 지킨다. '저기압' 은 '저기' 로, '이론'
+# 과 '이유' 는 '이' 로 시작한다 — 접두 규칙이었다면 전부 사라졌을 어절들이다.
+cat > "$KB/sources/586-content-nouns.md" <<'EOF'
+# 관측 기록
+
+저기압이 통과하는 동안 관측을 계속했다.
+이론 모형은 관측과 다른 값을 냈다.
+이유를 규명하지 못한 채 기록만 남겼다.
+EOF
+for demo_probe in '저기압은 무엇인가|저기압' '이론은 무엇인가|이론' '이유는 무엇인가|이유'; do
+  demo_q="${demo_probe%%|*}"; demo_term="${demo_probe#*|}"
+  demo_answer="$(router wiki "$demo_q" --reason 'unknown entity' || true)"
+  if [ -z "$demo_answer" ]; then
+    bad "PIN13 반례 [$demo_q] 렌더가 빈 값을 냈다"
+  elif printf '%s' "$demo_answer" | grep -qF 'no searchable keyword'; then
+    bad "PIN13 반례 [$demo_q] 의 콘텐츠 명사 '$demo_term' 이 지시어로 오분류됐다"
+  elif ! printf '%s' "$demo_answer" | grep -qF '586-content-nouns.md'; then
+    bad "PIN13 반례 [$demo_q] 이 '$demo_term' 을 쓴 파일을 더는 찾지 못한다"
+  else
+    ok "PIN13 반례 [$demo_q] — '$demo_term' 은 여전히 검색어이고 파일을 찾는다"
+  fi
+done
+rm -f "$KB/sources/586-content-nouns.md"
+
+# 알려진 잔여 gap, 결과로 고정한다. 복수 '들' 은 _KOREAN_TRAILING_SUFFIXES 에 없으므로
+# '이것들은' 은 어간이 '이것들' 이 되고, 그건 목록에 없어 키워드로 남는다. 닫으려면 반복
+# 분리(#581 이 측정과 함께 거부했다)나 '들' 항목이 필요하고 둘 다 #581 의 표 소관이다.
+# 이 값이 움직이면 그 표가 바뀌었다는 뜻이다 — 고쳐야 할 결함이 아니라 신호다.
+demo_gap="$(py "
+import os, sys
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB'
+import ask_router as a
+print([t for t, _p in a._keywords('이것들은 무엇인가')])
+" || true)"
+[ -n "$demo_gap" ] || bad "PIN13 잔여 gap 측정이 빈 값을 냈다"
+same "PIN13 알려진 잔여 gap: 복수 '들' 은 조사 표에 없어 '이것들은' 이 키워드로 남는다" \
+  "['이것들은']" "$demo_gap"
+
 echo ""
 echo "========================================"
 echo "test_ask_wiki_search: $pass passed, $fail failed"

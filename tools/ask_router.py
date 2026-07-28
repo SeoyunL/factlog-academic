@@ -673,6 +673,80 @@ def _is_cjk(word: str) -> bool:
     )
 
 
+# 지시 표현(demonstratives), built as a PRODUCT of two closed classes instead of being
+# listed form by form (#586).
+#
+# Why a product and not more literals. The stop-word list below is a closed enumeration
+# of surface 어절, and #571 already said widening it needs a rule. Measured on the list
+# as it stood after #581, the enumeration covered '이것'/'여기' but not '이곳'/'그때'/
+# '이쪽'/'이만큼' — so '이곳은 무엇인가' kept '이곳은' as its only keyword, matched
+# nothing, and was reported as '(no matching source excerpts found)': the reader is told
+# the KB is silent on a topic they never named. Four of #586's seven reported 어절 still
+# reproduced that on 96ea1ae; the other three ('이것을', '여기에', '저것을') were closed
+# by #581's stem guard, because THEIR stems were on the list and these four were not.
+#
+# So the missing piece is stems, and stems are where a rule exists. 지시 관형사 is a
+# closed class of exactly three (이/그/저), and the 의존명사·대용 어간 that FUSE with
+# them into one 어절 form a small closed class too. Their product is generated whole
+# rather than curated, which is what makes the 계열 symmetry structural: no 계열 can be
+# silently missing a row, because no row is written by hand. Rare members ('저때',
+# '이만치') are kept for exactly that reason — dropping them would put a curator back in
+# the loop, and their measured reach over the searchable corpus is 0 files each.
+#
+# The product supplies STEMS; #581's _korean_stem supplies the 조사. Composed, the two
+# handle "지시 표현 + 임의 조사" as one rule: '이곳에서'→'이곳', '그쪽으로'→'그쪽',
+# '저만큼은'→'저만큼' all reduce onto a member and are dropped, without any of those
+# surface forms being written down. That is why this closes a productive suffix class
+# that no enumeration could.
+#
+# Matching stays WHOLE-TOKEN (on the 어절, then on its stem), NOT prefix. A prefix rule
+# was the other candidate #586 named, and it is what the issue's counterexamples are
+# aimed at. Read at the DETERMINER (1 character, which is how '이론'/'이유' become
+# counterexamples at all), it is measurably destructive: over the corpus search()
+# actually reads (127 files), 10 distinct Korean 어절 begin with 이/그/저 — '이론',
+# '이론연구', '이름', '이후', '저널', '저자', '저la', '이니셜', '이를',
+# '이형접합_삽입_검출_비율' — and a 1-character prefix rule drops all 10, costing 76
+# file-reaches, 66 of them '저널' alone.
+#
+# Read at the 2-character STEM the damage is NOT visible on the corpora available here,
+# and that is worth saying plainly rather than implying otherwise: over the wider
+# vocabulary described below, a stem-prefix rule drops 13 어절 that this rule keeps, and
+# every one of them is demonstrative-derived ('이것들', '여기까지는', '그쪽이고'), a
+# conjunction built on one ('그런데'), or a file name ('여기서-갈리는가.md') — measured
+# cost in content nouns, zero. The objection to it is structural instead: the remainder
+# after the stem is unconstrained, so any noun that happens to open with one of these
+# bigrams is swallowed, '저기압' (低氣壓) being the readiest example. Whole-token
+# equality cannot have that failure — the remainder after the determiner must BE a bound
+# noun, and '론'/'유'/'기압' are not — so it is preferred on a bound worst case, not on a
+# measured difference. '저기압' is pinned as a test for exactly that reason.
+#
+# Measured cost of the rule as written, over the same 127 files: 0 of their 496 distinct
+# Korean 어절 change their result, and the 59 title-control questions (every source's own
+# `title:` asked back as a question) reach exactly the files they reached on 96ea1ae.
+# Every product member's own prose reach there is 0 files (only '여기' reaches 1, and it
+# was already listed). Over a wider Korean vocabulary — the KB's non-searchable trees
+# (pages/, facts/, policy/, runs/, decisions/, source-provenance/) plus this repo frozen
+# at 96ea1ae, 2,149 files and 9,213 distinct 어절 — the rule newly drops 9 어절, and all
+# 9 are demonstratives: 그때, 그때는, 그만큼, 그쪽이, 이곳, 이곳에서, 이때, 이때는, 이쪽은.
+#
+# KNOWN GAP, measured not assumed: plural '들' is not a listed 조사, so '이것들은' keeps
+# its 어절 ('이것들') and stays a keyword. Closing it means either iterative stripping —
+# which #581 refused with a measurement — or a '들' entry in the suffix table, which is
+# #581's table, not this rule. 요/고/조 계열 ('요것', '고것') are likewise out: they are
+# spoken-register forms and the determiner class here is the written one.
+_CJK_DEMONSTRATIVE_DETERMINERS = ("이", "그", "저")
+_CJK_DEMONSTRATIVE_BOUND_NOUNS = ("것", "거", "곳", "쪽", "때", "런", "렇게", "만큼", "만치")
+_CJK_DEMONSTRATIVES = frozenset(
+    {
+        determiner + noun
+        for determiner in _CJK_DEMONSTRATIVE_DETERMINERS
+        for noun in _CJK_DEMONSTRATIVE_BOUND_NOUNS
+    }
+    # 장소 대명사는 곱으로 나오지 않는다: '여기'의 '기'는 의존명사가 아니라 굳어진 형태다.
+    | {"여기", "거기", "저기"}
+)
+
+
 # Korean question function words, as whole 어절 (whitespace-token) SURFACE forms.
 #
 # Why this list exists (#571): every CJK token of length>=2 is promoted to a content
@@ -699,9 +773,13 @@ def _is_cjk(word: str) -> bool:
 # below already drops them, so listing them would only imply a guarantee this filter
 # does not provide.
 #
-# This is a CLOSED enumeration, not a morphological rule: unlisted question forms
-# exist (요청형 '알려줘', 의존명사 '대한', 동사+의문어미 '제시하는가') and still become
-# keywords. Widening it needs an analyzer, not more literals — that is #581's ground.
+# The literals below are a CLOSED enumeration, not a morphological rule: unlisted
+# question forms exist (요청형 '알려줘', 의존명사 '대한', 동사+의문어미 '제시하는가') and
+# still become keywords. Widening THAT needs an analyzer, not more literals — that is
+# #581's ground. One class has since been lifted out of the enumeration and into a rule:
+# 지시 표현 come from _CJK_DEMONSTRATIVES above, so this list no longer spells '이것',
+# '그런', '이렇게' or their 조사 rows at all. The union is what callers see; the split is
+# about which half a new form belongs in.
 _CJK_QUESTION_STOPWORDS = frozenset(
     {
         # 의문사 + 그 조사/어미 표층형
@@ -744,31 +822,14 @@ _CJK_QUESTION_STOPWORDS = frozenset(
         "없는가",
         "맞나",
         "맞는가",
-        # 지시/대용어
-        "이것",
-        "이것이",
-        "이것은",
-        "그것",
-        "그것이",
-        "그것은",
-        "저것",
-        "저것이",
-        "저것은",
-        "이거",
-        "그거",
-        "저거",
-        "여기",
+        # 지시/대용어 중 곱으로도 어간 분리로도 나오지 않는 것만 남는다. '여기서'류의
+        # '서' 는 _KOREAN_TRAILING_SUFFIXES 에 없고, 넣을 수도 없다: 위 주석과 같은 넓은
+        # 어휘(9,213 어절)에서 측정하면 '서' 항목 하나가 36 어절의 어간을 바꾸고, 그중
+        # '보고서'→'보고', '제안서'→'제안', '각문서'→'각문' 처럼 문서 종류를 가리키는
+        # 명사가 머리를 잃는다. 그래서 이 세 형태는 표층형으로 적는다.
         "여기서",
-        "거기",
         "거기서",
-        "저기",
         "저기서",
-        "이런",
-        "그런",
-        "저런",
-        "이렇게",
-        "그렇게",
-        "저렇게",
         # 질문 틀이 만들어 내는 총칭 명사의 조사 표층형. 어간('논문')은 콘텐츠
         # 명사이므로 목록에 없다 — 사용자가 '논문' 을 그대로 치면 키워드로 남는다.
         # 실측(실제 KB, sources/ 의 읽을 수 있는 파일 186개): '논문은' 이 걸리는 파일은
@@ -779,6 +840,7 @@ _CJK_QUESTION_STOPWORDS = frozenset(
         "논문을",
         "논문인가",
     }
+    | _CJK_DEMONSTRATIVES
 )
 
 
@@ -1036,9 +1098,14 @@ def _tokenize_keywords(question: str) -> list[tuple[str, re.Pattern[str]]]:
             # '이것' reaches every line pattern '이것을' reached and more — which is
             # #571's defect re-entering through the new code path. Content words are
             # not at risk from it: matching stays whole-token, so '반박논문은' → the
-            # stem '반박논문', which is not a listed form and stays a keyword. (This
-            # incidentally drops some of the 어절 #586 reports; #586's own scope —
-            # the stop-word list and the no-keyword diagnostic — is untouched here.)
+            # stem '반박논문', which is not a listed form and stays a keyword.
+            #
+            # This guard is also the half of #586's fix that lives in code. #586's other
+            # half is _CJK_DEMONSTRATIVES, which supplies the STEMS; this line is what
+            # turns "지시 어간" into "지시 어간 + 임의 조사" without either side spelling
+            # a single inflected form. Neither half works alone: on 96ea1ae the guard
+            # was already here and '이곳은' still became a keyword, because '이곳' was
+            # not a listed stem.
             if term != word and _cjk_stopword(term):
                 continue
             if term in seen:
