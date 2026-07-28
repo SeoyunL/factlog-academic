@@ -1833,6 +1833,179 @@ same "PIN15 가산은 그것이 가장 멀리 올리는 발췌가 받는다 — 
 sources/g-union.md:3" \
   "$pick_refs"
 
+# =============================================================================
+# PIN 16 — 순위 성분 진단 플래그 (#603)
+# =============================================================================
+# 답변의 순서를 정하는 입력 중 셋이 페이지에 아무 표시도 남기지 않는다. #594 의 백킹
+# 가산(키도 태그도 행 증감도 없다), #602 의 "파일당 한 발췌"(같은 파일의 두 행이 서로
+# 다른 이유로 갈리는데 어느 쪽도 그 이유를 말하지 않는다), #606 의 선언 동의어 축(사람이
+# policy 파일에 쓴 한 줄이 답변을 재정렬한다). 이 블록이 고정하는 것은 두 가지다 —
+# 플래그가 없으면 아무것도 달라지지 않는다는 것과, 붙이면 그 셋이 각각 이름을 갖는다는 것.
+#
+# 픽스처는 실 KB 에서 잰 사례를 최소로 옮긴 것이다. 실측 (커밋 bb3909c, 실 KB 사본에
+# 선언 한 줄 '- `해석가능성` = `설명가능성`' 만 추가, FACTLOG_EMBED_MODULE 미설정,
+# 질문 'neurosymbolic 접근이 순수 신경망 대비 해석가능성에서 낫다고 주장하는 논문은?'):
+#
+#   ask_router.py search "<질문>" --target <사본>  의 상위 10행에서
+#   sources/wickramarachchi-2024-…-of.md:4 가 10위 -> 7위로 오른다. 렌더된 그 행에는
+#   태그도 '← synonym:' 줄도 없고, --why 를 붙이면 coverage 1 -> 2 이며 그 1 이
+#   '← synonym: 해석가능성에서 ≈ 설명가능성' 으로 들어온 것임이 보인다.
+#
+# 아래 픽스처가 그 형태다: 렉시컬로 동점인 두 파일 중 하나만 표를 경유해 백킹을 받고,
+# 그 결과 코퍼스 순서를 거슬러 앞선다.
+KB603="$_TMP_KB/why-flag"
+"$PYTHON" -m factlog init --target "$KB603" >/dev/null
+: > "$KB603/policy/logic-policy.dl"
+rm -f "$KB603"/sources/* "$KB603"/decisions/*
+# 코퍼스 순서상 q-plain 이 먼저다. 즉 백킹이 없으면 w-backed 는 q-plain 을 앞설 수
+# 없고, 앞선다면 원인은 표 경유 가산뿐이다.
+printf '# 대조 논문\n\nneurosymbolic 결과.\n' > "$KB603/sources/q-plain.md"
+printf '# 표 경유 논문\n\nneurosymbolic 결과.\n' > "$KB603/sources/w-backed.md"
+# 두 발췌짜리 파일 — #602 의 축. 창이 겹치지 않도록 8줄을 띄운다 (_EXCERPT_WINDOW=3).
+{
+  echo '# 두 발췌'
+  echo ''
+  echo '재현가능성 결과.'
+  for _blank in 1 2 3 4 5 6 7 8; do echo ''; done
+  echo '재현가능성 재확인.'
+} > "$KB603/sources/f-two.md"
+{
+  echo 'relation("s1", "이점", "설명가능성_향상").'
+  echo 'relation("s2", "핵심_기법", "검증가능성_확인").'
+} > "$KB603/facts/accepted.dl"
+{
+  echo 'subject,relation,object,source,status,confidence,note'
+  echo 's1,이점,설명가능성_향상,sources/w-backed.md,confirmed,0.9,'
+  echo 's2,핵심_기법,검증가능성_확인,sources/f-two.md,confirmed,0.9,'
+} > "$KB603/facts/candidates.csv"
+SYN603="$KB603/policy/vocabulary-synonyms.md"
+Q_WHY='neurosymbolic 해석가능성에서'
+Q_PICK16='재현가능성에서 검증가능성을'
+
+# 전제. 표가 없으면 이 질문은 백킹을 하나도 받지 못하고 두 파일은 코퍼스 순서로 선다.
+# 이 전제가 깨지면 아래 이동 pin 은 "원래 그 순서였다"를 통과로 읽는다.
+why_base_order="$(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB603'
+import ask_router as a
+for r in a.search('''$Q_WHY''', pathlib.Path('$KB603'), limit=None):
+    print(f\"{r['file']}:{r['line']}\")
+" || true)"
+[ -n "$why_base_order" ] || bad "PIN16 표 없는 기준 순서 측정이 빈 값을 냈다 (이후 체크가 공허해진다)"
+same "PIN16 표가 없으면 두 발췌는 렉시컬 동점이고 코퍼스 순서로 선다" \
+  "sources/q-plain.md:3
+sources/w-backed.md:3" \
+  "$why_base_order"
+
+# 수용 기준 1. 플래그가 없을 때가 아니라, 플래그를 붙였을 때 답변이 그대로인가를 본다 —
+# 앞의 것은 이 파일의 PIN1..PIN15 전체가 이미 보고 있고(그 값들이 움직였다면 여기가
+# 아니라 저 위에서 떨어진다), 여기서만 볼 수 있는 것은 --why 가 기존 블록을 건드리지
+# 않고 뒤에 덧붙기만 한다는 성질이다.
+printf -- '- `해석가능성` = `설명가능성`\n' > "$SYN603"
+why_plain="$("$PYTHON" "$ROUTER" wiki "$Q_WHY" --target "$KB603" || true)"
+why_flagged="$("$PYTHON" "$ROUTER" wiki "$Q_WHY" --why --target "$KB603" || true)"
+[ -n "$why_plain" ] || bad "PIN16 플래그 없는 wiki 렌더가 비었다 (이후 비교가 공허해진다)"
+[ -n "$why_flagged" ] || bad "PIN16 --why wiki 렌더가 비었다 (이후 비교가 공허해진다)"
+if py "
+import sys
+plain, flagged = sys.argv[1], sys.argv[2]
+assert flagged.startswith(plain + '\n'), flagged[:len(plain) + 80]
+assert flagged != plain
+" "$why_plain" "$why_flagged" 2>/dev/null; then ok "PIN16 --why 는 답변 블록을 한 바이트도 바꾸지 않고 뒤에 덧붙기만 한다 (수용 기준 1)"; else bad "PIN16 --why 가 답변 블록 자체를 바꿨다 — 진단이 답변을 오염시키고 있다"; fi
+
+# 기본 출력에 점수를 노출하지 않는다는 이슈의 '주의' 항. 사람이 읽는 답변에 숫자가 뜨면
+# UNVERIFIED 행이 정량적 권위를 갖는 것처럼 보인다.
+if printf '%s\n' "$why_plain" | grep -qE 'DIAGNOSTIC|coverage|frequency'; then
+  bad "PIN16 플래그 없는 답변에 점수 성분이 새어 나왔다"
+else
+  ok "PIN16 플래그 없는 답변에는 점수도 진단 머리도 없다"
+fi
+
+# #606 축. 이 행은 렉시컬로 인용된 행이므로 헤더 태그도 '← synonym:' 줄도 붙지 않는다
+# (그 줄은 승격 행과 분해 제안 블록에만 붙는다 — PIN14 가 고정한다). 즉 표가 이 답변을
+# 재정렬했다는 사실은 진단에서만 읽을 수 있다.
+why_block="$(printf '%s\n' "$why_flagged" | sed -n '/^DIAGNOSTIC/,$p' || true)"
+[ -n "$why_block" ] || bad "PIN16 진단 블록이 출력에 없다 (이후 체크가 공허해진다)"
+same "PIN16 표 경유 백킹을 받은 행의 성분이 이름과 함께 나온다 (#606 축)" \
+  "[sources/w-backed.md:3] (sources)
+    grade      primary
+    coverage   2  lexical=[neurosymbolic] +backing=[해석가능성에서]
+    frequency  2  lexical=1 +backing=1
+    backing    1 accepted fact(s) reach this file — credited to THIS excerpt
+      ← synonym: 해석가능성에서 ≈ 설명가능성 (policy/vocabulary-synonyms.md)
+      ← accepted: s1, 이점, 설명가능성_향상" \
+  "$(printf '%s\n' "$why_block" | grep -A6 -F '[sources/w-backed.md:3]' || true)"
+same "PIN16 그 행의 렌더된 인용에는 태그도 synonym 줄도 없다 — 이동이 페이지에 안 보인다" \
+  "[sources/w-backed.md:3] (sources)" \
+  "$(printf '%s\n' "$why_plain" | grep -F '[sources/w-backed.md:3]' || true)"
+same "PIN16 백킹이 없는 대조 행은 '없음' 을 성분으로 보고한다 (뒤에 서는 이유)" \
+  "    backing    none — no accepted fact reaches this file" \
+  "$(printf '%s\n' "$why_block" | grep -F 'backing    none' || true)"
+
+# 이동 자체. 위 성분이 실제로 순서를 뒤집는다 — 진단이 설명하는 것이 실재하는 이동인지를
+# 보는 유일한 체크다.
+why_syn_order="$(py "
+import os, sys, pathlib
+sys.path.insert(0, '$PLUGIN_ROOT/tools'); os.environ['FACTLOG_ROOT'] = '$KB603'
+import ask_router as a
+for r in a.search('''$Q_WHY''', pathlib.Path('$KB603'), limit=None):
+    print(f\"{r['file']}:{r['line']}\")
+" || true)"
+[ -n "$why_syn_order" ] || bad "PIN16 표 경유 순서 측정이 빈 값을 냈다 (이후 체크가 공허해진다)"
+same "PIN16 선언 한 줄이 코퍼스 순서를 거슬러 순위를 바꾼다 (실 KB 의 10위->7위 사례)" \
+  "sources/w-backed.md:3
+sources/q-plain.md:3" \
+  "$why_syn_order"
+
+# 표를 지우면 진단에서도 그 줄이 사라진다 — 양방향. 진단이 표 유무와 무관하게 늘 같은
+# 줄을 찍고 있었다면 위 체크는 통과하면서도 아무것도 증명하지 못한다.
+rm -f "$SYN603"
+if "$PYTHON" "$ROUTER" wiki "$Q_WHY" --why --target "$KB603" | grep -qF '← synonym:'; then
+  bad "PIN16 표가 없는데 진단이 표 경유를 주장한다"
+else
+  ok "PIN16 표를 지우면 진단의 synonym 줄도 사라진다 (양방향)"
+fi
+
+# #602 축. 파일당 한 발췌만 가산을 받는데, 어느 쪽이 받았는지는 답변에서 보이지 않는다.
+# 진단은 받은 행과 못 받은 행을 서로 다른 문장으로 말하고, 못 받은 행은 받은 행의 줄을 댄다.
+pick_block="$("$PYTHON" "$ROUTER" wiki "$Q_PICK16" --why --target "$KB603" | sed -n '/^DIAGNOSTIC/,$p' || true)"
+[ -n "$pick_block" ] || bad "PIN16 발췌 선택 축의 진단 블록이 비었다 (이후 체크가 공허해진다)"
+same "PIN16 가산을 받은 발췌는 그렇다고 말한다 (#602 축)" \
+  "[sources/f-two.md:3] (sources)
+    grade      primary
+    coverage   2  lexical=[재현가능성에서] +backing=[검증가능성을]
+    frequency  2  lexical=1 +backing=1
+    backing    1 accepted fact(s) reach this file — credited to THIS excerpt" \
+  "$(printf '%s\n' "$pick_block" | grep -A4 -F '[sources/f-two.md:3]' || true)"
+same "PIN16 같은 파일의 다른 발췌는 가산을 못 받았음과 어디로 갔는지를 말한다 (#602 축)" \
+  "[sources/f-two.md:12] (sources)
+    grade      primary
+    coverage   1  lexical=[재현가능성에서]
+    frequency  1  lexical=1
+    backing    1 accepted fact(s) reach this file — credited to line 3 of this file, not to this excerpt (one excerpt per file)" \
+  "$(printf '%s\n' "$pick_block" | grep -A4 -F '[sources/f-two.md:12]' || true)"
+
+# porcelain 계약. search 의 JSON 은 스크립트가 읽는다. --why 는 행에 필드를 더하지 않고
+# 최상위에 배열 하나를 덧붙이며, 플래그가 없으면 그 키조차 없다 — 즉 기존 소비자에게는
+# 바이트 단위로 같은 문서다.
+search_plain="$("$PYTHON" "$ROUTER" search "$Q_PICK16" --target "$KB603" || true)"
+search_why="$("$PYTHON" "$ROUTER" search "$Q_PICK16" --why --target "$KB603" || true)"
+[ -n "$search_plain" ] || bad "PIN16 search JSON 이 비었다 (이후 체크가 공허해진다)"
+[ -n "$search_why" ] || bad "PIN16 search --why JSON 이 비었다 (이후 체크가 공허해진다)"
+if py "
+import json, sys
+plain, why = sys.argv[1], sys.argv[2]
+# 바이트 수준: --why 문서는 기존 문서의 닫는 괄호 앞에 키 하나가 삽입된 것과 정확히 같다.
+assert why.startswith(plain[:-1] + ', \"why\": ['), why[:400]
+assert why.endswith(']}'), why[-80:]
+doc, flagged = json.loads(plain), json.loads(why)
+assert 'why' not in doc, sorted(doc)
+assert flagged['results'] == doc['results']
+assert len(flagged['why']) == len(doc['results'])
+keys = sorted({k for row in flagged['results'] for k in row})
+assert keys == ['dir', 'excerpt', 'file', 'line'], keys
+" "$search_plain" "$search_why" 2>/dev/null; then ok "PIN16 --why 는 행 키를 건드리지 않고 최상위 배열만 더한다 (기존 스크립트 계약 유지)"; else bad "PIN16 search JSON 의 계약이 움직였다: $(printf '%s' "$search_why" | head -c 300)"; fi
+
 echo ""
 echo "========================================"
 echo "test_ask_wiki_search: $pass passed, $fail failed"
