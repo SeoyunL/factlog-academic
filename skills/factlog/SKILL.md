@@ -1191,10 +1191,12 @@ excerpt, and the question's words the engine's accepted vocabulary reaches that
 file through. So a source ranks higher for carrying accepted facts about what you
 asked, even where the corpus spells it in another language — and a question whose
 Korean terms match no prose still orders the answer by something other than
-filename. The two channels are counted as one set of question words, so a term
-found both ways counts once, and this credit sits **below** the directory grade:
-it can never lift a `decisions/` excerpt above a source. It changes **order
-only** — no row becomes verified, gains a tag, or enters the block because of it.
+filename. How much of your question a row answers is one set of words across both
+channels, so a term found both ways widens that set once; how much evidence says
+so is a sum, so a term found both ways does add on both sides there. The credit
+sits **below** the directory grade: it can never lift a `decisions/` excerpt above
+a source. It changes **order only** — no row becomes verified, gains a tag, or
+enters the block because of it.
 A row reached ONLY through that vocabulary is a different thing and still says so
 with `[via KB vocabulary — still UNVERIFIED]`.
 
