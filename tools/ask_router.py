@@ -78,6 +78,14 @@ _ROOT_FLAG_HELP = (
     "config; without it the root is resolved as $FACTLOG_ROOT > active-KB config > cwd."
 )
 
+# One help string for the two subcommands that carry --why (#603), for the reason
+# _ROOT_FLAG_HELP is shared: one flag described twice drifts into two flags.
+_WHY_FLAG_HELP = (
+    "report each returned row's ranking components (grade, coverage, frequency and "
+    "the KB-vocabulary backing behind them). Diagnostic only — the answer itself is "
+    "unchanged, and without this flag the output is byte-identical."
+)
+
 
 def _peek_root_flag(argv: list[str] | None = None) -> str | None:
     """The KB root given on the command line, or None.
@@ -662,7 +670,10 @@ _EXCERPT_ELISION = "…"
 # Directory grade — the TOP element of the ranking key (#572). Before this the
 # grade lived only in the display label, so a review note could (and on the
 # reference KB did) take rank 1 over the source text it was reviewing. Only the
-# ORDER of these two values matters; neither is ever displayed.
+# ORDER of these two values matters; neither VALUE is ever displayed. The --why
+# diagnostic (#603) does show which side of the split a row is on, as the word
+# 'primary'/'supplementary' through :func:`_grade_label` — so these two integers
+# stay internal and are still free to change.
 _GRADE_PRIMARY = 1
 _GRADE_SUPPLEMENTARY = 0
 
@@ -2071,7 +2082,7 @@ def _credit_backing(
     scored: list[tuple[tuple[int, int, int], dict[str, object]]],
     backed: dict[str, list[tuple[int, set[str], int]]],
     bridged: dict[str, dict[str, object]],
-) -> None:
+) -> dict[str, int]:
     """Apply #594's KB-vocabulary credit ONCE per backed file, to one excerpt of it.
 
     The credit is a fact about the FILE — these accepted facts were extracted from
@@ -2113,7 +2124,15 @@ def _credit_backing(
     Scores are rewritten in place, BEFORE the sort and before the bridged rows are
     appended, so a promoted row (#576) still competes against the credited row on the
     same key it did.
+
+    Returns {ref: the index that received the credit}. The choice is made here and
+    nowhere else, so a diagnostic that reports WHICH excerpt was credited (#603) has
+    to read it from this function rather than re-derive it — a second copy of the
+    `max` key is the "equivalent rule duplicated" shape common.py's fact_key warns
+    about, and it would go stale silently because both copies would still pick the
+    same row on most fixtures.
     """
+    chosen: dict[str, int] = {}
     for ref, rows in backed.items():
         entry = bridged[ref]
         terms = set(entry["terms"])
@@ -2123,6 +2142,213 @@ def _credit_backing(
         )
         grade = scored[index][0][0]
         scored[index] = ((grade, len(hits | terms), frequency + facts), scored[index][1])
+        chosen[ref] = index
+    return chosen
+
+
+# ---------------------------------------------------------------------------
+# Ranking diagnostics (#603) — what put this row where it is
+# ---------------------------------------------------------------------------
+# Three of this module's ranking inputs are invisible on the page. The KB-vocabulary
+# CREDIT (#594) moves a cited row without adding a key, a tag, or a row; #602 then
+# made that credit land on ONE excerpt per file, so which excerpt received it is not
+# derivable from the answer either; and #606 let a question word reach the credit
+# through policy/vocabulary-synonyms.md, so a line a human wrote in a policy file can
+# reorder an answer with nothing on the page saying so.
+#
+# Measured, on a COPY of the reference KB at bb3909c with one declared group added
+# ('- `해석가능성` = `설명가능성`' in policy/vocabulary-synonyms.md) and nothing else
+# changed, FACTLOG_EMBED_MODULE unset:
+#
+#   ask_router.py wiki 'neurosymbolic 접근이 순수 신경망 대비 해석가능성에서 낫다고
+#   주장하는 논문은?' --target <copy>
+#
+# moves sources/wickramarachchi-2024-…-of.md:4 from rank 10 to rank 7 of the 10 rows
+# the default render shows, and that row's own 10 lines (citation header + excerpt)
+# are equal string for string in the two runs — no tag, no '← synonym:' line, nothing
+# that says the answer was reordered.
+#
+# So the components are reported on request and only on request. The default answer
+# keeps NO number: a score printed beside an UNVERIFIED excerpt reads as a measure of
+# how true it is, which is the failure mode this whole block is built to avoid.
+RANKING_DIAGNOSTIC_HEADER = "DIAGNOSTIC — ranking components (--why)"
+# Read before the components, for the reason the recall caveat is placed before the
+# excerpts it qualifies: a reader who meets the numbers first has already drawn the
+# conclusion the caveat exists to prevent.
+RANKING_DIAGNOSTIC_CAVEAT = (
+    "note: retrieval bookkeeping for the rows above — they order UNVERIFIED excerpts "
+    "and say nothing about whether any of them is true."
+)
+
+
+def _grade_label(grade: int) -> str:
+    """The directory grade as the split it encodes, never as its integer.
+
+    _GRADE_PRIMARY/_GRADE_SUPPLEMENTARY document that only their ORDER matters, so
+    printing 1/0 would publish an arbitrary constant as if it were an interface and
+    invite a script to compare against it. The split itself is what ranks the row.
+    """
+    return "primary" if grade == _GRADE_PRIMARY else "supplementary"
+
+
+def _backing_trace(
+    entry: dict[str, object],
+    hits: set[str],
+    *,
+    applied: bool,
+) -> dict[str, object]:
+    """The KB-vocabulary side of one row's key, split by HOW each term was reached.
+
+    *entry* is a :func:`kb_vocabulary_bridge` value (or a row's own 'via', which is
+    built from one). 'direct' are the question words the KB's own spelling reached;
+    'synonyms' are the (word, declared member) hops that carried the rest (#606).
+    Their union is 'terms' — the file-level fact — and separating them is the whole
+    point: a word that matched the KB's spelling must not be reported as needing a
+    declaration, and a word that needed one must not be presented as a spelling match
+    (the same rule _bridged_facts states for the rendered answer).
+
+    'added' is what this ROW's coverage actually gained: the terms not already in its
+    lexical *hits*, and empty when the credit went to another excerpt of the file
+    (#602). It is what makes the report checkable — coverage == len(lexical) +
+    len(added) and frequency == lexical_frequency + (facts if applied else 0) hold for
+    every row, so a component that does not add up is a defect in the report or in the
+    credit, and tests assert both sums rather than the numbers alone.
+    """
+    mediated = {term for term, _member in entry.get("synonyms", [])}
+    terms = [str(term) for term in entry["terms"]]
+    return {
+        "terms": terms,
+        "direct": [term for term in terms if term not in mediated],
+        "synonyms": [list(hop) for hop in entry.get("synonyms", [])],
+        "facts": [str(fact) for fact in entry["facts"]],
+        "applied": applied,
+        "added": sorted(set(terms) - hits) if applied else [],
+    }
+
+
+def _trace_components(
+    scored: list[tuple[tuple[int, int, int], dict[str, object]]],
+    lexical: dict[int, tuple[set[str], int]],
+    backed: dict[str, list[tuple[int, set[str], int]]],
+    bridged: dict[str, dict[str, object]],
+    credited: dict[str, int],
+) -> dict[int, dict[str, object]]:
+    """{id(result row): the components of that row's ranking key}.
+
+    Keyed by object identity because the rows are about to be sorted, capped and
+    possibly re-ranked by a backend (:func:`_semantic_rerank`), and every one of those
+    steps carries the SAME dicts through — so identity is what survives them, while an
+    index does not. The caller holds *scored* for the whole of :func:`search`, which is
+    what keeps those ids valid; a caller that dropped it could see an id reused.
+
+    Read-only over what the scan already recorded: *lexical* is {index: (hits,
+    frequency)} taken before the credit, *credited* is :func:`_credit_backing`'s own
+    choice of excerpt. Nothing here re-scores or re-joins anything, so a wrong number
+    in this report is a wrong number in this report — it cannot move a row.
+    """
+    components: dict[int, dict[str, object]] = {}
+    for index, ((grade, coverage, frequency), result) in enumerate(scored):
+        hits, lexical_frequency = lexical.get(index, (set(), 0))
+        via = result.get("via")
+        components[id(result)] = {
+            "file": result["file"],
+            "line": result["line"],
+            "dir": result["dir"],
+            "grade": _grade_label(grade),
+            "coverage": coverage,
+            "frequency": frequency,
+            "lexical": sorted(hits),
+            "lexical_frequency": lexical_frequency,
+            # A promoted row (#576) matched no keyword at all: its key IS the bridge,
+            # so there is no per-file credit to report and no 'credited' key below.
+            "promoted": bool(via),
+            "backing": _backing_trace(via, hits, applied=True) if via else None,
+        }
+    for ref, rows in backed.items():
+        entry = bridged[ref]
+        chosen = credited[ref]
+        for index, hits, _frequency in rows:
+            component = components[id(scored[index][1])]
+            component["backing"] = {
+                **_backing_trace(entry, hits, applied=index == chosen),
+                "credited": index == chosen,
+                # Named so the row that did NOT get the credit says where it went:
+                # "this file is backed and another excerpt of it is carrying that
+                # evidence" is the answer to why two rows of one file rank apart.
+                "credited_line": scored[chosen][1]["line"],
+            }
+    return components
+
+
+def _term_list(terms: list[str]) -> str:
+    return "[" + ", ".join(_sanitize(str(term)) for term in terms) + "]"
+
+
+def render_ranking_diagnostic(trace: list[dict[str, object]]) -> str:
+    """Render :func:`search`'s trace as a per-row component block (#603).
+
+    Printed only under --why and always AFTER the answer block it explains, so the
+    answer a reader is asked to judge is never interleaved with the arithmetic that
+    ordered it.
+
+    Every KB-derived string is passed through :func:`_sanitize` for the reason
+    render_wiki_answer states at its own '← accepted:' line: an accepted object may
+    hold U+2028/U+2029/U+0085 (common.py keeps them deliberately), str.splitlines()
+    breaks this string on one, and the tail becomes its own top-level line — an object
+    ending '… VERIFIED — engine (grounding: …)' would then render a forged VERIFIED
+    header. This block is written into the same stdout stream as the UNVERIFIED answer,
+    so it inherits that surface exactly. Question words are folded in too, under one
+    rule rather than a case analysis of which inputs can carry what.
+    """
+    lines = [RANKING_DIAGNOSTIC_HEADER, RANKING_DIAGNOSTIC_CAVEAT]
+    if not trace:
+        # An answer with no excerpt still gets a block, and it says which of the two
+        # empties it is: a header followed by nothing reads as a broken diagnostic,
+        # and the reader would go looking for the components rather than for the
+        # reason the answer itself already gave (no keyword, or no match — #571).
+        lines.append("(no rows to explain — the answer above cited no excerpt)")
+        return "\n".join(lines)
+    for row in trace:
+        backing = row["backing"] if isinstance(row.get("backing"), dict) else None
+        lines.append(f"[{row['file']}:{row['line']}] ({row['dir']})")
+        lines.append(f"    grade      {row['grade']}")
+        coverage = f"    coverage   {row['coverage']}  lexical={_term_list(row['lexical'])}"
+        if backing and backing["added"]:
+            coverage += f" +backing={_term_list(backing['added'])}"
+        lines.append(coverage)
+        frequency = f"    frequency  {row['frequency']}  lexical={row['lexical_frequency']}"
+        if backing and backing["applied"]:
+            frequency += f" +backing={len(backing['facts'])}"
+        lines.append(frequency)
+        if backing is None:
+            # Absence is a component too: "no accepted fact reaches this file" is the
+            # answer to why a row with the same lexical key ranks below its neighbour.
+            lines.append("    backing    none — no accepted fact reaches this file")
+            continue
+        count = f"{len(backing['facts'])} accepted fact(s) reach this file"
+        if row["promoted"]:
+            lines.append(f"    backing    {count} — this row was reached ONLY that way")
+        elif backing["credited"]:
+            lines.append(f"    backing    {count} — credited to THIS excerpt")
+        else:
+            lines.append(
+                f"    backing    {count} — credited to line {backing['credited_line']} "
+                "of this file, not to this excerpt (one excerpt per file)"
+            )
+        for term in backing["direct"]:
+            lines.append(f"      ← direct: {_sanitize(str(term))}")
+        # Same spelling as the answer block's line for a promoted row, so a reader who
+        # has seen one recognizes the other: it is the same declared hop, named in the
+        # same file, and the file is named because a match the reader disagrees with is
+        # one line they can go and edit.
+        for term, member in backing["synonyms"]:
+            lines.append(
+                f"      ← synonym: {_sanitize(str(term))} ≈ {_sanitize(str(member))} "
+                f"({SYNONYM_POLICY_FILE})"
+            )
+        for fact in backing["facts"]:
+            lines.append(f"      ← accepted: {_sanitize(str(fact))}")
+    return "\n".join(lines)
 
 
 def search(
@@ -2131,6 +2357,7 @@ def search(
     *,
     limit: int | None = 10,
     recall: dict[str, list[str]] | None = None,
+    trace: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """Relevance-ranked search over the wiki corpus (sources/ + runs/sources/).
 
@@ -2162,6 +2389,12 @@ def search(
     side report: nothing below reads it, so it cannot influence scoring, ordering
     or the returned rows.
 
+    *trace* is the same kind of side report for the RANKING (#603): given a list, it
+    is filled with one component dict per RETURNED row, in the returned order —
+    :func:`_trace_components`' value, aligned by object identity through the sort, the
+    cap and the optional re-rank. It is written at the very end, out of what the scan
+    already recorded, and nothing below reads it either.
+
     The tally is taken HERE, per scanned line, because every vantage point outside
     this loop undercounts and would report a keyword the corpus HAS as absent:
       - after the `limit` cap: the cap is a RENDER budget; a keyword whose only
@@ -2191,6 +2424,16 @@ def search(
     # {ref: [(index into `scored`, that row's lexical hits, its frequency)]} for the
     # files the KB backs — what _credit_backing needs to pick one excerpt per file.
     backed: dict[str, list[tuple[int, set[str], int]]] = {}
+    # The same record for EVERY scanned row, keyed the same way. `backed` holds it only
+    # for the backed files, and the credit overwrites the score tuple in place, so
+    # after _credit_backing the lexical half of an unbacked row's key exists nowhere
+    # else. Recorded unconditionally rather than under `trace is not None`: it is one
+    # dict insert per SCANNED excerpt — 152 of them on the reference KB, measured at
+    # bb3909c with search('오메가-3 보충이 COPD 환자에게 효과있음을 보인 연구는?', root,
+    # limit=None), whose 169 rows are those 152 plus 17 promoted bridge rows that never
+    # enter this dict — and a second scan path would be a second place for the two to
+    # disagree.
+    lexical: dict[int, tuple[set[str], int]] = {}
     ignored_patterns = sync_ignore_patterns(root)
     # Read ONCE, before the scan, and used twice: to credit the rows the scan cites
     # (#594, below) and to build rows for the files it never cites (#576). Reading it
@@ -2301,6 +2544,7 @@ def search(
                 # saying so. That is #594's existing shape, not something #606
                 # introduces, and exposing it is #603's axis.
                 scored.append(((grade, len(hits), frequency), result))
+                lexical[len(scored) - 1] = (hits, frequency)
                 # The scan's own record, not a second read of the KB: the credit needs
                 # each excerpt's hit SET (coverage is a union, not a sum) and its
                 # frequency, and neither survives in the score tuple above.
@@ -2316,7 +2560,7 @@ def search(
     # Before the bridge rows are appended, so a promoted row still meets the credited
     # row on the same key, and before the sort, so the credit decides order and not
     # a re-sort of an already-ranked list.
-    _credit_backing(scored, backed, bridged)
+    credited = _credit_backing(scored, backed, bridged)
     # KB-vocabulary bridge (#576): sources the question reached through the engine's
     # own Korean vocabulary rather than through the corpus text. Appended AFTER the
     # scan and BEFORE the sort, so bridged rows compete on the same ranking key
@@ -2324,6 +2568,10 @@ def search(
     # other row does, so a caller that never looks at it sees exactly what it saw
     # before on a KB with no bridge.
     scored.extend(_bridge_rows(bridged, root, cited, ignored_patterns))
+    # After the bridge rows are appended, so the report covers every row that can be
+    # returned, and before the sort purely for reading order — the components are keyed
+    # by row identity, and the sort rewrites neither the keys nor the dicts.
+    components = _trace_components(scored, lexical, backed, bridged, credited) if trace is not None else {}
     # Taken before the sort and the cap below, so neither the grade key (#572) nor
     # the render budget can make recall look worse than the corpus is (#575).
     _fill_recall(recall, keywords, pending)
@@ -2369,7 +2617,14 @@ def search(
     ranked = [result for _score, result in scored]
     if limit is not None:
         ranked = ranked[:limit]
-    return _semantic_rerank(question, ranked)
+    ranked = _semantic_rerank(question, ranked)
+    # Filled from the FINAL order, after the cap and after the backend has had its
+    # say, so the report describes the rows the caller is about to render rather than
+    # the rows the lexical sort produced. `scored` is still in scope here, which is
+    # what keeps the identities in `components` alive (see _trace_components).
+    if trace is not None:
+        trace.extend(components[id(row)] for row in ranked)
+    return ranked
 
 
 def _render_limit(value: int | None) -> int | None:
@@ -3087,26 +3342,37 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     root = Path(os.environ["FACTLOG_ROOT"])
+    # Passed to the CAPPED call in both branches — the one whose rows are printed.
+    # The second, uncapped call below exists only to count, and threading the trace
+    # through it would report components for rows this command never emits.
+    trace: list[dict[str, object]] | None = [] if args.why else None
     if args.all:
-        results = search(args.text, root, limit=None)
+        results = search(args.text, root, limit=None, trace=trace)
         total = len(results)
     else:
         # Keep the existing top-10 retrieval/reranking behaviour for callers of
         # the stable ``results`` array.  The additive fields make the cap visible.
-        results = search(args.text, root)
+        results = search(args.text, root, trace=trace)
         total = len(search(args.text, root, limit=None))
     # 'diagnostic' is null unless the empty result needs an explanation the row
     # count cannot give: zero rows because zero keywords, not because zero matches
     # (#571). Additive, like total/truncated — the results array is unchanged.
-    print(json.dumps(
-        {
-            "results": results,
-            "total": total,
-            "truncated": len(results) < total,
-            "diagnostic": None if _keyword_patterns(args.text) else NO_QUERY_TERM_NOTE,
-        },
-        ensure_ascii=False,
-    ))
+    payload: dict[str, object] = {
+        "results": results,
+        "total": total,
+        "truncated": len(results) < total,
+        "diagnostic": None if _keyword_patterns(args.text) else NO_QUERY_TERM_NOTE,
+    }
+    # A PARALLEL array, not fields inside the rows (#603). The row dicts are a script
+    # contract — 'dir'/'excerpt'/'file'/'line', plus 'via' on a bridged row — and a
+    # consumer that iterates a row's keys, diffs two runs, or re-serializes a row would
+    # see a schema change on a flag it never passed if the components lived there. Here
+    # the key appears only under --why, and only at the top level, so without the flag
+    # the JSON is byte-identical: json.dumps preserves insertion order and this key is
+    # added after the four that were always there.
+    if trace is not None:
+        payload["why"] = trace
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 
@@ -3118,11 +3384,12 @@ def cmd_wiki(args: argparse.Namespace) -> int:
     # the render cap cannot make recall look worse than it is (#575), which would
     # have turned this diagnostic into the false alarm it exists to prevent.
     recall: dict[str, list[str]] = {}
+    trace: list[dict[str, object]] | None = [] if args.why else None
     if args.all:
-        results = search(args.text, root, limit=None, recall=recall)
+        results = search(args.text, root, limit=None, recall=recall, trace=trace)
         total_results = len(results)
     else:
-        results = search(args.text, root, recall=recall)
+        results = search(args.text, root, recall=recall, trace=trace)
         total_results = len(search(args.text, root, limit=None))
     # Grounding: accepted facts about mentioned entities (empty if not compiled yet).
     accepted = load_accepted_facts() if ACCEPTED_DL.is_file() else []
@@ -3153,6 +3420,16 @@ def cmd_wiki(args: argparse.Namespace) -> int:
     # is a separate, actionable defect the author should fix — surface it (#193).
     if _policy_uncompiled():
         print(POLICY_UNCOMPILED_WARNING)
+    # Last, below the policy warning (#603). Two reasons, and neither is aesthetic:
+    # the answer block and that warning are what the skill is told to show the user
+    # verbatim, so nothing may be inserted between them; and the diagnostic is an
+    # appendix about rows the reader has already seen, which is only readable after
+    # them. It is sliced to the rows the renderer SHOWED — search()'s cap and the
+    # renderer's cap are different numbers (10 vs DEFAULT_RENDER_ROW_LIMIT), so
+    # reporting the trace whole could describe an excerpt that is not on the page.
+    if trace is not None:
+        visible = trace if args.all else trace[:_render_limit(DEFAULT_RENDER_ROW_LIMIT)]
+        print(render_ranking_diagnostic(visible))
     return 0
 
 
@@ -3181,6 +3458,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_p = sub.add_parser("search", help="search the wiki corpus (sources/ + runs/sources/) (JSON)")
     search_p.add_argument("text", help="the natural-language question")
     search_p.add_argument("--all", action="store_true", help="return every matching excerpt")
+    search_p.add_argument("--why", action="store_true", help=_WHY_FLAG_HELP)
     search_p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
     search_p.set_defaults(func=cmd_search)
 
@@ -3189,6 +3467,7 @@ def build_parser() -> argparse.ArgumentParser:
     wiki_p.add_argument("--reason", default="not expressible over accepted facts", help="why the engine path did not apply")
     wiki_p.add_argument("--draft", default=None, help="validated draft query; append display-only spelling hints when eligible")
     wiki_p.add_argument("--all", action="store_true", help="show every excerpt and grounding row")
+    wiki_p.add_argument("--why", action="store_true", help=_WHY_FLAG_HELP)
     wiki_p.add_argument(*_ROOT_FLAGS, dest="target", default=None, metavar="PATH", help=_ROOT_FLAG_HELP)
     wiki_p.set_defaults(func=cmd_wiki)
 
