@@ -12,6 +12,9 @@
 #   - --purge deletes the candidate row instead of superseding it
 #   - --delete-original also removes the user's original under sources/
 #   - a bare stem matches; an unknown name errors (rc != 0); non-KB path errors
+#   - naming a *path* stays inside that path: `eject sub/report.html` never
+#     reaches a same-name original in another directory (#324), while a bare
+#     filename keeps matching every directory
 #
 # Usage: bash tests/test_eject_cmd.sh
 
@@ -110,6 +113,98 @@ printf '%s\n%s\n%s\n' "$H" \
 "$PYTHON" -m factlog eject sources/a/dup.md --target "$KB" --delete-original >/dev/null 2>&1 || true
 [ ! -f "$KB/sources/a/dup.md" ] && [ -f "$KB/sources/b/dup.md" ] && ok "full path ejects only that file, not the same-name sibling" || bad "full path matched across directories"
 grep -q "sources/b/dup.md,confirmed," "$KB/facts/candidates.csv" && ok "sibling's fact preserved" || bad "sibling fact wrongly retired"
+
+# =============================================================================
+# #324: naming a path must not reach a same-name original in another directory
+# =============================================================================
+
+# Two same-name originals (sources/report.html and sources/sub/report.html), each
+# with its mirrored conversion. $1 = KB, $2 = header style (path|legacy): the
+# nested conversion's provenance records either the #214 sources-relative path or
+# a legacy bare basename. Both must select identically — the conversion's own
+# mirrored location is what pairs it with its original.
+seed_dup() {  # $1 = KB path, $2 = path|legacy
+  local kb="$1" nested_src="sub/report.html"
+  [ "$2" = "legacy" ] && nested_src="report.html"
+  "$PYTHON" -m factlog init --target "$kb" >/dev/null
+  mkdir -p "$kb/sources/sub" "$kb/runs/sources/sub"
+  printf '<html>top</html>\n' > "$kb/sources/report.html"
+  printf '<html>nested</html>\n' > "$kb/sources/sub/report.html"
+  printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\ntop\n' \
+    > "$kb/runs/sources/report.html.md"
+  printf '<!-- ingested-by-factlog | source: %s | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nnested\n' \
+    "$nested_src" > "$kb/runs/sources/sub/report.html.md"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$H" \
+    'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' \
+    'C,rel,D,runs/sources/sub/report.html.md,confirmed,0.9,' \
+    'E,rel,F,sources/report.html,confirmed,0.9,' \
+    'G,rel,H,sources/sub/report.html,confirmed,0.9,' > "$kb/facts/candidates.csv"
+}
+
+# --- a sources-relative path ejects only the conversion made from that path ----
+for style in path legacy; do
+  KB="$(mktemp -d)/wiki"; seed_dup "$KB" "$style"
+  "$PYTHON" -m factlog eject sub/report.html --target "$KB" >/dev/null 2>&1
+  [ ! -f "$KB/runs/sources/sub/report.html.md" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+    && ok "[$style header] 'sub/report.html' ejects the nested conversion only" \
+    || bad "[$style header] path eject hit the same-name conversion in another directory"
+  grep -q "A,rel,B,runs/sources/report.html.md,confirmed," "$KB/facts/candidates.csv" \
+    && ok "[$style header] the top-level conversion's fact is not retired" \
+    || bad "[$style header] unrequested fact retired"
+  [ -f "$KB/sources/report.html" ] && [ -f "$KB/sources/sub/report.html" ] \
+    && ok "[$style header] both originals kept" || bad "[$style header] an original was deleted"
+done
+
+# --- './name' narrows to the root-level original's conversion -----------------
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+"$PYTHON" -m factlog eject ./report.html --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "'./report.html' ejects the root-level conversion only" || bad "'./report.html' reached into sub/"
+
+# --- a KB-relative 'sources/...' path matches that original + its conversion ---
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+out="$("$PYTHON" -m factlog eject sources/report.html --target "$KB" --delete-original 2>&1)"
+[ ! -f "$KB/sources/report.html" ] && [ ! -f "$KB/runs/sources/report.html.md" ] \
+  && ok "'sources/report.html' ejects that original and its conversion" || bad "KB-relative path eject incomplete"
+[ -f "$KB/sources/sub/report.html" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "'sources/report.html' leaves the sub/ pair untouched" || bad "KB-relative path eject hit sub/"
+
+# --- a bare filename stays deliberately wide (a filename is not a path) -------
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+out="$("$PYTHON" -m factlog eject report.html --target "$KB" --dry-run 2>&1)"
+[ "$(printf '%s' "$out" | grep -c '^  - ')" -eq 4 ] \
+  && ok "a bare filename still matches every source with that name (4 refs)" \
+  || bad "bare filename matching narrowed: $(printf '%s' "$out" | grep -c '^  - ') refs"
+
+# --- an absolute path inside the KB resolves to its KB-relative ref -----------
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+"$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/sub/report.html.md" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "an absolute path under sources/ ejects only its own conversion" || bad "absolute path matched by basename"
+
+# --- an absolute original outside the KB matches only a FLAT conversion -------
+# ingest gives a path outside sources/ no subtree to mirror, so its conversion is
+# flat; a mirrored conversion can never have come from that path.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
+"$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "an outside-the-KB original matches its flat conversion, not a mirrored one" \
+  || bad "outside-the-KB path reached a mirrored conversion"
+
+# --- a path is compared as written: '..' and case differences do not match ----
+# Deliberate: eject never normalises a path away from the form a provenance
+# header records, and never case-folds. Both now select nothing (rc != 0)
+# instead of falling back to a basename match.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+set +e
+"$PYTHON" -m factlog eject sub/../report.html --target "$KB" --dry-run >/dev/null 2>&1; rc=$?
+"$PYTHON" -m factlog eject SUB/report.html --target "$KB" --dry-run >/dev/null 2>&1; rc2=$?
+set -e
+[ "$rc" -ne 0 ] && ok "a '..' path selects nothing instead of falling back to the basename" \
+  || bad "'..' path still matched by basename"
+[ "$rc2" -ne 0 ] && ok "a case-different path selects nothing (no case folding)" \
+  || bad "case-different path matched"
 
 # --- a candidates.csv whose header lacks 'status' is not truncated -------------
 KB="$(mktemp -d)/wiki"

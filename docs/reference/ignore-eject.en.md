@@ -50,6 +50,43 @@ factlog eject report.pdf --delete-original  # also delete the user's original un
 factlog eject report.pdf --dry-run       # show the planned changes, modify nothing
 ```
 
+### How a source is named — filenames are wide, paths are narrow
+
+| What you name | What it matches |
+|---------|---------|
+| stem `report` | **every** source with that stem, and their conversions |
+| filename `report.html` | **every** source with that filename in any directory, and their conversions |
+| path `sub/report.html`, `./report.html` | only the conversion made from the original at that path under `sources/` |
+| KB-relative ref `sources/sub/report.html` | that original + the conversion made from it |
+| absolute path `/kb/sources/sub/report.html` | the same (it reduces to the KB-relative ref) |
+
+**A bare filename is not a path.** `factlog eject report.html` matches widely by
+design, so it also catches `sources/sub/report.html`. To take only the top-level
+one, name a path: `./report.html` or `sources/report.html`.
+
+Given a path, only the conversion made from *that* path matches — conversions
+mirror the original's subdirectory under `runs/sources/`, so
+`factlog eject sub/report.html` deletes `runs/sources/sub/report.html.md` and
+leaves `runs/sources/report.html.md`, made from a same-name original in another
+directory, alone.
+
+A path is compared **as written**: no `..` folding and no case folding, so
+`sub/../report.html` and `SUB/report.html` match nothing and exit 1 — even on a
+case-insensitive filesystem. Only an absolute path is resolved (symlinks
+included) and reduced to a KB-relative ref; a relative path is not, so one
+spelled through a symlinked directory name (`link/report.html`) matches nothing —
+use the real path (`real/report.html`) or an absolute path.
+
+To delete the original too (`--delete-original`), name it by its KB-relative ref
+(`sources/sub/report.html`) or by absolute path. A sources-relative path
+(`sub/report.html`) names the **conversion** made from it.
+
+An original ingested from outside `sources/` (e.g.
+`factlog ingest /elsewhere/report.html`) has no subtree to mirror, so its
+conversion is written flat under `runs/sources/`. Naming that original by path
+matches the flat conversion only: a conversion in a subdirectory cannot have come
+from it.
+
 ### Removing a single fact (`--fact`)
 
 When a source is fine but one extracted fact is wrong, retire just that fact —

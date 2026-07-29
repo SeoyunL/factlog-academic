@@ -2366,17 +2366,73 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         origin = conv_origin.get(ref)
         return PurePosixPath(origin).name if origin is not None else None
 
-    def matches(ref: str, name: str) -> bool:
-        name = nfc(name)
-        rp, np_ = Path(ref), Path(name)
-        if ref == name:  # exact KB-relative ref
+    try:
+        troot = target.resolve()
+    except OSError:
+        troot = target
+
+    def selector(name: str) -> tuple[set[str], str | None, str]:
+        """Canonicalise one `eject <name>` argument into what the matcher needs:
+
+          refs    — the KB-relative ref(s) the argument names exactly;
+          src_rel — the original's path *relative to sources/*, when a path was
+                    given; compared against conv_origin to reach the conversion
+                    that path produced. None when the argument names no original
+                    under sources/ (a conversion ref, or a bare name);
+          raw     — the argument as written, for the bare filename / stem rules.
+        """
+        raw = nfc(name)
+        p = Path(raw)
+        if p.is_absolute():
+            # Resolve an *absolute* argument, and the root with it: this machine
+            # can reach the KB through a symlink (/tmp -> /private/tmp), and an
+            # unresolved argument would then look like it lies outside the KB.
+            # A relative argument is never resolved — resolving it against the
+            # cwd would turn `sub/report.html`, typed inside the KB, into an
+            # outside-the-KB path and drop it back to basename matching, which
+            # is the deletion #324 is about.
+            try:
+                p = p.resolve()
+            except OSError:
+                pass
+            try:
+                kb_rel = nfc(p.relative_to(troot).as_posix())
+            except ValueError:
+                kb_rel = None
+            if kb_rel is not None and (kb_rel == "sources" or kb_rel.startswith("sources/")):
+                return {kb_rel}, kb_rel[len("sources/"):] or None, raw
+            # An original outside sources/ — anywhere else in the KB, or outside
+            # it entirely — has no subtree for ingest to mirror, so it always
+            # converts to a *flat* runs/sources/<name> whose rebuilt origin is a
+            # bare basename. Comparing against that basename keeps the legitimate
+            # case working while leaving every mirrored conversion out of reach.
+            return ({kb_rel} if kb_rel is not None else set()), nfc(p.name), raw
+        # A relative argument is read KB-relative (`sources/...`, `runs/...`) or
+        # sources-relative (`sub/report.html`). PurePosixPath folds "./" and "//"
+        # but keeps ".." verbatim: no normpath/realpath here, so the comparison
+        # never rewrites a path into something the recorded origin spells
+        # differently.
+        norm = PurePosixPath(raw).as_posix() if "/" in raw else raw
+        if norm.startswith("sources/"):
+            return {raw, norm}, norm[len("sources/"):] or None, raw
+        if norm.startswith("runs/sources/"):
+            return {raw, norm}, None, raw  # names a conversion, not an original
+        return {raw, norm}, norm, raw
+
+    def matches(ref: str, sel: tuple[set[str], str | None, str]) -> bool:
+        refs, src_rel, name = sel
+        if ref in refs:  # exact KB-relative ref
             return True
         is_conv = ref.startswith("runs/sources/")
         if "/" in name:
             # A path was given: the exact original is handled above; for a
-            # binary original also match the conversion it produced (by
-            # recorded origin). Same-basename files elsewhere are NOT matched.
-            return is_conv and origin_name(ref) == np_.name
+            # binary original also match the conversion it produced — the one
+            # whose recorded origin *is* that sources-relative path. #324: a
+            # same-name original in another directory is NOT matched, because
+            # both sides keep their directory instead of collapsing to a
+            # basename.
+            return is_conv and src_rel is not None and conv_origin.get(ref) == src_rel
+        rp, np_ = Path(ref), Path(name)
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
                 return rp.name == np_.name  # an original with that filename
@@ -2445,7 +2501,8 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         print(f"factlog eject (KB: {target}): orphan scan — {len(matched)} orphaned source(s)")
     else:
         for name in args.sources:
-            hits = {ref for ref in all_refs if matches(ref, name)}
+            sel = selector(name)
+            hits = {ref for ref in all_refs if matches(ref, sel)}
             if hits:
                 matched |= hits
             else:
@@ -2489,9 +2546,14 @@ def cmd_eject(args: argparse.Namespace) -> int:
         by default (kept for audit), or removed entirely with --purge;
       - optionally deletes the user's original under sources/ with
         --delete-original (off by default: ingest never created it).
-    A source is named by its filename, stem, or KB-relative path. Naming the
-    binary original (e.g. report.pptx) also matches its runs/sources/<stem>
-    conversion; a bare stem matches every source with that stem. eject also
+    A source is named by its filename, stem, or path. Naming the binary original
+    (e.g. report.pptx) also matches its runs/sources/<stem> conversion; a bare
+    stem matches every source with that stem. A filename is deliberately wide —
+    it matches that name in every directory — while a *path* is narrow: it
+    selects the original at that path and the conversion made from it, never a
+    same-name original elsewhere (#324). Paths are read relative to sources/ (or
+    as a KB-relative ref / absolute path) and compared as written: no ".."
+    folding, no case folding, and only an absolute path is resolved. eject also
     catches a source cited only in candidates.csv (an already-orphaned ref).
 
     Orphan mode (`eject --orphans`) selects every orphaned source automatically
