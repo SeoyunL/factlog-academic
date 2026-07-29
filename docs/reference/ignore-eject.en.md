@@ -62,7 +62,10 @@ factlog eject report.pdf --dry-run       # show the planned changes, modify noth
 
 **A bare filename is not a path.** `factlog eject report.html` matches widely by
 design, so it also catches `sources/sub/report.html`. To take only the top-level
-one, name a path: `./report.html` or `sources/report.html`.
+one, name a path — `./report.html` for its conversion alone, or the KB-relative
+ref `sources/report.html` to include the original itself (which is what makes
+`--delete-original` actually delete it). The two table rows above are that
+difference.
 
 Given a path, only the conversion made from *that* path matches — conversions
 mirror the original's subdirectory under `runs/sources/`, so
