@@ -60,8 +60,10 @@ factlog eject report.pdf --dry-run       # show the planned changes, modify noth
 | 절대 경로 `/kb/sources/sub/report.html` | 위와 동일(KB 기준 ref 로 환원) |
 
 **파일명은 경로 지정이 아닙니다.** `factlog eject report.html` 은 의도적으로 넓게
-매칭되므로 `sources/sub/report.html` 쪽도 함께 걸립니다. 최상위 것만 빼려면
-`./report.html` 이나 `sources/report.html` 처럼 경로로 지정하십시오.
+매칭되므로 `sources/sub/report.html` 쪽도 함께 걸립니다. 최상위 것만 빼려면 경로로
+지정하십시오 — 변환본만 지우려면 `./report.html`, 원본까지 대상에 넣으려면(즉
+`--delete-original` 이 실제로 원본을 지우게 하려면) `sources/report.html` 처럼 KB
+기준 ref 로 지정합니다. 위 표의 두 줄이 그 차이입니다.
 
 경로를 주면 그 경로에서 만들어진 변환본만 매칭됩니다 — 변환본은 `runs/sources/`
 아래에 원본의 서브디렉터리를 미러링하므로, `factlog eject sub/report.html` 은
