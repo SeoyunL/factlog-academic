@@ -63,8 +63,17 @@ all, so there the two spellings simply stay separate values.
 are still in the KB, `tools/check_conflicts.py` may now exit **1** — a gate
 failure, not a warning. `１００억` and `100억` used to fold onto the same scalar
 and count as one value; the full-width one now keys on its raw string, so for the
-same subject a single-valued relation sees two values. Correct the source of
-those facts to ASCII and re-collect to clear it.
+same subject a single-valued relation sees two values.
+
+That gate failure is loud; there is also a **quiet** one. If an existing KB holds
+a full-width amount compound term (`amount(１００,"억")`), a query written without
+the quotes — `amount(１００,억)` — now **misses silently**, because a full-width
+term is no longer a valid amount and so no longer folds to the same canonical
+form as the stored value. That miss is indistinguishable from an engine-verified
+"no such fact", which makes it harder to notice than the failure.
+
+Both cases clear the same way: correct the source of those facts to ASCII and
+re-collect.
 
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).
