@@ -684,7 +684,7 @@ run_payload_case "envelope: engine-input path only inside content — allow (no 
       "$KB_ENV7/notes.md" "$KB_ENV7/facts/accepted.dl")" 0
 
 # ---------------------------------------------------------------------------
-# CASE 33: FACTLOG_GATE_FAIL_OPEN=1 escape hatch.
+# CASE 33: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 escape hatch.
 #
 # (a) It releases the narrow schema-drift deny of CASE 23 — without an escape
 #     hatch, a payload-schema change turns this gate into a global Write/Edit
@@ -693,24 +693,24 @@ run_payload_case "envelope: engine-input path only inside content — allow (no 
 # Vacuous pre-fix for (a); PRE-FIX FAIL for (b) (old gate returned 0).
 # ---------------------------------------------------------------------------
 hatch_exit=0
-FACTLOG_GATE_FAIL_OPEN=1 FACTLOG_ROOT="$KB_ENV7" bash "$GATE" \
+FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 FACTLOG_ROOT="$KB_ENV7" bash "$GATE" \
   <<< '{"tool_name":"Write","tool_input":{"content":"x"}}' >/dev/null 2>&1 || hatch_exit=$?
 if [ "$hatch_exit" -eq 0 ]; then
-  echo "PASS: FACTLOG_GATE_FAIL_OPEN=1 releases the schema-drift deny (exit $hatch_exit)"
+  echo "PASS: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 releases the schema-drift deny (exit $hatch_exit)"
   pass=$((pass + 1))
 else
-  echo "FAIL: FACTLOG_GATE_FAIL_OPEN=1 — expected allow (exit 0), got $hatch_exit"
+  echo "FAIL: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 — expected allow (exit 0), got $hatch_exit"
   fail=$((fail + 1))
 fi
 
 hatch_fresh_exit=0
-FACTLOG_GATE_FAIL_OPEN=1 FACTLOG_ROOT="$KB_ENV7" bash "$GATE" \
+FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 FACTLOG_ROOT="$KB_ENV7" bash "$GATE" \
   <<< "$(envelope Write "$KB_ENV7/facts/accepted.dl")" >/dev/null 2>&1 || hatch_fresh_exit=$?
 if [ "$hatch_fresh_exit" -eq 2 ]; then
-  echo "PASS: FACTLOG_GATE_FAIL_OPEN=1 does NOT release the freshness deny (exit $hatch_fresh_exit)"
+  echo "PASS: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 does NOT release the freshness deny (exit $hatch_fresh_exit)"
   pass=$((pass + 1))
 else
-  echo "FAIL: FACTLOG_GATE_FAIL_OPEN=1 — freshness deny must still fire (exit 2), got $hatch_fresh_exit"
+  echo "FAIL: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 — freshness deny must still fire (exit 2), got $hatch_fresh_exit"
   fail=$((fail + 1))
 fi
 rm -rf "$KB_ENV7"
