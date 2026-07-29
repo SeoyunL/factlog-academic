@@ -492,7 +492,7 @@ fi
 rm -rf "$KB_OK" "$ok_err"
 
 # ===========================================================================
-# CASES 18-35: REAL HOOK ENVELOPE (#323)
+# CASES 18-38: REAL HOOK ENVELOPE (#323)
 #
 # Claude Code does not send the bare tool input; it sends an envelope with the
 # tool input nested under `tool_input`. CASES 1-17 above all use the FLAT
@@ -684,7 +684,97 @@ run_payload_case "envelope: engine-input path only inside content — allow (no 
       "$KB_ENV7/notes.md" "$KB_ENV7/facts/accepted.dl")" 0
 
 # ---------------------------------------------------------------------------
-# CASE 33: UNPARSEABLE PAYLOAD — ALLOW, but say so.
+# CASE 33: NUL SEPARATOR — MUTATION PIN.
+#
+# The extractor separates its three fields with NUL because a path may legally
+# contain a newline. Switching both the write and the read back to "\n" passes
+# every other case in this file, so without this one that decision is unpinned.
+#
+# The target is the engine input path with a newline and one more segment glued
+# on. That is NOT the engine input, and the KB is stale, so the gate must ALLOW.
+# Under a newline separator the record splits at the newline, field 2 becomes
+# exactly "<KB>/facts/accepted.dl", the stale-report guard fires, and the case
+# gets exit 2 instead.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: newline inside file_path — allow (NUL separator pin)" \
+  "$KB_ENV7" \
+  "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s\\nsuffix"}}' \
+      "$KB_ENV7/facts/accepted.dl")" 0
+
+# ---------------------------------------------------------------------------
+# CASE 34: EMPTY file_path — DENY, and pin it.
+#
+# `tool_input` is an object and `tool_name` is write-class, but the path is the
+# empty string, so no target can be read and the narrow fail-closed branch
+# fires. Note this deny happens BEFORE the engine-input match, so it holds even
+# in a KB whose report is fresh — hence the second call below against a fresh
+# KB. The deny text must therefore not diagnose "schema changed" as the only
+# possible cause.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: empty file_path in a stale KB — deny" \
+  "$KB_ENV7" '{"tool_name":"Write","tool_input":{"file_path":"","content":"x"}}' 2
+
+KB_EMPTY_FRESH="$(mktemp -d)"
+kb_fresh "$KB_EMPTY_FRESH"
+run_payload_case "envelope: empty file_path in a FRESH KB — deny (runs before the match)" \
+  "$KB_EMPTY_FRESH" '{"tool_name":"Write","tool_input":{"file_path":""}}' 2
+rm -rf "$KB_EMPTY_FRESH"
+
+# ---------------------------------------------------------------------------
+# CASE 35: WRITE-CLASS CALL WITH NO tool_input OBJECT — ALLOW, but say so.
+#
+# The JSON parses and the extractor record is complete, so neither the
+# unparseable nor the incomplete note covers these; the gate is nevertheless
+# blind to the target. That is a skipped check, not ordinary traffic, so it must
+# be observable. Under the current schema Write/Edit always send a `tool_input`
+# object, so in normal operation this note never fires.
+#
+# Three shapes: tool_input missing entirely, a renamed key (the most plausible
+# schema drift), and a tool_input that is not an object.
+# ---------------------------------------------------------------------------
+blind_note_case() {
+  local desc="$1"
+  local payload="$2"
+
+  local err
+  err="$(mktemp)"
+  local actual_exit=0
+  FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< "$payload" >/dev/null 2>"$err" || actual_exit=$?
+
+  if [ "$actual_exit" -eq 0 ] && grep -qF "carried no tool_input object" "$err"; then
+    echo "PASS: $desc — allow with a fail-open note (exit $actual_exit)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc — expected allow (exit 0) with a fail-open note; exit=$actual_exit stderr=$(cat "$err")"
+    fail=$((fail + 1))
+  fi
+  rm -f "$err"
+}
+
+blind_note_case "write-class call with no tool_input at all" \
+  '{"tool_name":"Write"}'
+blind_note_case "write-class call with a renamed tool_input key" \
+  "$(printf '{"tool_name":"Write","toolInput":{"file_path":"%s"}}' "$KB_ENV7/facts/accepted.dl")"
+blind_note_case "write-class call with a non-object tool_input" \
+  '{"tool_name":"Edit","tool_input":"oops"}'
+
+# A non-write tool in the same shape must stay SILENT — the note must not become
+# noise on every Read/Grep/Bash call in a session.
+quiet_err="$(mktemp)"
+quiet_exit=0
+FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< '{"tool_name":"Read","tool_input":"oops"}' \
+  >/dev/null 2>"$quiet_err" || quiet_exit=$?
+if [ "$quiet_exit" -eq 0 ] && [ ! -s "$quiet_err" ]; then
+  echo "PASS: non-write tool with no tool_input object — allow, and silent (exit $quiet_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: non-write tool — expected a silent allow; exit=$quiet_exit stderr=$(cat "$quiet_err")"
+  fail=$((fail + 1))
+fi
+rm -f "$quiet_err"
+
+# ---------------------------------------------------------------------------
+# CASE 36: UNPARSEABLE PAYLOAD — ALLOW, but say so.
 #
 # The header enumerates five fail-open branches; before this case none of the
 # harness exercised the two that mean "the gate skipped a check it could not
@@ -712,7 +802,7 @@ fi
 rm -f "$unparsed_err"
 
 # ---------------------------------------------------------------------------
-# CASE 34: INCOMPLETE EXTRACTOR RECORD — ALLOW, but say so.
+# CASE 37: INCOMPLETE EXTRACTOR RECORD — ALLOW, but say so.
 #
 # The extractor writes exactly three NUL-terminated fields; if it dies or writes
 # anything else, the shell has no record to reason about. That must fail OPEN
@@ -762,7 +852,7 @@ fi
 rm -rf "$TRUNC_SHIM" "$trunc_err"
 
 # ---------------------------------------------------------------------------
-# CASE 35: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 escape hatch.
+# CASE 38: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 escape hatch.
 #
 # (a) It releases the narrow schema-drift deny of CASE 23 — without an escape
 #     hatch, a payload-schema change turns this gate into a global Write/Edit
