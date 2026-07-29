@@ -260,6 +260,11 @@ def main(argv: list[str] | None = None) -> int:
     # The `not has_rules` conjunct is a redundant guard, not the thing that protects a
     # MIXED policy: every site below is already inside a has-rules branch or ordered after
     # one, so dropping it leaves the whole suite green (a true equivalent mutant, measured).
+    # Re-measured at bb3909c by cutting it down to
+    # `rejected_only = logic_policy_md_has_rejected_items(policy_md)`: tests/test_finalize.sh
+    # 74 passed / 0 failed and `pytest tests/unit -q` 6288 passed / 1 skipped, both identical
+    # to baseline. That command is the whole content of "equivalent mutant" here — if a later
+    # change gives the conjunct work to do, that run is what stops reporting a survivor.
     # It is kept because it makes the name honest — "rejected_only" should not be True for
     # a .md that also compiled a rule — and reads as the same verdict generation reaches.
     rejected_only = not logic_policy_md_has_rules(policy_md) and logic_policy_md_has_rejected_items(

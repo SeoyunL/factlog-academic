@@ -303,7 +303,13 @@ def _typed_spec_by_form() -> tuple[dict[str, object], dict[str, list[str]]]:
         canon = aliases.get(nfc_name, nfc_name)
         # The expansion is a set; sort it so the ITERATION is reproducible. Report
         # order does not depend on this (the return statement orders both levels),
-        # and the forms of one spec are distinct, so this is defensive only.
+        # and the forms of one spec are distinct, so this is defensive only — and
+        # nothing checks it, which is the half a reader has to be told. Measured at
+        # bb3909c with the `sorted()` stripped off this line: `pytest tests/unit -q
+        # -k entity_audit` stays 61 passed / 1 skipped and tests/test_entity_audit.sh
+        # stays 43 passed / 0 failed under PYTHONHASHSEED 0, 1, 7 and 12345 alike.
+        # The mutant survives every one, so this line is kept for the reproducibility
+        # it buys and not for a test it protects.
         for form in sorted({nfc_name, canon} | surface_variants(canon, aliases)):
             if nfc_name not in claimants[form]:
                 claimants[form].append(nfc_name)

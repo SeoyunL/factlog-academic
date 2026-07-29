@@ -280,6 +280,15 @@ def validate(root: Path) -> list[str]:
     # refuses a target without it before any check runs, so a "missing directory:
     # sources/" line here is unreachable. Were it reachable it would be the very
     # behaviour #530 removed — reporting on a non-KB instead of refusing it.
+    #
+    # Unreachable as in reach 0, not merely un-asserted, and the difference is what two
+    # mutants at bb3909c were for. (a) add "sources" to this list; (b) add it AND raise
+    # AssertionError in its branch. Both survived: tests/test_validate_sources.sh 9 passed
+    # / 0 failed and `pytest tests/unit -q` 6288 passed / 1 skipped, twice, identical to
+    # baseline. (b) is the discriminating half — a branch that were reached but unchecked
+    # would have thrown. main() is validate()'s only caller (the unit tests import this
+    # module and call main(), never validate() directly), so main()'s refusal above is the
+    # whole of the guarantee; give validate() a second caller and this stops holding.
     for dirname in ["pages", "facts", "decisions", "policy"]:
         if not (root / dirname).is_dir():
             errors.append(f"missing directory: {dirname}/")

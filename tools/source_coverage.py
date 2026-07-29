@@ -420,13 +420,19 @@ def report_run_orphans(run_orphans: list[tuple[str, int]], ejectable: dict[str, 
     """
     if not run_orphans:
         return
-    # The early return above is the ONLY redundant guard here, and calling the
-    # three of them one defence would be a costly misreading. With an empty
-    # *run_orphans* both lists below are empty, so both loops and both `if` bodies
-    # are no-ops: deleting the early return changes the output for no input at
-    # all. A mutation run reports it as a survivor; it is an equivalent mutant.
+    # The early return above is the ONLY redundant guard here, and reading the four
+    # guards below as one defence would be a costly misreading. With an empty
+    # *run_orphans* all four lists below are empty, so all four loops and all four
+    # `if` bodies are no-ops: deleting the early return changes the output for no
+    # input at all. A mutation run reports it as a survivor; it is an equivalent
+    # mutant — and here is how to re-check that instead of taking it on trust.
+    # Measured at bb3909c with the guard replaced by `if False:`:
+    # tests/test_coverage.sh 83 passed / 0 failed, tests/test_drop_visibility.sh
+    # 31 / 0, `pytest tests/unit -q` 6288 passed / 1 skipped — every figure identical
+    # to baseline. (These counts read "both" and "three" until #617 re-counted them:
+    # EJECT_BLOCKED made every one of them four and the prose was never re-read.)
     #
-    # The three `if` blocks below are NOT that. None is redundant with the early
+    # The four `if` blocks below are NOT that. None is redundant with the early
     # return nor with the others: each guards the case where only the OTHER classes
     # are present, which is the ordinary state of a KB. Break one and a report
     # carrying a single class starts printing another class's summary at zero —
@@ -536,8 +542,29 @@ _LOST_CODES = frozenset({QUERY_RELATION_NOT_ACCEPTED, QUERY_ENTITY_NOT_ACCEPTED}
 _STATE_ORDER = ("resolvable", "lost", "unusable", "review")
 
 # Every state a question can land in, summary order. `lost` is the only one the
-# `--strict-questions` gate fires on: it is THE #537/#538 loss, and it is the only
-# verdict that does not rest on an estimate.
+# `--strict-questions` gate fires on — main() gates on `args.strict_questions and
+# unresolvable`, and report_questions returns exactly by_state["lost"]. It is THE
+# #537/#538 loss.
+#
+# It is NOT "the only verdict that does not rest on an estimate", which this comment
+# claimed until #617 and which is false in both readings. estimated_verdict() returns
+# `lost` itself (its `missing` branch), so the gate does fire on estimates; and
+# `review`/`unusable` are reachable only from draft_verdict(), so those are the states
+# that never rest on one. Reproduced at bb3909c on a KB carrying one declared question
+# naming `uses`, one needs_review row with that relation, an empty facts/accepted.dl
+# and no facts/query.dl:
+#
+#   $ python3 tools/source_coverage.py --target "$KB" --strict-questions; echo $?
+#   questions: 1 declared; 0 with resolvable vocabulary, 1 unresolvable
+#     (facts/query.dl absent — run /factlog query; questions estimated from text)
+#     - [q1] Which systems have uses rows?  (no query draft; estimated from the
+#       question text: relation 'uses' has no rows in engine input)
+#   --strict-questions: 1 declared question(s) with no engine-input vocabulary
+#   1
+#
+# What the gate does rest on: `lost` means a relation the KB still declares and engine
+# input no longer carries, on either route. Which route produced a given row is what
+# the `estimated` field and the `_ESTIMATE` reason prefix are for.
 _STATES = ("resolvable", "lost", "review", "no_vocabulary", "unmatched", "unusable")
 
 # What a fallback (no query draft) verdict prefixes its reason with, so a reader

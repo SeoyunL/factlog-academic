@@ -36,10 +36,27 @@ from pathlib import Path
 # lookup also answers without executing the package, so a broken install fails later,
 # loudly, on its own terms instead of being silently routed around.
 #
-# The `not in sys.path` guard is load-bearing, not defensive: tests/unit/
-# test_report_factlog_provenance.py::test_two_trees_produce_two_different_lines fronts
-# a second tree on PYTHONPATH that already lists _ROOT, and only this guard stops the
-# insertion below from overtaking it. Do not drop it, and do not "always insert at 0".
+# The `not in sys.path` guard is load-bearing, not defensive — but the named test proves
+# that for exactly ONE of the four copies, and this block is byte-identical everywhere, so
+# the sentence has to say which. Measured at bb3909c by replacing this line with `if True:`
+# in one wrapper at a time and running `~/.factlog-venv/bin/python -m pytest tests/unit -q`:
+#
+#   factlog_config.py                          -> test_report_factlog_provenance.py::
+#     TestTwoTreesAreDistinguishable::test_two_trees_produce_two_different_lines FAILS
+#   common.py / compile_facts.py / literal_types.py
+#     -> that test passes and the suite stays 6288 passed, 1 skipped apart from
+#        test_prefer_installed.py::TestTheFourBootstrapsDoNotDrift, which compares this
+#        block as TEXT and therefore kills every single-file mutant whatever it does
+#
+# The difference is import ORDER, not redundancy. run_logic_check.py — the script that
+# writes the report that test reads — imports factlog_config (its line 34) before common
+# (line 80), so `factlog` is already in sys.modules by the time the later copies run and a
+# late sys.path.insert cannot move it. Measured directly with the guard dropped in
+# common.py and PYTHONPATH fronting a second tree: importing `tools/common` FIRST resolves
+# factlog to this tree, importing it after factlog_config still resolves the fronted tree.
+# The copy that decides for tools/validate.py is common.py's (validate imports no
+# factlog_config), and no test measures that path today. Do not drop it, and do not
+# "always insert at 0".
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     if os.environ.get("FACTLOG_PREFER_INSTALLED") == "1":

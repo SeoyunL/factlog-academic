@@ -214,9 +214,16 @@ line="$(printf '%s' "$out" | { grep -F "'published_year' is declared by" || true
 # Cut the "• 'published_year' is declared by" PREFIX off before inspecting the
 # claimant list. Grepping the whole line was VACUOUS for the canonical: the form
 # name leads the line, so `grep "'published_year'"` matched the prefix and passed
-# even with that name missing from the claimant list — a mutant dropping it kept
-# the shell at 42/42 while pytest failed three tests. Only the text AFTER the
-# marker is the claim being asserted.
+# even with that name missing from the claimant list — against THAT harness a mutant
+# dropping the canonical claimant kept the shell at 42/42 while pytest failed three
+# tests. Only the text AFTER the marker is the claim being asserted.
+#
+# 42/42 is the PRE-FIX number and does not reproduce today, which is the fix working.
+# Re-measured at bb3909c against the harness as it now stands, same mutant (the
+# claimant list filtered to drop the one whose name equals the form): the shell is
+# 41 passed / 2 failed — the presence loop below and the exact-list check are the two
+# that catch it — and `pytest tests/unit -q -k entity_audit` is still 3 failed /
+# 58 passed.
 claim="${line#*is declared by }"
 claim="${claim%%—*}"                       # drop the trailing " — amounts ... unjudged"
 claim="$(printf '%s' "$claim" | sed 's/[[:space:]]*$//')"
