@@ -132,8 +132,27 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
     return True
 
 
-def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str:
+def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str | None:
+    """Render one policy query's result, or None when the query is unparseable.
+
+    `query_args` returns [] for a line it cannot read (a missing trailing '?',
+    say). "No args" is not "no constants to honour" — it means the query was
+    never understood, so answering it with the predicate's whole extent invents
+    an answer for a line `validate_query` is reporting as an error in the same
+    report. Emitting nothing leaves the Errors section to speak.
+
+    The query is echoed because this line and the "Policy evaluation:" extent
+    line ("<pred>: N rows", the count over ALL entities) sit a few lines apart
+    and now legitimately disagree — 3 rows there, 0 rows here. Naming the query
+    that produced the 0 is what makes the pair readable as scope rather than
+    contradiction, and it also tells two queries on the same predicate apart.
+    The extent line itself is left untouched: it is pinned by
+    tests/golden/logic_report.txt, and its section header already says it is the
+    policy evaluation rather than the answer to any one query.
+    """
     args = query_args(line)
+    if not args:
+        return None
     rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
     values: list[str] = []
     for row in rows:
@@ -143,7 +162,7 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
                 bindings.append(f"{arg}={value}")
         values.append(", ".join(bindings) if bindings else ", ".join(row))
     suffix = "; " + "; ".join(values) if values else ""
-    return f"{predicate} results: {len(rows)} rows{suffix}"
+    return f"{predicate} results (query: {line}): {len(rows)} rows{suffix}"
 
 
 def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[str, ...]]], policy_query_predicates: set[str]) -> list[str]:
@@ -151,7 +170,9 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
-            results.append(policy_result_line(predicate, line, inferred))
+            result_line = policy_result_line(predicate, line, inferred)
+            if result_line is not None:
+                results.append(result_line)
         elif predicate == "path":
             constants = quoted_constants(line)
             if len(constants) >= 2:
