@@ -492,7 +492,7 @@ fi
 rm -rf "$KB_OK" "$ok_err"
 
 # ===========================================================================
-# CASES 18-33: REAL HOOK ENVELOPE (#323)
+# CASES 18-35: REAL HOOK ENVELOPE (#323)
 #
 # Claude Code does not send the bare tool input; it sends an envelope with the
 # tool input nested under `tool_input`. CASES 1-17 above all use the FLAT
@@ -684,7 +684,85 @@ run_payload_case "envelope: engine-input path only inside content — allow (no 
       "$KB_ENV7/notes.md" "$KB_ENV7/facts/accepted.dl")" 0
 
 # ---------------------------------------------------------------------------
-# CASE 33: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 escape hatch.
+# CASE 33: UNPARSEABLE PAYLOAD — ALLOW, but say so.
+#
+# The header enumerates five fail-open branches; before this case none of the
+# harness exercised the two that mean "the gate skipped a check it could not
+# read". #323 survived precisely because a documented contract had no case
+# riding it, so both are pinned here: exit 0 AND the one-line stderr note that
+# keeps the skip visible to an operator (#244's rule).
+#
+# Garbage payload → json.load raises → fail open with a note.
+# Empty payload → same branch (json.load("") raises too).
+# ---------------------------------------------------------------------------
+run_payload_case "unparseable payload — allow (fail-open)" \
+  "$KB_ENV7" 'not json at all' 0
+run_payload_case "empty payload — allow (fail-open)" \
+  "$KB_ENV7" '' 0
+
+unparsed_err="$(mktemp)"
+FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< 'not json at all' >/dev/null 2>"$unparsed_err" || true
+if grep -qF "hook payload was not parseable JSON" "$unparsed_err"; then
+  echo "PASS: unparseable payload emits a one-line fail-open note"
+  pass=$((pass + 1))
+else
+  echo "FAIL: unparseable payload — expected a fail-open note, got: $(cat "$unparsed_err")"
+  fail=$((fail + 1))
+fi
+rm -f "$unparsed_err"
+
+# ---------------------------------------------------------------------------
+# CASE 34: INCOMPLETE EXTRACTOR RECORD — ALLOW, but say so.
+#
+# The extractor writes exactly three NUL-terminated fields; if it dies or writes
+# anything else, the shell has no record to reason about. That must fail OPEN
+# (we cannot even tell the call is a write) and must NOT be silent.
+#
+# Simulated hermetically with a FACTLOG_PYTHON_RUNNER shim that answers the
+# `import sys` availability probe and the resolver, then emits a record with no
+# NUL terminators. The KB is stale and the payload targets an engine input, so a
+# working extractor would DENY — reaching exit 0 proves the incomplete-record
+# branch was taken.
+# ---------------------------------------------------------------------------
+TRUNC_SHIM="$(mktemp -d)"
+cat > "$TRUNC_SHIM/runner.sh" <<'SH'
+#!/usr/bin/env bash
+# Behave like tools/factlog_python.sh for the probes the gate makes first, then
+# hand back a record that is not three NUL-terminated fields.
+for arg in "$@"; do
+  case "$arg" in
+    "import sys") exit 0 ;;
+    *resolve_root*) printf '%s' ""; exit 0 ;;
+  esac
+done
+printf 'Write no-nul-here'
+exit 0
+SH
+chmod +x "$TRUNC_SHIM/runner.sh"
+
+trunc_err="$(mktemp)"
+trunc_exit=0
+FACTLOG_PYTHON_RUNNER="$TRUNC_SHIM/runner.sh" FACTLOG_ROOT="$KB_ENV7" \
+  bash "$GATE" <<< "$(envelope Write "$KB_ENV7/facts/accepted.dl")" \
+  >/dev/null 2>"$trunc_err" || trunc_exit=$?
+if [ "$trunc_exit" -eq 0 ]; then
+  echo "PASS: incomplete extractor record — allow (fail-open) (exit $trunc_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: incomplete extractor record — expected fail-open (exit 0), got $trunc_exit"
+  fail=$((fail + 1))
+fi
+if grep -qF "returned no complete record" "$trunc_err"; then
+  echo "PASS: incomplete extractor record emits a one-line fail-open note"
+  pass=$((pass + 1))
+else
+  echo "FAIL: incomplete extractor record — expected a fail-open note, got: $(cat "$trunc_err")"
+  fail=$((fail + 1))
+fi
+rm -rf "$TRUNC_SHIM" "$trunc_err"
+
+# ---------------------------------------------------------------------------
+# CASE 35: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 escape hatch.
 #
 # (a) It releases the narrow schema-drift deny of CASE 23 — without an escape
 #     hatch, a payload-schema change turns this gate into a global Write/Edit
