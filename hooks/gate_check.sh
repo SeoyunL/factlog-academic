@@ -23,6 +23,10 @@
 #   DENY (exit 2) otherwise, i.e. TARGET is an engine input AND NOT bootstrap
 #   AND (report absent OR report stale).
 #
+#   TARGET itself is read from the hook payload; when it cannot be read at all
+#   the predicate above is undefined, and the narrow fail-closed rule described
+#   under "fail-closed branches" below decides instead.
+#
 # This predicate is falsifiable in both directions:
 #   - Bootstrap is allowed: creating facts/query.dl in a freshly `factlog init`
 #     KB (no logic_report.txt, no pre-existing query.dl) returns exit 0.
@@ -48,10 +52,24 @@
 # That degrade is made OBSERVABLE: when Python is available but the resolver
 # returns empty (package import failure), a one-line stderr note is emitted so
 # the silent permissive fallback is visible to an operator (see below).
-# The only true fail-closed here is the python-availability check below (which
-# DENYs when no usable Python 3.11+ is present, since the predicate cannot then
-# be evaluated). Target-path extraction failures for engine-input-shaped payloads
-# likewise deny.
+# There are exactly TWO fail-closed branches, both with an env escape hatch:
+#   1. The python-availability check below DENYs when no usable Python 3.11+ is
+#      present, since the predicate cannot then be evaluated. Escape hatch:
+#      FACTLOG_PYTHON (point it at a usable interpreter).
+#   2. Target-path extraction DENYs only in the narrow case where the payload
+#      carries a `tool_input` JSON OBJECT, `tool_name` is one of the write-class
+#      tools this hook is registered for, and NO usable path can be read from
+#      either `tool_input` or the top level. That combination means the payload
+#      schema drifted out from under the extractor while a write was in flight,
+#      so the predicate cannot be evaluated for a write that may well target an
+#      engine input. Escape hatch: FACTLOG_GATE_FAIL_OPEN=1 (named in the deny
+#      message, since a PreToolUse exit 2 stderr is fed back to the model and
+#      without a stated recovery it becomes a retry loop).
+# Everything else fails OPEN (exit 0): unparseable payloads, a missing/absent
+# `tool_name`, a `tool_name` outside the write-class list, and a `tool_input`
+# that is not a JSON object. Those cannot be distinguished from non-write
+# traffic, and a gate protecting two files in one KB must not become a global
+# Write/Edit outage.
 
 set -euo pipefail
 
@@ -98,17 +116,110 @@ else
   echo "[factlog GATE] note: factlog config resolver unavailable; freshness gate falling back to \${FACTLOG_ROOT:-cwd} (KB_ROOT=$KB_ROOT)" >&2
 fi
 
-# Extract the tool target from the hook payload.
-# Claude Code sends the tool input as JSON on stdin.
-# The relevant field is "file_path" for Write and "file_path" for Edit.
-target_path="$(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c \
-  "import json,sys; d=json.load(sys.stdin); print(d.get('file_path','') or d.get('path',''))" \
-  2>/dev/null || true)"
+# Extract the tool target from the hook payload (issue #323).
+#
+# Claude Code sends an ENVELOPE on stdin, not the bare tool input:
+#   {"session_id":..,"cwd":..,"hook_event_name":"PreToolUse","tool_name":"Write",
+#    "tool_input":{"file_path":..,"content":..},"tool_use_id":..}
+# so the target path lives under `tool_input`, which the previous extractor
+# never looked at — every real payload fell through to the fail-open branch.
+#
+# Key precedence: `tool_input` first, then the TOP LEVEL as a fallback. No real
+# Claude Code payload puts `file_path` at the top level; that fallback exists to
+# keep the flat fixture shape used by tests/test_gate_check.sh working.
+# `notebook_path` is defensive only: hooks.json registers the matcher "Write|Edit",
+# which Claude Code compares by exact tool name, so NotebookEdit (and MultiEdit)
+# never reach this hook. It costs nothing and covers a user who widens the
+# matcher in their own settings.json.
+#
+# The extractor pulls each field under its OWN try/except and always writes
+# exactly three NUL-terminated fields, so a failure in one field cannot truncate
+# the others. NUL is the separator because a path may legally contain a newline.
+# (Fields are read straight off a pipe: bash command substitution silently drops
+# NUL bytes, so `$(...)` cannot be used to capture this.)
+GATE_EXTRACT_PY="
+import json, sys
+PATH_KEYS = (\"file_path\", \"path\", \"notebook_path\")
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    payload = None
+try:
+    name = payload.get(\"tool_name\")
+    tool_name = name if isinstance(name, str) else \"\"
+except Exception:
+    tool_name = \"\"
+try:
+    if not isinstance(payload, dict) or \"tool_input\" not in payload:
+        input_kind = \"absent\"
+    elif isinstance(payload[\"tool_input\"], dict):
+        input_kind = \"object\"
+    else:
+        input_kind = \"other\"
+except Exception:
+    input_kind = \"absent\"
+try:
+    target = \"\"
+    nested = payload.get(\"tool_input\") if isinstance(payload, dict) else None
+    for source in (nested, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in PATH_KEYS:
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                target = value
+                break
+        if target:
+            break
+except Exception:
+    target = \"\"
+sys.stdout.write(tool_name + \"\\0\" + target + \"\\0\" + input_kind + \"\\0\")
+"
 
-# If we could not extract a path, allow the tool to proceed (fail open).
-# An empty/unparseable payload cannot target an engine input, so allowing here
-# does not weaken the engine-input guard below.
+tool_name=""
+target_path=""
+tool_input_kind="absent"
+if ! { IFS= read -r -d '' tool_name \
+    && IFS= read -r -d '' target_path \
+    && IFS= read -r -d '' tool_input_kind; } \
+    < <(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c "$GATE_EXTRACT_PY" 2>/dev/null); then
+  # The extractor produced no complete record (e.g. the interpreter died). Treat
+  # it as an unparseable payload: fail OPEN, same as before this change.
+  tool_name=""
+  target_path=""
+  tool_input_kind="absent"
+fi
+
+# Write-class tool names, matched EXACTLY. A user may register this hook with a
+# broader matcher in their own settings.json, so the deny branch below must key
+# off the tool name rather than assume only Write/Edit arrive. Anything outside
+# this list — including an absent tool_name, which is what the flat test
+# fixtures send — is not a write we can reason about, and falls open.
+_is_write_tool() {
+  case "$1" in
+    Write|Edit) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ -z "$target_path" ]; then
+  if [ "$tool_input_kind" = "object" ] && _is_write_tool "$tool_name"; then
+    # Narrow fail-closed: a write-class call carrying a structured tool_input
+    # from which no path key could be read. The payload schema drifted; we
+    # cannot tell whether it targets an engine input.
+    if [ "${FACTLOG_GATE_FAIL_OPEN:-}" = "1" ]; then
+      echo "[factlog GATE] note: could not read a target path from the $tool_name payload; FACTLOG_GATE_FAIL_OPEN=1 is set, so the write is allowed unchecked." >&2
+      exit 0
+    fi
+    echo "[factlog GATE] DENIED: could not read a target path from the $tool_name tool payload." >&2
+    echo "  The hook payload schema changed, so the freshness predicate cannot be evaluated" >&2
+    echo "  and this write cannot be shown to miss facts/accepted.dl or facts/query.dl." >&2
+    echo "  Re-run with FACTLOG_GATE_FAIL_OPEN=1 to bypass this specific check (the" >&2
+    echo "  freshness deny still applies), and please report the payload shape upstream." >&2
+    exit 2
+  fi
+  # Fail OPEN for everything else: unparseable payload, non-write tool, absent
+  # tool_name, or a tool_input that is not a JSON object.
   exit 0
 fi
 
