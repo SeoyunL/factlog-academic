@@ -50,5 +50,21 @@ to `2030-01`. A bare `2030` with no `date(…)` wrapper still does NOT parse as 
 date — with neither a separator nor the wrapper it is indistinguishable from a
 plain number.
 
+Digits must be **ASCII**. A value carrying full-width digits — `１００억`,
+`date(２０２０,１)`, the half-and-half `1２3억` — does NOT parse as any of
+date/number/ordinal/amount. It takes the ordinary "does not parse → load
+untyped" path and surfaces as a `typed-relations: … does not parse as …`
+warning. Full-width is not folded to ASCII silently, because folding would
+rewrite the stored fact string — the fix is to correct the source to ASCII and
+re-collect. Under a relation that is not declared typed the parsers never run at
+all, so there the two spellings simply stay separate values.
+
+⚠️ **Migrating an existing KB.** If full-width values collected before this rule
+are still in the KB, `tools/check_conflicts.py` may now exit **1** — a gate
+failure, not a warning. `１００억` and `100억` used to fold onto the same scalar
+and count as one value; the full-width one now keys on its raw string, so for the
+same subject a single-valued relation sees two values. Correct the source of
+those facts to ASCII and re-collect to clear it.
+
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).
