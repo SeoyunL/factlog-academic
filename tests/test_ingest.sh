@@ -371,15 +371,19 @@ a_ign="$(extract_ignored "$allnote")"
 #    converted-but-empty and distinguished by `sources`/`status`, while a normal
 #    text PDF is unaffected. Guarded on pdftotext because that is the converter
 #    THIS case needs — not because it is the only one that can reach the state.
-#    It is not, and the claim that it was is what #617 removed. Measured at
-#    bb3909c on a fresh KB: an empty `sources/x.html` and a minimal empty RTF
-#    (`{\rtf1\ansi}`) each go through pandoc, which exits 0 and writes a
-#    non-empty file, and `factlog ingest --scan` reports both as
-#    `converted-but-empty (likely scanned/needs OCR)`. What survives of the old
-#    parenthetical is narrower and still true: the BUILT-IN converters treat an
-#    empty extraction as failure (_conv_hwpx/_conv_hwp/_conv_pptx return False),
-#    and factlog/ingest.py:167 counts a zero-byte output as failure for every
-#    converter.
+#    It is not, and the claim that it was is what #617 removed: an empty
+#    `sources/x.html` and a minimal empty RTF (`{\rtf1\ansi}`) each go through
+#    pandoc, which exits 0 and writes a header-only conversion (measured at
+#    bb3909c, re-measured for #620 with pandoc 3.10; block 9b pins it). What
+#    survives of the old parenthetical is narrower and still true: the BUILT-IN
+#    converters treat an empty extraction as failure (_conv_hwpx/_conv_hwp/
+#    _conv_pptx return False), and factlog/ingest.py:167 counts a zero-byte
+#    output as failure for every converter.
+#
+#    #620 splits the *reason* by the converter that produced the empty file.
+#    pdftotext reads a PDF's text layer, and a PDF may carry its content as page
+#    images with none — so "needs OCR" points at a real next step here and is
+#    asserted below, where before only the "converted-but-empty" label was.
 # ---------------------------------------------------------------------------
 if command -v pdftotext >/dev/null 2>&1; then
   EMPTYKB="$(mktemp -d)/wiki"
@@ -422,6 +426,12 @@ PY
   printf '%s' "$emptyout" | grep -qF "03_scanned.pdf" \
     && ok "#229 the empty conversion names the scanned source" \
     || bad "#229 empty-conversion warning missing the source name"
+  # #620: the PDF case is where "needs OCR" points somewhere, so it must survive
+  # the split. Without this the markup branch could drop the hint everywhere and
+  # every #229 assertion above would still pass (they only match the label).
+  printf '%s' "$emptyout" | grep -F "03_scanned.pdf" | grep -qiE "scanned.*OCR" \
+    && ok "#620 the empty PDF keeps the scanned/needs-OCR guidance (no regression)" \
+    || bad "#620 the empty PDF lost its scanned/needs-OCR guidance: $emptyout"
   # normal text PDF must NOT be mis-flagged as empty (no regression)
   if printf '%s' "$emptyout" | grep "02_text.pdf" | grep -qiE "converted-but-empty"; then
     bad "#229 a normal text PDF was wrongly flagged converted-but-empty (regression)"
@@ -433,6 +443,12 @@ PY
   printf '%s' "$esrc" | grep "03_scanned.pdf" | grep -qiE "converted-but-empty" \
     && ok "#229 sources marks the scanned PDF converted-but-empty" \
     || bad "#229 sources did not distinguish the empty conversion"
+  # #620: `sources` reads the reason back out of the conversion's own provenance
+  # header (converter: pdftotext), not from the extension — so this also covers
+  # conversion_converter() round-tripping what ingest wrote.
+  printf '%s' "$esrc" | grep "03_scanned.pdf" | grep -qiE "scanned.*OCR" \
+    && ok "#620 sources keeps the scanned/needs-OCR guidance on the empty PDF" \
+    || bad "#620 sources lost the scanned/needs-OCR guidance: $esrc"
   printf '%s' "$esrc" | grep "02_text.pdf" | grep -qiE "converted-but-empty" \
     && bad "#229 sources wrongly marked the text PDF converted-but-empty" \
     || ok "#229 sources leaves the text PDF unmarked (no regression)"
@@ -443,6 +459,80 @@ PY
     || bad "#229 status did not surface converted-but-empty"
 else
   echo "SKIP: no pdftotext — skipping #229 empty-conversion assertions"
+fi
+
+# ---------------------------------------------------------------------------
+# 9b. #620: the empty-conversion reason follows the CONVERTER, not a fixed
+#     "scanned PDF" assumption. Measured on a fresh KB with pandoc 3.10: an
+#     empty `sources/*.html` and a minimal empty RTF (`{\rtf1\ansi}`) each take
+#     the pandoc chain (INGEST_CONVERTERS[".html"][0] / [".rtf"][0]), exit 0 and
+#     leave a header-only conversion — they reach converted-but-empty exactly as
+#     the scanned PDF does. OCR recovers nothing from markup that never held
+#     text, so the guidance there must not name it.
+#
+#     Both directions are asserted (absence of the OCR wording AND presence of
+#     the neutral reason) so that neither mutant survives: one that returns the
+#     scanned hint for every converter dies on the absence checks, one that
+#     returns the neutral hint for every converter dies on the #620 assertions
+#     in block 9. Guarded on pandoc because that is the converter THIS case
+#     needs. With pandoc off PATH both extensions fall to textutil; run by hand
+#     for #620 on a PATH holding textutil but not pandoc, that reaches the same
+#     converted-but-empty state and the same (neutral) branch — measured, not
+#     pinned here, since the harness cannot remove a tool from its own PATH.
+# ---------------------------------------------------------------------------
+if command -v pandoc >/dev/null 2>&1; then
+  MARKUPKB="$(mktemp -d)/wiki"
+  "${FACTLOG[@]}" init --target "$MARKUPKB" >/dev/null
+  : > "$MARKUPKB/sources/01_empty.html"          # the issue's own reproduction
+  printf '%s' '{\rtf1\ansi}' > "$MARKUPKB/sources/02_empty.rtf"
+  mkout="$("${FACTLOG[@]}" ingest --scan --target "$MARKUPKB" 2>&1)"
+  msrc="$("${FACTLOG[@]}" sources --target "$MARKUPKB" 2>&1)"
+  for f in 01_empty.html 02_empty.rtf; do
+    line="$(printf '%s\n' "$mkout" | grep -F "$f" || true)"
+    if [ -z "$line" ]; then
+      bad "#620 ingest said nothing about $f (expected a converted-but-empty line): $mkout"
+      continue
+    fi
+    printf '%s' "$line" | grep -qF "converted-but-empty" \
+      && ok "#620 $f still reaches converted-but-empty via pandoc" \
+      || bad "#620 $f was not reported converted-but-empty (got '$line')"
+    printf '%s' "$line" | grep -qiE "OCR|scanned" \
+      && bad "#620 $f was told to run OCR, which leads nowhere for markup (got '$line')" \
+      || ok "#620 $f is not told to run OCR"
+    printf '%s' "$line" | grep -qF "no extractable text" \
+      && ok "#620 $f says the original held no extractable text" \
+      || bad "#620 $f lost the neutral reason (got '$line')"
+    sline="$(printf '%s\n' "$msrc" | grep -F "$f" || true)"
+    if [ -z "$sline" ]; then
+      bad "#620 sources did not list $f: $msrc"
+      continue
+    fi
+    printf '%s' "$sline" | grep -qiE "OCR|scanned" \
+      && bad "#620 sources told the user to OCR $f (got '$sline')" \
+      || ok "#620 sources does not tell the user to OCR $f"
+    printf '%s' "$sline" | grep -qF "no extractable text" \
+      && ok "#620 sources gives $f the neutral reason" \
+      || bad "#620 sources lost the neutral reason for $f (got '$sline')"
+  done
+  # The ingest summary counts a bucket that can mix converters, so it may carry
+  # only what holds for all of them — never the PDF-specific instruction.
+  msum="$(printf '%s\n' "$mkout" | grep -F "converted-but-empty" | tail -n 1 || true)"
+  printf '%s' "$msum" | grep -qiE "OCR|scanned" \
+    && bad "#620 the ingest summary still instructs OCR over a mixed bucket (got '$msum')" \
+    || ok "#620 the ingest summary states only what holds for the whole bucket"
+  mstat="$("${FACTLOG[@]}" status --target "$MARKUPKB" 2>&1 | grep -i "sources:" || true)"
+  if [ -z "$mstat" ]; then
+    bad "#620 status printed no sources: line for the markup KB"
+  else
+    printf '%s' "$mstat" | grep -qF "converted-but-empty" \
+      && ok "#620 status still counts the markup conversions as converted-but-empty" \
+      || bad "#620 status stopped counting converted-but-empty (got '$mstat')"
+    printf '%s' "$mstat" | grep -qiE "OCR|scanned" \
+      && bad "#620 status instructs OCR for a bucket with no PDF in it (got '$mstat')" \
+      || ok "#620 status does not instruct OCR for a bucket with no PDF in it"
+  fi
+else
+  echo "SKIP: no pandoc — skipping #620 markup empty-conversion assertions"
 fi
 
 # ---------------------------------------------------------------------------
