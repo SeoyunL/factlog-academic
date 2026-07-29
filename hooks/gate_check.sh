@@ -52,7 +52,7 @@
 # That degrade is made OBSERVABLE: when Python is available but the resolver
 # returns empty (package import failure), a one-line stderr note is emitted so
 # the silent permissive fallback is visible to an operator (see below).
-# There are exactly TWO fail-closed branches, both with an env escape hatch:
+# THREE branches DENY without evaluating the freshness predicate:
 #   1. The python-availability check below DENYs when no usable Python 3.11+ is
 #      present, since the predicate cannot then be evaluated. Escape hatch:
 #      FACTLOG_PYTHON (point it at a usable interpreter).
@@ -62,14 +62,27 @@
 #      either `tool_input` or the top level. That combination means the payload
 #      schema drifted out from under the extractor while a write was in flight,
 #      so the predicate cannot be evaluated for a write that may well target an
-#      engine input. Escape hatch: FACTLOG_GATE_FAIL_OPEN=1 (named in the deny
-#      message, since a PreToolUse exit 2 stderr is fed back to the model and
-#      without a stated recovery it becomes a retry loop).
-# Everything else fails OPEN (exit 0): unparseable payloads, a missing/absent
-# `tool_name`, a `tool_name` outside the write-class list, and a `tool_input`
-# that is not a JSON object. Those cannot be distinguished from non-write
-# traffic, and a gate protecting two files in one KB must not become a global
-# Write/Edit outage.
+#      engine input. Escape hatch: FACTLOG_GATE_FAIL_OPEN=1, which only a human
+#      can set (see the deny message below).
+#   3. _mtime() DENYs when `stat` cannot report a file's mtime. That branch has
+#      NO escape hatch; it is only reachable for a file this script has already
+#      seen pass `-f`, i.e. a race or an unreadable filesystem.
+# Only branches 1 and 2 carry an escape hatch, and only branches 1 and 2 are
+# about the payload/interpreter layer.
+#
+# Everything else fails OPEN (exit 0):
+#   - an unparseable payload;
+#   - an absent `tool_name`;
+#   - a `tool_name` outside the write-class list;
+#   - a `tool_input` that is not a JSON object;
+#   - an INCOMPLETE record from the extractor — the interpreter died, or wrote
+#     something that is not three NUL-terminated fields. Note this lands the
+#     OPPOSITE way from branch 2's reasoning, deliberately: with no record at
+#     all we cannot tell that the call is even a write, so denying would block
+#     every tool call in the session on evidence we do not have. Branch 2 denies
+#     because we positively know it IS a write we cannot evaluate.
+# A gate protecting two files in one KB must not become a global Write/Edit
+# outage, so anything short of positive knowledge falls open.
 
 set -euo pipefail
 
@@ -134,9 +147,26 @@ fi
 #
 # The extractor pulls each field under its OWN try/except and always writes
 # exactly three NUL-terminated fields, so a failure in one field cannot truncate
-# the others. NUL is the separator because a path may legally contain a newline.
-# (Fields are read straight off a pipe: bash command substitution silently drops
-# NUL bytes, so `$(...)` cannot be used to capture this.)
+# the others. NUL is the separator because a path may legally contain a newline,
+# and a newline separator misreads such a path (or, with a leading newline,
+# denies a perfectly legal write). A JSON string CAN itself contain a NUL, which
+# shifts the remaining fields; that is a wash here — a truncated engine-input
+# path still matches the engine input (deny), and a NUL-prefixed one is a path
+# the OS cannot write to anyway.
+#
+# Three fields, not two: `tool_name` is carried raw so the write-class decision
+# stays a readable `case` in shell right next to hooks.json's matcher, and so
+# the deny message can name the offending tool. Collapsing the tool name and the
+# tool_input shape into one field is possible, but it moves that decision into
+# the embedded Python where it is harder to audit.
+#
+# Fields are read straight off a pipe: bash command substitution silently drops
+# NUL bytes, so `$(...)` cannot capture this. A shell that cannot parse process
+# substitution would raise a SYNTAX error, and bash exits 2 on one — which
+# PreToolUse reads as DENY, not as a fail-open. That is unreachable in practice
+# (bash falls back to FIFOs where /dev/fd is missing, and macOS, Linux and Git
+# Bash all support it), so the code is left as is; it is noted only so the
+# failure direction is not misdescribed.
 GATE_EXTRACT_PY="
 import json, sys
 PATH_KEYS = (\"file_path\", \"path\", \"notebook_path\")
@@ -183,8 +213,10 @@ if ! { IFS= read -r -d '' tool_name \
     && IFS= read -r -d '' target_path \
     && IFS= read -r -d '' tool_input_kind; } \
     < <(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c "$GATE_EXTRACT_PY" 2>/dev/null); then
-  # The extractor produced no complete record (e.g. the interpreter died). Treat
-  # it as an unparseable payload: fail OPEN, same as before this change.
+  # The extractor produced no complete record (the interpreter died, or wrote
+  # something that is not three NUL-terminated fields). Treat it as an
+  # unparseable payload: fail OPEN, the pre-#323 behaviour. See the header for
+  # why this lands opposite to the narrow fail-closed branch below.
   tool_name=""
   target_path=""
   tool_input_kind="absent"
@@ -205,8 +237,16 @@ _is_write_tool() {
 if [ -z "$target_path" ]; then
   if [ "$tool_input_kind" = "object" ] && _is_write_tool "$tool_name"; then
     # Narrow fail-closed: a write-class call carrying a structured tool_input
-    # from which no path key could be read. The payload schema drifted; we
-    # cannot tell whether it targets an engine input.
+    # from which no path key could be read. Usually that means the payload
+    # schema drifted; a present-but-empty file_path lands here too, and is
+    # denied regardless of report freshness because this branch runs before the
+    # engine-input match. Either way we cannot tell whether it targets an
+    # engine input.
+    #
+    # The escape hatch is read from THIS process's environment, which a hook
+    # inherits from the Claude Code process. A model cannot set it for its own
+    # tool calls from inside the session, so the deny message is addressed to a
+    # human operator and says where to set it.
     if [ "${FACTLOG_GATE_FAIL_OPEN:-}" = "1" ]; then
       echo "[factlog GATE] note: could not read a target path from the $tool_name payload; FACTLOG_GATE_FAIL_OPEN=1 is set, so the write is allowed unchecked." >&2
       exit 0
@@ -214,12 +254,16 @@ if [ -z "$target_path" ]; then
     echo "[factlog GATE] DENIED: could not read a target path from the $tool_name tool payload." >&2
     echo "  The hook payload schema changed, so the freshness predicate cannot be evaluated" >&2
     echo "  and this write cannot be shown to miss facts/accepted.dl or facts/query.dl." >&2
-    echo "  Re-run with FACTLOG_GATE_FAIL_OPEN=1 to bypass this specific check (the" >&2
-    echo "  freshness deny still applies), and please report the payload shape upstream." >&2
+    echo "  This cannot be worked around from inside the session. Ask the operator to set" >&2
+    echo "  FACTLOG_GATE_FAIL_OPEN=1 in the Claude Code environment (the \"env\" block of" >&2
+    echo "  settings.json, or export it before launching Claude Code) and start a new" >&2
+    echo "  session. That bypasses only this check — the freshness deny still applies." >&2
+    echo "  Please also report the payload shape upstream." >&2
     exit 2
   fi
-  # Fail OPEN for everything else: unparseable payload, non-write tool, absent
-  # tool_name, or a tool_input that is not a JSON object.
+  # Fail OPEN for everything else: unparseable payload, an incomplete extractor
+  # record, a non-write tool, an absent tool_name, or a tool_input that is not a
+  # JSON object.
   exit 0
 fi
 
@@ -274,6 +318,11 @@ if [ ! -f "$report" ]; then
   exit 2
 fi
 
+# Fail-closed branch 3 (see header): if stat cannot report an mtime we cannot
+# compare freshness, so we deny. The `exit 2` inside this command substitution
+# ends the whole script under `set -e`. There is no escape hatch here — the file
+# has already passed `-f` a line earlier, so reaching this needs a race or an
+# unreadable filesystem, not a schema change someone has to work around.
 _mtime() {
   local value
   if value="$(stat -c %Y "$1" 2>/dev/null)" || value="$(stat -f %m "$1" 2>/dev/null)"; then
