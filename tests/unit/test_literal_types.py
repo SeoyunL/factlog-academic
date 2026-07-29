@@ -377,3 +377,140 @@ class TestLiteralReConsistency:
         from entity_audit import _LITERAL_RE
         assert _LITERAL_RE.match(raw), f"entity_audit no longer detects {raw!r}"
         assert lt.normalize(type_tag, raw) == expected
+
+
+class TestFullWidthDigitsRejected:
+    """ASCII-only digits (#331). Python's ``\\d`` covers the whole Unicode ``Nd``
+    category, so a full-width ``１００억`` used to normalize to the SAME scalar as
+    ``100억`` while ``relation/3`` stored a different object string — the two
+    spellings merged under a typed relation but stayed separate entities and
+    missed each other in object-match queries. The policy is reject, not fold: a
+    full-width value takes the ordinary "does not parse -> untyped" path."""
+
+    @pytest.mark.parametrize("type_tag,raw", [
+        # Each of these returned a scalar before the fix (20200101 / 20200101 /
+        # 123000 / 3 / 10000000000 / 10000000000), never None.
+        ("date", "date(２０２０,１)"),
+        ("date", "２０２０.１"),
+        ("number", "number(１２３)"),
+        ("number", "１２３"),
+        ("ordinal", "ordinal(３)"),
+        ("ordinal", "３위"),
+        ("ordinal", "제３호"),
+        ("amount", "１００억"),
+        ("amount", 'amount(１００,"억")'),
+    ])
+    def test_normalize_rejects(self, type_tag, raw):
+        assert lt.normalize(type_tag, raw) is None
+
+    @pytest.mark.parametrize("parser,raw", [
+        (lt.parse_date, "date(２０２０,１)"),
+        (lt.parse_number, "number(１２３)"),
+        (lt.parse_number_scaled, "number(１２３)"),
+        (lt.parse_ordinal, "ordinal(３)"),
+    ])
+    def test_public_parsers_reject(self, parser, raw):
+        assert parser(raw) is None
+
+    def test_parse_amount_rejects(self):
+        assert lt.parse_amount("１００억", lt.DEFAULT_AMOUNT_UNITS) is None
+
+    @pytest.mark.parametrize("type_tag,raw", [
+        # Half-and-half spellings are the realistic accident (an IME left in
+        # full-width mode mid-token), and they must not parse either.
+        ("amount", "1２3억"),
+        ("amount", "amount('１0억')"),
+        ("amount", 'amount("１００","억")'),
+        ("number", "number('1２3')"),
+        ("number", "1２3"),
+        ("date", "date(20２0,1)"),
+        ("ordinal", "ordinal(1２)"),
+    ])
+    def test_mixed_width_rejects(self, type_tag, raw):
+        assert lt.normalize(type_tag, raw) is None
+
+    def test_full_width_no_longer_shares_a_scalar_with_ascii(self):
+        # The motivating bug in one line: same scalar, different stored string.
+        assert lt.normalize("amount", "100억") == 10000000000
+        assert lt.normalize("amount", "１００억") is None
+
+    @pytest.mark.parametrize("raw", ['amount(１００,억)', 'amount(１００,"억")'])
+    def test_canonical_amount_rejects(self, raw):
+        # Consequence, by design: merge_candidates' dedup key no longer collapses
+        # the bare and quoted full-width spellings into one row. Folding them is
+        # the silent rewrite this policy refuses.
+        assert lt.canonical_amount(raw) is None
+
+    @pytest.mark.parametrize("raw", ['amount(１００,"억")', "date(２０２０,１)", "number(１２３)"])
+    def test_humanize_returns_full_width_verbatim(self, raw):
+        # Unrecognized -> verbatim, the documented humanize fallback.
+        assert lt.humanize(raw) == raw
+
+
+class TestFullWidthSurfaces:
+    """AC3 (#331): a rejected full-width value must reach a user-visible path at
+    least once. Under a relation declared typed, the projection loop warns on
+    stderr and loads the fact untyped — the same path any malformed literal takes.
+
+    Residual symptom, deliberately NOT covered: a relation declared as an
+    attribute but NOT typed has no spec, so ``_project_typed_relations`` skips it
+    without warning and the full-width value surfaces nowhere."""
+
+    class _FakeSession:
+        """Records inserts; _project_typed_relations touches nothing else."""
+
+        def __init__(self):
+            self.inserts = []
+
+        def intern(self, value):
+            return 1
+
+        def insert(self, alias, payload):
+            self.inserts.append((alias, payload))
+
+    def test_projection_warns_and_loads_untyped(self, capsys):
+        import common
+
+        specs = {"출시일": common.TypedRelSpec("date", "launch_date")}
+        rows = [
+            {"subject": "제품", "relation": "출시일", "object": "date(２０２０,１)"},
+            {"subject": "제품2", "relation": "출시일", "object": "date(2020,1)"},
+        ]
+        session = self._FakeSession()
+        common._project_typed_relations(session, specs, rows)
+        err = capsys.readouterr().err
+        assert "date(２０２０,１)" in err
+        assert "does not parse as date" in err
+        # Only the ASCII row projects; the full-width fact still loads untyped.
+        assert session.inserts == [("launch_date", (1, 20200101))]
+
+
+class TestAsciiDigitsUnchanged:
+    """Regression guard for the narrowing in #331: the ASCII forms that already
+    parsed must keep parsing, including the ones a careless narrowing would break
+    (a space-separated unit, a comma inside the number, and — the reason
+    ``re.ASCII`` is NOT used — a U+3000 ideographic space as separator whitespace).
+    These pin existing behaviour; they do not prove the fix."""
+
+    @pytest.mark.parametrize("type_tag,raw,expected", [
+        ("amount", "100 억", 10000000000),
+        ("amount", "100억", 10000000000),
+        ("amount", 'amount(1,000,"억")', 100000000000),
+        ("amount", "1,000원", 1000),
+        ("date", "date(2020)", 20200101),
+        ("date", "date(2020,　1)", 20200101),  # U+3000 stays whitespace
+        ("date", "2030.1", 20300101),
+        ("number", "1,000", 1000000),
+        ("number", "3.14", 3140),
+        ("ordinal", "제3호", 3),
+        ("ordinal", "3rd", 3),
+    ])
+    def test_ascii_forms_still_parse(self, type_tag, raw, expected):
+        assert lt.normalize(type_tag, raw) == expected
+
+    def test_ascii_canonical_amount_unchanged(self):
+        assert lt.canonical_amount("amount(1,000,억)") == 'amount(1000,"억")'
+
+    def test_ascii_humanize_unchanged(self):
+        assert lt.humanize('amount(7,"억")') == "7억"
+        assert lt.humanize("date(2030,1,15)") == "2030-01-15"
