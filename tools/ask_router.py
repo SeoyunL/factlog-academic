@@ -447,7 +447,10 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
     (same body, module-specific docstring). The natural home is common.py
     alongside the other query-parsing helpers, but hoisting it there is a wider
     change than this fix needs; the report/router parity test fails if the two
-    copies ever drift.
+    copies ever drift. Two of its cases carry that load — the 0-arity row and the
+    NFD-stored/NFC-queried entity. Every other case is a 2-column ASCII row,
+    which a copy that lost the short-row guard, or that folded to NFC on its own,
+    still gets right; do not delete those two.
     """
     for index, arg in enumerate(args):
         if not is_quoted_string(arg):
