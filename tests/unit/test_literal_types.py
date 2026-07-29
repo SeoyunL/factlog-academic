@@ -419,9 +419,9 @@ class TestFullWidthDigitsRejected:
         # Half-and-half spellings are the realistic accident (an IME left in
         # full-width mode mid-token), and they must not parse either.
         ("amount", "1２3억"),
-        ("amount", "amount('１0억')"),
+        ("amount", 'amount(１0,"억")'),
         ("amount", 'amount("１００","억")'),
-        ("number", "number('1２3')"),
+        ("number", 'number("1２3")'),
         ("number", "1２3"),
         ("date", "date(20２0,1)"),
         ("ordinal", "ordinal(1２)"),
