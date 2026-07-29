@@ -15,14 +15,23 @@ factlog enforces freshness through two distinct mechanisms:
 
 These two levels are complementary: the hook closes the deterministic gap; the SKILL discipline covers the narration layer where engineering enforcement is not possible.
 
+> **An existing KB needs one `/factlog check` first.** In earlier versions the
+> hook could not read Claude Code's real payload, so this deny never fired. From
+> this fix on, a KB that already has `facts/accepted.dl` or `facts/query.dl`
+> while `facts/logic_report.txt` is missing or older must be refreshed with
+> `/factlog check` before its engine inputs can be edited.
+
 The hook denies for **one more reason** besides staleness. It reads the target
 path out of the tool payload Claude Code sends; if the call is a `Write`/`Edit`
 but the payload shape has changed such that no path can be read — so the write
 cannot be shown *not* to target an engine input — the hook denies rather than
 letting it through. Only in that situation can you skip the check with
-`FACTLOG_GATE_FAIL_OPEN=1` (the deny message names it); that variable does
-**not** release the staleness deny. If you hit it, please report the payload
-shape upstream.
+`FACTLOG_GATE_FAIL_OPEN=1`, and that variable does **not** release the staleness
+deny. It is not something the model can do from inside the session: a hook
+inherits the Claude Code process environment, so **a human** has to set it there
+— in the `env` block of `settings.json`, or exported before launching Claude
+Code — and then start a new session. Please also report the payload shape
+upstream.
 
 ### Scale & performance
 
