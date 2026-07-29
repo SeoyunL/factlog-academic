@@ -2366,9 +2366,14 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         origin = conv_origin.get(ref)
         return PurePosixPath(origin).name if origin is not None else None
 
+    # resolve() reports a symlink loop as RuntimeError (not OSError) and a path
+    # with an embedded NUL as ValueError, and neither may reach the user as a
+    # traceback: an unresolvable argument simply matches nothing.
+    _RESOLVE_ERRORS = (OSError, RuntimeError, ValueError)
+
     try:
         troot = target.resolve()
-    except OSError:
+    except _RESOLVE_ERRORS:
         troot = target
 
     def selector(name: str) -> tuple[set[str], str | None, str]:
@@ -2393,7 +2398,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             # is the deletion #324 is about.
             try:
                 p = p.resolve()
-            except OSError:
+            except _RESOLVE_ERRORS:
                 pass
             try:
                 kb_rel = nfc(p.relative_to(troot).as_posix())
@@ -2430,8 +2435,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             # whose recorded origin *is* that sources-relative path. #324: a
             # same-name original in another directory is NOT matched, because
             # both sides keep their directory instead of collapsing to a
-            # basename.
-            return is_conv and src_rel is not None and conv_origin.get(ref) == src_rel
+            # basename. An *empty* src_rel (a root path like "/" names no file)
+            # must not compare equal either: the empty string is also the
+            # no-usable-origin sentinel stored for a header like "source: /".
+            return bool(is_conv and src_rel and conv_origin.get(ref) == src_rel)
         rp, np_ = Path(ref), Path(name)
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
