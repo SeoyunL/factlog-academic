@@ -2317,6 +2317,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     # so a stem guess would let `eject report.docx` wrongly pull report.pptx's
     # conversion; the recorded origin name disambiguates. Falls back to a stem
     # match only when no header is present (a hand-made conversion).
+    #
+    # The stored value is the original's path *relative to sources/* — the
+    # conversion's own mirrored subdir joined with the basename read from the
+    # header (see the loop below). Consumers that only want the basename go
+    # through origin_name().
     conv_origin: dict[str, str] = {}
     for ref, p in disk_refs.items():
         if not ref.startswith("runs/sources/"):
@@ -2336,12 +2341,30 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             origin = nfc(m.group(1).strip())
             if origin:
                 # #214: the header may now record a sources/-relative path
-                # (sub_a/data.hwpx) rather than a bare basename. Reduce it to the
-                # basename so the pairing/orphan reconstruction below — which
-                # rebuilds sources/<subdir>/<origin> from the conversion's own
-                # mirrored subdir — stays correct for both header formats and no
-                # legacy basename header regresses.
-                conv_origin[ref] = PurePosixPath(origin).name
+                # (sub_a/data.hwpx) rather than a bare basename. Rebuild the
+                # original's sources-relative path from the conversion's *own*
+                # mirrored subdir plus the header's basename, so both header
+                # formats yield the same value and no legacy basename header
+                # regresses: ingest derives the mirrored subdir and the header
+                # label from one src_rel, so the header's directory component is
+                # never new information (and is the wrong signal to trust when a
+                # hand-edit makes the two disagree — the file's own location is
+                # what the conversion actually mirrors).
+                # Only PurePosixPath joining is used: it folds "//" and "./" but
+                # keeps ".." verbatim, so a stored origin still spells the header
+                # the same way a consumer would.
+                subdir = PurePosixPath(ref[len("runs/sources/"):]).parent
+                base = PurePosixPath(origin).name
+                # A header with no filename component ("source: /") is as
+                # unusable as an empty one; keep the empty-origin sentinel rather
+                # than inventing an original named after the subdir.
+                conv_origin[ref] = (subdir / base).as_posix() if base else ""
+
+    def origin_name(ref: str) -> str | None:
+        """Basename of the original a conversion was made from — None when the
+        conversion carries no provenance header at all."""
+        origin = conv_origin.get(ref)
+        return PurePosixPath(origin).name if origin is not None else None
 
     def matches(ref: str, name: str) -> bool:
         name = nfc(name)
@@ -2353,11 +2376,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             # A path was given: the exact original is handled above; for a
             # binary original also match the conversion it produced (by
             # recorded origin). Same-basename files elsewhere are NOT matched.
-            return is_conv and conv_origin.get(ref) == np_.name
+            return is_conv and origin_name(ref) == np_.name
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
                 return rp.name == np_.name  # an original with that filename
-            origin = conv_origin.get(ref)  # the conversion made from this original
+            origin = origin_name(ref)  # the conversion made from this original
             # Provenance is the reliable signal. A headerless conversion falls
             # back to its own name minus the ingest out-suffix: since ingest now
             # keeps the original's extension (report.pptx -> report.pptx.md), the
@@ -2367,7 +2390,7 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # one (matched via its recorded origin so the source's own extension in
         # the new naming — report.pptx.md — does not defeat the stem compare).
         if is_conv:
-            origin = conv_origin.get(ref)
+            origin = origin_name(ref)
             return Path(origin if origin else rp.name).stem == np_.stem
         return rp.stem == np_.stem
 
@@ -2393,21 +2416,18 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         #    a subtree to mirror, so the subdir is unknown) has only the
         #    provenance basename as an origin signal; match by basename and keep
         #    erring toward retention.
-        from pathlib import PurePosixPath
-
         src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
         for ref in all_refs:
             if ref.startswith("runs/sources/"):
                 if ref in disk_refs:
                     origin = conv_origin.get(ref)
                     # origin is not None == has a factlog provenance header
-                    # (hand-placed conversions are kept).
+                    # (hand-placed conversions are kept). It already carries the
+                    # conversion's mirrored subdir, so a "/" in it *is* the
+                    # mirrored case and sources/<origin> is the exact original.
                     if origin is not None:
-                        conv_rel = ref[len("runs/sources/"):]
-                        subdir = PurePosixPath(conv_rel).parent
-                        if subdir.as_posix() != ".":
-                            expected = (PurePosixPath("sources") / subdir / origin).as_posix()
-                            paired = expected in disk_refs
+                        if "/" in origin:
+                            paired = f"sources/{origin}" in disk_refs
                         else:
                             paired = origin in src_basenames
                         if not paired:

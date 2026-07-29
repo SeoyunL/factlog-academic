@@ -317,6 +317,59 @@ printf '%s\n%s\n%s\n' "$H" \
 [ ! -f "$KB/runs/sources/a/report.md" ] && ok "orphaned subdir conversion (deleted original) is ejected" || bad "same-basename collision masked the orphan"
 [ -f "$KB/runs/sources/b/report.md" ] && ok "surviving subdir sibling's conversion is kept" || bad "surviving sibling wrongly orphaned"
 
+# --- a #214 path-form header pairs with its mirrored original (no orphan) -----
+# ingest records `source: sub/report.html` for sources/sub/report.html, and the
+# conversion sits in the matching mirrored subdir. Both same-name originals are
+# present, so neither conversion may be scanned as an orphan.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub" "$KB/runs/sources/sub"
+printf '<html>top</html>\n' > "$KB/sources/report.html"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/report.html.md"
+printf '<!-- ingested-by-factlog | source: sub/report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/sub/report.html.md"
+printf '%s\n%s\n%s\n' "$H" \
+  'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' \
+  'C,rel,D,runs/sources/sub/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "no orphaned sources found" \
+  && [ -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "path-form provenance header: mirrored conversions are not orphans" \
+  || bad "path-form header wrongly orphaned a live conversion"
+
+# --- a path-form header on a FLAT conversion still pairs by basename ----------
+# An original named by an explicit path converts flat (no subtree to mirror)
+# while its header can still spell a subdir. Reconstructing the original's
+# location from the header instead of the conversion's own path would look for
+# sources/sub/... under a flat conversion and auto-delete every such file.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+printf '<!-- ingested-by-factlog | source: sub/report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/report.html.md"
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "no orphaned sources found" && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "path-form header on a flat conversion pairs by basename (not auto-deleted)" \
+  || bad "flat conversion with a path header wrongly ejected"
+
+# --- a header with no filename component is kept, like an empty one -----------
+# `source: /` carries no original name; it must not be reconstructed into an
+# original named after the conversion's subdir.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub" "$KB/runs/sources/sub"
+printf 'PK\003\004\000' > "$KB/sources/sub/real.pdf"
+printf '<!-- ingested-by-factlog | source: / | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/sub/slash.md"
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/sub/slash.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+set +e; "$PYTHON" -m factlog eject sub --target "$KB" --dry-run >/dev/null 2>&1; rc=$?; set -e
+[ "$rc" -ne 0 ] && ok "a filename-less header ('source: /') names no original" \
+  || bad "a filename-less header matched the subdir name"
+
 # --- non-KB path errors -------------------------------------------------------
 set +e; "$PYTHON" -m factlog eject anything --target "$(mktemp -d)" >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -ne 0 ] && ok "eject on a non-KB path errors" || bad "non-KB path should error"
