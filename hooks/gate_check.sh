@@ -72,27 +72,33 @@
 # Only branches 1 and 2 carry an escape hatch, and only branches 1 and 2 are
 # about the payload/interpreter layer.
 #
-# Everything else fails OPEN (exit 0):
-#   - an unparseable payload;                       } these two emit a one-line
-#   - an INCOMPLETE record from the extractor —     } stderr note, see below
-#     the interpreter died, or wrote something that is not three NUL-terminated
-#     fields. Note this lands the OPPOSITE way from branch 2's reasoning,
-#     deliberately: with no record at all we cannot tell that the call is even a
-#     write, so denying would block every tool call in the session on evidence
-#     we do not have. Branch 2 denies because we positively know it IS a write
-#     we cannot evaluate.
-#   - an absent `tool_name`;                        } ordinary traffic,
-#   - a `tool_name` outside the write-class list;   } silent
-#   - a `tool_input` that is not a JSON object;     }
+# Everything else fails OPEN (exit 0). Three of those branches are a check the
+# gate SKIPPED because it could not read the call, and each emits a one-line
+# stderr note — #323 was filed partly because such skips were silent and left
+# the operator believing the gate was running (same rule as the resolver
+# degrade, #244):
+#   - an unparseable payload;
+#   - an INCOMPLETE record from the extractor — the interpreter died, or wrote
+#     something that is not three NUL-terminated fields. Note this lands the
+#     OPPOSITE way from branch 2's reasoning, deliberately: with no record at
+#     all we cannot tell that the call is even a write, so denying would block
+#     every tool call in the session on evidence we do not have. Branch 2 denies
+#     because we positively know it IS a write we cannot evaluate.
+#   - a write-class `tool_name` whose `tool_input` is absent or is not a JSON
+#     object. The JSON parses and the record is complete, so the two notes above
+#     do not cover it, yet the gate is just as blind. Under the current schema
+#     Write/Edit always send a `tool_input` object, so this fires zero times in
+#     normal operation.
+# Two branches stay silent, and neither is a skipped check:
+#   - a `tool_name` outside the write-class list (a Read is not this gate's
+#     business);
+#   - a payload with no `tool_name` at all.
+# One more permissive degrade exists further down: _canon() falls back to the
+# raw path string if the canonicaliser cannot run, which can only make a match
+# LESS likely (i.e. more permissive). It is silent, and predates #323.
+#
 # A gate protecting two files in one KB must not become a global Write/Edit
 # outage, so anything short of positive knowledge falls open.
-#
-# The first two are a check the gate SKIPPED because it could not read the call.
-# #323 was filed partly because such skips were silent and left the operator
-# believing the gate was running, so they emit one stderr line each — the same
-# observability rule the resolver degrade follows (#244). The last three are not
-# skipped checks (a Read is simply not this gate's business), so they stay
-# silent; a note on every tool call would be noise.
 
 set -euo pipefail
 
@@ -266,32 +272,44 @@ if [ -z "$target_path" ]; then
       exit 0
     fi
     echo "[factlog GATE] DENIED: could not read a target path from the $tool_name tool payload." >&2
-    echo "  The hook payload schema changed, so the freshness predicate cannot be evaluated" >&2
-    echo "  and this write cannot be shown to miss facts/accepted.dl or facts/query.dl." >&2
-    echo "  This cannot be worked around from inside the session. Ask the operator to set" >&2
-    echo "  FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 in the Claude Code environment (the" >&2
-    echo "  \"env\" block of settings.json, or export it before launching Claude Code) and" >&2
-    echo "  start a new session. That bypasses only this check — the freshness deny and the" >&2
-    echo "  Python-availability deny still apply." >&2
+    echo "  Either the tool call carried an empty path — in which case the write itself is" >&2
+    echo "  malformed and nothing needs configuring — or the hook payload schema changed, so" >&2
+    echo "  the freshness predicate cannot be evaluated and this write cannot be shown to" >&2
+    echo "  miss facts/accepted.dl or facts/query.dl." >&2
+    echo "  If it is the schema: this cannot be worked around from inside the session. Ask" >&2
+    echo "  the operator to set FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 in the Claude Code" >&2
+    echo "  environment (the \"env\" block of settings.json, or export it before launching" >&2
+    echo "  Claude Code) and start a new session. That bypasses only this check — the" >&2
+    echo "  freshness deny and the Python-availability deny still apply." >&2
     echo "  Please also report the payload shape upstream." >&2
     exit 2
   fi
-  # Fail OPEN for everything else: unparseable payload, an incomplete extractor
-  # record, a non-write tool, an absent tool_name, or a tool_input that is not a
-  # JSON object.
-  #
-  # The first two mean the gate silently skipped a call it could not read, which
-  # is exactly the "operator believes the gate is running" failure #323 was
-  # filed over. Make them OBSERVABLE with one stderr line, the same way the
-  # resolver degrade is (#244). The remaining three are ordinary traffic — a
-  # non-write tool or a payload shape with no tool_input is not a skipped check
-  # — so they stay silent rather than becoming noise on every tool call.
+  # Fail OPEN for everything else. Three of those branches mean the gate SKIPPED
+  # a check because it could not read the call, which is exactly the "operator
+  # believes the gate is running" half of #323, so each emits one stderr line
+  # the way the resolver degrade does (#244):
+  #   - the payload was not parseable JSON;
+  #   - the extractor returned no complete record;
+  #   - the call IS a write-class tool, but its `tool_input` is missing or is not
+  #     a JSON object (a renamed key, a changed nesting). The JSON parses and the
+  #     record is complete here, so neither note above covers it — and under the
+  #     current schema Write/Edit always send a `tool_input` object, so this note
+  #     fires zero times in normal operation.
+  # Only two branches stay silent, and neither is a skipped check: a tool outside
+  # the write-class list (a Read is not this gate's business) and a payload with
+  # no `tool_name` at all. Those are ordinary traffic; a note on each would be
+  # noise on every tool call.
   case "$tool_input_kind" in
     unparsed)
       echo "[factlog GATE] note: hook payload was not parseable JSON; the freshness gate was skipped for this call (fail-open)." >&2
       ;;
     incomplete)
       echo "[factlog GATE] note: the payload extractor returned no complete record; the freshness gate was skipped for this call (fail-open)." >&2
+      ;;
+    absent|other)
+      if _is_write_tool "$tool_name"; then
+        echo "[factlog GATE] note: the $tool_name payload carried no tool_input object, so no target path could be read; the freshness gate was skipped for this call (fail-open)." >&2
+      fi
       ;;
   esac
   exit 0
