@@ -27,13 +27,21 @@ so a full-width value takes the ordinary "does not parse -> untyped" path and
 surfaces as a typed-projection warning instead of merging silently. Rewriting the
 stored string would have been the silent fold this repo consistently refuses.
 
-Three call sites outside this module change behaviour as a consequence. All three
-are intended, and none of them rewrites data:
+Four call sites outside this module change behaviour as a consequence. All four
+are intended, and none of them rewrites data already stored:
 
 - ``tools/merge_candidates.py`` dedup key — ``canonical_amount`` returns ``None``
   for a full-width term, so ``amount(１００,억)`` and ``amount(１００,"억")`` stay
   two rows instead of collapsing into one. Collapsing them is exactly the fold
-  this policy rejects.
+  this policy rejects. A newly merged full-width row also keeps its **source
+  string verbatim** instead of being rewritten to the quoted canonical form;
+  rows already in the KB are untouched either way.
+- ``tools/check_conflicts.py`` ``_group_key`` — a full-width object no longer
+  normalizes to a scalar, so it keys as ``("raw", obj)`` while its ASCII twin
+  keys as ``("scalar", …)``. Under a single-valued relation those are **two
+  values**, so a KB that used to pass can now report a conflict and the command
+  exits **1**. This is the one consequence that flips a green gate red — see the
+  migration note in ``docs/reference/typed-relations.md``.
 - ``common._canonical_value`` — a fact already stored as ``amount(１００,"억")``
   in an existing KB is no longer canonicalised, so a query written as
   ``amount(１００,억)`` misses it. Intended: under this policy ``amount(１００,억)``
@@ -42,12 +50,18 @@ are intended, and none of them rewrites data:
 - ``humanize`` — a full-width compound term is now returned verbatim rather than
   rendered as ``１００억``.
 
-Residual symptom, NOT fixed here: the warning only fires for relations **declared
-typed**. ``common._project_typed_relations`` skips a relation with no typed spec
-without warning, so a full-width value under a relation that is declared as an
-attribute but not typed still surfaces nowhere — ``tools/entity_audit.py`` lists
-``declared_literals`` as an unflagged sorted list, and ``100억`` / ``１００억``
-sort far apart in it.
+A rejected value has two user-visible paths, matching the two the issue asked
+for. Under a relation declared **typed**, ``common._project_typed_relations``
+warns and loads the fact untyped. Under a relation that is **not declared** as an
+attribute at all, ``tools/entity_audit.py`` reports it as a *literal suspect* —
+its ``_LITERAL_RE`` is deliberately looser than this module and still matches
+full-width digits, so narrowing that detector would close this path (a pinning
+test guards the divergence).
+
+Residual symptom, NOT fixed here: a relation declared as an **attribute but not
+typed** falls between the two. It has no spec, so the projection loop skips it
+without warning, and its objects land in ``entity_audit``'s ``declared_literals``
+— an unflagged sorted list in which ``100억`` and ``１００억`` sort far apart.
 """
 from __future__ import annotations
 
