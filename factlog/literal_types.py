@@ -47,8 +47,9 @@ are intended, and none of them rewrites data already stored:
   ``amount(１００,억)`` misses it. Intended: under this policy ``amount(１００,억)``
   is not a valid amount term at all, so there is no canonical form to map it to.
   The fix is to correct the source to ASCII and re-collect, not to fold here.
-- ``humanize`` — a full-width compound term is now returned verbatim rather than
-  rendered as ``１００억``.
+- ``tools/ask_router.py`` answer annotation — ``humanize`` returns a full-width
+  compound term verbatim rather than rendering it as ``１００억``, so the display
+  suffix (``… (= 100억)``) is simply omitted for such a row.
 
 A rejected value has two user-visible paths, matching the two the issue asked
 for. Under a relation declared **typed**, ``common._project_typed_relations``
