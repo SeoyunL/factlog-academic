@@ -417,6 +417,7 @@ class TestFullWidthDigitsRejected:
         ("ordinal", "ordinal(３)"),
         ("ordinal", "３위"),
         ("ordinal", "제３호"),
+        ("ordinal", "３rd"),   # the English ordinal form has its own regex
         ("amount", "１００억"),
         ("amount", 'amount(１００,"억")'),
     ])
@@ -445,6 +446,7 @@ class TestFullWidthDigitsRejected:
         ("number", "1２3"),
         ("date", "date(20２0,1)"),
         ("ordinal", "ordinal(1２)"),
+        ("ordinal", "1２th"),
     ])
     def test_mixed_width_rejects(self, type_tag, raw):
         assert lt.normalize(type_tag, raw) is None
