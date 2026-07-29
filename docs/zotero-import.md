@@ -262,8 +262,10 @@ factlog zotero-import --collection "neurosymbolic AI" --pdf --dry-run   # 변환
 ```
 
 - 스캔 PDF(텍스트 레이어 없음)는 `pdftotext`가 빈 텍스트를 내며, import 시 인라인으로
-  도는 `ingest` 출력과 이후 `factlog status`가 "converted-but-empty (likely
-  scanned/needs OCR)"로 표시합니다(OCR은 범위 밖).
+  도는 `ingest` 출력이 "converted-but-empty (no extractable text; likely a scanned
+  PDF, needs OCR)"로 표시합니다(OCR은 범위 밖). `factlog status`는 변환기가 섞일 수
+  있는 개수만 세므로 공통 문구인 "converted-but-empty (no extractable text)"만
+  적으며, 파일별 사유는 `factlog sources`가 보여줍니다(#620).
 - **저작권**: 원본 PDF 바이너리가 `sources/`에 저장되므로, KB를 버전관리한다면
   `.gitignore`에 `*.pdf`(또는 `sources/**/*.pdf`)를 넣어 커밋을 막으세요. 변환 텍스트가
   놓이는 `runs/`는 이미 생성물이라 커밋 대상이 아닙니다.

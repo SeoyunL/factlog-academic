@@ -1179,6 +1179,8 @@ def cmd_sources(args: argparse.Namespace) -> int:
 
     from factlog.common import (
         conversion_body_is_empty,
+        conversion_converter,
+        empty_conversion_hint,
         is_hidden_source,
         is_sync_ignored,
         paired_conversion,
@@ -1257,7 +1259,10 @@ def cmd_sources(args: argparse.Namespace) -> int:
             # #229: a conversion that ran but has only a provenance header (a
             # scanned/image PDF) is a silent 0-facts source. Distinguish it from
             # a normal source that simply has not been synced yet.
-            flags += "   [converted-but-empty — likely scanned PDF; needs OCR]"
+            # #620: which explanation is true depends on the converter recorded in
+            # that conversion's own header, so read it rather than assuming PDF.
+            hint = empty_conversion_hint(conversion_converter(target / conv_ref))
+            flags += f"   [converted-but-empty — {hint}]"
         elif not facts:
             flags += "   [no facts — run /factlog sync or factlog ingest]"
         print(f"  [{facts:>3}] {orig}  ({ext}){arrow}{flags}")
@@ -3372,7 +3377,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     )
     via_note = f" ({via} via conversion)" if via else ""
     excl_note = f", {n_ignored} sync-ignored" if n_ignored else ""
-    empty_note = f", {empty_conv} converted-but-empty (likely scanned/needs OCR)" if empty_conv else ""
+    # #620: one count over a bucket that can mix converters, so it carries only
+    # the wording that holds for every member; `factlog sources` names each file
+    # with the converter-specific reason.
+    empty_note = (
+        f", {empty_conv} converted-but-empty ({common.EMPTY_CONVERSION_AGGREGATE})" if empty_conv else ""
+    )
     print(f"  sources:    {total} file(s), {covered} with facts{via_note}, {total - covered} with none{excl_note}{empty_note}")
 
     # Conflicts (single-valued relations with >1 distinct object)
@@ -3730,7 +3740,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
     from pathlib import Path
 
-    from factlog.common import is_hidden_source, is_sync_ignored, sync_ignore_patterns
+    from factlog.common import (
+        EMPTY_CONVERSION_AGGREGATE,
+        empty_conversion_hint,
+        is_hidden_source,
+        is_sync_ignored,
+        sync_ignore_patterns,
+    )
 
     target_str, source = factlog_config.resolve_root(args.target)
     target = Path(target_str)
@@ -3955,16 +3971,20 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         # warning only sees a *missing* conversion, never an empty one).
         if body.strip() == "":
             empty_converted += 1
+            # #620: the reason follows the converter that just ran. pdftotext
+            # finding no text layer leaves "the pages are images" open, so OCR is
+            # a real next step; pandoc/textutil finding no text in markup means
+            # the original held none, and OCR recovers nothing there.
             print(
                 f"factlog ingest: {source_label} -> {dst_rel} converted-but-empty "
-                "(likely scanned/needs OCR)",
+                f"({empty_conversion_hint(tool)})",
                 file=sys.stderr,
             )
             # empty is the louder signal, so it wins the bucket — but a converter
             # can be empty *and* have warned (a cp949 doc that produced no text and
             # a code-page warning). Still echo the warning here so #239's fix is not
-            # re-swallowed in that narrow overlap, and the "needs OCR" label does not
-            # silently mis-attribute an encoding failure.
+            # re-swallowed in that narrow overlap, and the empty-conversion reason
+            # does not silently mis-attribute an encoding failure.
             for line in conv_warnings.splitlines():
                 print(f"    {line}", file=sys.stderr)
         elif conv_warnings:
@@ -3993,7 +4013,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     if warned_converted:
         summary += f", {warned_converted} converted-with-warnings"
     if empty_converted:
-        summary += f", {empty_converted} converted-but-empty (likely scanned/needs OCR)"
+        # #620: aggregate over a possibly mixed-converter bucket — the neutral
+        # wording only; the per-file lines above already carried the reason.
+        summary += f", {empty_converted} converted-but-empty ({EMPTY_CONVERSION_AGGREGATE})"
     if scan_nonbinary:
         summary += f", {scan_nonbinary} ignored (binary extension, non-binary content)"
     if scan_empty:

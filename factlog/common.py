@@ -373,8 +373,9 @@ def conversion_body_is_empty(path: Path) -> bool:
     A scanned/image-only PDF (or any input with no extractable text) converts to
     a file that carries only the ingest provenance header and no content — a
     silent 0-facts source (#229). Return True for such a conversion so callers can
-    flag it as `converted-but-empty (likely scanned/needs OCR)` instead of
-    conflating it with a not-yet-synced source.
+    flag it as `converted-but-empty` instead of conflating it with a not-yet-synced
+    source. Why it came out empty depends on the converter: see
+    empty_conversion_hint().
 
     Returns False for a file with no factlog provenance header (a plain text
     source or a hand-placed conversion — not something ingest produced) and for an
@@ -389,6 +390,73 @@ def conversion_body_is_empty(path: Path) -> bool:
         return False  # not an ingest conversion — do not judge its emptiness here
     body = parts[1] if len(parts) > 1 else ""
     return body.strip() == ""
+
+
+def conversion_converter(path: Path) -> str | None:
+    """The converter tool named in an ingest conversion's provenance header, or None.
+
+    ingest writes `... | converter: <tool> | ...` in both header formats (the
+    markdown comment and the bracketed plain-text line). Returns the tool name, or
+    None when the file has no factlog header, no `converter:` field (a header
+    predating the field), or an unreadable path — callers must treat None as
+    "unknown converter" and say nothing converter-specific about it.
+
+    The converter, not the original's extension, is the signal that survives:
+    a legacy pre-#213 conversion is named by the bare stem and has lost the
+    original's extension, but its header still records what produced it.
+    """
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+    except OSError:
+        return None
+    if "ingested-by-factlog" not in head:
+        return None
+    m = re.search(r"converter:\s*([^|>]+?)\s*(?:\||-->|$)", head)
+    return m.group(1) if m and m.group(1) else None
+
+
+# Converters whose empty output leaves "the source is page images" a live
+# hypothesis, so telling the user to run OCR points at something that exists.
+# pdftotext reads a PDF's *text layer*, and a PDF may carry its whole content as
+# raster page images with no text layer — that is exactly what a scan is.
+# Which extension reaches this state, and through which tool, is a property of
+# the installed converters — a measurement, not something this repo guarantees.
+# Measured for #620 by `factlog ingest --scan` on fresh KBs (pandoc 3.10,
+# pdftotext 26.06.0, macOS textutil), reading each conversion's own header back:
+#   .pdf                                -> pdftotext, converted-but-empty
+#   .html/.htm/.xhtml/.rtf/.docx/.odt   -> pandoc,    converted-but-empty
+#   .html/.rtf with pandoc off PATH     -> textutil,  converted-but-empty
+#   .hwpx/.pptx                         -> built-in,  reported as a FAILURE
+# (.hwp needs hwp5html, absent on that machine — unmeasured; its built-in also
+# returns False on a zero-byte output.) tests/test_ingest.sh blocks 9 and 9b pin
+# the pdftotext and pandoc rows. For the markup converters an empty result means
+# the markup held no text, and no OCR step recovers text that was never there.
+OCR_CANDIDATE_CONVERTERS: frozenset[str] = frozenset({"pdftotext"})
+
+
+# The wording for a converted-but-empty *count*, where the bucket can mix
+# converters. It is the observation every empty conversion shares, so both hints
+# below are built on top of it and a count may be phrased with it alone;
+# test_conversion_provenance.py asserts that containment rather than trusting
+# this comment.
+EMPTY_CONVERSION_AGGREGATE = "no extractable text"
+
+
+def empty_conversion_hint(converter: str | None) -> str:
+    """Why a converted-but-empty conversion came out empty, per the tool that made it.
+
+    User-facing text, so it must not name an action that leads nowhere (#620,
+    AGENTS.md "주석·문서의 주장 규율"): "needs OCR" is a next step only where a
+    text layer could be missing from an image-bearing page. An unknown converter
+    (None) gets the neutral wording — never assert "scanned" without evidence.
+
+    Both returns extend EMPTY_CONVERSION_AGGREGATE, so the per-item sites and the
+    aggregate counters in `status` / the ingest summary read as one vocabulary
+    (before #620 the four call sites spelled this concept three different ways).
+    """
+    if converter in OCR_CANDIDATE_CONVERTERS:
+        return f"{EMPTY_CONVERSION_AGGREGATE}; likely a scanned PDF, needs OCR"
+    return f"{EMPTY_CONVERSION_AGGREGATE} in the original"
 
 
 def paired_conversion(
