@@ -26,8 +26,9 @@ path out of the tool payload Claude Code sends; if the call is a `Write`/`Edit`
 but the payload shape has changed such that no path can be read — so the write
 cannot be shown *not* to target an engine input — the hook denies rather than
 letting it through. Only in that situation can you skip the check with
-`FACTLOG_GATE_FAIL_OPEN=1`, and that variable does **not** release the staleness
-deny. It is not something the model can do from inside the session: a hook
+`FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1`. As the name says, it exempts the
+unreadable-payload branch and nothing else — it does **not** release the
+staleness deny. It is not something the model can do from inside the session: a hook
 inherits the Claude Code process environment, so **a human** has to set it there
 — in the `env` block of `settings.json`, or exported before launching Claude
 Code — and then start a new session. Please also report the payload shape

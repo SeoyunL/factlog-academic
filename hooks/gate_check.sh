@@ -62,7 +62,7 @@
 #      either `tool_input` or the top level. That combination means the payload
 #      schema drifted out from under the extractor while a write was in flight,
 #      so the predicate cannot be evaluated for a write that may well target an
-#      engine input. Escape hatch: FACTLOG_GATE_FAIL_OPEN=1, which only a human
+#      engine input. Escape hatch: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1, which only a human
 #      can set (see the deny message below).
 #   3. _mtime() DENYs when `stat` cannot report a file's mtime. That branch has
 #      NO escape hatch; it is only reachable for a file this script has already
@@ -247,15 +247,15 @@ if [ -z "$target_path" ]; then
     # inherits from the Claude Code process. A model cannot set it for its own
     # tool calls from inside the session, so the deny message is addressed to a
     # human operator and says where to set it.
-    if [ "${FACTLOG_GATE_FAIL_OPEN:-}" = "1" ]; then
-      echo "[factlog GATE] note: could not read a target path from the $tool_name payload; FACTLOG_GATE_FAIL_OPEN=1 is set, so the write is allowed unchecked." >&2
+    if [ "${FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD:-}" = "1" ]; then
+      echo "[factlog GATE] note: could not read a target path from the $tool_name payload; FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 is set, so the write is allowed unchecked." >&2
       exit 0
     fi
     echo "[factlog GATE] DENIED: could not read a target path from the $tool_name tool payload." >&2
     echo "  The hook payload schema changed, so the freshness predicate cannot be evaluated" >&2
     echo "  and this write cannot be shown to miss facts/accepted.dl or facts/query.dl." >&2
     echo "  This cannot be worked around from inside the session. Ask the operator to set" >&2
-    echo "  FACTLOG_GATE_FAIL_OPEN=1 in the Claude Code environment (the \"env\" block of" >&2
+    echo "  FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 in the Claude Code environment (the \"env\" block of" >&2
     echo "  settings.json, or export it before launching Claude Code) and start a new" >&2
     echo "  session. That bypasses only this check — the freshness deny still applies." >&2
     echo "  Please also report the payload shape upstream." >&2
