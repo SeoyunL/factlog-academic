@@ -182,6 +182,32 @@ KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
 [ ! -f "$KB/runs/sources/sub/report.html.md" ] && [ -f "$KB/runs/sources/report.html.md" ] \
   && ok "an absolute path under sources/ ejects only its own conversion" || bad "absolute path matched by basename"
 
+# --- an absolute path + --delete-original removes exactly that one original ---
+# Reducing an absolute path to its KB-relative ref makes it match the original
+# itself, so --delete-original now reaches an original that a basename fallback
+# never selected. It must stay at exactly one file: the same-name sibling in the
+# other directory keeps both its original and its conversion.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+"$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$KB" --delete-original >/dev/null 2>&1
+[ ! -f "$KB/sources/sub/report.html" ] && [ ! -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "absolute path + --delete-original removes that original and its conversion" \
+  || bad "absolute path + --delete-original did not remove the named original"
+[ -f "$KB/sources/report.html" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "absolute path + --delete-original leaves the same-name sibling intact" \
+  || bad "--delete-original deleted a file in another directory"
+
+# --- an unresolvable path errors like any unknown name (no traceback) ---------
+# resolve() raises RuntimeError on a symlink loop, not OSError; letting it escape
+# turned an ordinary no-match into a crash.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+LOOP="$(mktemp -d)"; ln -s "$LOOP/b" "$LOOP/a"; ln -s "$LOOP/a" "$LOOP/b"
+set +e
+err="$("$PYTHON" -m factlog eject "$LOOP/a/absent.html" --target "$KB" --dry-run 2>&1)"; rc=$?
+set -e
+[ "$rc" -ne 0 ] && ! printf '%s' "$err" | grep -qF "Traceback" \
+  && ok "a symlink-loop path reports no match instead of crashing" \
+  || bad "symlink-loop path crashed: $(printf '%s' "$err" | tail -1)"
+
 # --- an absolute original outside the KB matches only a FLAT conversion -------
 # ingest gives a path outside sources/ no subtree to mirror, so its conversion is
 # flat; a mirrored conversion can never have come from that path.
@@ -461,9 +487,16 @@ printf 'PK\003\004\000' > "$KB/sources/sub/real.pdf"
 printf '<!-- ingested-by-factlog | source: / | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
   > "$KB/runs/sources/sub/slash.md"
 printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/sub/slash.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
-set +e; "$PYTHON" -m factlog eject sub --target "$KB" --dry-run >/dev/null 2>&1; rc=$?; set -e
+set +e
+"$PYTHON" -m factlog eject sub --target "$KB" --dry-run >/dev/null 2>&1; rc=$?
+# ...and a root path, which names no file either, must not collide with that
+# sentinel and select the conversion.
+"$PYTHON" -m factlog eject / --target "$KB" --dry-run >/dev/null 2>&1; rc2=$?
+set -e
 [ "$rc" -ne 0 ] && ok "a filename-less header ('source: /') names no original" \
   || bad "a filename-less header matched the subdir name"
+[ "$rc2" -ne 0 ] && ok "a root path selects nothing (no empty-origin collision)" \
+  || bad "'/' matched a conversion through the empty-origin sentinel"
 
 # --- non-KB path errors -------------------------------------------------------
 set +e; "$PYTHON" -m factlog eject anything --target "$(mktemp -d)" >/dev/null 2>&1; rc=$?; set -e
