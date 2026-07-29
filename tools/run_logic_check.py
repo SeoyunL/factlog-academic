@@ -20,6 +20,7 @@ from common import (
     LOGIC_POLICY_DL,
     run_wirelog,
     arg_value,
+    is_quoted_string,
     query_args,
     quoted_constants,
 )
@@ -93,9 +94,47 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
     return errors, warnings
 
 
+def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> bool:
+    """True when *row* satisfies every quoted constant *args* pins, by position.
+
+    A quoted constant is a FILTER, at whatever position it appears — not merely a
+    binding the display omits. Filtering only args[0] would still let
+    ``pred(E, "stale")?`` report the other reasons' rows, and would do so while
+    the first-argument form answers correctly, which is worse than filtering
+    nothing: the reader loses the one signal that the second line is untrustworthy.
+
+    A row shorter than the pinned position cannot satisfy the constant, so the
+    0-arity row an engine may emit is dropped from a constant-pinned query (it
+    still shows up for an all-variable query, as before).
+
+    Comparison is RAW (``arg_value`` only), deliberately not
+    ``common.canonical_value``: it mirrors ask_router's policy branch exactly so
+    the report and ``ask`` cannot diverge, which is the property
+    tests/unit/test_policy_query_filter.py pins. This means the policy path does
+    NOT go through the "#213 single query-value comparison chokepoint"
+    (common.py `_canonical_value`), contrary to what that docstring claims for
+    every query-match path. Measured consequence: an NFD-stored entity queried
+    with an NFC-typed constant now yields `0 rows`, which reads as a verified
+    negative. Folding both sides belongs in one place for BOTH paths and is out
+    of scope here; see #213.
+
+    The matching rule is kept identical to ask_router's `policy_row_matches`
+    (same body, module-specific docstring). The natural home is common.py
+    alongside the other query-parsing helpers, but hoisting it there is a wider
+    change than this fix needs; the report/router parity test fails if the two
+    copies ever drift.
+    """
+    for index, arg in enumerate(args):
+        if not is_quoted_string(arg):
+            continue
+        if index >= len(row) or arg_value(arg) != row[index]:
+            return False
+    return True
+
+
 def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str:
-    rows = sorted(inferred[predicate])
     args = query_args(line)
+    rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
     values: list[str] = []
     for row in rows:
         bindings = []
