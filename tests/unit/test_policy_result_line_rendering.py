@@ -50,6 +50,19 @@ class TestUnparseableQueryEmitsNoResultLine:
 
 
 class TestResultLineNamesTheQueryItAnswers:
+    def test_variable_only_query_text_is_byte_identical_to_before_the_fix(self):
+        # The fix promised not to change the output of a variable-only query.
+        # This is the literal upstream/main (c6d359d) rendering of this input,
+        # so the echo must not reach it: a variable-only query reports the extent,
+        # which is exactly what the 'Policy evaluation:' line says, so it cannot
+        # produce the mismatch the echo exists to explain.
+        line = rlc.policy_result_line(PREDICATE, f"{PREDICATE}(E, R)?", INFERRED)
+        assert line == (
+            "needs_review results: 3 rows; "
+            "E=Alice, R=low_conf; E=Carol, R=stale; E=Dave, R=no_source"
+        )
+        assert "query:" not in line
+
     def test_result_line_echoes_the_query(self):
         draft = f'{PREDICATE}("Bob", R)?'
         line = rlc.policy_result_line(PREDICATE, draft, INFERRED)

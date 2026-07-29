@@ -141,12 +141,15 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
     an answer for a line `validate_query` is reporting as an error in the same
     report. Emitting nothing leaves the Errors section to speak.
 
-    The query is echoed because this line and the "Policy evaluation:" extent
-    line ("<pred>: N rows", the count over ALL entities) sit a few lines apart
-    and now legitimately disagree — 3 rows there, 0 rows here. Naming the query
-    that produced the 0 is what makes the pair readable as scope rather than
-    contradiction, and it also tells two queries on the same predicate apart.
-    The extent line itself is left untouched: it is pinned by
+    The query is echoed ONLY when a quoted constant is pinned. Such a line and
+    the "Policy evaluation:" extent line ("<pred>: N rows", the count over ALL
+    entities) sit a few lines apart and now legitimately disagree — 3 rows there,
+    0 rows here — so naming the query that produced the 0 is what makes the pair
+    readable as scope rather than contradiction, and it tells two queries on the
+    same predicate apart. A variable-only query cannot produce that mismatch (it
+    reports the extent, which is what the extent line says), so it keeps its
+    original text byte for byte — the query-shape whose output this fix promised
+    not to change. The extent line itself is left untouched: it is pinned by
     tests/golden/logic_report.txt, and its section header already says it is the
     policy evaluation rather than the answer to any one query.
     """
@@ -162,7 +165,8 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
                 bindings.append(f"{arg}={value}")
         values.append(", ".join(bindings) if bindings else ", ".join(row))
     suffix = "; " + "; ".join(values) if values else ""
-    return f"{predicate} results (query: {line}): {len(rows)} rows{suffix}"
+    echo = f" (query: {line})" if any(is_quoted_string(arg) for arg in args) else ""
+    return f"{predicate} results{echo}: {len(rows)} rows{suffix}"
 
 
 def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[str, ...]]], policy_query_predicates: set[str]) -> list[str]:
