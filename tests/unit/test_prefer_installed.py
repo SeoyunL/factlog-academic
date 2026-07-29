@@ -539,12 +539,214 @@ class TestScriptTreeSplit:
         assert script_tree_split("/nowhere/tools/x.py") is not None
 
 
+# The made-up integration that tells the two trees apart below. Made-up on purpose:
+# ``_tree_with_a_fifth_integration`` asserts this string is absent from this tree's
+# writers, so the day a real fifth integration lands the helper says so instead of
+# quietly measuring nothing.
+FIFTH_IDENTITY_KEY = "fifthsource_id"
+
+# A source whose opening ``---`` a human deleted, in the shape ``tools/validate.py``
+# reports: no opening fence, first line an importer identity key. See
+# ``test_validate_front_matter.OPENING_DELETED``, which is the same file with a real key.
+PROBE_SOURCE = f'{FIFTH_IDENTITY_KEY}: "X1"\ntitle: "A paper"\n---\n\nAbstract.\n'
+
+# The two files ``factlog init`` does not write. Filled in so a validate run over the
+# fixture below PASSES: the answer then arrives as one warning line above an otherwise
+# identical verdict, and an unrelated failure cannot be mistaken for the signal.
+CANDIDATES_HEADER = "subject,relation,object,source,status,confidence,note\n"
+REVIEW_SECTIONS = "# Open Questions\n\n## 중복 개념 후보\n\n## 모호한 관계명\n\n## 출처 부족\n\n## 충돌\n"
+
+
+def _tree_with_a_fifth_integration(tmp_path: Path, name: str, *, with_tools: bool) -> Path:
+    """A runnable copy of this tree whose writers know one more integration.
+
+    A copy rather than a stub, for the reason ``_bundle`` gives. It differs from this
+    tree by one entry in ``IDENTITY_KEYS_BY_SOURCE``, which is a documented extension
+    point: ``tools/validate.py`` builds ``_OPENING_IDENTITY_KEY_RE`` from that map at
+    import — "a fifth integration's key is covered here the day it is added there" — so
+    a source opening with that key is flagged by a validate run that imported THIS copy
+    and by no other.
+
+    That is what makes "which factlog did this process import" answerable for a tool
+    that prints no provenance line: the answer is a behaviour of the run, read off
+    validate's own stdout, and nothing is added to ``validate.py`` to obtain it.
+    """
+    root = tmp_path / name
+    shutil.copytree(REPO_ROOT / "factlog", root / "factlog")
+    if with_tools:
+        shutil.copytree(REPO_ROOT / "tools", root / "tools")
+    writer = root / "factlog" / "integrations" / "common" / "source_writer.py"
+    text = writer.read_text(encoding="utf-8")
+    assert FIFTH_IDENTITY_KEY not in text, f"{FIFTH_IDENTITY_KEY} is no longer a made-up key"
+    anchor = "IDENTITY_KEYS_BY_SOURCE = {"
+    assert text.count(anchor) == 1, "the writers' identity map moved; this copy patches nothing"
+    writer.write_text(
+        text.replace(anchor, f'{anchor}\n    "fifthsource": "{FIFTH_IDENTITY_KEY}",'),
+        encoding="utf-8",
+    )
+    return root
+
+
+def _kb_with_a_probe_source(tmp_path: Path, name: str) -> Path:
+    """A KB that validates cleanly, holding one source that opens with the fifth key."""
+    kb = _new_kb(tmp_path, name)
+    (kb / "sources" / "probe.md").write_text(PROBE_SOURCE, encoding="utf-8")
+    (kb / "facts" / "candidates.csv").write_text(CANDIDATES_HEADER, encoding="utf-8")
+    (kb / "decisions" / "open-questions.md").write_text(REVIEW_SECTIONS, encoding="utf-8")
+    return kb
+
+
+def _validate(
+    script_root: Path,
+    kb: Path,
+    cwd: Path,
+    *,
+    package_roots: tuple[Path, ...],
+    prefer: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``<script_root>/tools/validate.py`` over *kb* and hand back its streams.
+
+    *package_roots* is the whole ``PYTHONPATH``, in order, because the question here is
+    which entry wins — a single root could not pose it. ``--target`` is named on the
+    command line rather than left to ``$FACTLOG_ROOT`` or the active-KB config, so no
+    machine's ``factlog use`` can decide what this run validated.
+    """
+    env = _env(kb, prefer=prefer)
+    env["PYTHONPATH"] = os.pathsep.join(str(root) for root in package_roots)
+    return subprocess.run(
+        [sys.executable, str(script_root / "tools" / "validate.py"), "--target", str(kb)],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _flagged(result: subprocess.CompletedProcess[str]) -> list[str]:
+    """The sources this run read as having had their opening fence deleted.
+
+    Non-empty only when the factlog the run imported carries the fifth integration's
+    key. The exit code is asserted here so a run that failed for some other reason
+    cannot be read as "the key was not recognised".
+    """
+    assert result.returncode == 0, result.stdout + result.stderr
+    return [line for line in result.stdout.splitlines() if line.startswith("warning: no_opening_fence: ")]
+
+
+def _verdict(result: subprocess.CompletedProcess[str]) -> list[str]:
+    """Everything the run said apart from warnings — its judgement on the KB."""
+    return [line for line in result.stdout.splitlines() if not line.startswith("warning: ")]
+
+
+class TestWhichTreeValidatePyImports:
+    """The path ``tools/common.py``'s copy of the block decides ALONE (#621).
+
+    ``TestTheFourBootstrapsDoNotDrift`` below compares the four copies as TEXT, so a
+    mutant in any one of them fails it whatever the mutant does. That reads as coverage
+    and is not: before this class, the only copy whose BEHAVIOUR a test measured was
+    ``factlog_config.py``'s, through ``test_two_trees_produce_two_different_lines``
+    (measured in #617 at bb3909c by replacing the membership guard with ``if True:`` one
+    wrapper at a time — dropping it from ``common.py``, ``compile_facts.py`` or
+    ``literal_types.py`` left every behaviour test green).
+
+    The reason is import ORDER, not redundancy: every other ``tools/`` script that
+    imports ``common`` imports ``factlog_config`` FIRST (measured at 3e6aafc, first
+    import line of each: ``run_logic_check`` 34 against 80, ``merge_candidates`` 65
+    against 102, ``finalize`` 34 against 35, and so on), so ``factlog`` is already in
+    ``sys.modules`` when ``common``'s copy runs and its ``sys.path`` work cannot move it.
+    ``tools/validate.py`` is the exception — the only script that imports ``common``
+    (line 15) and no ``factlog_config`` at all (``grep -c factlog_config``: validate 0,
+    compile_facts 4, literal_types 4, merge_candidates 3, source_coverage 2) — so
+    ``common.py``'s copy decides which factlog it gets, on its own.
+
+    Every run is a subprocess, for the module docstring's reason, and each is compared
+    against the same tools running with a different ``PYTHONPATH`` — never against a
+    literal, which would pin this machine instead of the mechanism.
+    """
+
+    def test_a_fronted_tree_wins_over_validate_s_own_root(self, tmp_path):
+        """The membership guard, measured through the tool it decides for.
+
+        Same ``tools/validate.py``, same KB, same interpreter: only the order of
+        ``PYTHONPATH`` differs, and the package that answers changes with it. That is
+        the shape the guard exists for — a contributor's tree named ahead of the root
+        this script sits in — and ``if str(_ROOT) not in sys.path`` in ``common.py`` is
+        the whole of what keeps the insertion below from overtaking it.
+        """
+        fronted = _tree_with_a_fifth_integration(tmp_path, "fronted", with_tools=False)
+        kb = _kb_with_a_probe_source(tmp_path, "kb_fronted")
+        cwd = _neutral_cwd(tmp_path)
+
+        here = _validate(REPO_ROOT, kb, cwd, package_roots=(REPO_ROOT,))
+        there = _validate(REPO_ROOT, kb, cwd, package_roots=(fronted, REPO_ROOT))
+
+        assert len(_flagged(there)) == 1, there.stdout
+        assert f"identity key {FIFTH_IDENTITY_KEY!r}" in _flagged(there)[0]
+        # The control that keeps the assertion above from passing on any run at all:
+        # this tree does not know that key, so its own run must stay silent about it.
+        assert _flagged(here) == []
+        # And the two runs agree on everything else, so the flagged line is carrying the
+        # whole distinction — the proof it is the imported package talking and not the KB.
+        assert _verdict(there) == _verdict(here)
+
+    def test_validate_s_own_root_wins_when_nothing_fronts_it(self, tmp_path):
+        """No-regression gate: a bundled ``validate.py`` still validates with its bundle.
+
+        The insertion is what makes a shipped plugin self-contained. Nothing names the
+        bundle on ``PYTHONPATH`` here — it wins purely by ``common.py``'s own insert,
+        which is the field shape — while this repo IS named there and still loses.
+        """
+        bundle = _tree_with_a_fifth_integration(tmp_path, "bundle", with_tools=True)
+        kb = _kb_with_a_probe_source(tmp_path, "kb_bundled")
+        cwd = _neutral_cwd(tmp_path)
+
+        bundled = _validate(bundle, kb, cwd, package_roots=(REPO_ROOT,))
+        repo = _validate(REPO_ROOT, kb, cwd, package_roots=(REPO_ROOT,))
+
+        assert len(_flagged(bundled)) == 1, bundled.stdout
+        assert _flagged(repo) == []
+        assert _verdict(bundled) == _verdict(repo)
+
+    def test_one_hands_validate_to_the_installed_tree(self, tmp_path):
+        """``FACTLOG_PREFER_INSTALLED=1`` reaches ``validate.py`` too.
+
+        The opt-out is documented for the wrappers as a set, and this is the tool where
+        no earlier copy has already settled the question — so if ``common.py``'s copy
+        did not honour it, the variable would be silently ineffective for exactly the
+        run a contributor is most likely to be debugging. Both values are exercised in
+        one test: the absence of the flag is only evidence next to its presence.
+        """
+        bundle = _tree_with_a_fifth_integration(tmp_path, "bundle_prefer", with_tools=True)
+        kb = _kb_with_a_probe_source(tmp_path, "kb_prefer")
+        cwd = _neutral_cwd(tmp_path)
+
+        default = _validate(bundle, kb, cwd, package_roots=(REPO_ROOT,))
+        opted_out = _validate(bundle, kb, cwd, package_roots=(REPO_ROOT,), prefer="1")
+
+        assert len(_flagged(default)) == 1, default.stdout
+        assert _flagged(opted_out) == []
+        assert _verdict(opted_out) == _verdict(default)
+
+
 class TestTheFourBootstrapsDoNotDrift:
     """Four copies of one block, kept identical by a script rather than by memory.
 
     The duplication is forced — each wrapper must run before any ``factlog`` import is
     possible, so there is nowhere shared to put it. Duplication a human is asked to
     maintain drifts; this makes the drift a test failure on the commit that causes it.
+
+    **These are TEXT checks, not behaviour checks**, and the distinction is worth more
+    than it looks. Comparing the copies byte-for-byte means a mutant in any single copy
+    fails this class whatever the mutant does — so "the mutant died" says nothing about
+    whether that copy's behaviour is measured anywhere. What kills a mutant is the
+    reading, not that it was killed (#617, #621). The behaviour of ``factlog_config``'s
+    copy is measured by ``test_two_trees_produce_two_different_lines``, and of
+    ``common.py``'s by ``TestWhichTreeValidatePyImports`` above. No test measures
+    ``compile_facts.py``'s or ``literal_types.py``'s: the membership guard only changes
+    an outcome when ``_ROOT`` is ALREADY on ``sys.path`` behind another tree, and no test
+    drives either of those two in that shape — dropping it from them moves no behaviour
+    test (measured at 3e6aafc + #621, one wrapper at a time; the bootstrap comment in
+    ``tools/common.py`` carries all four runs).
     """
 
     def _block(self, path: Path) -> str:
@@ -571,13 +773,14 @@ class TestTheFourBootstrapsDoNotDrift:
         # bundle with ``=1`` set and nothing printed. See
         # ``test_a_broken_install_is_not_silently_routed_around``.
         assert 'importlib.util.find_spec("factlog") is None' in block
-        # The membership guard is what keeps ``test_two_trees_produce_two_different_lines``
-        # working — through ``factlog_config.py``'s copy, and only that one. That test
-        # fronts a tree on PYTHONPATH that already lists _ROOT, and without this line the
-        # insertion below would overtake it. Dropping the guard from ``common.py``,
-        # ``compile_facts.py`` or ``literal_types.py`` instead leaves that test green
-        # (measured at bb3909c, one wrapper at a time; the bootstrap comment in
-        # ``tools/factlog_config.py`` carries the numbers and the import-order reason).
+        # The membership guard is what keeps two behaviour tests working, one copy each:
+        # ``test_two_trees_produce_two_different_lines`` through ``factlog_config.py``'s,
+        # and ``TestWhichTreeValidatePyImports`` through ``common.py``'s. Both front a
+        # tree on PYTHONPATH that already lists _ROOT, and without this line the insertion
+        # below would overtake it. Dropping the guard from ``compile_facts.py`` or
+        # ``literal_types.py`` instead moves no behaviour test at all (measured at
+        # 3e6aafc + #621, one wrapper at a time; the bootstrap comment in
+        # ``tools/factlog_config.py`` carries the four runs and the import-order reason).
         # The assertion below is textual, so it fires for all four regardless of that.
         assert "if str(_ROOT) not in sys.path:" in block
 

@@ -36,27 +36,38 @@ from pathlib import Path
 # lookup also answers without executing the package, so a broken install fails later,
 # loudly, on its own terms instead of being silently routed around.
 #
-# The `not in sys.path` guard is load-bearing, not defensive — but the named test proves
-# that for exactly ONE of the four copies, and this block is byte-identical everywhere, so
-# the sentence has to say which. Measured at bb3909c by replacing this line with `if True:`
-# in one wrapper at a time and running `~/.factlog-venv/bin/python -m pytest tests/unit -q`:
+# The `not in sys.path` guard is load-bearing, not defensive — but WHICH test proves that
+# depends on the copy, and this block is byte-identical everywhere, so the sentence has to
+# say which. Measured at 3e6aafc + #621 by replacing this line with `if True:` in one
+# wrapper at a time and running `~/.factlog-venv/bin/python -m pytest tests/unit -q`
+# (baseline 6313 passed, 1 skipped):
 #
-#   factlog_config.py                          -> test_report_factlog_provenance.py::
+#   common.py          2 failed, 6311 passed -> test_prefer_installed.py::
+#     TestWhichTreeValidatePyImports::test_a_fronted_tree_wins_over_validate_s_own_root
+#     FAILS — the tools/validate.py path, which this copy decides alone (#621)
+#   factlog_config.py  2 failed, 6311 passed -> test_report_factlog_provenance.py::
 #     TestTwoTreesAreDistinguishable::test_two_trees_produce_two_different_lines FAILS
-#   common.py / compile_facts.py / literal_types.py
-#     -> that test passes and the suite stays 6288 passed, 1 skipped apart from
-#        test_prefer_installed.py::TestTheFourBootstrapsDoNotDrift, which compares this
-#        block as TEXT and therefore kills every single-file mutant whatever it does
+#   compile_facts.py   2 failed, 6311 passed -> no behaviour test moves
+#   literal_types.py   1 failed, 6312 passed -> no behaviour test moves
+#
+# Every other failure in those runs is test_prefer_installed.py::
+# TestTheFourBootstrapsDoNotDrift, which compares this block as TEXT and therefore kills
+# every single-file mutant whatever it does. "It died" is not the reading; what killed it
+# is. Drop the guard from all four at once and the byte-identical check goes quiet while
+# both behaviour tests above still fail (measured: 3 failed, 6310 passed, 1 skipped — the
+# third is test_the_block_is_the_real_one, which pins this line as a literal).
 #
 # The difference is import ORDER, not redundancy. run_logic_check.py — the script that
 # writes the report that test reads — imports factlog_config (its line 34) before common
 # (line 80), so `factlog` is already in sys.modules by the time the later copies run and a
-# late sys.path.insert cannot move it. Measured directly with the guard dropped in
-# common.py and PYTHONPATH fronting a second tree: importing `tools/common` FIRST resolves
-# factlog to this tree, importing it after factlog_config still resolves the fronted tree.
-# The copy that decides for tools/validate.py is common.py's (validate imports no
-# factlog_config), and no test measures that path today. Do not drop it, and do not
-# "always insert at 0".
+# late sys.path.insert cannot move it. Measured directly (re-measured at 3e6aafc) with the
+# guard dropped in common.py and PYTHONPATH fronting a second tree: importing `tools/common`
+# FIRST resolves factlog to this tree, importing it after factlog_config still resolves the
+# fronted tree. The copy that decides for tools/validate.py is common.py's — validate is the
+# only tools/ script importing no factlog_config (measured: `grep -c factlog_config` gives
+# validate 0, compile_facts 4, literal_types 4, merge_candidates 3, source_coverage 2) — and
+# TestWhichTreeValidatePyImports measures that path through validate's own output. Do not
+# drop it, and do not "always insert at 0".
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     if os.environ.get("FACTLOG_PREFER_INSTALLED") == "1":
