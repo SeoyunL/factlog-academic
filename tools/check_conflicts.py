@@ -103,7 +103,8 @@ def _representative(raws: set[str]) -> str:
     (U+AC00…), so ``min`` on a mixed group *always* returns the decomposed form —
     the one that will not match if the reader types or pastes the name into a
     search from an NFC editor. Preferring NFC makes the reported string the one
-    most likely to grep.
+    most likely to grep, and the full spelling list is printed alongside it for
+    the rows it cannot reach.
     """
     return min(raws, key=lambda s: (s != _fold(s), s))
 
@@ -170,6 +171,110 @@ def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     return ("raw", folded)
 
 
+def collect_conflicts(
+    facts: list[dict[str, str]],
+    single_valued: set[str],
+    typed: dict[str, TypedRelSpec] | None = None,
+    aliases: dict[str, str] | None = None,
+) -> tuple[
+    dict[tuple[str, str], list[str]],
+    dict[tuple[str, str], list[str]],
+    dict[tuple[str, str], dict[str, list[str]]],
+]:
+    """Return ``(conflicts, subject_variants, object_variants)``.
+
+    *conflicts* is exactly what ``detect_conflicts`` returns (see there).
+
+    The other two are symmetric spelling channels — folding merges strings on the
+    subject axis and on the object axis alike, and a reported representative
+    stands in for every spelling it absorbed on **both**:
+
+    * *subject_variants* maps each reported key to the sorted raw subject strings
+      merged under it;
+    * *object_variants* maps each reported key to ``{reported object: sorted raw
+      objects}`` for that key's value groups.
+
+    Either list holds one entry when nothing was merged. More than one means the
+    KB writes that string in several Unicode normalization forms, so the reported
+    representative does not grep to every row behind it — which is exactly what
+    the caller has to disclose.
+
+    These channels exist so ``main`` can report a merge without duplicating the
+    grouping logic, while ``detect_conflicts`` keeps its established return shape
+    (a large body of pinned tests asserts that dict directly).
+
+    **Subject axis folding (#325):** rows group under the NFC fold of the
+    subject, so a contradiction written with the subject NFC on one row and NFD
+    on another is detected instead of splitting into two singleton groups. That
+    split was an *unsound* false negative: the finalize gate passed KBs that do
+    contain a contradiction, and nobody ever saw it. Conversely the untyped
+    object axis folds too, so two objects that render identically stop being
+    reported as a contradiction the reader cannot act on.
+
+    The *reported* key preserves provenance: a raw subject actually seen for that
+    (folded subject, canonical relation) pair, chosen by ``_representative`` (NFC
+    spelling preferred, ties lexicographic — not a plain ``min``, see there). The
+    map is keyed per **pair**, never per folded subject globally — a global map
+    would rewrite the reported subject spelling of unrelated relations and break
+    byte-identity on inputs where folding merges nothing.
+
+    **Relation axis is out of scope (#325).** Folding it as well is mechanically
+    possible and the #210 pins survive it (representative restoration keeps the
+    reported relation verbatim), so "the pins forbid it" would be a false reason.
+    The real reason is scope: folding the relation axis changes *grouping*
+    semantics, and how far #210's "no silent NFC coercion for non-participating
+    relations" was meant to reach is a maintainer's call. Raised as a follow-up.
+
+    **Engine divergence (note only):** ``common.dedup_engine_atoms``
+    (``factlog/common.py:1277``) dedups on the **raw** ``(subject, relation,
+    object)`` triple, so the engine still writes an NFC-spelled and an NFD-spelled
+    subject into ``accepted.dl`` as two distinct entities. After this change the
+    checker therefore reports a contradiction the engine cannot see from
+    ``accepted.dl`` alone. For the gate that direction is safe — the checker is
+    the stricter of the two, so nothing slips through — but the engine-side
+    defect remains and is not addressed here.
+    """
+    typed = typed or {}
+    aliases = aliases or {}
+    # Precompute the set of canonical single-valued relation names so the
+    # per-row membership test is O(1).
+    sv = {_canonicalize(r, aliases) for r in single_valued}
+    # (folded subject, canonical_relation) -> group key -> set of raw objects.
+    by_key: dict[tuple[str, str], dict[tuple, set[str]]] = {}
+    # Same pair -> set of raw subject spellings folded into it.
+    raw_subjects: dict[tuple[str, str], set[str]] = {}
+    for row in engine_facts(facts):
+        relation = row["relation"]
+        canon = _canonicalize(relation, aliases)
+        if canon not in sv:
+            continue
+        obj = row["object"]
+        # Typed-spec lookup (#210), NOT a fold of the relation axis: the spec dict
+        # is keyed by NFC names, so the lookup normalizes to find it. The relation
+        # used for grouping stays `canon`, verbatim.
+        spec = typed.get(canon) or typed.get(_fold(relation))
+        key = _group_key(obj, spec)
+        pair = (_fold(row["subject"]), canon)
+        by_key.setdefault(pair, {}).setdefault(key, set()).add(obj)
+        raw_subjects.setdefault(pair, set()).add(row["subject"])
+    conflicts: dict[tuple[str, str], list[str]] = {}
+    subject_variants: dict[tuple[str, str], list[str]] = {}
+    object_variants: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for pair, groups in by_key.items():
+        if len(groups) <= 1:
+            continue
+        subjects = raw_subjects[pair]
+        # Representative restoration on both axes: report strings as written.
+        # Distinct folded subjects cannot share a representative (the choice is a
+        # function of the fold), so reported keys stay unique.
+        reported = (_representative(subjects), pair[1])
+        objects = {_representative(raws): sorted(raws) for raws in groups.values()}
+        conflicts[reported] = sorted(objects)
+        subject_variants[reported] = sorted(subjects)
+        object_variants[reported] = objects
+    return conflicts, subject_variants, object_variants
+
+
 def detect_conflicts(
     facts: list[dict[str, str]],
     single_valued: set[str],
@@ -213,31 +318,14 @@ def detect_conflicts(
     from the alias map), then falls back to the NFC form of the raw relation
     string.  This ensures that an NFD-authored relation that also participates in
     the alias map still reaches its typed spec, so equivalent notations (억↔조)
-    collapse correctly."""
-    typed = typed or {}
-    aliases = aliases or {}
-    # Precompute the set of canonical single-valued relation names so the
-    # per-row membership test is O(1).
-    sv = {_canonicalize(r, aliases) for r in single_valued}
-    # (subject, canonical_relation) -> group key -> set of raw object strings.
-    by_key: dict[tuple[str, str], dict[tuple, set[str]]] = {}
-    for row in engine_facts(facts):
-        relation = row["relation"]
-        canon = _canonicalize(relation, aliases)
-        if canon not in sv:
-            continue
-        obj = row["object"]
-        # Typed-spec lookup: try canonical name first (NFC by construction when
-        # it came from the alias map), then NFC of the raw relation (#210).
-        spec = typed.get(canon) or typed.get(unicodedata.normalize("NFC", relation))
-        key = _group_key(obj, spec)
-        groups = by_key.setdefault((row["subject"], canon), {})
-        groups.setdefault(key, set()).add(obj)
-    return {
-        key: sorted(_representative(raws) for raws in groups.values())
-        for key, groups in by_key.items()
-        if len(groups) > 1
-    }
+    collapse correctly.
+
+    **Unicode folding (#325):** the subject and untyped-object axes are folded to
+    NFC, and the reported strings are restored to raw spellings seen. Callers that
+    also need to know *which* raw spellings were merged should use
+    ``collect_conflicts``, which documents the grouping in full and returns those
+    maps alongside this dict."""
+    return collect_conflicts(facts, single_valued, typed, aliases)[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -251,25 +339,59 @@ def main(argv: list[str] | None = None) -> int:
         print("check_conflicts: no single-valued relations declared (policy/single-valued.md); nothing to check")
         return 0
 
-    conflicts = detect_conflicts(load_facts(), single_valued, typed_relations(), relation_aliases())
+    conflicts, subject_variants, object_variants = collect_conflicts(
+        load_facts(), single_valued, typed_relations(), relation_aliases()
+    )
     if not conflicts:
         print(f"check_conflicts: 0 conflicts across {len(single_valued)} single-valued relation(s)")
         return 0
 
     print(f"check_conflicts: {len(conflicts)} conflict(s) found", file=sys.stderr)
     aliases = relation_aliases()
-    for (subject, relation), objects in sorted(conflicts.items()):
+    # Whether folding merged spellings anywhere. This is an *extra* disclosure,
+    # never a replacement for the supersede guidance: a contradiction that a mixed
+    # spelling merely joined is still a contradiction, and unifying the spelling
+    # does not resolve it.
+    any_mixed = False
+    for key, objects in sorted(conflicts.items()):
+        subject, relation = key
         suffix = " (canonical; incl. surface variants)" if aliases and relation in set(aliases.values()) else ""
+        subjects = subject_variants[key]
+        if len(subjects) > 1:
+            suffix += f" (subject written in {len(subjects)} mixed Unicode normalization forms)"
         print(
             f"  CONFLICT: single-valued '{relation}'{suffix} on '{subject}' has "
             f"{len(objects)} values: {', '.join(objects)}",
             file=sys.stderr,
         )
+        # Print the spellings themselves, escaped: the whole difficulty of this
+        # class of conflict is that the strings render identically, so naming a
+        # count without the code points leaves the reader unable to act.
+        if len(subjects) > 1:
+            any_mixed = True
+            print(f"    subject spellings: {', '.join(ascii(s) for s in subjects)}", file=sys.stderr)
+        for obj in objects:
+            raws = object_variants[key][obj]
+            if len(raws) > 1:
+                any_mixed = True
+                print(
+                    f"    value {obj!r} spellings: {', '.join(ascii(r) for r in raws)}",
+                    file=sys.stderr,
+                )
     print(
         "  Resolve by marking the outdated row(s) status='superseded' in "
         "facts/candidates.csv, then re-run.",
         file=sys.stderr,
     )
+    if any_mixed:
+        print(
+            "  Some string(s) above were merged across Unicode normalization forms: they render "
+            "identically but differ byte-wise, so the reported spelling does not grep to every "
+            "row behind it (the spellings are listed under each conflict). Unify them to one "
+            "form in facts/candidates.csv as well — that is a separate repair from superseding, "
+            "and neither substitutes for the other.",
+            file=sys.stderr,
+        )
     return 1
 
 
