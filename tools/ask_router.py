@@ -464,11 +464,12 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     - path: a fully-quoted query returns the dependency path (or none); a query
       with a variable returns the reachable (start, target) pairs.
     - policy predicate: the inferred (entity, reason) rows from the engine,
-      optionally filtered by a quoted entity argument.
+      filtered by every quoted constant the query pins, at whatever argument
+      position it appears (see policy_row_matches).
 
     A truly unknown predicate raises NotImplementedError rather than returning 0
     rows, so a caller never mistakes an unsupported predicate for a verified
-    negative.
+    negative. A malformed count or policy query raises for the same reason.
     """
     predicate = _predicate_of(draft)
     args = query_args(draft)
@@ -533,6 +534,18 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # verified negative). Catch broad Exception — never BaseException, so
         # KeyboardInterrupt/SystemExit still propagate — because the engine may
         # raise non-FactlogError types.
+        # Guard arity BEFORE evaluating, like the count branch above (#257) and
+        # for the same reason: with a malformed query no constant lines up with a
+        # column, so the filter passes rows it cannot have checked — `pred("X")?`
+        # returned a filtered-looking count and `pred(E, R, "zzz")?` returned 0
+        # rows, which renders as a verified negative for a query classify_query
+        # already rejects as BAD_ARITY. classify_query rejects these too, so the
+        # render path never reaches here; the `evaluate` subcommand does, and
+        # cmd_evaluate turns NotImplementedError into a clean error JSON.
+        # run_logic_check drops the result line on the same shapes, so the report
+        # and ask agree that a malformed policy query has no answer.
+        if len(args) != 2:
+            raise NotImplementedError("policy query must have entity and reason arguments")
         try:
             inferred = run_wirelog()
         except Exception as exc:  # noqa: BLE001 — engine/loader raise non-FactlogError too

@@ -133,13 +133,24 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
 
 
 def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str | None:
-    """Render one policy query's result, or None when the query is unparseable.
+    """Render one policy query's result, or None when the query is malformed.
 
-    `query_args` returns [] for a line it cannot read (a missing trailing '?',
-    say). "No args" is not "no constants to honour" — it means the query was
-    never understood, so answering it with the predicate's whole extent invents
-    an answer for a line `validate_query` is reporting as an error in the same
-    report. Emitting nothing leaves the Errors section to speak.
+    The arity test is the SAME one validate_query applies to a policy query
+    (entity + reason, i.e. exactly 2 args), so a line the report is rejecting in
+    its Errors section never also receives an answer here. Three shapes reach
+    this function malformed, and each used to be answered:
+
+    - unparseable (no trailing '?'): `query_args` returns [], no constant is
+      pinned, so the filter passes everything -> the whole extent;
+    - `pred()?` -> one empty arg, likewise unfiltered -> the whole extent;
+    - `pred("Alice")?` / `pred("Alice", R, "zzz")?` -> wrong arity, filtered by
+      whatever constants happen to line up -> a plausible but meaningless count.
+
+    "No usable args" is not "no constants to honour" — it means the query was
+    never understood, so answering it invents an answer for a line the report is
+    simultaneously calling an error. Emitting nothing leaves the Errors section
+    to speak. ask_router.evaluate raises NotImplementedError on the same shapes,
+    so neither path answers a malformed policy query.
 
     The query is echoed ONLY when a quoted constant is pinned. Such a line and
     the "Policy evaluation:" extent line ("<pred>: N rows", the count over ALL
@@ -154,7 +165,7 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
     policy evaluation rather than the answer to any one query.
     """
     args = query_args(line)
-    if not args:
+    if len(args) != 2:
         return None
     rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
     values: list[str] = []
