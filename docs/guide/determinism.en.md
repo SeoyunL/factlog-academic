@@ -15,6 +15,15 @@ factlog enforces freshness through two distinct mechanisms:
 
 These two levels are complementary: the hook closes the deterministic gap; the SKILL discipline covers the narration layer where engineering enforcement is not possible.
 
+The hook denies for **one more reason** besides staleness. It reads the target
+path out of the tool payload Claude Code sends; if the call is a `Write`/`Edit`
+but the payload shape has changed such that no path can be read — so the write
+cannot be shown *not* to target an engine input — the hook denies rather than
+letting it through. Only in that situation can you skip the check with
+`FACTLOG_GATE_FAIL_OPEN=1` (the deny message names it); that variable does
+**not** release the staleness deny. If you hit it, please report the payload
+shape upstream.
+
 ### Scale & performance
 
 **You don't need to empty the KB for performance.** The logic-check cost depends
