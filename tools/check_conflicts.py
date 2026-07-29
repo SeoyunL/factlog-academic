@@ -73,6 +73,41 @@ def _canonicalize(relation: str, aliases: dict[str, str]) -> str:
     return relation
 
 
+def _fold(value: str) -> str:
+    """Return *value* under Unicode canonical composition (NFC).
+
+    NFC only — **not** NFKC and **not** casefold. NFC merges strings that are
+    *canonically equivalent*: the same abstract characters written with
+    precomposed vs decomposed code points. macOS filesystems and IMEs routinely
+    emit Hangul decomposed, so a KB assembled from mixed sources naturally
+    collects both spellings of one string. It does **not** merge compatibility
+    variants (fullwidth ``ＡＢＣ`` stays distinct from ``ABC``) nor case — those
+    are genuinely different values and must keep firing a conflict.
+
+    ``common._canonical_value`` is deliberately *not* reused: it layers
+    amount-quote normalization on top of the Unicode fold, which would perturb
+    the typed-literal key space this module builds through ``literal_types``.
+    """
+    return unicodedata.normalize("NFC", value)
+
+
+def _representative(raws: set[str]) -> str:
+    """Return the string reported on behalf of a folded group of *raws*.
+
+    Deterministic, and always one of the strings as written (provenance). Where
+    the group holds several normalization forms, the **composed (NFC)** spelling
+    wins; ties break lexicographically.
+
+    Plain ``min`` would be deterministic too, but it picks the wrong member in
+    practice: Hangul conjoining jamo (U+1100…) sort below precomposed syllables
+    (U+AC00…), so ``min`` on a mixed group *always* returns the decomposed form —
+    the one that will not match if the reader types or pastes the name into a
+    search from an NFC editor. Preferring NFC makes the reported string the one
+    most likely to grep.
+    """
+    return min(raws, key=lambda s: (s != _fold(s), s))
+
+
 def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     """Return the equivalence key an *object* string is grouped under.
 
@@ -108,12 +143,31 @@ def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     < 2**63`` guard). So this checker may group under a scalar the engine would
     drop. That affects **grouping only** (never insertion) and is harmless: the
     checker is strictly more willing to merge equivalents, never less. No behaviour
-    change here — note only."""
+    change here — note only.
+
+    **Unicode folding (#325):** *obj* is NFC-folded **once, on entry**, and the
+    folded string feeds *both* the typed ``normalize`` call and the raw fallback.
+    Folding before ``normalize`` is required, not cosmetic. An NFD-authored typed
+    literal fails to parse — ``normalize("amount", NFD('amount(5400,"억")'), units)``
+    and ``normalize("ordinal", NFD("제3호"), None)`` both return ``None`` — so it
+    degrades to ``("raw", …)`` while its NFC twin keys as ``("scalar", …)``. The
+    two tags never meet, and folding only the fallback would not reach them.
+    Typed relations are in fact the *more* exposed axis, since amount and ordinal
+    units are Hangul (억/조/호/위/번/차). The ``scalar``/``raw`` tag split itself is
+    correct and unchanged.
+
+    Consequence, stated plainly: an **all-NFD typed KB can change output**. Two
+    NFD rows that previously degraded to distinct raw strings now parse and may
+    collapse onto one scalar. That is not a regression — it is #116's cross-
+    notation equivalence (억↔조) starting to work on that KB for the first time.
+    The invariant held here is the one the issue asks for: an **NFC-only** KB is
+    byte-identical."""
+    folded = _fold(obj)
     if spec is not None:
-        scalar = literal_types.normalize(spec.type, obj, spec.units)
+        scalar = literal_types.normalize(spec.type, folded, spec.units)
         if scalar is not None:
             return ("scalar", scalar)
-    return ("raw", obj)
+    return ("raw", folded)
 
 
 def detect_conflicts(
@@ -130,8 +184,8 @@ def detect_conflicts(
     available, else the raw string — see ``_group_key``), so equivalent typed
     notations do not false-positive. The reported values, however, preserve the
     original object strings (provenance): each distinct key contributes one
-    deterministic representative (the lexicographically smallest raw object seen
-    for it). Deterministic; never raises.
+    deterministic representative (an object seen for it, chosen by
+    ``_representative``). Deterministic; never raises.
 
     Two grouping subtleties documented on ``_group_key``: ordinal collapses
     cross-unit notations onto the shared rank (rank-only contract, #218/#224 A),
@@ -180,7 +234,7 @@ def detect_conflicts(
         groups = by_key.setdefault((row["subject"], canon), {})
         groups.setdefault(key, set()).add(obj)
     return {
-        key: sorted(min(raws) for raws in groups.values())
+        key: sorted(_representative(raws) for raws in groups.values())
         for key, groups in by_key.items()
         if len(groups) > 1
     }
