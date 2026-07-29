@@ -17,6 +17,37 @@ only in this first cut: ``원/천/만/억/조``). Amounts compare in integer bas
 a sub-base-unit fraction is rounded to the nearest int (ROUND_HALF_UP). The engine
 has no float column, so the base-unit value MUST be an exact integer — see
 ``parse_amount``.
+
+**Digits are ASCII-only.** Python's ``\\d`` matches the whole Unicode ``Nd``
+category, so a full-width ``１００억`` used to parse to the *same scalar* as
+``100억`` while ``relation/3`` kept the differing object string — one value with
+three different answers to "is this the same?" depending on the code path. The
+policy is **reject, not fold**: every numeric group below is spelled ``[0-9]``,
+so a full-width value takes the ordinary "does not parse -> untyped" path and
+surfaces as a typed-projection warning instead of merging silently. Rewriting the
+stored string would have been the silent fold this repo consistently refuses.
+
+Three call sites outside this module change behaviour as a consequence. All three
+are intended, and none of them rewrites data:
+
+- ``tools/merge_candidates.py`` dedup key — ``canonical_amount`` returns ``None``
+  for a full-width term, so ``amount(１００,억)`` and ``amount(１００,"억")`` stay
+  two rows instead of collapsing into one. Collapsing them is exactly the fold
+  this policy rejects.
+- ``common._canonical_value`` — a fact already stored as ``amount(１００,"억")``
+  in an existing KB is no longer canonicalised, so a query written as
+  ``amount(１００,억)`` misses it. Intended: under this policy ``amount(１００,억)``
+  is not a valid amount term at all, so there is no canonical form to map it to.
+  The fix is to correct the source to ASCII and re-collect, not to fold here.
+- ``humanize`` — a full-width compound term is now returned verbatim rather than
+  rendered as ``１００억``.
+
+Residual symptom, NOT fixed here: the warning only fires for relations **declared
+typed**. ``common._project_typed_relations`` skips a relation with no typed spec
+without warning, so a full-width value under a relation that is declared as an
+attribute but not typed still surfaces nowhere — ``tools/entity_audit.py`` lists
+``declared_literals`` as an unflagged sorted list, and ``100억`` / ``１００억``
+sort far apart in it.
 """
 from __future__ import annotations
 
@@ -41,7 +72,13 @@ DEFAULT_AMOUNT_UNITS: dict[str, int] = {
     "조": 10**12,
 }
 
-_DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
+# Every numeric group below is written ``[0-9]``, never ``\d`` — see the ASCII-only
+# paragraph in the module docstring. Do NOT reach for ``re.ASCII`` to get the same
+# effect: the flag also narrows ``\s``, and U+3000 (ideographic space) inside
+# ``date(2020,<U+3000>1)`` would silently stop parsing. The ``\D+`` unit group in
+# ``_AMOUNT_RE`` needs no change: ``\D`` is the complement of ``Nd``, so it already
+# excludes full-width digits (``1２3억`` therefore does not match either half).
+_DATE_RE = re.compile(r"^([0-9]{4})[.\-/]([0-9]{1,2})(?:[.\-/]([0-9]{1,2}))?$")
 # The compound form is year-precision friendly: month AND day are optional, so
 # ``date(2020)`` parses (a bibliographic record normally knows only the year).
 # This mirrors the prose path, where a missing day already defaults to ``01``
@@ -50,29 +87,29 @@ _DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
 # it is indistinguishable from a plain number, so only the explicitly typed
 # compound term opts into year precision.
 _DATE_COMPOUND_RE = re.compile(
-    r"^date\(\s*(\d{4})(?:\s*,\s*(\d{1,2})(?:\s*,\s*(\d{1,2}))?)?\s*\)$",
+    r"^date\(\s*([0-9]{4})(?:\s*,\s*([0-9]{1,2})(?:\s*,\s*([0-9]{1,2}))?)?\s*\)$",
     re.IGNORECASE,
 )
-_NUMBER_RE = re.compile(r"^-?\d[\d,]*(?:\.\d+)?$")
+_NUMBER_RE = re.compile(r"^-?[0-9][0-9,]*(?:\.[0-9]+)?$")
 _NUMBER_COMPOUND_RE = re.compile(
-    r"^number\(\s*\"?(-?\d[\d,]*(?:\.\d+)?)\"?\s*\)$",
+    r"^number\(\s*\"?(-?[0-9][0-9,]*(?:\.[0-9]+)?)\"?\s*\)$",
     re.IGNORECASE,
 )
-_ORDINAL_KO_RE = re.compile(r"^제?(\d+)\s*(?:호|위|번|차|등|째)$")
-_ORDINAL_EN_RE = re.compile(r"^(\d+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
-_ORDINAL_COMPOUND_RE = re.compile(r"^ordinal\(\s*(\d+)\s*\)$", re.IGNORECASE)
+_ORDINAL_KO_RE = re.compile(r"^제?([0-9]+)\s*(?:호|위|번|차|등|째)$")
+_ORDINAL_EN_RE = re.compile(r"^([0-9]+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
+_ORDINAL_COMPOUND_RE = re.compile(r"^ordinal\(\s*([0-9]+)\s*\)$", re.IGNORECASE)
 # <number><unit>, contiguous OR a single space between them. The number part is a
 # plain/comma/decimal magnitude with an OPTIONAL leading sign (a loss/credit may be
 # negative); the unit is validated against the table by the caller. A leading `제`
 # (ordinal marker) can't match because the `num` group is anchored to an optional
-# sign + leading digit (`^-?\d…`), so `제3호`-style ordinals never match (the first
-# char `제` is neither `-` nor a digit → no match).
-_AMOUNT_RE = re.compile(r"^(?P<num>-?\d[\d,]*(?:\.\d+)?) ?(?P<unit>\D+)$")
+# sign + leading digit (`^-?[0-9]…`), so `제3호`-style ordinals never match (the
+# first char `제` is neither `-` nor a digit → no match).
+_AMOUNT_RE = re.compile(r"^(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?) ?(?P<unit>\D+)$")
 # Compound amount: the unit may be quoted ("...", allowing spaces and commas) or
 # bare (no comma/paren/quote). The number is optionally quoted. Canonicalisation
 # always emits the quoted unit form (see ``canonical_amount``).
 _AMOUNT_COMPOUND_RE = re.compile(
-    r'^amount\(\s*"?(?P<num>-?\d[\d,]*(?:\.\d+)?)"?\s*,\s*'
+    r'^amount\(\s*"?(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?)"?\s*,\s*'
     r'(?:"(?P<qunit>[^"]*)"|(?P<unit>[^,)"]+))\s*\)$',
     re.IGNORECASE,
 )
@@ -250,7 +287,12 @@ def canonical_amount(raw: str) -> str | None:
     reaches ``facts/accepted.dl`` as ``"amount(7,\\"억\\")"`` and loads cleanly.
     Both the bare (``amount(7,억)``) and quoted (``amount(7,"억")``) input forms
     canonicalise to the same quoted output, so a re-merge is idempotent and the
-    dedup key collapses the two."""
+    dedup key collapses the two.
+
+    A full-width number (``amount(１００,억)``) is not an amount compound term, so
+    it returns ``None`` and the two spellings stay separate rows in the
+    ``tools/merge_candidates.py`` dedup key — the intended consequence of the
+    ASCII-only digit policy (see the module docstring)."""
     m = _AMOUNT_COMPOUND_RE.match(raw.strip())
     if not m:
         return None
@@ -298,7 +340,9 @@ def humanize(value: str) -> str:
     ``ordinal(N)`` is intentionally NOT humanized: the source unit (호/위/번) is
     lost at normalization, so a bare rank would be ambiguous. Any non-compound or
     unrecognized string is returned verbatim, so a KB that emits no compound
-    objects is byte-identical."""
+    objects is byte-identical. A full-width term (``amount(１００,"억")``) is not
+    recognized under the ASCII-only digit policy, so it too comes back verbatim
+    rather than rendered."""
     text = value.strip()
     m = _DATE_COMPOUND_RE.match(text)
     if m:
