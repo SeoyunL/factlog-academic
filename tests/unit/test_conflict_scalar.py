@@ -155,6 +155,54 @@ class TestUnparseableDegrades:
         assert conflicts[("갑사", "매출")] == ["540000000000", 'amount(5400,"억")']
 
 
+class TestFullWidthDegradesToRaw:
+    """The migration risk of the ASCII-only digit policy (#331), pinned.
+
+    Full-width digits stopped parsing, so a full-width object degrades to the
+    ``("raw", obj)`` key while its ASCII twin keys as ``("scalar", …)``. Under a
+    single-valued relation that is **two values**, so a KB carrying both
+    spellings now reports a CONFLICT and ``main`` returns 1 where it used to
+    return 0. That gate flip is the one user-visible break this policy causes and
+    it is intended: the resolution is to correct the source to ASCII and
+    re-collect, NOT to fold full-width to ASCII in ``_group_key``. These tests
+    fail if such a fold is ever added, which is the point of having them —
+    ``docs/reference/typed-relations.md`` documents the same contract.
+    """
+
+    def test_full_width_amount_keys_raw_not_scalar(self):
+        assert check_conflicts._group_key("100억", _AMOUNT_SPEC) == ("scalar", 10000000000)
+        assert check_conflicts._group_key("１００억", _AMOUNT_SPEC) == ("raw", "１００억")
+
+    def test_full_width_and_ascii_twin_conflict(self):
+        # The same value in two spellings is now two values -> CONFLICT (exit 1).
+        facts = [
+            _fact("갑사", "매출", "100억"),
+            _fact("갑사", "매출", "１００억"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
+        # Reported values keep the original object strings (provenance), so a
+        # reviewer can see which row carries the full-width digits.
+        assert conflicts[("갑사", "매출")] == ["100억", "１００억"]
+
+    def test_full_width_date_and_ascii_twin_conflict(self):
+        facts = [
+            _fact("기서비스", "출시", "2030.1"),
+            _fact("기서비스", "출시", "２０３０.１"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"출시"}, _TYPED_DATE)
+        assert conflicts[("기서비스", "출시")] == ["2030.1", "２０３０.１"]
+
+    def test_full_width_alone_is_not_a_conflict(self):
+        # Degrading to raw must not invent a conflict out of one repeated value:
+        # only a KB that carries BOTH spellings flips from green to red.
+        facts = [
+            _fact("갑사", "매출", "１００억"),
+            _fact("갑사", "매출", "１００억"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
+        assert conflicts == {}
+
+
 class TestMultiValuedNotFlagged:
     def test_relation_not_single_valued_never_conflicts(self):
         # Not declared single-valued -> ignored entirely, even with typed spec.
