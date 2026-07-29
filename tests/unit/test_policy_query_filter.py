@@ -24,6 +24,7 @@ test would read the developer's real knowledge base.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import pytest
 
@@ -96,12 +97,8 @@ class TestPolicyResultLineFiltersFixedEntity:
         assert _row_count(line) == 3
         assert "E=Alice, R=low_conf" in line
 
-    def test_empty_row_dropped_when_a_constant_is_pinned(self):
-        # A 0-arity row cannot satisfy a pinned constant, so it is filtered out;
-        # an all-variable query keeps reporting it, as before.
-        inferred = {PREDICATE: {(), ("Alice", "low_conf")}}
-        assert _report_rows(f'{PREDICATE}("Alice", R)?', inferred) == 1
-        assert _report_rows(f"{PREDICATE}(E, R)?", inferred) == 2
+    # The 0-arity row case lives in TestReportRouterParity: asserting it on the
+    # report alone let a router that dropped its short-row guard survive.
 
 
 class TestReportRouterParity:
@@ -133,3 +130,38 @@ class TestReportRouterParity:
         assert report_rows == expected
         assert router_rows == expected
         assert report_rows == router_rows
+
+    def test_zero_arity_row_is_dropped_by_both_paths(self, monkeypatch):
+        # The cases above are all 2-column rows, so neither path's short-row
+        # guard is exercised by them: a router that dropped the guard kept
+        # passing. A 0-arity row cannot satisfy a pinned constant, on EITHER path.
+        inferred = {PREDICATE: {(), ("Alice", "low_conf")}}
+        pinned = f'{PREDICATE}("Alice", R)?'
+        assert _report_rows(pinned, inferred) == 1
+        assert _router_rows(monkeypatch, pinned, inferred) == 1
+        # Non-vacuous: the empty row IS in the extent both paths start from, so
+        # the 1 above is a filter result, not an absent row.
+        variables = f"{PREDICATE}(E, R)?"
+        assert _report_rows(variables, inferred) == 2
+        assert _router_rows(monkeypatch, variables, inferred) == 2
+
+    def test_nfd_stored_entity_does_not_meet_an_nfc_query_on_either_path(self, monkeypatch):
+        # Pins CURRENT behaviour, not desired behaviour: both paths compare raw
+        # values, so an NFD-stored entity is invisible to an NFC-typed constant
+        # and the query reports 0 rows — which reads as a verified negative. That
+        # is a known gap (see #213 and policy_row_matches' docstring); what this
+        # test forbids is FIXING IT ON ONE PATH ONLY, which would put the report
+        # and ask back into disagreement. The cases above are ASCII-only, so a
+        # router that folded to NFC on its own kept passing them.
+        nfd = unicodedata.normalize("NFD", "박수영")
+        nfc = unicodedata.normalize("NFC", "박수영")
+        assert nfd != nfc
+        inferred = {PREDICATE: {(nfd, "stale")}}
+        nfc_query = f'{PREDICATE}("{nfc}", R)?'
+        assert _report_rows(nfc_query, inferred) == 0
+        assert _router_rows(monkeypatch, nfc_query, inferred) == 0
+        # Non-vacuous: the row is reachable — an NFD-typed constant finds it on
+        # both paths, so the 0 above is the folding gap and not an empty extent.
+        nfd_query = f'{PREDICATE}("{nfd}", R)?'
+        assert _report_rows(nfd_query, inferred) == 1
+        assert _router_rows(monkeypatch, nfd_query, inferred) == 1
