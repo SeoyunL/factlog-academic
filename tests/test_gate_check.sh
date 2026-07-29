@@ -43,6 +43,29 @@ run_case() {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: run gate for a given KB root with a VERBATIM payload and expected exit.
+# Used by the envelope cases (#323), where the payload shape is the thing under
+# test and cannot be derived from a path alone.
+# ---------------------------------------------------------------------------
+run_payload_case() {
+  local desc="$1"
+  local kb_root="$2"
+  local payload="$3"
+  local expected_exit="$4"
+
+  local actual_exit=0
+  FACTLOG_ROOT="$kb_root" bash "$GATE" <<< "$payload" >/dev/null 2>&1 || actual_exit=$?
+
+  if [ "$actual_exit" -eq "$expected_exit" ]; then
+    echo "PASS: $desc (exit $actual_exit)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc — expected exit $expected_exit, got $actual_exit"
+    fail=$((fail + 1))
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Setup helpers
 # ---------------------------------------------------------------------------
 make_kb() {
@@ -467,6 +490,230 @@ else
   fail=$((fail + 1))
 fi
 rm -rf "$KB_OK" "$ok_err"
+
+# ===========================================================================
+# CASES 18-33: REAL HOOK ENVELOPE (#323)
+#
+# Claude Code does not send the bare tool input; it sends an envelope with the
+# tool input nested under `tool_input`. CASES 1-17 above all use the FLAT
+# fixture shape, which no production payload has, so before the #323 fix the
+# gate returned exit 0 for every envelope payload — the freshness guard never
+# fired in production and the harness never noticed.
+#
+# Each case below is labelled with its PRE-FIX result. "vacuous pre-fix" means
+# the old gate passed the case only because it allowed everything; those cases
+# pin behaviour but are NOT evidence of the defect. The cases that genuinely
+# failed before the fix are marked "PRE-FIX FAIL".
+# ===========================================================================
+
+kb_no_report() {
+  # Existing engine input, no report → the stale-guard must DENY.
+  local root="$1"
+  make_kb "$root"
+  touch_file "$root/facts/accepted.dl"
+}
+
+kb_stale() {
+  # Report older than accepted.dl → DENY.
+  local root="$1"
+  make_kb "$root"
+  touch_file "$root/facts/logic_report.txt"
+  set_mtime_past "$root/facts/logic_report.txt"
+  touch_file "$root/facts/accepted.dl"
+}
+
+kb_fresh() {
+  # Report newer than accepted.dl → ALLOW.
+  local root="$1"
+  make_kb "$root"
+  touch_file "$root/facts/accepted.dl"
+  set_mtime_past "$root/facts/accepted.dl"
+  touch_file "$root/facts/logic_report.txt"
+}
+
+envelope() {
+  # The payload Claude Code actually sends for a Write/Edit PreToolUse hook.
+  local tool_name="$1"
+  local target="$2"
+  printf '{"session_id":"s","cwd":"/tmp","hook_event_name":"PreToolUse","tool_name":"%s","tool_input":{"file_path":"%s","content":"x"},"tool_use_id":"u"}' \
+    "$tool_name" "$target"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 18: envelope, existing engine input, report absent — DENY.
+# PRE-FIX FAIL (old gate returned 0). This is the issue's core reproduction.
+# ---------------------------------------------------------------------------
+KB_ENV1="$(mktemp -d)"
+kb_no_report "$KB_ENV1"
+run_payload_case "envelope: engine input, report absent — deny" \
+  "$KB_ENV1" "$(envelope Write "$KB_ENV1/facts/accepted.dl")" 2
+rm -rf "$KB_ENV1"
+
+# ---------------------------------------------------------------------------
+# CASE 19: envelope, report stale — DENY.
+# PRE-FIX FAIL (old gate returned 0).
+# ---------------------------------------------------------------------------
+KB_ENV2="$(mktemp -d)"
+kb_stale "$KB_ENV2"
+run_payload_case "envelope: engine input, report stale — deny" \
+  "$KB_ENV2" "$(envelope Edit "$KB_ENV2/facts/accepted.dl")" 2
+rm -rf "$KB_ENV2"
+
+# ---------------------------------------------------------------------------
+# CASE 20: envelope, report fresh — ALLOW (acceptance criterion; vacuous pre-fix).
+# ---------------------------------------------------------------------------
+KB_ENV3="$(mktemp -d)"
+kb_fresh "$KB_ENV3"
+run_payload_case "envelope: engine input, report fresh — allow" \
+  "$KB_ENV3" "$(envelope Write "$KB_ENV3/facts/accepted.dl")" 0
+rm -rf "$KB_ENV3"
+
+# ---------------------------------------------------------------------------
+# CASE 21: envelope bootstrap — fresh KB creating query.dl — ALLOW.
+# Acceptance criterion; vacuous pre-fix. Guards against a fix that denies the
+# first write in a fresh KB and deadlocks the question→query-draft flow.
+# ---------------------------------------------------------------------------
+KB_ENV4="$(mktemp -d)"
+make_kb "$KB_ENV4"
+run_payload_case "envelope: bootstrap fresh KB creating query.dl — allow" \
+  "$KB_ENV4" "$(envelope Write "$KB_ENV4/facts/query.dl")" 0
+rm -rf "$KB_ENV4"
+
+# ---------------------------------------------------------------------------
+# CASE 22: envelope, target is not an engine input — ALLOW (vacuous pre-fix).
+# ---------------------------------------------------------------------------
+KB_ENV5="$(mktemp -d)"
+kb_stale "$KB_ENV5"
+run_payload_case "envelope: non-engine-input target in a stale KB — allow" \
+  "$KB_ENV5" "$(envelope Write "$KB_ENV5/notes.md")" 0
+rm -rf "$KB_ENV5"
+
+# ---------------------------------------------------------------------------
+# CASE 23: NARROW FAIL-CLOSED — write-class tool, `tool_input` IS an object, but
+# it carries no known path key — DENY.
+# PRE-FIX FAIL (old gate returned 0).
+#
+# This is the schema-drift branch: the payload is a write we cannot evaluate, so
+# we cannot show it misses the engine inputs.
+# ---------------------------------------------------------------------------
+KB_ENV6="$(mktemp -d)"
+kb_stale "$KB_ENV6"
+run_payload_case "envelope: Write with no path key in tool_input — fail-closed deny" \
+  "$KB_ENV6" '{"tool_name":"Write","tool_input":{"content":"x"}}' 2
+
+# ---------------------------------------------------------------------------
+# CASE 24: the fail-closed branch requires a write-class `tool_name`. With NO
+# tool_name (the shape CASES 1-17 send) the gate must ALLOW — otherwise the
+# entire flat harness flips to DENY. Vacuous pre-fix; kills a mutant that denies
+# on every empty path.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: no tool_name, no path key — allow (not a known write)" \
+  "$KB_ENV6" '{"tool_input":{"content":"x"}}' 0
+
+# ---------------------------------------------------------------------------
+# CASE 25: tool_name outside the write-class list — ALLOW (vacuous pre-fix).
+# Pins the exact-match small list: a user who widens the matcher in their own
+# settings.json must not have unrelated tools denied.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: non-write tool_name, no path key — allow" \
+  "$KB_ENV6" '{"tool_name":"Read","tool_input":{"content":"x"}}' 0
+rm -rf "$KB_ENV6"
+
+# ---------------------------------------------------------------------------
+# CASE 26: KEY PRECEDENCE — `tool_input.file_path` wins over a top-level
+# `file_path`. Here the nested path IS the engine input and the top-level one is
+# not, so the gate must DENY. PRE-FIX FAIL (old gate read the top level → 0).
+# ---------------------------------------------------------------------------
+KB_ENV7="$(mktemp -d)"
+kb_stale "$KB_ENV7"
+run_payload_case "envelope: tool_input.file_path wins over top-level — deny" \
+  "$KB_ENV7" \
+  "$(printf '{"tool_name":"Write","file_path":"%s","tool_input":{"file_path":"%s"}}' \
+      "$KB_ENV7/notes.md" "$KB_ENV7/facts/accepted.dl")" 2
+
+# ---------------------------------------------------------------------------
+# CASE 27: the same precedence in the opposite direction — the nested path is
+# NOT an engine input while the top-level one is, so the gate must ALLOW.
+# PRE-FIX FAIL (old gate read the top level → 2). Together with CASE 26 this
+# pins the precedence in both directions; either case alone is passed by an
+# implementation that simply merges the two dicts.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: top-level file_path ignored when tool_input has one — allow" \
+  "$KB_ENV7" \
+  "$(printf '{"tool_name":"Write","file_path":"%s","tool_input":{"file_path":"%s"}}' \
+      "$KB_ENV7/facts/accepted.dl" "$KB_ENV7/notes.md")" 0
+
+# ---------------------------------------------------------------------------
+# CASE 28: top-level FALLBACK is still consulted when `tool_input` carries no
+# path key. No production payload has a top-level file_path; this keeps the flat
+# fixture shape of CASES 1-17 working. Vacuous pre-fix.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: falls back to top-level file_path — deny" \
+  "$KB_ENV7" \
+  "$(printf '{"file_path":"%s","tool_input":{"content":"x"}}' "$KB_ENV7/facts/accepted.dl")" 2
+
+# ---------------------------------------------------------------------------
+# CASES 29-31: `tool_input` present but NOT an object (null / string / array).
+# That is not the narrow fail-closed condition, so the gate must ALLOW rather
+# than deny — and, more importantly, the extractor must not die partway through
+# and leave the shell reading a truncated record. Vacuous pre-fix; these are the
+# cases that kill an extractor which calls .get() on a non-dict.
+#
+# CASE 31 deliberately hides an engine-input path inside an ARRAY: a path is
+# only honoured from an object, so this must still ALLOW.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: tool_input is null — allow (not the fail-closed shape)" \
+  "$KB_ENV7" '{"tool_name":"Write","tool_input":null}' 0
+run_payload_case "envelope: tool_input is a string — allow (not the fail-closed shape)" \
+  "$KB_ENV7" '{"tool_name":"Write","tool_input":"oops"}' 0
+run_payload_case "envelope: tool_input is an array — allow (not the fail-closed shape)" \
+  "$KB_ENV7" \
+  "$(printf '{"tool_name":"Write","tool_input":[{"file_path":"%s"}]}' "$KB_ENV7/facts/accepted.dl")" 0
+
+# ---------------------------------------------------------------------------
+# CASE 32: MUTATION PIN (vacuous pre-fix) — the engine-input path appears only
+# inside `content`, while the actual target is an unrelated file → ALLOW.
+#
+# A grep-the-whole-payload "fix" (the shape hooks/gate_reminder.sh:17 uses for
+# its non-blocking nudge) would DENY here and make every write that merely
+# mentions facts/accepted.dl unblockable without a logic check.
+# ---------------------------------------------------------------------------
+run_payload_case "envelope: engine-input path only inside content — allow (no payload grep)" \
+  "$KB_ENV7" \
+  "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":"see %s"}}' \
+      "$KB_ENV7/notes.md" "$KB_ENV7/facts/accepted.dl")" 0
+
+# ---------------------------------------------------------------------------
+# CASE 33: FACTLOG_GATE_FAIL_OPEN=1 escape hatch.
+#
+# (a) It releases the narrow schema-drift deny of CASE 23 — without an escape
+#     hatch, a payload-schema change turns this gate into a global Write/Edit
+#     outage, and the deny stderr is fed back to the model as a retry loop.
+# (b) It must NOT release the freshness deny, which is the gate's whole purpose.
+# Vacuous pre-fix for (a); PRE-FIX FAIL for (b) (old gate returned 0).
+# ---------------------------------------------------------------------------
+hatch_exit=0
+FACTLOG_GATE_FAIL_OPEN=1 FACTLOG_ROOT="$KB_ENV7" bash "$GATE" \
+  <<< '{"tool_name":"Write","tool_input":{"content":"x"}}' >/dev/null 2>&1 || hatch_exit=$?
+if [ "$hatch_exit" -eq 0 ]; then
+  echo "PASS: FACTLOG_GATE_FAIL_OPEN=1 releases the schema-drift deny (exit $hatch_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: FACTLOG_GATE_FAIL_OPEN=1 — expected allow (exit 0), got $hatch_exit"
+  fail=$((fail + 1))
+fi
+
+hatch_fresh_exit=0
+FACTLOG_GATE_FAIL_OPEN=1 FACTLOG_ROOT="$KB_ENV7" bash "$GATE" \
+  <<< "$(envelope Write "$KB_ENV7/facts/accepted.dl")" >/dev/null 2>&1 || hatch_fresh_exit=$?
+if [ "$hatch_fresh_exit" -eq 2 ]; then
+  echo "PASS: FACTLOG_GATE_FAIL_OPEN=1 does NOT release the freshness deny (exit $hatch_fresh_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: FACTLOG_GATE_FAIL_OPEN=1 — freshness deny must still fire (exit 2), got $hatch_fresh_exit"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_ENV7"
 
 # ---------------------------------------------------------------------------
 # Summary
