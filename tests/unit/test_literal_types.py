@@ -378,6 +378,26 @@ class TestLiteralReConsistency:
         assert _LITERAL_RE.match(raw), f"entity_audit no longer detects {raw!r}"
         assert lt.normalize(type_tag, raw) == expected
 
+    @pytest.mark.parametrize("raw,type_tag", [
+        ("１００억", "amount"),
+        ("２０２６", "number"),
+        ("제３호", "ordinal"),
+        ("２０３０.１", "date"),
+    ])
+    def test_full_width_divergence_is_intended(self, raw, type_tag):
+        """The two must NOT be made consistent for full-width digits (#331).
+
+        entity_audit's detector is a loose smell test; these normalizers are a
+        strict ASCII-only contract. That divergence is load-bearing: a relation
+        that is not declared an attribute puts a matching object into
+        ``literal_suspects``, which is the second user-visible path a rejected
+        full-width value takes. Narrowing ``_LITERAL_RE`` to ``[0-9]`` "for
+        consistency" would silently close it — so pin both halves together.
+        """
+        from entity_audit import _LITERAL_RE
+        assert _LITERAL_RE.match(raw), f"entity_audit must still SEE {raw!r}"
+        assert lt.normalize(type_tag, raw) is None, f"{raw!r} must NOT parse"
+
 
 class TestFullWidthDigitsRejected:
     """ASCII-only digits (#331). Python's ``\\d`` covers the whole Unicode ``Nd``
