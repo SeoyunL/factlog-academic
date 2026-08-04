@@ -1723,7 +1723,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         extra = [f"{s}={n}" for s, n in by_status.items() if s not in order]
         print(f"  facts:      {len(facts)} candidate(s) [{', '.join(seen + extra)}]; {len(engine_rows)} engine fact(s)")
     else:
-        print("  facts:      none (no facts/candidates.csv — run /factlog sync)")
+        # Empty row list has two causes and `init` now makes the first one the
+        # normal first-run state, so they must read differently: a scaffolded
+        # ledger holds zero rows, while an absent one is a breakage validate
+        # reports as an error (#327).
+        why = "0 rows" if ctx.candidates_csv.is_file() else "no facts/candidates.csv"
+        print(f"  facts:      none ({why} — run /factlog sync)")
 
     # Vocabulary
     attr = ctx.attribute_relations()
