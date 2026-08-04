@@ -142,19 +142,22 @@ seed_dup() {  # $1 = KB path, $2 = path|legacy
 }
 
 # A KB whose flat conversion really did come from an original outside sources/:
-# nothing under sources/ bears that basename, so the pairing is unambiguous.
+# no original *anywhere* under sources/ bears that basename, so the pairing is
+# unambiguous. The mirrored pair deliberately uses a different filename — give
+# it the same one and the flat conversion becomes attributable to it instead,
+# which is the ambiguity the guard refuses.
 seed_outside() {  # $1 = KB path
   local kb="$1"
   "$PYTHON" -m factlog init --target "$kb" >/dev/null
   mkdir -p "$kb/sources/sub" "$kb/runs/sources/sub"
-  printf '<html>nested</html>\n' > "$kb/sources/sub/report.html"
+  printf '<html>nested</html>\n' > "$kb/sources/sub/other.html"
   printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\noutside\n' \
     > "$kb/runs/sources/report.html.md"
-  printf '<!-- ingested-by-factlog | source: sub/report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nnested\n' \
-    > "$kb/runs/sources/sub/report.html.md"
+  printf '<!-- ingested-by-factlog | source: sub/other.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nnested\n' \
+    > "$kb/runs/sources/sub/other.html.md"
   printf '%s\n%s\n%s\n' "$H" \
     'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' \
-    'C,rel,D,runs/sources/sub/report.html.md,confirmed,0.9,' > "$kb/facts/candidates.csv"
+    'C,rel,D,runs/sources/sub/other.html.md,confirmed,0.9,' > "$kb/facts/candidates.csv"
 }
 
 # --- a sources-relative path ejects only the conversion made from that path ----
@@ -298,7 +301,7 @@ set -e
 KB="$(mktemp -d)/wiki"; seed_outside "$KB"
 OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
 "$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" >/dev/null 2>&1
-[ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+[ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/other.html.md" ] \
   && ok "an outside-the-KB original matches its flat conversion, not a mirrored one" \
   || bad "outside-the-KB path reached a mirrored conversion"
 
@@ -317,6 +320,27 @@ set -e
   && grep -q "A,rel,B,runs/sources/report.html.md,confirmed," "$KB/facts/candidates.csv" \
   && ok "an outside path does not claim a flat conversion paired with sources/" \
   || bad "outside path purged a conversion paired with an in-KB original"
+
+# --- ...including when the in-KB original lives in a subdirectory -------------
+# The original claiming that basename need not sit at the top of sources/. A
+# flat conversion paired with sources/sub/report.html is exactly what --orphans
+# already treats as paired (it compares against every source basename, not just
+# the top-level ones), so the two must not disagree inside one command.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub" "$KB/runs/sources"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nflat\n' \
+  > "$KB/runs/sources/report.html.md"
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
+set +e
+"$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" --purge >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && grep -q "A,rel,B,runs/sources/report.html.md,confirmed," "$KB/facts/candidates.csv" \
+  && ok "an outside path does not claim a flat conversion paired with a subdir original" \
+  || bad "outside path purged a conversion paired with sources/sub/"
 
 # --- a leading '//' is absolute, and must not degrade to a basename match -----
 # Path("//sub/report.html").is_absolute() is True on POSIX, so it takes the

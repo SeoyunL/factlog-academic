@@ -104,11 +104,14 @@ conversion is written flat under `runs/sources/`. Naming that original by path
 matches the flat conversion only: a conversion in a subdirectory cannot have come
 from it.
 
-**Unless `sources/` already holds an original of the same name — then nothing
-matches and it exits 1.** `ingest` records only the filename for an original
-outside `sources/`, so a flat conversion cannot say *which* file of that name it
-came from. If the KB holds one itself, that is the answer; `eject` deletes files
-without a confirmation prompt, so it refuses the ambiguous request instead.
+**Unless `sources/` already holds an original of the same name, at any depth —
+then nothing matches and it exits 1.** `ingest` records only the filename for an
+original outside `sources/`, so a flat conversion cannot say *which* file of that
+name it came from. If the KB holds one itself, that is the answer; `eject`
+deletes files without a confirmation prompt, so it refuses the ambiguous request
+instead. A competing original in a subdirectory (`sources/sub/report.html`)
+counts just as much as a top-level one — this is the same test `--orphans` uses
+to decide whether a flat conversion is paired.
 
 ### Removing a single fact (`--fact`)
 

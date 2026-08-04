@@ -2375,6 +2375,13 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         origin = conv_origin.get(ref)
         return PurePosixPath(origin).name if origin is not None else None
 
+    # Every basename claimed by an original under sources/, at any depth. A flat
+    # conversion's header records only a basename, so this set answers "does the
+    # KB hold an original this conversion could have been made from?" — the
+    # question both the --orphans pairing below and the basename fallback in
+    # selector() have to agree on.
+    src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
+
     # What resolve() does with a symlink loop depends on the interpreter: on
     # 3.11/3.12 pathlib re-raises ELOOP as RuntimeError (not OSError), while on
     # 3.13+ it raises nothing and hands back the path unresolved. Both are in
@@ -2483,8 +2490,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             # that name it came from; when the KB holds one itself, that file is
             # the answer and this argument is not. Ejecting is unprompted and
             # exits 0, so an ambiguous argument must select nothing at all.
+            # The competing original can sit at any depth — src_basenames is the
+            # same set --orphans pairs against, so one command cannot call a
+            # conversion paired there and unpaired here.
             base = nfc(p.name)
-            fallback = base if base and f"sources/{base}" not in disk_refs else None
+            fallback = base if base and base not in src_basenames else None
             return ({kb_rel} if kb_rel is not None else set()), fallback, raw
         # A relative argument is read KB-relative (`sources/...`, `runs/...`) or
         # sources-relative (`sub/report.html`). PurePosixPath folds "./" and "//"
@@ -2557,7 +2567,6 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         #    a subtree to mirror, so the subdir is unknown) has only the
         #    provenance basename as an origin signal; match by basename and keep
         #    erring toward retention.
-        src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
         for ref in all_refs:
             if ref.startswith("runs/sources/"):
                 if ref in disk_refs:
