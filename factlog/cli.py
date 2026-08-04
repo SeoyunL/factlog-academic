@@ -2330,6 +2330,9 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             head = p.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
         except OSError:
             head = ""
+        # Same header grammar as common.conversion_origin(); kept inline because
+        # that helper returns a basename and this needs the full recorded value,
+        # and because every conversion's header is read here in one pass.
         # Exclude the field delimiters from the capture so an empty/malformed
         # `source:` value (e.g. `... | source:  | converter: ...`) can't let
         # the lazy group swallow the `|`/`-->` and capture a garbage origin.
@@ -2353,6 +2356,12 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 # Only PurePosixPath joining is used: it folds "//" and "./" but
                 # keeps ".." verbatim, so a stored origin still spells the header
                 # the same way a consumer would.
+                # Dropping the header's directory also narrows one shape that no
+                # released factlog has ever written — a *flat* conversion whose
+                # header carries a path — since mirroring (rel_parent) and the
+                # #214 path header (source_label) were added by the same commit,
+                # 73cc76a. That is defence against a hand-edited KB, not a
+                # migration path.
                 subdir = PurePosixPath(ref[len("runs/sources/"):]).parent
                 base = PurePosixPath(origin).name
                 # A header with no filename component ("source: /") is as
@@ -2428,7 +2437,9 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     def selector(name: str) -> tuple[set[str], str | None, str]:
         """Canonicalise one `eject <name>` argument into what the matcher needs:
 
-          refs    — the KB-relative ref(s) the argument names exactly;
+          refs    — the KB-relative ref(s) the argument names exactly. Always
+                    the normalised spelling: disk and CSV refs are never written
+                    with "./" or "//", so the raw spelling could not match one;
           src_rel — the original's path *relative to sources/*, when a path was
                     given; compared against conv_origin to reach the conversion
                     that path produced. None when the argument names no original
@@ -2482,10 +2493,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # differently.
         norm = PurePosixPath(raw).as_posix() if "/" in raw else raw
         if norm.startswith("sources/"):
-            return {raw, norm}, norm[len("sources/"):] or None, raw
+            return {norm}, norm[len("sources/"):] or None, raw
         if norm.startswith("runs/sources/"):
-            return {raw, norm}, None, raw  # names a conversion, not an original
-        return {raw, norm}, norm, raw
+            return {norm}, None, raw  # names a conversion, not an original
+        return {norm}, norm, raw
 
     def matches(ref: str, sel: tuple[set[str], str | None, str]) -> bool:
         refs, src_rel, name = sel
