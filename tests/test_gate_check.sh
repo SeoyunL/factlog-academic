@@ -1097,6 +1097,72 @@ run_payload_case "prefilter: case-variant Accepted.dl reaches the matcher — ex
 rm -rf "$KB_PRE"
 
 # ---------------------------------------------------------------------------
+# CASE 47: THE ENGINE INPUT IS ITSELF A SYMLINK — DENY.
+#
+# Every guard in CASES 43-46 asks about the TARGET. None asks whether
+# accepted.dl or query.dl is a symlink. With
+# `facts/query.dl -> ../shared/my-queries.dl`, the engine input canonicalises to
+# a name the prefilter has never heard of, so a write to the real file behind it
+# IS an engine-input write that the basename test cannot recognise.
+#
+# This one does not self-heal. compile_facts.py writes accepted.dl through
+# temp + os.replace, which breaks a symlink there on the next compile; query.dl
+# is user-authored and never atomically replaced, so the symlink survives.
+# ---------------------------------------------------------------------------
+KB_ESYM="$(mktemp -d)"
+make_kb "$KB_ESYM"
+mkdir -p "$KB_ESYM/shared"
+touch_file "$KB_ESYM/facts/logic_report.txt"
+set_mtime_past "$KB_ESYM/facts/logic_report.txt"
+touch_file "$KB_ESYM/shared/my-queries.dl"
+ln -s ../shared/my-queries.dl "$KB_ESYM/facts/query.dl"
+run_payload_case "engine input query.dl is a symlink — deny writes to its real file" \
+  "$KB_ESYM" "$(envelope Write "$KB_ESYM/shared/my-queries.dl")" 2
+rm -rf "$KB_ESYM"
+
+# ---------------------------------------------------------------------------
+# CASES 48-49: A LEADING TILDE MUST NOT DISABLE THE GUARDS.
+#
+# canon() runs expanduser; the prefilter does not. A "~/…" target therefore made
+# `-L`, `-e` and `stat` interrogate a literal path that does not exist, and all
+# three answered "not a symlink, no hard link" — silently switching off the two
+# guards that need the filesystem. Both of the shapes those guards exist for are
+# pinned here through a tilde.
+#
+# HOME is repointed at the KB's parent so the tilde resolves into the fixture
+# and the case never touches the developer's real home directory.
+# ---------------------------------------------------------------------------
+TILDE_HOME="$(mktemp -d)"
+KB_TILDE="$TILDE_HOME/kb"
+make_kb "$KB_TILDE"
+touch_file "$KB_TILDE/facts/logic_report.txt"
+set_mtime_past "$KB_TILDE/facts/logic_report.txt"
+touch_file "$KB_TILDE/facts/accepted.dl"
+ln -s accepted.dl "$KB_TILDE/facts/notes.dl"
+ln "$KB_TILDE/facts/accepted.dl" "$KB_TILDE/facts/hardlink.dl"
+
+tilde_case() {
+  local desc="$1"
+  local target="$2"
+  local actual_exit=0
+  HOME="$TILDE_HOME" FACTLOG_ROOT="$KB_TILDE" bash "$GATE" \
+    <<< "$(envelope Write "$target")" >/dev/null 2>&1 || actual_exit=$?
+  if [ "$actual_exit" -eq 2 ]; then
+    echo "PASS: $desc (exit $actual_exit)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc — expected deny (exit 2), got $actual_exit"
+    fail=$((fail + 1))
+  fi
+}
+
+tilde_case "tilde path through a symlink — deny (guard 3 not disabled)" \
+  "~/kb/facts/notes.dl"
+tilde_case "tilde path through a hard link — deny (guard 7 not disabled)" \
+  "~/kb/facts/hardlink.dl"
+rm -rf "$TILDE_HOME"
+
+# ---------------------------------------------------------------------------
 # CASE 47: MTIME EQUALITY IS FRESH — ALLOW.
 #
 # The freshness comparison is `report_mtime -lt newest_input_mtime`, so a report

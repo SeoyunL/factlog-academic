@@ -492,39 +492,71 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 # component: a path whose basename is neither accepted.dl nor query.dl cannot
 # name an engine input.
 #
-# That rule is only sound with all four of the guards below, each of which was
-# reached by construction against the naive `case "$target_path" in */accepted.dl)`
-# form, and each of which is pinned by a case in tests/test_gate_check.sh:
+# That rule holds only with every one of the seven guards below. Each was reached
+# by construction — guards 3-7 against the naive
+# `case "$target_path" in */accepted.dl)` form, guards 1-2 against an earlier
+# version of this prefilter that had the other five — and each is pinned by a
+# case in tests/test_gate_check.sh.
 #
-#   1. SYMLINK. A symlink's own name says nothing about what it resolves to.
+# The rule the guards exist to protect is: canon(target) can only equal
+# canon(engine) if their BASENAMES agree, because realpath preserves the final
+# component. Guards 1-3 cover the ways the target's canonical basename differs
+# from the string we are reading; guard 2 covers the same for the ENGINE side;
+# guards 4-7 cover names that differ while still denoting one file.
+#
+#   1. TILDE. canon() runs expanduser; nothing in this function does. A leading
+#      "~" therefore makes -L, -e and stat interrogate a literal "~/…" that does
+#      not exist, and all three answer "no symlink, no hard link" — silently
+#      disabling guards 3 and 7. Rather than reimplement expanduser's "~" and
+#      "~user" semantics in shell, decline to short-circuit at all. Applies to
+#      KB_ROOT too, which reaches the engine paths below.
+#   2. A SYMLINKED ENGINE INPUT. The guards below ask whether the TARGET is a
+#      symlink; they say nothing about whether accepted.dl or query.dl is one.
+#      With `facts/query.dl -> ../shared/my-queries.dl`, canon(engine) ends in
+#      my-queries.dl, so a write to that file is an engine-input write whose
+#      basename this function has never heard of. Only the final component can
+#      do this — a symlinked parent redirects the directory but preserves the
+#      basename — so testing exactly those two paths is sufficient. Note
+#      compile_facts.py temp+os.replace()s accepted.dl, which breaks a symlink
+#      there on the next compile; query.dl is user-authored and never replaced,
+#      so a symlink on it persists indefinitely.
+#   3. SYMLINK. A symlink's own name says nothing about what it resolves to.
 #      `facts/notes.dl -> accepted.dl` has basename notes.dl and canonicalises
 #      to the engine input; the prefilter runs BEFORE canonicalisation, so it
 #      cannot "see the resolved basename". `-L` is a shell builtin test, so
 #      falling through on one costs nothing. Only the final component matters:
 #      a symlinked PARENT directory does not change the basename.
-#   2. TRAILING SEPARATORS. "…/accepted.dl/" canonicalises to the engine input
+#   4. TRAILING SEPARATORS. "…/accepted.dl/" canonicalises to the engine input
 #      but does not match a `*/accepted.dl` glob. Strip them first, backslash
-#      included — the separator question is the same one as in guard 4's note.
-#   3. DOT COMPONENTS. "…/accepted.dl/." canonicalises to the engine input while
+#      included — the separator question is the same one as in guard 6's note.
+#   5. DOT COMPONENTS. "…/accepted.dl/." canonicalises to the engine input while
 #      its basename is ".". An empty, "." or ".." basename tells us nothing, so
 #      fall through.
-#   4. CASE. On a case-folding filesystem Accepted.dl IS the engine input, so a
+#   6. CASE. On a case-folding filesystem Accepted.dl IS the engine input, so a
 #      case-sensitive glob here would silently undo the matcher's case handling.
 #      The alternatives are spelled out per character rather than via `tr` (a
 #      process spawn on the hot path) or `shopt -s nocasematch` (global state in
 #      a safety gate). ASCII is sufficient: the two names are pure ASCII, and no
 #      non-ASCII codepoint case-folds into one.
-#   5. HARD LINKS. A second name for one inode is invisible to every test above,
+#   7. HARD LINKS. A second name for one inode is invisible to every test above,
 #      so the link count has to be asked for. `stat` costs ~3ms against the
 #      ~70ms interpreter spawn this prefilter exists to avoid — 4% of the saving
 #      to keep the guarantee. Only an existing file can carry one; a path we
 #      cannot stat for any other reason falls through.
 #
-# Every uncertain shape falls THROUGH to the matcher; the prefilter only
-# short-circuits on positive proof that the target cannot be an engine input.
-# Over-matching costs one spawn, so it is always the safe direction here.
+# Every uncertain shape falls THROUGH to the matcher. Over-matching costs one
+# spawn and can only make the gate stricter, so it is always the safe direction.
+# The short-circuit fires only once all seven ways a name can diverge from its
+# canonical basename have been excluded — which is not the same as proof: a
+# parent directory this process cannot stat would make -L and stat answer "no"
+# for a reason other than the truth. That case cannot be reached by a write the
+# same process could perform, so it is left uncovered rather than guarded.
 _cannot_be_engine_input() {
   local path="$1"
+  case "$path" in ~*) return 1 ;; esac
+  case "$KB_ROOT" in ~*) return 1 ;; esac
+  [ -L "${KB_ROOT}/facts/accepted.dl" ] && return 1
+  [ -L "${KB_ROOT}/facts/query.dl" ] && return 1
   [ -L "$path" ] && return 1
   while :; do
     case "$path" in
