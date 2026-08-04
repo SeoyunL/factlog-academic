@@ -1239,6 +1239,33 @@ run_payload_case "literal backslash in the filename — allow (not the engine in
 # is not passing merely because the KB stopped being stale.
 run_payload_case "control: real engine input in the same KB — deny" \
   "$KB_BSLASH" "$(envelope Write "$KB_BSLASH/facts/accepted.dl")" 2
+
+# CASE 51b: A NAME ENDING IN A BACKSLASH IS ONE COMPONENT ON POSIX — DENY.
+#
+# The mirror of the case above, and the reason the trailing-separator strip
+# takes `/` ONLY. `<KB>/facts/link\` is a single component whose last character
+# happens to be a backslash; realpath resolves it as-is and lands on the engine
+# input. If the strip removed the `\`, every guard that asks the filesystem
+# would interrogate `<KB>/facts/link` — a different file, or none — and the
+# short-circuit would fire on a write the canonicaliser sends straight to
+# accepted.dl. Both link kinds are covered because the two guards fail
+# differently: -L catches the symlink, the link-count check catches the hard
+# link, and stripping blinds both.
+bslash_link="$KB_BSLASH/facts/link\\"
+bslash_hard="$KB_BSLASH/facts/hl\\"
+ln -s accepted.dl "$bslash_link"
+ln "$KB_BSLASH/facts/accepted.dl" "$bslash_hard"
+for bslash_case in "symlink:$bslash_link" "hard link:$bslash_hard"; do
+  bslash_kind="${bslash_case%%:*}"
+  bslash_path="${bslash_case#*:}"
+  bslash_link_payload="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+print(json.dumps({"tool_name": "Write",
+                  "tool_input": {"file_path": sys.argv[1], "content": "x"}}))
+' "$bslash_path")"
+  run_payload_case "trailing backslash on a $bslash_kind to the engine input — deny" \
+    "$KB_BSLASH" "$bslash_link_payload" 2
+done
 rm -rf "$KB_BSLASH"
 
 # ---------------------------------------------------------------------------

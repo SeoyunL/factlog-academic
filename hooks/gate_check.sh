@@ -579,9 +579,16 @@ _cannot_be_engine_input() {
   case "$KB_ROOT" in ~*) return 1 ;; esac
   [ -L "${KB_ROOT}/facts/accepted.dl" ] && return 1
   [ -L "${KB_ROOT}/facts/query.dl" ] && return 1
+  # Strip `/` only, never `\`. On POSIX a backslash is an ordinary filename
+  # character, so `facts/link\` is a ONE-component name that realpath resolves
+  # as-is. Stripping it would make the filesystem guards below interrogate
+  # `facts/link` — a different file, or none — while the canonicaliser still
+  # lands on the engine input. The backslash SPLIT at the basename stays: that
+  # is what the Windows direction needs, and a Windows trailing backslash
+  # yields an empty basename, which falls through anyway.
   while :; do
     case "$path" in
-      */|*\\) path="${path%?}" ;;
+      */) path="${path%/}" ;;
       *) break ;;
     esac
   done
