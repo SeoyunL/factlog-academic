@@ -79,6 +79,17 @@ printf '%s' "$out" | grep -qF "non-ASCII digits" && ok "#331: status flags the n
 # The ESCAPED codepoint; the raw glyph cannot satisfy this.
 printf '%s' "$out" | grep -qF 'uff11' && ok "#331: status escapes the offending codepoints" || bad "#331: status does not escape the offending characters"
 
+# One offender shared by TWO conflict groups must be named once, not once per
+# group. The values are collected into a set before rendering.
+printf '%s\n%s\n%s\n%s\n%s\n' "$H" \
+  '갑사,매출,100억,sources/a.md,confirmed,0.9,' \
+  '갑사,매출,１００억,sources/a.md,confirmed,0.9,' \
+  '을사,매출,200억,sources/a.md,confirmed,0.9,' \
+  '을사,매출,１００억,sources/a.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+dupes="$(printf '%s' "$out" | grep -o 'uff11' | wc -l | tr -d ' ')"
+[ "$dupes" = "1" ] && ok "#331: a shared offender is named once across conflict groups" || bad "#331: offender repeated $dupes times across groups"
+
 # Negative control 1 (UNTYPED relation): the same full-width value under a
 # relation with no typed declaration must NOT be flagged. There the raw key comes
 # from the missing spec, not the digits, and supersession is the correct fix.

@@ -1767,29 +1767,31 @@ def cmd_status(args: argparse.Namespace) -> int:
         if conflicts:
             msg += "  ⚠ resolve via superseded / see tools/check_conflicts.py"
         print(msg)
-        # A conflicting value carrying non-ASCII digits does not parse as a typed
-        # literal, so the generic "resolve via superseded" advice above can clear
-        # the gate while leaving that value in the KB (#331). Name it here — this
-        # path did not print the values at all, and repr() would not distinguish
-        # '１００억' from '100억' on screen.
+        # Under a TYPED relation, a conflicting value carrying non-ASCII digits
+        # does not parse as the declared type, so the generic "resolve via
+        # superseded" advice above can clear the gate while leaving that value in
+        # the KB (#331). Name it here — this path did not print the values at all,
+        # and repr() would not distinguish '１００억' from '100억' on screen.
+        #
         # Restricted to typed relations on purpose: under an untyped relation the
         # two spellings are just two strings, the value is a usable relation/3
         # fact, and superseding the outdated row IS the fix — warning there would
         # steer the user away from the one action that works.
         typed = ctx.typed_relations()
-        odd = sorted(
+        odd = sorted({
             literal_types.mark_non_ascii_digits(o)
             for (_subject, relation), objs in conflicts.items()
             # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
             if typed.get(unicodedata.normalize("NFC", relation)) is not None
             for o in objs
             if literal_types.has_non_ascii_digits(o)
-        )
+        })
         if odd:
+            # A set, so one offender shared by several conflict groups is named once.
             print(
-                "              ⚠ " + ", ".join(f"'{o}'" for o in odd)
-                + " has non-ASCII digits — superseding a row clears the gate but can"
-                " keep a value that does not parse; fix the source to ASCII and re-collect"
+                "              ⚠ non-ASCII digits in " + ", ".join(f"'{o}'" for o in odd)
+                + " — superseding a row clears the gate but can keep a value that does"
+                " not parse; correct the source to ASCII and re-collect"
             )
     else:
         print("  conflicts:  n/a (no single-valued relations declared in policy/single-valued.md)")
