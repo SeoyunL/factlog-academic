@@ -103,6 +103,15 @@ class TestTypedNonAsciiDigitGroupsGetTheNote:
         assert "can leave" in note
         assert "cannot" not in note
 
+    def test_note_does_not_claim_re_collection_replaces_supersession(self):
+        # For 100억 vs ２００억 the values genuinely differ: correcting the source
+        # yields 100억 vs 200억, still a conflict that supersession must settle.
+        # So the guidance must not say "re-collect INSTEAD of superseding", and it
+        # must still name supersession as the follow-up.
+        note = "\n".join(check_conflicts.non_ascii_digit_note(["100억", "２００억"], _AMOUNT_SPEC))
+        assert "instead" not in note.lower()
+        assert "supersede" in note.lower()
+
     def test_only_the_offending_value_is_named(self):
         note = "\n".join(check_conflicts.non_ascii_digit_note(["100억", "１００억"], _AMOUNT_SPEC))
         assert "'100억'" not in note

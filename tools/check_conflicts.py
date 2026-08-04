@@ -206,9 +206,16 @@ def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[
     outdated row is exactly the right fix. Every clause of this note would be
     false there, and it would steer the user away from the one action that works.
 
-    Note what is NOT claimed: superseding the offending row itself does resolve
-    the conflict correctly, so the wording says supersession *can* leave the bad
-    value, never that it cannot work. Pure; never raises."""
+    Two things the wording deliberately does NOT claim:
+
+    * that supersession cannot resolve the conflict — superseding the offending
+      row itself resolves it correctly, so the note says supersession *can* leave
+      the bad value behind, never that it is useless;
+    * that re-collection *replaces* supersession — for genuinely different values
+      (``100억`` vs ``２００억``) correcting the source yields ``100억`` vs
+      ``200억``, still a conflict that supersession must settle.
+
+    Pure; never raises."""
     if spec is None:
         return None
     offenders = [o for o in objects if literal_types.has_non_ascii_digits(o)]
@@ -216,11 +223,12 @@ def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[
         return None
     shown = ", ".join(f"'{literal_types.mark_non_ascii_digits(o)}'" for o in offenders)
     return [
-        f"    note: {shown} carries non-ASCII digits, so it does not parse as a",
-        "          typed literal and is compared here as a raw string. Superseding a",
-        "          row clears this gate but can leave that unreadable value in the KB",
-        "          — correct the source to ASCII digits and re-collect instead",
-        "          (docs/reference/typed-relations.md).",
+        f"    note: {shown} carries non-ASCII digits, so it does not parse as this",
+        f"          relation's declared type ({spec.type}) and is compared here as a raw",
+        "          string. Superseding a row clears this gate but can leave that",
+        "          unreadable value in the KB. Correct the source to ASCII digits and",
+        "          re-collect; if the values still differ afterwards, supersede the",
+        "          outdated one (docs/reference/typed-relations.md).",
     ]
 
 
@@ -251,8 +259,8 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         # Same spec lookup detect_conflicts uses (#210): the conflict key is the
-        # canonical relation, already NFC when it came from the alias map; try the
-        # NFC form too for an NFD-authored name.
+        # canonical relation, which is already NFC when it came from the alias map;
+        # fall back to the NFC form for an NFD-authored name.
         spec = typed.get(relation) or typed.get(unicodedata.normalize("NFC", relation))
         for line in non_ascii_digit_note(objects, spec) or ():
             print(line, file=sys.stderr)
