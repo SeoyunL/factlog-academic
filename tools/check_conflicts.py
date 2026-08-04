@@ -188,18 +188,29 @@ def detect_conflicts(
     }
 
 
-def non_ascii_digit_note(objects: list[str]) -> list[str] | None:
-    """Extra guidance lines for a conflict group holding a value with non-ASCII
-    digits, or ``None`` when every value is ASCII-clean.
+def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[str] | None:
+    """Extra guidance lines for a **typed** relation's conflict group when one of
+    its values carries non-ASCII digits; ``None`` otherwise.
 
     The generic advice printed by ``main`` ("mark the outdated row superseded")
-    assumes one of the values is out of date. A value carrying non-ASCII digits
-    does not parse as a typed literal at all (``_group_key`` degrades it to
-    ``("raw", obj)``), so superseding the OTHER row clears this gate while leaving
-    the KB holding the value the engine cannot read. Note what is NOT claimed:
-    superseding the offending row itself does resolve the conflict correctly, so
-    the wording says supersession *can* leave the bad value, never that it cannot
-    work. Pure; never raises."""
+    assumes one of the values is out of date. Under a typed relation a value
+    carrying non-ASCII digits does not parse as the declared type at all
+    (``_group_key`` degrades it to ``("raw", obj)``), so superseding the OTHER row
+    clears this gate while leaving the KB holding the value the engine cannot
+    read.
+
+    **The ``spec is None`` gate is load-bearing, not defensive.** Under an untyped
+    single-valued relation ``_group_key`` returns a raw key because there is no
+    spec, *not* because of digit width — ``GPT-４`` and ``GPT-5`` key identically,
+    ``GPT-４`` is a perfectly usable ``relation/3`` fact, and superseding the
+    outdated row is exactly the right fix. Every clause of this note would be
+    false there, and it would steer the user away from the one action that works.
+
+    Note what is NOT claimed: superseding the offending row itself does resolve
+    the conflict correctly, so the wording says supersession *can* leave the bad
+    value, never that it cannot work. Pure; never raises."""
+    if spec is None:
+        return None
     offenders = [o for o in objects if literal_types.has_non_ascii_digits(o)]
     if not offenders:
         return None
@@ -224,7 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         print("check_conflicts: no single-valued relations declared (policy/single-valued.md); nothing to check")
         return 0
 
-    conflicts = detect_conflicts(load_facts(), single_valued, typed_relations(), relation_aliases())
+    typed = typed_relations()
+    conflicts = detect_conflicts(load_facts(), single_valued, typed, relation_aliases())
     if not conflicts:
         print(f"check_conflicts: 0 conflicts across {len(single_valued)} single-valued relation(s)")
         return 0
@@ -238,7 +250,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(objects)} values: {', '.join(objects)}",
             file=sys.stderr,
         )
-        for line in non_ascii_digit_note(objects) or ():
+        # Same spec lookup detect_conflicts uses (#210): the conflict key is the
+        # canonical relation, already NFC when it came from the alias map; try the
+        # NFC form too for an NFD-authored name.
+        spec = typed.get(relation) or typed.get(unicodedata.normalize("NFC", relation))
+        for line in non_ascii_digit_note(objects, spec) or ():
             print(line, file=sys.stderr)
     print(
         "  Resolve by marking the outdated row(s) status='superseded' in "

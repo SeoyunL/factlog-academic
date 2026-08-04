@@ -210,8 +210,26 @@ printf '%s' "$nout" | grep -qF "re-collect" \
   && ok "#331: the note gives the real fix (correct the source)" \
   || bad "#331: note does not point at the source fix"
 
-# Negative control. Without it the three assertions above would pass just as well
-# against a note printed for EVERY conflict, which would be noise, not guidance.
+# Negative control 1 (UNTYPED relation). Every clause of the note is false here:
+# _group_key returned raw because there is no spec, not because of digit width —
+# the ASCII twin 'GPT-5' keys the same way — 'GPT-４' is a usable relation/3 fact,
+# and superseding the outdated row is exactly the right fix. Firing here would
+# tell the user NOT to do the one thing that works.
+printf '# single-valued\n\n- 모델\n' > "$KB/policy/single-valued.md"
+rm -f "$KB/policy/typed-relations.md"
+csv '갑사,모델,GPT-４,sources/x.md,confirmed,0.9,old' '갑사,모델,GPT-5,sources/x.md,confirmed,0.9,current'
+uout="$("$PYTHON" "$CONFLICTS" --wiki "$KB" 2>&1 || true)"
+printf '%s' "$uout" | grep -qF "CONFLICT" \
+  && ok "#331: untyped full-width conflict is still reported" \
+  || bad "#331: untyped conflict not reported at all"
+if printf '%s' "$uout" | grep -qF "non-ASCII digits"; then
+  bad "#331: UNTYPED relation wrongly carries the non-ASCII note (guidance is false there)"
+else
+  ok "#331: untyped relation carries no non-ASCII note"
+fi
+
+# Negative control 2 (ASCII-only, typed). Without these the assertions above would
+# pass just as well against a note printed for EVERY conflict.
 printf '# single-valued\n\n- 주_속성\n' > "$KB/policy/single-valued.md"
 rm -f "$KB/policy/typed-relations.md"
 csv '을서비스,주_속성,값가,sources/x.md,confirmed,0.9,' '을서비스,주_속성,값나,sources/x.md,confirmed,0.9,'

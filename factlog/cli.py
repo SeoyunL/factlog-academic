@@ -1814,9 +1814,16 @@ def cmd_status(args: argparse.Namespace) -> int:
         # the gate while leaving that value in the KB (#331). Name it here — this
         # path did not print the values at all, and repr() would not distinguish
         # '１００억' from '100억' on screen.
+        # Restricted to typed relations on purpose: under an untyped relation the
+        # two spellings are just two strings, the value is a usable relation/3
+        # fact, and superseding the outdated row IS the fix — warning there would
+        # steer the user away from the one action that works.
+        typed = ctx.typed_relations()
         odd = sorted(
             literal_types.mark_non_ascii_digits(o)
-            for objs in conflicts.values()
+            for (_subject, relation), objs in conflicts.items()
+            # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
+            if typed.get(unicodedata.normalize("NFC", relation)) is not None
             for o in objs
             if literal_types.has_non_ascii_digits(o)
         )
