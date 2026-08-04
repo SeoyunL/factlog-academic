@@ -120,6 +120,12 @@ def kb_template(tmp_path_factory) -> Path:
     # (file missing).
     (template / "decisions").mkdir(parents=True, exist_ok=True)
     (template / "decisions" / "open-questions.md").write_text("", encoding="utf-8")
+    # Same trick for the fact ledger: `factlog init` scaffolds it since #327, so
+    # compile_facts and review_candidates would no longer say "missing
+    # facts/candidates.csv" — the marker these tests use to tell "landed on the
+    # KB" from "landed on the empty decoy". Remove it to restore the signal.
+    (template / "facts").mkdir(parents=True, exist_ok=True)
+    (template / "facts" / "candidates.csv").unlink(missing_ok=True)
     return template
 
 
