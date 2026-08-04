@@ -1163,6 +1163,29 @@ tilde_case "tilde path through a hard link — deny (guard 7 not disabled)" \
 rm -rf "$TILDE_HOME"
 
 # ---------------------------------------------------------------------------
+# CASE 50: THE PREDICATE IS KEYED ON THE TARGET, NOT THE TOOL NAME.
+#
+# `_is_write_tool` gates the fail-closed empty-path branch and the fail-open
+# notes. It does NOT gate the freshness predicate: once a target path is
+# readable, any tool that reaches this hook and names a stale engine input is
+# denied. hooks.json registers only Write|Edit, so nothing else arrives in
+# practice — this is what a user who widens their own matcher gets.
+#
+# Pinned because the alternative is worse, not because a denied Read is nice:
+# keying the predicate on the write-class list would leave a widened matcher
+# (MultiEdit, NotebookEdit) completely unguarded, since those names are not on
+# the list. Erring toward guarding is the safe direction; silently dropping the
+# guard is not. Behaviour predates #323 and was previously unpinned.
+# ---------------------------------------------------------------------------
+KB_TOOLNAME="$(mktemp -d)"
+kb_stale "$KB_TOOLNAME"
+for other_tool in Read Grep MultiEdit NotebookEdit; do
+  run_payload_case "$other_tool naming a stale engine input — deny (predicate keys on the target)" \
+    "$KB_TOOLNAME" "$(envelope "$other_tool" "$KB_TOOLNAME/facts/accepted.dl")" 2
+done
+rm -rf "$KB_TOOLNAME"
+
+# ---------------------------------------------------------------------------
 # CASE 47: MTIME EQUALITY IS FRESH — ALLOW.
 #
 # The freshness comparison is `report_mtime -lt newest_input_mtime`, so a report
