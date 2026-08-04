@@ -19,7 +19,7 @@ import sys
 from pathlib import Path as _Path
 from typing import Callable, NamedTuple
 
-from factlog import __version__, ingest
+from factlog import __version__, ingest, literal_types
 from factlog import config as factlog_config
 from factlog.common import _atomic_write_text
 
@@ -1767,6 +1767,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         if conflicts:
             msg += "  ⚠ resolve via superseded / see tools/check_conflicts.py"
         print(msg)
+        # A conflicting value carrying non-ASCII digits does not parse as a typed
+        # literal, so the generic "resolve via superseded" advice above can clear
+        # the gate while leaving that value in the KB (#331). Name it here — this
+        # path did not print the values at all, and repr() would not distinguish
+        # '１００억' from '100억' on screen.
+        odd = sorted(
+            literal_types.mark_non_ascii_digits(o)
+            for objs in conflicts.values()
+            for o in objs
+            if literal_types.has_non_ascii_digits(o)
+        )
+        if odd:
+            print(
+                "              ⚠ " + ", ".join(f"'{o}'" for o in odd)
+                + " has non-ASCII digits — superseding a row clears the gate but can"
+                " keep a value that does not parse; fix the source to ASCII and re-collect"
+            )
     else:
         print("  conflicts:  n/a (no single-valued relations declared in policy/single-valued.md)")
 
