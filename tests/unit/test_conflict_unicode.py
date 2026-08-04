@@ -383,8 +383,15 @@ class TestNfcOnlyKbByteIdentical:
     """The invariant the issue asks for: an NFC-only KB reports exactly as before."""
 
     def test_report_lines_unchanged_for_nfc_only_kb(self, monkeypatch, capsys):
+        # The 매출 rows carry a #116 cross-notation merge that has nothing to do
+        # with Unicode: 5400억 and 0.54조 are both plain NFC and both parse to
+        # 5.4e11, so they land in ONE object group holding TWO raw spellings.
+        # That is the input the merge disclosure must stay silent on. Without the
+        # third row every object group is a singleton, the disclosure branch is
+        # unreachable, and this pin cannot fail in either direction.
         facts = [
             _fact("갑사", "매출", 'amount(5400,"억")'),
+            _fact("갑사", "매출", 'amount(0.54,"조")'),
             _fact("갑사", "매출", 'amount(1,"조")'),
             _fact("김철수", "소속", "A사"),
             _fact("김철수", "소속", "B사"),
@@ -393,7 +400,7 @@ class TestNfcOnlyKbByteIdentical:
         assert capsys.readouterr().err == (
             "check_conflicts: 2 conflict(s) found\n"
             "  CONFLICT: single-valued '매출' on '갑사' has 2 values: "
-            'amount(1,"조"), amount(5400,"억")\n'
+            'amount(0.54,"조"), amount(1,"조")\n'
             "  CONFLICT: single-valued '소속' on '김철수' has 2 values: A사, B사\n"
             "  Resolve by marking the outdated row(s) status='superseded' in "
             "facts/candidates.csv, then re-run.\n"

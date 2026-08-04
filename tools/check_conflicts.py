@@ -372,7 +372,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    subject spellings: {', '.join(ascii(s) for s in subjects)}", file=sys.stderr)
         for obj in objects:
             raws = object_variants[key][obj]
-            if len(raws) > 1:
+            # Evidence of a *Unicode* merge is that folding collapses the group,
+            # not that the group holds several strings: a typed relation groups on
+            # the parsed scalar, so #116 cross-notation equivalents (amount(5400,
+            # "억") and amount(0.54,"조") -> 5.4e11) share a group while being
+            # plain NFC and rendering nothing alike. Keying the disclosure on
+            # len(raws) > 1 fired this whole paragraph — "they render identically",
+            # "merged across normalization forms", "unify the spelling" — at a KB
+            # with zero decomposed code points, none of which was true of it.
+            if len({_fold(r) for r in raws}) < len(raws):
                 any_mixed = True
                 print(
                     f"    value {obj!r} spellings: {', '.join(ascii(r) for r in raws)}",
