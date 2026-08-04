@@ -2366,9 +2366,17 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         origin = conv_origin.get(ref)
         return PurePosixPath(origin).name if origin is not None else None
 
-    # resolve() reports a symlink loop as RuntimeError (not OSError) and a path
-    # with an embedded NUL as ValueError, and neither may reach the user as a
-    # traceback: an unresolvable argument simply matches nothing.
+    # What resolve() does with a symlink loop depends on the interpreter: on
+    # 3.11/3.12 pathlib re-raises ELOOP as RuntimeError (not OSError), while on
+    # 3.13+ it raises nothing and hands back the path unresolved. Both are in
+    # range of requires-python >=3.11, and CI pins 3.11, so RuntimeError is live
+    # rather than defensive. ValueError covers a path with an embedded NUL,
+    # which argv cannot actually carry — that one is pure defence.
+    #
+    # None of them may reach the user as a traceback. Note that swallowing the
+    # error is not by itself enough to make the argument harmless: an
+    # unresolved path is still absolute and still lands outside the KB, so what
+    # keeps it from deleting anything is the sources/<basename> guard below.
     _RESOLVE_ERRORS = (OSError, RuntimeError, ValueError)
 
     try:
