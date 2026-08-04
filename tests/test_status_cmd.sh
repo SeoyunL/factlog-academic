@@ -68,6 +68,9 @@ printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "conf
 # values; what it never did was show WHICH one the engine cannot read. repr()
 # would not help — '１００억' and '100억' are indistinguishable in most fonts.
 printf '# single-valued\n- 매출\n' > "$KB/policy/single-valued.md"
+# The relation must be declared TYPED: that declaration is what makes the digits
+# (rather than a missing spec) the reason the value degrades to a raw key.
+printf -- '- `매출` : amount as revenue_amt\n' > "$KB/policy/typed-relations.md"
 printf '%s\n%s\n%s\n' "$H" \
   '갑사,매출,100억,sources/a.md,confirmed,0.9,' \
   '갑사,매출,１００억,sources/a.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
@@ -76,7 +79,23 @@ printf '%s' "$out" | grep -qF "non-ASCII digits" && ok "#331: status flags the n
 # The ESCAPED codepoint; the raw glyph cannot satisfy this.
 printf '%s' "$out" | grep -qF 'uff11' && ok "#331: status escapes the offending codepoints" || bad "#331: status does not escape the offending characters"
 
-# Negative control: restore the ASCII-only conflict, which must NOT be flagged —
+# Negative control 1 (UNTYPED relation): the same full-width value under a
+# relation with no typed declaration must NOT be flagged. There the raw key comes
+# from the missing spec, not the digits, and supersession is the correct fix.
+printf '# single-valued\n- 모델\n' > "$KB/policy/single-valued.md"
+rm -f "$KB/policy/typed-relations.md"
+printf '%s\n%s\n%s\n' "$H" \
+  '갑사,모델,GPT-４,sources/a.md,confirmed,0.9,old' \
+  '갑사,모델,GPT-5,sources/a.md,confirmed,0.9,current' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "#331: untyped conflict still counted" || bad "#331: untyped conflict not counted"
+if printf '%s' "$out" | grep -qF "non-ASCII digits"; then
+  bad "#331: status flags an UNTYPED relation as non-ASCII (guidance is false there)"
+else
+  ok "#331: status does not flag an untyped relation"
+fi
+
+# Negative control 2: restore the ASCII-only conflict, which must NOT be flagged —
 # otherwise the two assertions above would pass against an unconditional warning.
 printf '# single-valued\n- 주속성\n' > "$KB/policy/single-valued.md"
 printf '%s\n%s\n%s\n' "$H" \
