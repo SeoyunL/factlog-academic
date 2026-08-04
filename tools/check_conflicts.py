@@ -218,11 +218,20 @@ def collect_conflicts(
     would rewrite the reported subject spelling of unrelated relations and break
     byte-identity on inputs where folding merges nothing.
 
-    **Relation axis is out of scope (#325).** Folding it as well is mechanically
-    possible and the #210 pins survive it (representative restoration keeps the
-    reported relation verbatim), so "the pins forbid it" would be a false reason.
-    The real reason is scope: folding the relation axis changes *grouping*
-    semantics, and how far #210's "no silent NFC coercion for non-participating
+    **Relation axis (#325):** it is two mechanisms, and only *grouping* is
+    deferred. Membership — whether a relation is declared single-valued at all —
+    is folded above, because it gates entry to the loop and
+    ``common._relation_names_from`` does not normalize the names it reads from
+    policy/single-valued.md. Left raw it was a byte comparison between two
+    hand-written files, so a KB written uniformly in NFD never reached the check
+    and exited 0 with a contradiction in it. That is a *wider* false negative
+    than the mixed-subject one above — it needs no mixed spelling at all, just
+    one consistently decomposed KB, which is the scenario ``_fold`` itself cites.
+    Grouping stays verbatim: two spellings of one relation remain two groups, and
+    the reported relation is byte-for-byte as written. Folding that as well is
+    mechanically possible and the #210 pins survive it, so "the pins forbid it"
+    would be a false reason; the real reason is that it changes which rows
+    collide, and how far #210's "no silent NFC coercion for non-participating
     relations" was meant to reach is a maintainer's call. Raised as a follow-up.
 
     **Engine divergence (note only):** ``common.dedup_engine_atoms``
@@ -237,8 +246,13 @@ def collect_conflicts(
     typed = typed or {}
     aliases = aliases or {}
     # Precompute the set of canonical single-valued relation names so the
-    # per-row membership test is O(1).
-    sv = {_canonicalize(r, aliases) for r in single_valued}
+    # per-row membership test is O(1). Folded on both sides: this test is the
+    # only thing standing between a row and the grouping loop, and
+    # ``common._relation_names_from`` does not normalize the names it parses out
+    # of policy/single-valued.md, so comparing raw would make it a byte
+    # comparison between two hand-written files. Membership only — the folded
+    # name is never used as a grouping key (see the loop below).
+    sv = {_fold(_canonicalize(r, aliases)) for r in single_valued}
     # (folded subject, canonical_relation) -> group key -> set of raw objects.
     by_key: dict[tuple[str, str], dict[tuple, set[str]]] = {}
     # Same pair -> set of raw subject spellings folded into it.
@@ -246,7 +260,7 @@ def collect_conflicts(
     for row in engine_facts(facts):
         relation = row["relation"]
         canon = _canonicalize(relation, aliases)
-        if canon not in sv:
+        if _fold(canon) not in sv:
             continue
         obj = row["object"]
         # Typed-spec lookup (#210), NOT a fold of the relation axis: the spec dict

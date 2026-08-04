@@ -204,30 +204,56 @@ class TestNonEquivalentNotationsStayDistinct:
         assert check_conflicts.detect_conflicts(facts, {"속성"}, {}) == {}
 
 
-class TestRelationAxisOutOfScope:
-    """Regression pin, not a defect claim.
+class TestRelationAxisMembershipVsGrouping:
+    """The relation axis is two mechanisms, and only one of them is deferred.
 
-    Folding the *relation* axis is deliberately not part of #325: the reported
-    relation would stay verbatim under representative restoration, but grouping
-    semantics would change, and how far #210's "no silent NFC coercion for
-    non-participating relations" was meant to reach is a maintainer decision.
-    Tracked as a follow-up; pinned here so the scope boundary is explicit.
+    *Membership* — is this relation declared single-valued at all — is folded, so
+    a KB written uniformly in NFD reaches the check instead of being skipped.
+    ``common._relation_names_from`` does not normalize the names it parses out of
+    ``policy/single-valued.md``, so before the fold the test was a raw byte
+    comparison between the policy text and the candidates text: an all-NFD KB
+    (routine on macOS, the very scenario ``_fold`` cites) never entered the
+    grouping loop at all and exited 0 with a contradiction in it.
+
+    *Grouping* — which rows share a conflict key — stays verbatim and is the part
+    genuinely deferred to a follow-up, because that is what #210's "no silent NFC
+    coercion for non-participating relations" speaks to. Each fixture below uses
+    the realistic policy set (one NFC name), which is what the policy file
+    actually yields.
     """
 
-    def test_mixed_relation_without_aliases_still_splits(self):
+    def test_uniform_nfd_kb_reaches_the_membership_gate(self):
+        # Both rows spell subject and relation NFD; the policy file spells the
+        # relation NFC. Nothing here is a mixed-spelling case — one consistently
+        # decomposed KB is enough — so this is a wider false negative than the
+        # mixed-subject one #325 set out to fix.
+        facts = [
+            _fact(_nfd("김철수"), _nfd("소속"), "A사"),
+            _fact(_nfd("김철수"), _nfd("소속"), "B사"),
+        ]
+        conflicts = check_conflicts.detect_conflicts(facts, {_nfc("소속")}, {}, {})
+        assert len(conflicts) == 1
+        ((_, relation), objects), = conflicts.items()
+        assert objects == ["A사", "B사"]
+        # Membership folded, grouping did not: the relation is reported as written.
+        assert relation == _nfd("소속")
+        assert relation != _nfc("소속")
+
+    def test_mixed_relation_forms_still_split(self):
+        # Grouping is untouched, so two spellings of one relation remain two
+        # groups and no contradiction is reported. This is the deferred axis.
         facts = [
             _fact("김철수", _nfc("소속"), "A사"),
             _fact("김철수", _nfd("소속"), "B사"),
         ]
-        conflicts = check_conflicts.detect_conflicts(
-            facts, {_nfc("소속"), _nfd("소속")}, {}, {}
-        )
-        assert conflicts == {}
+        assert check_conflicts.detect_conflicts(facts, {_nfc("소속")}, {}, {}) == {}
 
     def test_nfd_relation_name_reported_verbatim(self):
+        # #210's contract, now exercised *through* a folded membership test: the
+        # relation gets in on its fold but is still reported byte-for-byte.
         nfd_rel = _nfd("소속")
         facts = [_fact("김철수", nfd_rel, "A사"), _fact("김철수", nfd_rel, "B사")]
-        conflicts = check_conflicts.detect_conflicts(facts, {nfd_rel}, {}, {})
+        conflicts = check_conflicts.detect_conflicts(facts, {_nfc("소속")}, {}, {})
         (_, relation), = conflicts
         assert relation == nfd_rel
 
