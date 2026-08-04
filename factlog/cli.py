@@ -1777,19 +1777,28 @@ def cmd_status(args: argparse.Namespace) -> int:
         # two spellings are just two strings, the value is a usable relation/3
         # fact, and superseding the outdated row IS the fix — warning there would
         # steer the user away from the one action that works.
-        typed = ctx.typed_relations()
-        odd = sorted({
-            literal_types.mark_non_ascii_digits(o)
-            for (_subject, relation), objs in conflicts.items()
-            # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
-            if typed.get(unicodedata.normalize("NFC", relation)) is not None
-            for o in objs
-            if literal_types.has_non_ascii_digits(o)
-        })
+        #
+        # Digit test FIRST, typed lookup only if it can matter. ctx.typed_relations()
+        # is not a pure read: it warns when a typed relation is missing from
+        # attribute-relations.md, and re-reads facts + logic policy to compute
+        # reserved names. Resolving it unconditionally put that warning on every
+        # status run for such a KB — including one with zero conflicts.
+        flagged: dict[str, set[str]] = {}
+        for (_subject, relation), objs in conflicts.items():
+            hits = {o for o in objs if literal_types.has_non_ascii_digits(o)}
+            if hits:
+                flagged.setdefault(relation, set()).update(hits)
+        odd: set[str] = set()
+        if flagged:
+            typed = ctx.typed_relations()
+            for relation, hits in flagged.items():
+                # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
+                if typed.get(unicodedata.normalize("NFC", relation)) is not None:
+                    odd.update(literal_types.mark_non_ascii_digits(o) for o in hits)
         if odd:
             # A set, so one offender shared by several conflict groups is named once.
             print(
-                "              ⚠ non-ASCII digits in " + ", ".join(f"'{o}'" for o in odd)
+                "              ⚠ non-ASCII digits in " + ", ".join(f"'{o}'" for o in sorted(odd))
                 + " — superseding a row clears the gate but can keep a value that does"
                 " not parse; correct the source to ASCII and re-collect"
             )

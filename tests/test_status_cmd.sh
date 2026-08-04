@@ -119,6 +119,35 @@ else
   ok "#331: ASCII-only conflict carries no non-ASCII note"
 fi
 
+# A clean ASCII-only KB must produce NO extra output. Resolving typed relations
+# is not free: KbContext.typed_relations warns when a typed relation is missing
+# from attribute-relations.md (and re-reads facts + logic policy to compute
+# reserved names). Resolving it unconditionally made `factlog status` print a
+# warning on a KB with zero conflicts and nothing wrong.
+#
+# COMPARE rather than grep: the assertions above ask whether a specific string is
+# present, which cannot see an unrelated line appearing. Here the whole of stderr
+# is compared against empty, and stdout against "no typed-relations line", so any
+# new output at all fails.
+CLEAN="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$CLEAN" >/dev/null
+printf '# single-valued\n- 매출\n' > "$CLEAN/policy/single-valued.md"
+# Typed but deliberately NOT declared in attribute-relations.md: the shape that
+# makes typed_relations() warn.
+printf -- '- `매출` : amount as revenue_amt\n' > "$CLEAN/policy/typed-relations.md"
+printf 'x\n' > "$CLEAN/sources/a.md"
+printf '%s\n%s\n' "$H" '갑사,매출,100억,sources/a.md,accepted,0.9,' > "$CLEAN/facts/candidates.csv"
+clean_err="$("$PYTHON" -m factlog status --target "$CLEAN" 2>&1 >/dev/null)"
+clean_out="$("$PYTHON" -m factlog status --target "$CLEAN" 2>/dev/null)"
+if [ -z "$clean_err" ]; then
+  ok "#331: clean ASCII KB — status writes nothing to stderr"
+else
+  bad "#331: clean ASCII KB — status wrote to stderr: $clean_err"
+fi
+typed_lines="$(printf '%s\n' "$clean_out" | grep -c '^typed-relations:' || true)"
+[ "$typed_lines" = "0" ] && ok "#331: clean ASCII KB — no typed-relations warning on stdout" || bad "#331: clean ASCII KB — $typed_lines typed-relations line(s) on stdout"
+printf '%s' "$clean_out" | grep -qE "conflicts: +0 \(over 1 single-valued" && ok "#331: clean ASCII KB — 0 conflicts reported" || bad "#331: clean ASCII KB — conflicts line wrong: $(printf '%s' "$clean_out"|grep conflicts)"
+
 # --- logic report freshness (report mtime pinned; each input checked) ---------
 printf 'errors: 0\nwarnings: 2\n' > "$KB/facts/logic_report.txt"
 printf 'relation("x","r","y").\n' > "$KB/facts/accepted.dl"
