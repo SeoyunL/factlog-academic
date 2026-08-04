@@ -2415,11 +2415,20 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         """Reduce an absolute path to a KB-relative ref by asking the filesystem
         whether one of its ancestors *is* sources/ or the KB root.
 
-        ingest decides the same question the same way ((target / "sources")
-        .resolve(), cli.py:2050); comparing resolved strings does not, and the
-        two disagree whenever sources/ is a symlink or --target is spelled in a
-        different case on a case-insensitive filesystem. Both of those miss and
-        fall through to the basename fallback — the deletion #324 is about.
+        Comparing resolved strings does not answer this: it misses whenever
+        sources/ is a symlink or --target is spelled in a different case on a
+        case-insensitive filesystem, and both misses fall through to the
+        basename fallback — the deletion #324 is about.
+
+        This is deliberately *stronger* than what ingest uses. ingest reduces
+        with relative_to() on resolved strings (cli.py:2050), so the two
+        commands do not agree: given a case-different --target, ingest treats an
+        in-sources/ file as outside and writes a flat conversion with a
+        bare-basename header, while this resolves the same argument into
+        sources/. A conversion produced that way cannot be paired from here —
+        its header names a basename, which says nothing about which directory it
+        came from — so deleting the original reports the orphan it leaves rather
+        than guessing (see the --delete-original notes below).
 
         Walks strictly upward, so a symlink loop cannot trap it: the loop makes
         stat() fail, which only means "not a root" and the walk keeps rising.
@@ -2630,6 +2639,28 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # spelling would have included it, rather than reporting a bare 0.
         for ref in dict.fromkeys(r for r in pointed_at if r not in matched):
             print(f"    note: {ref} is on disk but was not named; pass '{ref}' to delete it too")
+        # Deleting an original can strand a *flat* conversion that no argument
+        # could have selected: a bare-basename header does not say which
+        # directory its original was in, so it is only pairable by name. ingest
+        # writes exactly that shape whenever it could not place the original
+        # under sources/ — including for a --target spelled in a different case,
+        # which this command does resolve into sources/. Name the conversion
+        # instead of leaving it behind with nothing to point at.
+        doomed = {PurePosixPath(r).name for r in orig_on_disk}
+        surviving = {
+            PurePosixPath(r).name
+            for r in disk_refs
+            if not r.startswith("runs/sources/") and r not in matched
+        }
+        for ref in sorted(disk_refs):
+            if not ref.startswith("runs/sources/") or ref in matched:
+                continue
+            origin = conv_origin.get(ref)
+            if origin and "/" not in origin and origin in doomed and origin not in surviving:
+                print(
+                    f"    note: {ref} records 'source: {origin}' and will have no original "
+                    f"left; run 'factlog eject --orphans' to retire it"
+                )
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
     return _EjectSelection(match_row, conv_to_delete, orig_on_disk, True)

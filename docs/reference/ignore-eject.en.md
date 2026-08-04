@@ -83,14 +83,22 @@ an absolute path.
 An **absolute** path, by contrast, is reduced to a KB-relative ref by asking the
 filesystem directly: it walks up the path's ancestors looking for one that *is*
 the same directory as `sources/` or the KB root. Because this compares
-directories rather than strings, it agrees with the test `ingest` uses, and both
-of these work:
+directories rather than strings, both of these work:
 
 - a KB whose `sources/` is a symlink — naming the file through its real resolved
   path reduces to the same ref;
 - a `--target` spelled in a different case from the argument on a
   case-insensitive filesystem. `Path.resolve()` does not canonicalise case, but
   the filesystem still reports one directory.
+
+This test is **stricter than the one `ingest` uses.** `ingest` compares resolved
+strings with `relative_to()`, so a case-different `--target` makes it treat a
+file inside `sources/` as outside and write a **flat** conversion whose header
+records only a filename. `eject` resolves that same argument into `sources/`, so
+it cannot pair such a conversion — the header says nothing about which directory
+the original was in. Deleting the original with `--delete-original` would orphan
+it, so `eject` names the conversion that will be left behind and points at
+`factlog eject --orphans` instead of guessing.
 
 To delete the original too (`--delete-original`), name it by its KB-relative ref
 (`sources/sub/report.html`) or by absolute path. A sources-relative path
