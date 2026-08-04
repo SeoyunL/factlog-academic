@@ -637,6 +637,12 @@ run_payload_case "envelope: tool_input.file_path wins over top-level — deny" \
 # PRE-FIX FAIL (old gate read the top level → 2). Together with CASE 26 this
 # pins the precedence in both directions; either case alone is passed by an
 # implementation that simply merges the two dicts.
+#
+# MUTATION ATTRIBUTION (measured, not assumed): CASES 26+27 are what kill the
+# priority-inversion mutant `for source in (payload, nested)` — 45 passed /
+# 2 failed, and the two failures are exactly these. They do NOT kill the
+# `d.get("tool_input") or d` mutant, which reads the nested dict first and so
+# gets both directions right; CASE 28 kills that one. See CASE 28.
 # ---------------------------------------------------------------------------
 run_payload_case "envelope: top-level file_path ignored when tool_input has one — allow" \
   "$KB_ENV7" \
@@ -647,6 +653,11 @@ run_payload_case "envelope: top-level file_path ignored when tool_input has one 
 # CASE 28: top-level FALLBACK is still consulted when `tool_input` carries no
 # path key. No production payload has a top-level file_path; this keeps the flat
 # fixture shape of CASES 1-17 working. Vacuous pre-fix.
+#
+# MUTATION ATTRIBUTION (measured, not assumed): this is the ONLY case that kills
+# the `d.get("tool_input") or d` mutant the issue proposed — 46 passed /
+# 1 failed. That mutant stops at the truthy `tool_input` and never consults the
+# top level, so it returns 0 here instead of 2. CASES 26/27 pass under it.
 # ---------------------------------------------------------------------------
 run_payload_case "envelope: falls back to top-level file_path — deny" \
   "$KB_ENV7" \
