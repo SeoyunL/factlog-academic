@@ -509,11 +509,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     if any_mixed:
         print(
-            "  Some string(s) above were merged across Unicode normalization forms: they render "
-            "identically but differ byte-wise, so the reported spelling does not grep to every "
-            "row behind it (the spellings are listed under each conflict). Unify them to one "
-            "form in facts/candidates.csv as well — that is a separate repair from superseding, "
-            "and neither substitutes for the other.",
+            "  Some string(s) above are written in more than one Unicode normalization form: "
+            "they are canonically equivalent but differ byte-wise, so the reported spelling "
+            "does not grep to every row behind it (the spellings are listed with their form "
+            "under each conflict). Do NOT repair this by editing facts/candidates.csv: "
+            "merge_candidates rebuilds those rows from runs/*.json and carries back only "
+            "status, keyed on the raw (subject, relation, object) triple — so a hand-edited "
+            "spelling is discarded on the next merge, and stops matching the key that "
+            "preserves its 'superseded' mark. Unify the spelling in sources/ and re-collect. "
+            "That is a separate repair from superseding, and neither substitutes for the other.",
             file=sys.stderr,
         )
     return 1

@@ -378,7 +378,23 @@ class TestReportExposesTheMerge:
         facts = [_fact(raws[0], "소속", "A사"), _fact(raws[1], "소속", "B사")]
         _run_main(monkeypatch, facts, {"소속"})
         err = capsys.readouterr().err
-        assert "Unify them to one form" in err
+        assert "Unify the spelling in sources/" in err
+        assert "status='superseded'" in err
+
+    def test_unify_guidance_points_at_the_source_not_candidates_csv(self, monkeypatch, capsys):
+        # merge_candidates rebuilds rows from runs/*.json and carries back only
+        # status, keyed on the raw triple — so a hand-edited spelling in
+        # candidates.csv is discarded on the next merge AND stops matching the
+        # key that preserves its 'superseded' mark. Recommending that edit sends
+        # the reader round a loop that also undoes the repair that does work.
+        raws = [_nfc("김철수"), _nfd("김철수")]
+        facts = [_fact(raws[0], "소속", "A사"), _fact(raws[1], "소속", "B사")]
+        _run_main(monkeypatch, facts, {"소속"})
+        err = capsys.readouterr().err
+        assert "Unify the spelling in sources/ and re-collect" in err
+        assert "runs/*.json" in err
+        assert "Unify them to one form in facts/candidates.csv" not in err
+        # Superseding IS durable and still belongs on candidates.csv.
         assert "status='superseded'" in err
 
     def test_ordinary_conflict_keeps_the_supersede_guidance(self, monkeypatch, capsys):
@@ -387,7 +403,7 @@ class TestReportExposesTheMerge:
         err = capsys.readouterr().err
         assert "status='superseded'" in err
         assert "mixed Unicode normalization forms" not in err
-        assert "Unify them to one form" not in err
+        assert "Unify the spelling in sources/" not in err
 
     def test_supersede_guidance_survives_a_mixed_spelling_joining_a_real_conflict(
         self, monkeypatch, capsys
@@ -417,7 +433,7 @@ class TestReportExposesTheMerge:
         _run_main(monkeypatch, facts, {"소속", "속성"})
         err = capsys.readouterr().err
         assert "status='superseded'" in err
-        assert "Unify them to one form" in err
+        assert "Unify the spelling in sources/" in err
 
 
 class TestFoldingThatResolvesAConflict:
