@@ -72,7 +72,7 @@
 # Only branches 1 and 2 carry an escape hatch, and only branches 1 and 2 are
 # about the payload/interpreter layer.
 #
-# Everything else fails OPEN (exit 0). Three of those branches are a check the
+# Everything else fails OPEN (exit 0). Four of those branches are a check the
 # gate SKIPPED because it could not read the call, and each emits a one-line
 # note — #323 was filed partly because such skips were silent and left the
 # operator believing the gate was running (same rule as the resolver degrade,
@@ -90,7 +90,11 @@
 #     object. The JSON parses and the record is complete, so the two notes above
 #     do not cover it, yet the gate is just as blind. Under the current schema
 #     Write/Edit always send a `tool_input` object, so this fires zero times in
-#     normal operation.
+#     normal operation;
+#   - a record whose kind field is none of the four the extractor writes, which
+#     means a NUL inside a JSON string shifted the fields along. The OS rejects
+#     such a path, so the impact is zero — but a silent exit here would make the
+#     list below false.
 # Two branches stay silent, and neither is a skipped check:
 #   - a `tool_name` outside the write-class list (a Read is not this gate's
 #     business);
@@ -293,7 +297,10 @@ sys.stdout.write(tool_name + \"\\0\" + target + \"\\0\" + input_kind + \"\\0\")
 
 tool_name=""
 target_path=""
-tool_input_kind="absent"
+# Seeded with the value that describes "no record read yet" rather than a real
+# payload shape: every path below overwrites it, and a wrong seed would be a
+# lie waiting for a future edit to expose it.
+tool_input_kind="incomplete"
 if ! { IFS= read -r -d '' tool_name \
     && IFS= read -r -d '' target_path \
     && IFS= read -r -d '' tool_input_kind; } \
@@ -329,9 +336,11 @@ if [ -z "$target_path" ]; then
     # engine input.
     #
     # The escape hatch is read from THIS process's environment, which a hook
-    # inherits from the Claude Code process. A model cannot set it for its own
-    # tool calls from inside the session, so the deny message is addressed to a
-    # human operator and says where to set it.
+    # inherits from the Claude Code process. A model CAN write settings.json
+    # with Bash; what it cannot do is make that take effect for the call it is
+    # currently making, because the environment was fixed when Claude Code
+    # started. The barrier is the new session, not the edit — so the deny
+    # message is addressed to a human operator and says so.
     if [ "${FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD:-}" = "1" ]; then
       _note "note: could not read a target path from the $tool_name payload; FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 is set, so the write is allowed unchecked."
       _allow
@@ -375,6 +384,14 @@ if [ -z "$target_path" ]; then
       if _is_write_tool "$tool_name"; then
         _note "note: the $tool_name payload carried no tool_input object, so no target path could be read; the freshness gate was skipped for this call (fail-open)."
       fi
+      ;;
+    *)
+      # The extractor only ever writes one of the four kinds above, so an
+      # unrecognised one means the record itself shifted — a NUL inside a JSON
+      # string pushes the fields along by one. The OS rejects a path containing
+      # a NUL, so the practical impact is zero, but exiting 0 with no note at
+      # all would contradict the header's enumeration of what is silent.
+      _note "note: the payload extractor returned an unrecognised record shape; the freshness gate was skipped for this call (fail-open)."
       ;;
   esac
   _allow
