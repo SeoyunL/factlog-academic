@@ -1790,12 +1790,20 @@ def _quoted_constants(line: str) -> list[str]:
 #   arg_value(arg)         -> a quoted literal's value (JSON-decoded) or the bare arg
 #   is_quoted_string(arg)  -> True if arg is a quoted string literal
 #   is_variable(arg)       -> True if arg is a Datalog variable (capitalised)
+#   is_valid_arg(arg)      -> True if arg is a well-formed query argument
 #   quoted_constants(line) -> every "..." literal in a line
+#
+# `is_valid_arg` is the SINGLE definition of "a query argument is a variable or a
+# double-quoted string", the rule every classify_query branch applies. It is
+# exported so the report (tools/run_logic_check.py) applies the same predicate
+# instead of restating it: a second copy is exactly how the count branch came to
+# accept lines the gate rejects as malformed (#328).
 query_args = _query_args
 arg_value = _arg_value
 canonical_value = _canonical_value
 is_quoted_string = _is_quoted_string
 is_variable = _is_variable
+is_valid_arg = _is_valid_arg
 quoted_constants = _quoted_constants
 
 
