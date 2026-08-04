@@ -52,6 +52,31 @@ co="$("$PYTHON" "$CORR" --wiki "$KB" 2>&1)"
 printf '%s' "$co" | grep -qF "competing values" && ok "single-valued competing values reported" || bad "competing values not reported"
 printf '%s' "$co" | grep -qF "값가 (1 src)" && ok "competing value shows per-source support" || bad "per-source support missing"
 
+# uniformly-NFD KB still reaches the competing-values bucket (#325): the policy
+# file holds the composed relation name, the rows the decomposed one. Nothing is
+# mixed — one consistently decomposed KB is enough, and a raw membership test
+# matches none of it. Exercises the consumer, not just the shared helper.
+"$PYTHON" - "$KB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfd('김철수')},{nfd('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfd('김철수')},{nfd('소속')},BBB,sources/b.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+co="$("$PYTHON" "$CORR" --wiki "$KB" 2>&1)"
+printf '%s' "$co" | grep -qF "competing values" \
+  && ok "uniformly-NFD KB reaches competing values (membership folded)" \
+  || bad "NFD KB competing values missed: $(printf '%s' "$co" | tail -3)"
+
 echo ""
 echo "========================================"
 echo "test_corroboration: $pass passed, $fail failed"

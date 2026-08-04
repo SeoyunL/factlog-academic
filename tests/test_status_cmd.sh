@@ -63,6 +63,34 @@ printf '%s\n%s\n%s\n' "$H" \
 out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
 printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "conflict counted for single-valued relation" || bad "conflict not counted: $(printf '%s' "$out" | grep conflicts)"
 
+# --- uniformly-NFD KB still reaches the conflict count (#325) -----------------
+# policy/single-valued.md holds the composed name, the rows the decomposed one:
+# no mixed spelling anywhere, just one consistently decomposed KB (the macOS
+# default for Hangul). A raw membership test matches nothing, so status printed
+# 0 conflicts on a KB finalize then refused to compile. This exercises the
+# consumer end-to-end — folding only the helper leaves the call site free to
+# regress. Written from Python so the two forms survive editor normalization.
+"$PYTHON" - "$KB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfd('김철수')},{nfd('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfd('김철수')},{nfd('소속')},BBB,sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" \
+  && ok "uniformly-NFD KB reaches the conflict count (membership folded)" \
+  || bad "NFD KB not counted: $(printf '%s' "$out" | grep conflicts)"
+
 # --- logic report freshness (report mtime pinned; each input checked) ---------
 printf 'errors: 0\nwarnings: 2\n' > "$KB/facts/logic_report.txt"
 printf 'relation("x","r","y").\n' > "$KB/facts/accepted.dl"

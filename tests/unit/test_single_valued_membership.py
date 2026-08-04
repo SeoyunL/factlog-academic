@@ -71,8 +71,10 @@ class TestReadersAgreeWithTheGate:
         assert len(conflicts) == 1
 
     def test_folded_membership_admits_the_same_rows(self):
-        # This is the predicate `factlog status` and `corroboration` now use; it
-        # must admit exactly the rows the gate grouped, or their counts diverge.
+        # The helper contract only. That `factlog status` and `corroboration`
+        # actually CALL it is pinned end-to-end in tests/test_status_cmd.sh and
+        # tests/test_corroboration.sh — reverting either call site leaves this
+        # file entirely green, so it must not claim to cover them.
         folded = common.folded_relation_names(self._POLICY)
         admitted = [
             r for r in self._ROWS if common.fold_relation_name(r["relation"]) in folded
