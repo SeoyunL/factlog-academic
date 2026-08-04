@@ -398,6 +398,34 @@ class TestLiteralReConsistency:
         assert _LITERAL_RE.match(raw), f"entity_audit must still SEE {raw!r}"
         assert lt.normalize(type_tag, raw) is None, f"{raw!r} must NOT parse"
 
+    @pytest.mark.parametrize("raw,type_tag,ascii_twin", [
+        ("３rd", "ordinal", "3rd"),
+        ("date(２０２０,１)", "date", "date(2020,1)"),
+        ('amount(１００,"억")', "amount", 'amount(100,"억")'),
+        ("number(１２３)", "number", "number(123)"),
+        ("ordinal(３)", "ordinal", "ordinal(3)"),
+    ])
+    def test_forms_the_audit_cannot_see(self, raw, type_tag, ascii_twin):
+        """The blind spot in the manual path, stated honestly.
+
+        ``_LITERAL_RE`` only recognises bare prose literals, so the English
+        ordinal and every compound term fall outside it. Under a relation that is
+        not declared an attribute, a rejected value in one of these shapes reaches
+        no user-visible path at all — neither the typed-projection warning (the
+        relation has no spec) nor the audit.
+
+        This is NOT a regression: the ``ascii_twin`` assertion proves the detector
+        is equally blind to the ASCII spelling, so #331 did not close a path that
+        used to be open. It narrows the docstring claim in ``literal_types`` from
+        "two user-visible paths" to what actually holds."""
+        from entity_audit import _LITERAL_RE
+        assert _LITERAL_RE.match(raw) is None, f"detector unexpectedly sees {raw!r}"
+        assert _LITERAL_RE.match(ascii_twin) is None, (
+            f"detector sees the ASCII twin {ascii_twin!r} but not {raw!r} — that WOULD "
+            f"be a regression, and this test's premise no longer holds"
+        )
+        assert lt.normalize(type_tag, raw) is None, f"{raw!r} must NOT parse"
+
 
 class TestFullWidthDigitsRejected:
     """ASCII-only digits (#331). Python's ``\\d`` covers the whole Unicode ``Nd``
@@ -405,7 +433,12 @@ class TestFullWidthDigitsRejected:
     ``100억`` while ``relation/3`` stored a different object string — the two
     spellings merged under a typed relation but stayed separate entities and
     missed each other in object-match queries. The policy is reject, not fold: a
-    full-width value takes the ordinary "does not parse -> untyped" path."""
+    full-width value takes the ordinary "does not parse -> untyped" path.
+
+    Full-width is the common case, not the contract. ``\\d`` is exactly the Unicode
+    ``Nd`` category, so every other decimal system was accepted the same way; the
+    non-full-width cases below are what stop a later "reject ``[０-９]``" rewrite
+    from passing this class while re-opening the hole for ``١٠٠`` and ``१२३``."""
 
     @pytest.mark.parametrize("type_tag,raw", [
         # Each of these returned a scalar before the fix (20200101 / 20200101 /
@@ -420,6 +453,12 @@ class TestFullWidthDigitsRejected:
         ("ordinal", "３rd"),   # the English ordinal form has its own regex
         ("amount", "１００억"),
         ("amount", 'amount(１００,"억")'),
+        # Other Nd systems, same contract. These parse to 100 / 100 / 123 on the
+        # pre-#331 tree (int('١٠٠') == 100), so they are regression guards, not
+        # decoration.
+        ("number", "١٠٠"),
+        ("amount", "١٠٠억"),
+        ("number", "१२३"),
     ])
     def test_normalize_rejects(self, type_tag, raw):
         assert lt.normalize(type_tag, raw) is None
@@ -536,6 +575,18 @@ class TestAsciiDigitsUnchanged:
     def test_ascii_humanize_unchanged(self):
         assert lt.humanize('amount(7,"억")') == "7억"
         assert lt.humanize("date(2030,1,15)") == "2030-01-15"
+
+    def test_amount_unit_group_is_outside_the_digit_policy(self):
+        """The unit group of ``_AMOUNT_COMPOUND_RE`` is deliberately NOT narrowed:
+        a unit is an opaque label checked against the unit table, not a number.
+        Characterization pin — these three values are byte-identical to the
+        pre-#331 tree, so this test cannot fail on an unfixed tree. It exists so
+        that a later "for consistency" narrowing of the unit group has to be a
+        deliberate act rather than a silent one."""
+        assert lt.canonical_amount("amount(100,１００)") == 'amount(100,"１００")'
+        assert lt.humanize('amount(100,"１００")') == "100１００"
+        # It still never reaches a scalar: '１００' is in no unit table.
+        assert lt.normalize("amount", "amount(100,１００)", lt.DEFAULT_AMOUNT_UNITS) is None
 
 
 class TestNonAsciiDigitDiagnostics:
