@@ -565,7 +565,11 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 # Every uncertain shape falls THROUGH to the matcher. Over-matching costs one
 # spawn and can only make the gate stricter, so it is always the safe direction.
 # The short-circuit fires only once all seven ways a name can diverge from its
-# canonical basename have been excluded — which is not the same as proof: a
+# canonical basename have been excluded — and the guards run in an order that
+# keeps that true: the trailing-separator strip comes before the -L test,
+# because -L on a name ending in a separator resolves the link and answers
+# "no". Guards that ask the filesystem must see the same name the
+# canonicaliser will. This is still not the same as proof: a
 # parent directory this process cannot stat would make -L and stat answer "no"
 # for a reason other than the truth. That case cannot be reached by a write the
 # same process could perform, so it is left uncovered rather than guarded.
@@ -575,13 +579,17 @@ _cannot_be_engine_input() {
   case "$KB_ROOT" in ~*) return 1 ;; esac
   [ -L "${KB_ROOT}/facts/accepted.dl" ] && return 1
   [ -L "${KB_ROOT}/facts/query.dl" ] && return 1
-  [ -L "$path" ] && return 1
   while :; do
     case "$path" in
       */|*\\) path="${path%?}" ;;
       *) break ;;
     esac
   done
+  # AFTER the strip, never before: a trailing separator makes the shell's -L
+  # resolve the link, so `notes.dl/` answers "not a symlink" while
+  # realpath() still lands on accepted.dl. Stripping first asks -L about the
+  # same name the canonicaliser will see.
+  [ -L "$path" ] && return 1
   # Split on BOTH separators. Python's os.path treats a backslash as a separator
   # on Windows, so under Git Bash "C:\kb\facts\accepted.dl" canonicalises to the
   # engine input while `${path##*/}` hands back the whole string.

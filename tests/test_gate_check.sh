@@ -1094,6 +1094,18 @@ else
 fi
 run_payload_case "prefilter: case-variant Accepted.dl reaches the matcher — expect $pre_case_expect" \
   "$KB_PRE" "$(envelope Write "$KB_PRE/facts/Accepted.dl")" "$pre_case_expect"
+
+# CASE 46b: SYMLINK **AND** TRAILING SLASH TOGETHER. CASES 43 and 44 each pin
+# one of these alone; neither crosses them, and the crossing is where the hole
+# was. A trailing separator makes the shell's -L resolve the link, so -L answers
+# "not a symlink" while realpath() still lands on accepted.dl — the strip loop
+# then hands the glob a basename it does not match and the short-circuit fires.
+# Guards that ask the filesystem must run AFTER the strip, on the same name the
+# canonicaliser will see.
+run_payload_case "prefilter: symlink with a trailing slash — deny" \
+  "$KB_PRE" "$(envelope Write "$KB_PRE/facts/notes.dl/")" 2
+run_payload_case "prefilter: symlink with two trailing slashes — deny" \
+  "$KB_PRE" "$(envelope Write "$KB_PRE/facts/notes.dl//")" 2
 rm -rf "$KB_PRE"
 
 # ---------------------------------------------------------------------------
@@ -1230,7 +1242,7 @@ run_payload_case "control: real engine input in the same KB — deny" \
 rm -rf "$KB_BSLASH"
 
 # ---------------------------------------------------------------------------
-# CASE 47: MTIME EQUALITY IS FRESH — ALLOW.
+# CASE 52: MTIME EQUALITY IS FRESH — ALLOW.
 #
 # The freshness comparison is `report_mtime -lt newest_input_mtime`, so a report
 # written in the SAME second as the engine input counts as fresh. That is not an
@@ -1252,7 +1264,7 @@ run_payload_case "report and engine input share an mtime — allow (boundary is 
 rm -rf "$KB_EQ"
 
 # ---------------------------------------------------------------------------
-# CASE 48: SHIFTED EXTRACTOR RECORD IS NOT SILENT.
+# CASE 53: SHIFTED EXTRACTOR RECORD IS NOT SILENT.
 #
 # A NUL inside a JSON string value pushes the extractor's three fields along by
 # one, so `tool_input_kind` receives a path instead of one of the four kinds the
