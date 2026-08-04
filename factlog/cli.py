@@ -2521,6 +2521,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         return rp.stem == np_.stem
 
     matched: set[str] = set()
+    # Originals that an argument pointed *at* without naming: a sources-relative
+    # path selects the conversion made from a file, not the file. Collected so
+    # --delete-original can say so instead of just reporting 0.
+    pointed_at: list[str] = []
     if args.orphans:
         # Auto-detect orphaned sources — a source whose backing original is
         # gone. For a runs/sources/ conversion the origin is the file named
@@ -2575,6 +2579,9 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             hits = {ref for ref in all_refs if matches(ref, sel)}
             if hits:
                 matched |= hits
+                src_rel = sel[1]
+                if src_rel and f"sources/{src_rel}" in disk_refs:
+                    pointed_at.append(f"sources/{src_rel}")
             else:
                 print(f"factlog eject: no source matches '{name}'", file=sys.stderr)
         if not matched:
@@ -2598,6 +2605,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     print(f"  runs/sources conversion(s) to delete: {len(conv_to_delete)}")
     if args.delete_original:
         print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
+        # A sources-relative path selects what a file *produced*, not the file,
+        # so --delete-original can legitimately have nothing to do. Say which
+        # spelling would have included it, rather than reporting a bare 0.
+        for ref in dict.fromkeys(r for r in pointed_at if r not in matched):
+            print(f"    note: {ref} is on disk but was not named; pass '{ref}' to delete it too")
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
     return _EjectSelection(match_row, conv_to_delete, orig_on_disk, True)
