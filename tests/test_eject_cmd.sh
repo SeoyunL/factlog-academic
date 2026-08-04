@@ -264,6 +264,30 @@ if [ -d "$(dirname "$KB")/WIKI" ]; then
     || bad "case-different --target: deleted a file in another directory"
 fi
 
+# --- deleting an original that a flat conversion depends on is announced ------
+# ingest and eject do not agree about containment: ingest reduces with
+# relative_to() on resolved strings, so a --target spelled in a different case
+# makes it treat an in-sources/ file as outside and write a *flat* conversion
+# with a bare-basename header. eject resolves the same argument *into* sources/
+# and cannot pair that conversion. Deleting the original would silently orphan
+# it, so say so.
+BASE="$(mktemp -d)"; KB="$BASE/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+if [ -d "$BASE/Wiki" ]; then    # case-insensitive filesystem only
+  "$PYTHON" -m factlog ingest "$KB/sources/sub/report.html" --target "$BASE/Wiki" >/dev/null 2>&1
+  [ -f "$KB/runs/sources/report.html.md" ] \
+    && ok "ingest with a case-different --target writes a FLAT conversion" \
+    || bad "fixture wrong: expected a flat conversion from ingest"
+  printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+  out="$("$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$BASE/Wiki" --delete-original 2>&1)"
+  printf '%s' "$out" | grep -qF "runs/sources/report.html.md" \
+    && printf '%s' "$out" | grep -qF "will have no original left" \
+    && ok "deleting an original warns about the flat conversion it orphans" \
+    || bad "orphaning a flat conversion was silent"
+fi
+
 # --- an unresolvable path errors like any unknown name (no traceback) ---------
 # On Python 3.11/3.12 resolve() re-raises ELOOP as RuntimeError, not OSError;
 # letting it escape turned an ordinary no-match into a crash. 3.13+ returns the

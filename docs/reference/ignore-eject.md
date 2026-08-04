@@ -79,14 +79,21 @@ factlog eject report.pdf --dry-run       # show the planned changes, modify noth
 
 **절대** 경로는 반대로, 파일시스템에게 직접 물어서 KB 기준 ref 로 환원합니다 —
 경로의 조상을 거슬러 올라가며 `sources/` 나 KB 루트와 **같은 디렉터리인 지점**을
-찾습니다. 문자열을 맞춰 보는 것이 아니므로 `ingest` 가 쓰는 판정과 일치하고, 다음
-두 경우가 모두 정상 동작합니다.
+찾습니다. 문자열을 맞춰 보는 것이 아니므로 다음 두 경우가 모두 정상 동작합니다.
 
 - `sources/` 가 심링크인 KB. 심링크를 따라간 실제 경로로 지정해도 같은 ref 로
   환원됩니다.
 - `--target` 을 원본 경로와 다른 대소문자로 적은 경우(대소문자 비구분
   파일시스템). `Path.resolve()` 는 대소문자를 정준화하지 않지만 파일시스템은
   같은 디렉터리로 봅니다.
+
+이 판정은 `ingest` 의 것보다 **엄격합니다.** `ingest` 는 환원한 문자열을
+`relative_to` 로 비교하므로(`cli.py`), 대소문자가 어긋난 `--target` 을 주면
+`sources/` 안의 파일을 밖으로 보고 **평면 변환본**을 파일명만 적힌 헤더와 함께
+만듭니다. `eject` 는 같은 인자를 `sources/` 안으로 환원하므로 그렇게 만들어진
+변환본을 짝지을 수 없습니다 — 헤더가 파일명만 말하고 어느 디렉터리였는지는 말하지
+않기 때문입니다. 이때 `--delete-original` 로 원본을 지우면 그 변환본이 고아가 되므로,
+추측하는 대신 어떤 변환본이 남는지 알려주고 `factlog eject --orphans` 를 안내합니다.
 
 `--delete-original` 로 원본까지 지우려면 원본의 KB 기준 ref(`sources/sub/report.html`)
 나 절대 경로로 지정하십시오. `sources/` 기준 경로(`sub/report.html`)는 그 경로에서
