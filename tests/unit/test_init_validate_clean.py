@@ -147,10 +147,55 @@ class TestScaffoldIsNotADoormat:
 
 
 class TestSyncFillsTheScaffoldedSections:
-    def test_bullet_lands_under_the_existing_heading(self, fresh_kb):
-        # Regression guard for the scaffold/sync seam: with the headings already
-        # present, merge_candidates must insert into them rather than append a
-        # second copy at the end of the file.
+    def test_sync_adds_no_heading_of_its_own(self, fresh_kb):
+        # The scaffold/sync seam: with the headings already present,
+        # merge_candidates must insert into them rather than append a second copy.
+        #
+        # The load-bearing assertion is that the set of `## ` headings is
+        # BYTE-IDENTICAL before and after sync. Asserting only "the bullet landed
+        # under a 중복 heading" does not pin this: insert_bullet falls back to
+        # appending the section when it cannot find one, so a sync-created
+        # heading looks exactly like an init-created one from the bullet's point
+        # of view — that weaker form passed both with the scaffold deleted and
+        # with a scaffold heading drifted.
+        import merge_candidates
+
+        decisions = fresh_kb / "decisions" / "open-questions.md"
+        before = [
+            line
+            for line in decisions.read_text(encoding="utf-8").splitlines()
+            if line.startswith("## ")
+        ]
+        assert before, "init scaffolded no review headings at all"
+
+        merge_candidates.write_decisions(
+            fresh_kb,
+            [
+                {
+                    "subject": "A",
+                    "relation": "same_as",
+                    "object": "B",
+                    "source": "sources/x.md",
+                    "status": "needs_review",
+                    "confidence": "0.5",
+                    "note": "duplicate?",
+                }
+            ],
+        )
+        after = [
+            line
+            for line in decisions.read_text(encoding="utf-8").splitlines()
+            if line.startswith("## ")
+        ]
+        assert after == before, (
+            "sync changed the heading list — it appended its own section instead "
+            f"of filling a scaffolded one: {before!r} -> {after!r}"
+        )
+
+    def test_bullet_lands_inside_the_duplicate_section(self, fresh_kb):
+        # Placement, given the headings match: the bullet goes under 중복, not at
+        # the end of the file. This one does NOT pin the seam — see the test
+        # above for that.
         import merge_candidates
 
         merge_candidates.write_decisions(
