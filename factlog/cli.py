@@ -21,7 +21,7 @@ from typing import Callable, NamedTuple
 
 from factlog import __version__, ingest
 from factlog import config as factlog_config
-from factlog.common import _atomic_write_text
+from factlog.common import FACT_HEADER, _atomic_write_text
 
 MIN_PYTHON = (3, 11)
 MIN_PYREWIRE = (1, 0, 3)  # bundles wirelog v0.52.0 with \" escape support (wirelog#924)
@@ -512,6 +512,41 @@ explanation of its purpose.
 
 ## 확인 필요
 {{REVIEW}}
+""",
+    # Empty fact ledger: the header alone IS the schema contract tools/validate.py
+    # checks, so it is built from FACT_HEADER rather than retyped (#327). Without
+    # it a fresh KB failed validate with "missing facts/candidates.csv"; with it the
+    # file loads as zero rows, which is exactly how the absent file was treated.
+    "facts/candidates.csv": ",".join(FACT_HEADER) + "\n",
+    # Human-review ledger. The four section headings are a standing contract that
+    # tools/validate.py requires unconditionally, so `init` must lay them down —
+    # otherwise a KB where no fact of a given class has come up yet can never pass
+    # validate (#327). Headings are byte-identical to what
+    # merge_candidates.decision_section() emits, so `sync` fills these sections
+    # instead of appending duplicates; tests/unit/test_init_validate_clean.py pins
+    # the two together.
+    "decisions/open-questions.md": """\
+# Open Questions
+
+`/factlog sync` 가 사람의 판단이 필요하다고 표시한 후보 사실(needs_review)을 분류별로
+모아 두는 파일입니다. 아래 네 섹션은 검토 계약이므로 해당 분류의 항목이 아직 하나도
+없더라도 비운 채로 유지합니다(tools/validate.py 가 확인합니다).
+
+## 중복 개념 후보
+
+같은 대상을 다른 이름이나 다른 방향으로 가리키는 것으로 보이는 항목.
+
+## 모호한 관계명
+
+관계명이나 대상이 여러 가지로 읽혀 확정하기 어려운 항목.
+
+## 출처 부족
+
+근거 문서가 없거나, 사라진 출처를 가리키는 항목.
+
+## 기존 내용과 충돌할 수 있는 항목
+
+이미 확정된 사실과 어긋날 수 있어 둘 중 하나를 골라야 하는 항목.
 """,
 }
 
