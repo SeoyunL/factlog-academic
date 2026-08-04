@@ -73,22 +73,42 @@ mirror the original's subdirectory under `runs/sources/`, so
 leaves `runs/sources/report.html.md`, made from a same-name original in another
 directory, alone.
 
-A path is compared **as written**: no `..` folding and no case folding, so
-`sub/../report.html` and `SUB/report.html` match nothing and exit 1 — even on a
-case-insensitive filesystem. Only an absolute path is resolved (symlinks
-included) and reduced to a KB-relative ref; a relative path is not, so one
-spelled through a symlinked directory name (`link/report.html`) matches nothing —
-use the real path (`real/report.html`) or an absolute path.
+A **relative** path is compared **as written**: no `..` folding and no case
+folding, so `sub/../report.html` and `SUB/report.html` match nothing and exit 1 —
+even on a case-insensitive filesystem. A relative path is not resolved through
+symlinks either, so one spelled through a symlinked directory name
+(`link/report.html`) matches nothing — use the real path (`real/report.html`) or
+an absolute path.
+
+An **absolute** path, by contrast, is reduced to a KB-relative ref by asking the
+filesystem directly: it walks up the path's ancestors looking for one that *is*
+the same directory as `sources/` or the KB root. Because this compares
+directories rather than strings, it agrees with the test `ingest` uses, and both
+of these work:
+
+- a KB whose `sources/` is a symlink — naming the file through its real resolved
+  path reduces to the same ref;
+- a `--target` spelled in a different case from the argument on a
+  case-insensitive filesystem. `Path.resolve()` does not canonicalise case, but
+  the filesystem still reports one directory.
 
 To delete the original too (`--delete-original`), name it by its KB-relative ref
 (`sources/sub/report.html`) or by absolute path. A sources-relative path
-(`sub/report.html`) names the **conversion** made from it.
+(`sub/report.html`) names the **conversion** made from it — in that case
+`--delete-original` reports 0 originals *and* prints the spelling that would
+include one.
 
 An original ingested from outside `sources/` (e.g.
 `factlog ingest /elsewhere/report.html`) has no subtree to mirror, so its
 conversion is written flat under `runs/sources/`. Naming that original by path
 matches the flat conversion only: a conversion in a subdirectory cannot have come
 from it.
+
+**Unless `sources/` already holds an original of the same name — then nothing
+matches and it exits 1.** `ingest` records only the filename for an original
+outside `sources/`, so a flat conversion cannot say *which* file of that name it
+came from. If the KB holds one itself, that is the answer; `eject` deletes files
+without a confirmation prompt, so it refuses the ambiguous request instead.
 
 ### Removing a single fact (`--fact`)
 
