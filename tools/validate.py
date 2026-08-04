@@ -30,7 +30,7 @@ import factlog_config  # noqa: E402
 
 os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root()[0]
 
-from common import FACT_HEADER, KNOWN_STATUSES  # noqa: E402
+from common import FACT_HEADER, KNOWN_STATUSES, logic_policy_md_has_rules  # noqa: E402
 
 
 
@@ -121,6 +121,22 @@ def validate_questions(text: str) -> list[str]:
     return errors
 
 
+def logic_policy_dl_has_rules(dl_text: str) -> bool:
+    """True iff a compiled ``logic-policy.dl`` body carries anything the engine
+    would run.
+
+    Empty, whitespace-only, and comment-only bodies all mean "no policy". Both
+    ``//`` (Datalog) and ``#`` (the convention in every other policy file) count
+    as comments, matching ``common._load_logic_policy_from``'s treatment of
+    ``logic-policy.extra.dl`` — notably ``finalize.POLICY_STUB``
+    (``// no policy rules``), which finalize writes for a ruleless policy.
+    """
+    return any(
+        stripped and not stripped.startswith("//") and not stripped.startswith("#")
+        for stripped in (line.strip() for line in dl_text.splitlines())
+    )
+
+
 def validate_logic_policy(root: Path) -> list[str]:
     script = Path(__file__).parent / "generate_logic_policy.py"
     if not script.is_file():
@@ -190,9 +206,26 @@ def validate(root: Path) -> list[str]:
         errors.append("policy/prompts/natural_language_to_policy.md must contain {{POLICY_TEXT}} exactly once")
 
     logic_policy = root / "policy" / "logic-policy.dl"
-    if not logic_policy.is_file() or not read(logic_policy).strip():
+    dl_text = read(logic_policy) if logic_policy.is_file() else ""
+    if not logic_policy_md_has_rules(policy_source) and not logic_policy_dl_has_rules(dl_text):
+        # No policy at all: logic-policy.md defines no compilable bullets AND no
+        # compiled rules are on disk. That is a legitimate state, not a defect —
+        # it is exactly what `factlog init` leaves behind, and generate_logic_policy
+        # deliberately refuses to synthesise a .dl for a ruleless .md, so demanding
+        # one made a fresh KB permanently un-validatable (#327). `check`/`ask`
+        # already reached this conclusion in #190 via the SAME shared helper
+        # (common.logic_policy_md_has_rules); validate was simply never updated,
+        # leaving it the odd one out. Accepting an empty/comment-only .dl as well
+        # as an absent one covers finalize's POLICY_STUB, which validate previously
+        # rejected as drift against its own pipeline's output.
+        pass
+    elif not logic_policy.is_file() or not dl_text.strip():
+        # The .md DOES define rules but nothing is compiled — real drift that
+        # would silently drop the author's policy. Unchanged, fail loud (#194).
         errors.append("missing or empty policy/logic-policy.dl")
     elif policy_source.is_file() and policy_prompt.is_file():
+        # Rules on at least one side and a non-empty .dl: byte-compare the two so
+        # a stale compile (either direction) is still caught. Unchanged.
         errors.extend(validate_logic_policy(root))
 
     facts = root / "facts" / "candidates.csv"
