@@ -59,6 +59,11 @@ rewrite the stored fact string — the fix is to correct the source to ASCII and
 re-collect. Under a relation that is not declared typed the parsers never run at
 all, so there the two spellings simply stay separate values.
 
+This is not only about full-width (U+FF10–FF19). Every digit in the Unicode `Nd`
+category is rejected for the same reason — Arabic-Indic `١٠٠`, Devanagari `१२३`,
+Thai `๑๒๓` — precisely the strings `int()` and `Decimal()` accept silently as
+100 / 123.
+
 ⚠️ **Migrating an existing KB.** If full-width values collected before this rule
 are still in the KB, `tools/check_conflicts.py` may now exit **1** — a gate
 failure, not a warning. `１００억` and `100억` used to fold onto the same scalar

@@ -27,7 +27,12 @@ so a full-width value takes the ordinary "does not parse -> untyped" path and
 surfaces as a typed-projection warning instead of merging silently. Rewriting the
 stored string would have been the silent fold this repo consistently refuses.
 
-Four call sites outside this module change behaviour as a consequence. All four
+This is not only about full-width U+FF10–FF19. ``\\d`` is exactly the Unicode
+``Nd`` category, so Arabic-Indic ``١٠٠``, Devanagari ``१२३`` and Thai ``๑๒๓`` were
+accepted the same way — and ``int``/``Decimal`` still accept all of them
+(``int('١٠٠') == 100``), which is why the regex has to be the gate.
+
+Five call sites outside this module change behaviour as a consequence. All five
 are intended, and none of them rewrites data already stored:
 
 - ``tools/merge_candidates.py`` dedup key — ``canonical_amount`` returns ``None``
@@ -50,19 +55,35 @@ are intended, and none of them rewrites data already stored:
 - ``tools/ask_router.py`` answer annotation — ``humanize`` returns a full-width
   compound term verbatim rather than rendering it as ``１００억``, so the display
   suffix (``… (= 100억)``) is simply omitted for such a row.
+- ``factlog/cli.py`` ``status`` conflict count — this path never folded typed
+  scalars; it counts distinct **raw object strings**, so it already reported the
+  ASCII/full-width pair as 2 values while ``check_conflicts`` reported 0. The two
+  commands contradicted each other; narrowing here converges ``check_conflicts``
+  onto the count ``status`` was already giving. It is the strongest code-level
+  argument for rejecting rather than folding.
 
-A rejected value has two user-visible paths, matching the two the issue asked
-for. Under a relation declared **typed**, ``common._project_typed_relations``
-warns and loads the fact untyped. Under a relation that is **not declared** as an
-attribute at all, ``tools/entity_audit.py`` reports it as a *literal suspect* —
-its ``_LITERAL_RE`` is deliberately looser than this module and still matches
-full-width digits, so narrowing that detector would close this path (a pinning
-test guards the divergence).
+A rejected value surfaces on one automatic warning, one gate, and one manual
+tool — and falls through one hole:
 
-Residual symptom, NOT fixed here: a relation declared as an **attribute but not
-typed** falls between the two. It has no spec, so the projection loop skips it
-without warning, and its objects land in ``entity_audit``'s ``declared_literals``
-— an unflagged sorted list in which ``100억`` and ``１００억`` sort far apart.
+- **automatic** — under a relation declared **typed**,
+  ``common._project_typed_relations`` warns on stderr and loads the fact untyped.
+- **gate** — under a relation declared **single-valued**,
+  ``tools/check_conflicts.py`` sees the ASCII/full-width pair as two values and
+  exits 1, naming the offending value (``non_ascii_digit_note``).
+- **manual** — ``tools/entity_audit.py`` reports a value under a relation not
+  declared an attribute as a *literal suspect*. Nothing in the pipeline runs it
+  (``skills/factlog/SKILL.md`` documents it as a manual command) and its message
+  says nothing about digit width. Its ``_LITERAL_RE`` is deliberately looser than
+  this module and still matches full-width digits, so narrowing that detector
+  would close this path (a pinning test guards the divergence). It only sees bare
+  prose forms: ``１００억``/``２０２６``/``제３호``/``３위`` match, while ``３rd``
+  and every compound term (``date(２０２０,１)``, ``amount(１００,"억")``,
+  ``number(１２３)``, ``ordinal(３)``) do not — the same blind spots it has for the
+  ASCII spellings, so this is not a regression.
+- **hole** — a relation declared as an **attribute but not typed** has no spec, so
+  the projection loop skips it without warning and its objects land in
+  ``entity_audit``'s ``declared_literals``: an unflagged sorted list in which
+  ``100억`` and ``１００억`` sort far apart.
 """
 from __future__ import annotations
 
@@ -116,6 +137,12 @@ def mark_non_ascii_digits(value: str) -> str:
 # ``date(2020,<U+3000>1)`` would silently stop parsing. The ``\D+`` unit group in
 # ``_AMOUNT_RE`` needs no change: ``\D`` is the complement of ``Nd``, so it already
 # excludes full-width digits (``1２3억`` therefore does not match either half).
+# The asymmetry is deliberate, not an arbitrary line: whitespace is not part of the
+# value (an ideographic space in ``date(2020,<U+3000>1)`` is layout, and dropping it
+# changes nothing about what the value means), whereas a digit IS the value —
+# accepting ``１`` as ``1`` decides that two different stored strings mean the same
+# thing, which is exactly the fold this policy refuses. So narrow digits explicitly
+# and leave ``\s``/``\D`` alone.
 _DATE_RE = re.compile(r"^([0-9]{4})[.\-/]([0-9]{1,2})(?:[.\-/]([0-9]{1,2}))?$")
 # The compound form is year-precision friendly: month AND day are optional, so
 # ``date(2020)`` parses (a bibliographic record normally knows only the year).
@@ -146,6 +173,11 @@ _AMOUNT_RE = re.compile(r"^(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?) ?(?P<unit>\D+)$"
 # Compound amount: the unit may be quoted ("...", allowing spaces and commas) or
 # bare (no comma/paren/quote). The number is optionally quoted. Canonicalisation
 # always emits the quoted unit form (see ``canonical_amount``).
+# The unit group is deliberately OUTSIDE the digit policy: a unit is an opaque
+# label validated against the unit table, not a number. ``amount(100,１００)`` still
+# canonicalises to ``amount(100,"１００")`` and humanizes to ``100１００`` —
+# byte-identical to before this narrowing, because ``１００`` is in no unit table and
+# so never normalizes to a scalar. Only the ``num`` groups are ``[0-9]``.
 _AMOUNT_COMPOUND_RE = re.compile(
     r'^amount\(\s*"?(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?)"?\s*,\s*'
     r'(?:"(?P<qunit>[^"]*)"|(?P<unit>[^,)"]+))\s*\)$',
