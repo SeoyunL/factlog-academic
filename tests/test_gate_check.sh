@@ -969,6 +969,63 @@ fi
 rm -rf "$KB_ENV7"
 
 # ---------------------------------------------------------------------------
+# CASE 39: SAME FILE UNDER ANOTHER NAME — DENY.
+#
+# The header states "TARGET is an engine input iff it resolves to
+# <KB_ROOT>/facts/accepted.dl OR query.dl". A hard link reaches the same inode
+# under a different name, and Claude Code's Write truncates in place rather than
+# replacing the file, so writing through the link writes accepted.dl. Comparing
+# canonical path STRINGS calls that a different file and lets it past.
+#
+# Platform-independent: hard links behave the same everywhere.
+# ---------------------------------------------------------------------------
+KB_LINK="$(mktemp -d)"
+kb_stale "$KB_LINK"
+ln "$KB_LINK/facts/accepted.dl" "$KB_LINK/facts/hardlink.dl"
+run_payload_case "hard link to accepted.dl — deny (same inode)" \
+  "$KB_LINK" "$(envelope Write "$KB_LINK/facts/hardlink.dl")" 2
+rm -rf "$KB_LINK"
+
+# ---------------------------------------------------------------------------
+# CASES 40-41: CASE-FOLDING FILESYSTEM.
+#
+# On APFS (macOS default) and NTFS, facts/Accepted.dl IS facts/accepted.dl —
+# same inode, same file, and an unguarded write to it supersedes the report. On
+# ext4/xfs it is a genuinely different file that must NOT be denied, or the gate
+# starts blocking legitimate writes on Linux.
+#
+# The expected exit therefore depends on the filesystem under $TMPDIR, and the
+# harness ASKS it rather than assuming: it creates facts/accepted.dl and checks
+# whether the same inode answers to facts/ACCEPTED.DL. CI runs ubuntu-latest, so
+# CI exercises the case-sensitive half; a macOS developer machine exercises the
+# other. Both halves are the contract.
+#
+# CASE 40 covers the target-exists path (settled by st_dev/st_ino) and CASE 41
+# the target-does-not-exist path (settled by the read-only directory probe),
+# because those are two different mechanisms in the matcher.
+# ---------------------------------------------------------------------------
+KB_CASE="$(mktemp -d)"
+kb_stale "$KB_CASE"
+if [ -e "$KB_CASE/facts/ACCEPTED.DL" ]; then
+  case_fold_expect=2
+  case_fold_label="case-folding filesystem"
+else
+  case_fold_expect=0
+  case_fold_label="case-sensitive filesystem"
+fi
+run_payload_case "case-variant accepted.dl, target exists ($case_fold_label) — expect $case_fold_expect" \
+  "$KB_CASE" "$(envelope Write "$KB_CASE/facts/Accepted.dl")" "$case_fold_expect"
+
+# Same question with the engine input ABSENT: query.dl becomes the stale input,
+# and the target Accepted.dl does not exist on disk, so stat cannot compare
+# inodes. Only the directory probe can answer.
+touch_file "$KB_CASE/facts/query.dl"
+rm -f "$KB_CASE/facts/accepted.dl"
+run_payload_case "case-variant accepted.dl, target absent ($case_fold_label) — expect $case_fold_expect" \
+  "$KB_CASE" "$(envelope Write "$KB_CASE/facts/Accepted.dl")" "$case_fold_expect"
+rm -rf "$KB_CASE"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
