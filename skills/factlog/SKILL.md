@@ -232,6 +232,27 @@ re-`merge` preserves rows you marked `superseded` in `candidates.csv` even when
 a run re-asserts the retired fact. This keeps the KB free of the silently-
 accumulated contradictions a plain notes wiki cannot prevent.
 
+Subjects and values are compared under Unicode NFC, so a fact written `한국대학교`
+in one row and the decomposed spelling of the same name in another counts as one
+string (macOS filesystems and IMEs routinely emit Hangul decomposed). Two things
+follow, and the report states both:
+
+- When a conflict's strings were merged that way, the run lists the spellings
+  escaped and labelled (`'한...' (NFC), 'ᄒ...' (NFD)`), because they are
+  indistinguishable on screen. Unifying the spelling is a **second repair**, not
+  a substitute for superseding — a real contradiction that a mixed spelling
+  merely joined is still a contradiction.
+- When the merge *resolved* the contradiction, the run exits 0 and says so on
+  stdout. That is the only signal you get: `finalize` proceeds, and engine atoms
+  dedup on the raw triple, so both spellings still reach `accepted.dl` as
+  separate atoms of one visible fact.
+
+Repair the spelling **in `sources/` and re-collect**, not in `candidates.csv`:
+`merge` rebuilds those rows from `runs/*.json` and carries back only `status`,
+keyed on the raw (subject, relation, object) triple, so a hand-edited spelling
+is discarded on the next run and stops matching the key that preserves its
+`superseded` mark.
+
 **Entity vs literal typing.** Relations you list in `policy/attribute-relations.md`
 (same one-name-per-line format as `single-valued.md`) are treated as
 *literal-valued*: their object is a value (a date, number, ordinal, ...), not a

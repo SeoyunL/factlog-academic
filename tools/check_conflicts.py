@@ -84,6 +84,14 @@ def _fold(value: str) -> str:
     variants (fullwidth ``ＡＢＣ`` stays distinct from ``ABC``) nor case — those
     are genuinely different values and must keep firing a conflict.
 
+    Precomposed-vs-decomposed is the case that matters here, but not the only one
+    NFC folds: it also collapses the *canonical singletons* Unicode has
+    deprecated in favour of an existing character — ``Ω`` U+2126 → U+03A9, ``K``
+    U+212A → U+004B, ``Å`` U+212B → U+00C5. Merging them is correct (Unicode
+    itself defines them as the same character), and it is why the report says
+    "canonically equivalent" rather than "renders identically": equivalence is
+    guaranteed by the standard, identical rendering is only a font's habit.
+
     ``common._canonical_value`` is deliberately *not* reused: it layers
     amount-quote normalization on top of the Unicode fold, which would perturb
     the typed-literal key space this module builds through ``literal_types``.
@@ -105,6 +113,12 @@ def _representative(raws: set[str]) -> str:
     search from an NFC editor. Preferring NFC makes the reported string the one
     most likely to grep, and the full spelling list is printed alongside it for
     the rows it cannot reach.
+
+    The grep argument only holds where the group *has* a composed member. On a
+    uniformly decomposed KB every candidate is NFD and this returns NFD — still
+    deterministic and still a spelling actually written (which is the guarantee
+    that matters), but no more greppable than any other member. The labelled
+    spelling list is what carries the reader there in that case.
     """
     return min(raws, key=lambda s: (s != _fold(s), s))
 
@@ -129,10 +143,11 @@ def _spellings(raws: list[str]) -> str:
     """Render *raws* as an escaped, form-labelled list for the report.
 
     Escaped because the whole difficulty of this conflict class is that the
-    strings render identically, so the code points are the only way to tell them
-    apart; labelled because the code points alone still do not say which form to
-    unify *to*. The answer is on the CONFLICT line above — ``_representative``
-    already picked the NFC spelling — and the label is what connects the two.
+    strings are indistinguishable on screen, so the code points are the only way
+    to tell them apart; labelled because the code points alone do not say which
+    form to unify *to*. The answer is on the CONFLICT line above —
+    ``_representative`` already picked the NFC spelling — and the label is what
+    connects the two.
     """
     return ", ".join(f"{ascii(s)} ({_form_label(s)})" for s in raws)
 
