@@ -544,9 +544,12 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 #      cannot "see the resolved basename". `-L` is a shell builtin test, so
 #      falling through on one costs nothing. Only the final component matters:
 #      a symlinked PARENT directory does not change the basename.
-#   4. TRAILING SEPARATORS. "…/accepted.dl/" canonicalises to the engine input
-#      but does not match a `*/accepted.dl` glob. Strip them first, backslash
-#      included — the separator question is the same one as in guard 6's note.
+#   4. TRAILING SLASHES. "…/accepted.dl/" canonicalises to the engine input but
+#      does not match a `*/accepted.dl` glob. Strip them BEFORE guards 3 and 7,
+#      which ask the filesystem and must see the name the canonicaliser will.
+#      Slashes ONLY — on POSIX a trailing backslash is part of the filename, so
+#      stripping it would point those guards at a different file. Guard 6 still
+#      SPLITS on backslash; that is a Windows-basename question, not this one.
 #   5. DOT COMPONENTS. "…/accepted.dl/." canonicalises to the engine input while
 #      its basename is ".". An empty, "." or ".." basename tells us nothing, so
 #      fall through.
