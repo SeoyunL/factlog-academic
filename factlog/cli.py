@@ -2376,6 +2376,47 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     except _RESOLVE_ERRORS:
         troot = target
 
+    def ident(p: Path) -> tuple[int, int] | None:
+        """The filesystem's own identity for a path, or None when it cannot be
+        stat'd — the file is missing, or it sits behind a symlink loop."""
+        try:
+            st = p.stat()
+        except (OSError, ValueError):
+            return None
+        return (st.st_dev, st.st_ino)
+
+    troot_id, sroot_id = ident(troot), ident(target / "sources")
+
+    def kb_rel_by_identity(p: Path) -> str | None:
+        """Reduce an absolute path to a KB-relative ref by asking the filesystem
+        whether one of its ancestors *is* sources/ or the KB root.
+
+        ingest decides the same question the same way ((target / "sources")
+        .resolve(), cli.py:2050); comparing resolved strings does not, and the
+        two disagree whenever sources/ is a symlink or --target is spelled in a
+        different case on a case-insensitive filesystem. Both of those miss and
+        fall through to the basename fallback — the deletion #324 is about.
+
+        Walks strictly upward, so a symlink loop cannot trap it: the loop makes
+        stat() fail, which only means "not a root" and the walk keeps rising.
+        Returns None at the filesystem root, leaving the string reduction below
+        to handle a KB whose own root cannot be stat'd.
+        """
+        tail: list[str] = []
+        cur = p
+        while True:
+            cur_id = ident(cur)
+            if cur_id is not None:
+                if sroot_id is not None and cur_id == sroot_id:
+                    return "/".join(["sources", *reversed(tail)])
+                if troot_id is not None and cur_id == troot_id:
+                    # "." is what relative_to() spells for the root itself.
+                    return "/".join(reversed(tail)) if tail else "."
+            if cur.parent == cur:
+                return None
+            tail.append(cur.name)
+            cur = cur.parent
+
     def selector(name: str) -> tuple[set[str], str | None, str]:
         """Canonicalise one `eject <name>` argument into what the matcher needs:
 
@@ -2400,10 +2441,15 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
                 p = p.resolve()
             except _RESOLVE_ERRORS:
                 pass
-            try:
-                kb_rel = nfc(p.relative_to(troot).as_posix())
-            except ValueError:
-                kb_rel = None
+            # Identity first; the string reduction still covers a KB root that
+            # cannot be stat'd at all.
+            kb_rel = kb_rel_by_identity(p)
+            if kb_rel is None:
+                try:
+                    kb_rel = p.relative_to(troot).as_posix()
+                except ValueError:
+                    kb_rel = None
+            kb_rel = nfc(kb_rel) if kb_rel is not None else None
             if kb_rel is not None and (kb_rel == "sources" or kb_rel.startswith("sources/")):
                 return {kb_rel}, kb_rel[len("sources/"):] or None, raw
             # An original outside sources/ — anywhere else in the KB, or outside
