@@ -536,3 +536,53 @@ class TestAsciiDigitsUnchanged:
     def test_ascii_humanize_unchanged(self):
         assert lt.humanize('amount(7,"억")') == "7억"
         assert lt.humanize("date(2030,1,15)") == "2030-01-15"
+
+
+class TestNonAsciiDigitDiagnostics:
+    """The diagnostic half of the ASCII-only digit policy (#331).
+
+    ``check_conflicts`` and ``factlog status`` need to say WHY a value was
+    rejected, so the predicate that characterises "would have matched ``\\d`` but
+    not ``[0-9]``" lives here next to the regexes it explains. It is diagnostic
+    only — the regexes remain the single gate; nothing decides parseability from
+    these helpers."""
+
+    @pytest.mark.parametrize("value,expected", [
+        ("100억", False),
+        ("3rd", False),
+        ("date(2020,1)", False),
+        ("", False),
+        ("１００억", True),          # full-width, U+FF10-FF19
+        ("١٠٠", True),              # Arabic-Indic
+        ("१२३", True),              # Devanagari
+        ("๑๒๓", True),              # Thai
+        ("1２3억", True),            # half-and-half
+        # `²` is the case that separates a correct Nd test from `str.isdigit()`:
+        # isdigit() returns True for it, but its category is No and `\d` never
+        # matched it, so it was never accepted and must not be reported as the
+        # cause of a rejection.
+        ("²", False),
+    ])
+    def test_has_non_ascii_digits(self, value, expected):
+        assert lt.has_non_ascii_digits(value) is expected
+
+    def test_superscript_two_is_not_a_decimal_digit(self):
+        # Spelled out because it is the whole reason the implementation cannot be
+        # `str.isdigit()`.
+        assert "²".isdigit() is True
+        assert lt.has_non_ascii_digits("²") is False
+
+    def test_mark_escapes_only_the_offending_digits(self):
+        # Hangul survives so the value stays readable; the digits become visible.
+        assert lt.mark_non_ascii_digits("１００억") == "\\uff11\\uff10\\uff10억"
+
+    def test_mark_leaves_ascii_untouched(self):
+        assert lt.mark_non_ascii_digits("100억") == "100억"
+        assert lt.mark_non_ascii_digits("amount(100,\"억\")") == 'amount(100,"억")'
+
+    def test_mark_handles_mixed_width(self):
+        assert lt.mark_non_ascii_digits("1２3억") == "1\\uff123억"
+
+    def test_mark_is_a_noop_when_the_predicate_is_false(self):
+        for value in ("100억", "3rd", "²", ""):
+            assert lt.mark_non_ascii_digits(value) == value

@@ -63,6 +63,32 @@ printf '%s\n%s\n%s\n' "$H" \
 out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
 printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "conflict counted for single-valued relation" || bad "conflict not counted: $(printf '%s' "$out" | grep conflicts)"
 
+# --- #331: a conflicting value with non-ASCII digits is named -----------------
+# This path counts distinct RAW object strings, so it already saw the pair as two
+# values; what it never did was show WHICH one the engine cannot read. repr()
+# would not help — '１００억' and '100억' are indistinguishable in most fonts.
+printf '# single-valued\n- 매출\n' > "$KB/policy/single-valued.md"
+printf '%s\n%s\n%s\n' "$H" \
+  '갑사,매출,100억,sources/a.md,confirmed,0.9,' \
+  '갑사,매출,１００억,sources/a.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "non-ASCII digits" && ok "#331: status flags the non-ASCII digit value" || bad "#331: status does not flag it: $(printf '%s' "$out"|grep conflicts)"
+# The ESCAPED codepoint; the raw glyph cannot satisfy this.
+printf '%s' "$out" | grep -qF 'uff11' && ok "#331: status escapes the offending codepoints" || bad "#331: status does not escape the offending characters"
+
+# Negative control: restore the ASCII-only conflict, which must NOT be flagged —
+# otherwise the two assertions above would pass against an unconditional warning.
+printf '# single-valued\n- 주속성\n' > "$KB/policy/single-valued.md"
+printf '%s\n%s\n%s\n' "$H" \
+  '을서비스,주속성,값가,sources/a.md,confirmed,0.9,' \
+  '을서비스,주속성,값나,sources/a.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+if printf '%s' "$out" | grep -qF "non-ASCII digits"; then
+  bad "#331: ASCII-only conflict wrongly flagged as non-ASCII"
+else
+  ok "#331: ASCII-only conflict carries no non-ASCII note"
+fi
+
 # --- logic report freshness (report mtime pinned; each input checked) ---------
 printf 'errors: 0\nwarnings: 2\n' > "$KB/facts/logic_report.txt"
 printf 'relation("x","r","y").\n' > "$KB/facts/accepted.dl"
