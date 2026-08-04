@@ -137,6 +137,28 @@ def _spellings(raws: list[str]) -> str:
     return ", ".join(f"{ascii(s)} ({_form_label(s)})" for s in raws)
 
 
+def _variant_map(groups: dict[tuple, set[str]]) -> dict[str, list[str]]:
+    """Return ``{reported object: sorted raw objects}`` for *groups*, key-sorted.
+
+    Sorted rather than insertion-ordered. ``main`` reads this through the sorted
+    ``conflicts`` list and each key's sorted object list, so the report never
+    depended on it — but *groups* is built by iterating sets, so insertion order
+    tracks row order, and this is a public return value of a module whose entire
+    contract is determinism. Leaving row order in it is a trap for the next
+    caller, not a defect in this one.
+
+    Group representatives are distinct by construction (each raw object falls in
+    exactly one group, so the groups' raw sets are disjoint), hence sorting on
+    the key alone is a total order.
+    """
+    return dict(
+        sorted(
+            ((_representative(raws), sorted(raws)) for raws in groups.values()),
+            key=lambda item: item[0],
+        )
+    )
+
+
 def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     """Return the equivalence key an *object* string is grouped under.
 
@@ -329,15 +351,13 @@ def collect_conflicts(
             # Unicode merge and must not be announced as one.
             if any(len({_fold(r) for r in raws}) < len(raws) for raws in groups.values()):
                 reported = (_representative(subjects), pair[1])
-                object_variants[reported] = {
-                    _representative(raws): sorted(raws) for raws in groups.values()
-                }
+                object_variants[reported] = _variant_map(groups)
             continue
         # Representative restoration on both axes: report strings as written.
         # Distinct folded subjects cannot share a representative (the choice is a
         # function of the fold), so reported keys stay unique.
         reported = (_representative(subjects), pair[1])
-        objects = {_representative(raws): sorted(raws) for raws in groups.values()}
+        objects = _variant_map(groups)
         conflicts[reported] = sorted(objects)
         subject_variants[reported] = sorted(subjects)
         object_variants[reported] = objects

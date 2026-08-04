@@ -19,6 +19,7 @@ Folding is NFC only — compatibility variants (fullwidth) and case stay distinc
 """
 from __future__ import annotations
 
+import itertools
 import unicodedata
 
 import check_conflicts
@@ -297,6 +298,19 @@ class TestVariantChannels:
         _, subjects, objects = check_conflicts.collect_conflicts(facts, {"속성"}, {})
         assert subjects[("갑", "속성")] == ["갑"]
         assert objects[("갑", "속성")] == {"x": ["x"], "y": ["y"]}
+
+    def test_object_variant_key_order_is_independent_of_row_order(self):
+        # The groups are built in a dict keyed off set iteration, so insertion
+        # order tracks row order. main() reads this through the sorted conflicts
+        # list and the sorted objects list, so the report never showed it — but
+        # this is a public return value of a module whose whole contract is
+        # determinism, and leaving row order in it is a trap for the next caller.
+        base = [_fact("갑", "속성", v) for v in ("a", "b", "c", "d")]
+        orders = set()
+        for perm in itertools.permutations(base):
+            _, _, objects = check_conflicts.collect_conflicts(list(perm), {"속성"}, {})
+            orders.add(tuple(objects[("갑", "속성")]))
+        assert orders == {("a", "b", "c", "d")}
 
     def test_variant_map_is_per_subject_relation_pair(self):
         # A per-folded-subject (global) map would let the mixed spelling of one
