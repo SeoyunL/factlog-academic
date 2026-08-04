@@ -69,6 +69,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import re
+import unicodedata
 from decimal import Decimal
 
 # The literal types this module can normalize. The declaration parser validates
@@ -86,6 +87,28 @@ DEFAULT_AMOUNT_UNITS: dict[str, int] = {
     "억": 10**8,
     "조": 10**12,
 }
+
+
+def has_non_ascii_digits(value: str) -> bool:
+    """True when *value* carries a Unicode decimal digit (category ``Nd``) outside
+    ASCII ``0-9`` — exactly the characters the ``[0-9]`` narrowing rejects and the
+    old ``\\d`` accepted (``\\d`` and ``Nd`` coincide). Diagnostic only: callers use
+    it to EXPLAIN a rejection, never to decide one — the regexes stay the single
+    gate. ``str.isdigit`` is deliberately not used: it also matches ``No`` (``²``),
+    which ``\\d`` never did. Total; never raises."""
+    return any(unicodedata.category(ch) == "Nd" and not ch.isascii() for ch in value)
+
+
+def mark_non_ascii_digits(value: str) -> str:
+    """*value* with every non-ASCII decimal digit replaced by its ``\\uXXXX``
+    escape, so a message can name the offending characters. ``repr`` cannot:
+    ``repr('１００억')`` is ``'１００억'``, indistinguishable from ``'100억'`` in most
+    fonts. Everything else is left verbatim so the value stays readable."""
+    return "".join(
+        f"\\u{ord(ch):04x}" if unicodedata.category(ch) == "Nd" and not ch.isascii() else ch
+        for ch in value
+    )
+
 
 # Every numeric group below is written ``[0-9]``, never ``\d`` — see the ASCII-only
 # paragraph in the module docstring. Do NOT reach for ``re.ASCII`` to get the same

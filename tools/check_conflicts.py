@@ -10,7 +10,9 @@ a plain notes wiki accumulates. This surfaces it deterministically.
 
 Resolution is human-in-the-loop and non-destructive: mark the outdated row's
 status as 'superseded' in facts/candidates.csv (it stays for audit, drops out of
-engine input, and the conflict clears).
+engine input, and the conflict clears). A value carrying non-ASCII digits is the
+exception: it does not parse, so supersession can clear the gate while keeping the
+unreadable value (see non_ascii_digit_note).
 
 Exit code: 0 if no conflicts, 1 if any conflict is found.
 
@@ -186,6 +188,31 @@ def detect_conflicts(
     }
 
 
+def non_ascii_digit_note(objects: list[str]) -> list[str] | None:
+    """Extra guidance lines for a conflict group holding a value with non-ASCII
+    digits, or ``None`` when every value is ASCII-clean.
+
+    The generic advice printed by ``main`` ("mark the outdated row superseded")
+    assumes one of the values is out of date. A value carrying non-ASCII digits
+    does not parse as a typed literal at all (``_group_key`` degrades it to
+    ``("raw", obj)``), so superseding the OTHER row clears this gate while leaving
+    the KB holding the value the engine cannot read. Note what is NOT claimed:
+    superseding the offending row itself does resolve the conflict correctly, so
+    the wording says supersession *can* leave the bad value, never that it cannot
+    work. Pure; never raises."""
+    offenders = [o for o in objects if literal_types.has_non_ascii_digits(o)]
+    if not offenders:
+        return None
+    shown = ", ".join(f"'{literal_types.mark_non_ascii_digits(o)}'" for o in offenders)
+    return [
+        f"    note: {shown} carries non-ASCII digits, so it does not parse as a",
+        "          typed literal and is compared here as a raw string. Superseding a",
+        "          row clears this gate but can leave that unreadable value in the KB",
+        "          — correct the source to ASCII digits and re-collect instead",
+        "          (docs/reference/typed-relations.md).",
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Detect single-valued-relation contradictions.")
     parser.add_argument("--wiki", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
@@ -211,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(objects)} values: {', '.join(objects)}",
             file=sys.stderr,
         )
+        for line in non_ascii_digit_note(objects) or ():
+            print(line, file=sys.stderr)
     print(
         "  Resolve by marking the outdated row(s) status='superseded' in "
         "facts/candidates.csv, then re-run.",
