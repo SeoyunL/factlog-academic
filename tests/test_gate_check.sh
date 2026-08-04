@@ -1186,6 +1186,50 @@ done
 rm -rf "$KB_TOOLNAME"
 
 # ---------------------------------------------------------------------------
+# CASE 51: BACKSLASH IN THE TARGET NAME MUST NOT CAUSE A FALSE DENY.
+#
+# The prefilter splits the basename on BOTH separators, because Python's os.path
+# treats a backslash as one on Windows: under Git Bash
+# "C:\kb\facts\accepted.dl" canonicalises to the engine input while
+# `${path##*/}` hands back the whole string. That Windows direction CANNOT be
+# exercised here — it needs a Git Bash host where os.path is ntpath — so it
+# stays asserted by construction, not by this case. Verified out of band that
+# `ntpath.basename(r'C:\kb\facts\accepted.dl')` is 'accepted.dl' while POSIX
+# realpath keeps the backslash as an ordinary character.
+#
+# What IS testable on POSIX is the other direction, and it is the one that can
+# do damage: here a backslash is a legal filename character, so `<KB>/facts\
+# accepted.dl` (one component, no directory) is an ordinary file that merely
+# LOOKS like the engine input once split. It must ALLOW.
+#
+# This kills the obvious wrong way to add Windows support — rewriting
+# backslashes to forward slashes before the match, which would deny a legitimate
+# write to a real POSIX file. The prefilter may only use the backslash split to
+# decide to fall THROUGH; the verdict stays with the canonicaliser.
+#
+# The payload is built with json.dumps because a raw backslash inside a JSON
+# string is an invalid escape — Claude Code would send it doubled, and so must
+# this fixture.
+# ---------------------------------------------------------------------------
+KB_BSLASH="$(mktemp -d)"
+kb_stale "$KB_BSLASH"
+bslash_target="$KB_BSLASH/facts\\accepted.dl"
+touch_file "$bslash_target"
+bslash_payload="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+print(json.dumps({"tool_name": "Write",
+                  "tool_input": {"file_path": sys.argv[1], "content": "x"}}))
+' "$bslash_target")"
+run_payload_case "literal backslash in the filename — allow (not the engine input on POSIX)" \
+  "$KB_BSLASH" "$bslash_payload" 0
+
+# Control: the real engine input in the same KB still denies, so the case above
+# is not passing merely because the KB stopped being stale.
+run_payload_case "control: real engine input in the same KB — deny" \
+  "$KB_BSLASH" "$(envelope Write "$KB_BSLASH/facts/accepted.dl")" 2
+rm -rf "$KB_BSLASH"
+
+# ---------------------------------------------------------------------------
 # CASE 47: MTIME EQUALITY IS FRESH — ALLOW.
 #
 # The freshness comparison is `report_mtime -lt newest_input_mtime`, so a report
