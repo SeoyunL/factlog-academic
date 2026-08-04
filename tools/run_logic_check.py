@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Run deterministic logic checks over facts and query drafts."""
+"""Run deterministic logic checks over facts and query drafts.
+
+Usage:
+    python3 run_logic_check.py [--wiki <kb>]
+"""
 
 from __future__ import annotations
 
-from common import (
+import argparse
+import os
+import sys
+from pathlib import Path
+
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common, which binds
+# its module-level paths from FACTLOG_ROOT at import time.
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
+
+from common import (  # noqa: E402
     FACTS_DIR,
     KNOWN_STATUSES,
     QUERY_PREDICATES,
@@ -302,4 +322,9 @@ def main() -> None:
 if __name__ == "__main__":
     from common import run_cli
 
+    # main() takes no argv; parse here only so `--wiki` is a documented option
+    # with --help, and a mistyped flag is rejected instead of silently ignored.
+    _parser = argparse.ArgumentParser(description="Run deterministic logic checks over facts and query drafts.")
+    _parser.add_argument("--wiki", default=os.environ["FACTLOG_ROOT"], help="KB root")
+    _parser.parse_args()
     raise SystemExit(run_cli(main))

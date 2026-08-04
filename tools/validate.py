@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Validate factlog KB outputs."""
+"""Validate factlog KB outputs.
+
+Usage:
+    python3 validate.py [<kb>]
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import FACT_HEADER, KNOWN_STATUSES
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common. validate's KB
+# argument is a POSITIONAL, not a flag, so the shared resolver is called without
+# one and the positional keeps precedence via the argparse default in main().
+# Without this the active-KB config (`factlog use`) was skipped and resolution
+# fell straight through to cwd (#330).
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root()[0]
+
+from common import FACT_HEADER, KNOWN_STATUSES  # noqa: E402
 
 
 
@@ -256,7 +274,9 @@ def main() -> int:
             except (AttributeError, ValueError, OSError):
                 pass
     parser = argparse.ArgumentParser(description="Validate factlog KB outputs.")
-    parser.add_argument("root", nargs="?", default=".")
+    # Default is the prepass-resolved root ($FACTLOG_ROOT > active-KB config >
+    # cwd); an explicit positional still wins, keeping flag > env > config > cwd.
+    parser.add_argument("root", nargs="?", default=os.environ["FACTLOG_ROOT"])
     args = parser.parse_args()
     root = Path(args.root).expanduser().resolve()
     errors = validate(root)

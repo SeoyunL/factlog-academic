@@ -31,7 +31,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import logic_policy_md_has_rules
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common, which binds its
+# module-level paths from FACTLOG_ROOT at import time. It also becomes the
+# --target default below, so the active-KB config (`factlog use`) is honoured
+# instead of falling straight through to cwd (#330).
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--target")
+
+from common import logic_policy_md_has_rules  # noqa: E402
 
 _TOOLS = Path(__file__).parent
 

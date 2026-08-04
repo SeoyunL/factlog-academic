@@ -1,17 +1,33 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Generate policy/logic-policy.dl from controlled natural-language policy text."""
+"""Generate policy/logic-policy.dl from controlled natural-language policy text.
+
+Usage:
+    python3 generate_logic_policy.py [--wiki <kb>] [--dry-run] [--check]
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from common import (
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common, which binds
+# its module-level paths from FACTLOG_ROOT at import time.
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
+
+from common import (  # noqa: E402
     POLICY_DIR,
     PROMPTS_DIR,
     RUNS_DIR,
@@ -243,6 +259,10 @@ def write_trace(rules: list[dict[str, Any]], output: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate policy/logic-policy.dl from controlled natural-language policy text.")
+    # --wiki is resolved by the import-time prepass (it must set FACTLOG_ROOT
+    # before common binds its paths); declared here so it is documented in --help
+    # and not rejected as an unrecognized argument.
+    parser.add_argument("--wiki", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
     parser.add_argument("--dry-run", action="store_true", help="render and validate, but do not write policy/logic-policy.dl")
     parser.add_argument("--check", action="store_true", help="verify policy/logic-policy.dl matches the generated output")
     args = parser.parse_args()
