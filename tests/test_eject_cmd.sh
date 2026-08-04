@@ -247,8 +247,10 @@ if [ -d "$(dirname "$KB")/WIKI" ]; then
 fi
 
 # --- an unresolvable path errors like any unknown name (no traceback) ---------
-# resolve() raises RuntimeError on a symlink loop, not OSError; letting it escape
-# turned an ordinary no-match into a crash.
+# On Python 3.11/3.12 resolve() re-raises ELOOP as RuntimeError, not OSError;
+# letting it escape turned an ordinary no-match into a crash. 3.13+ returns the
+# path unresolved instead, so this assertion only bites on the older two — which
+# includes the interpreter CI pins.
 KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
 LOOP="$(mktemp -d)"; ln -s "$LOOP/b" "$LOOP/a"; ln -s "$LOOP/a" "$LOOP/b"
 set +e
@@ -257,6 +259,21 @@ set -e
 [ "$rc" -ne 0 ] && ! printf '%s' "$err" | grep -qF "Traceback" \
   && ok "a symlink-loop path reports no match instead of crashing" \
   || bad "symlink-loop path crashed: $(printf '%s' "$err" | tail -1)"
+
+# --- ...and it deletes nothing, on every interpreter --------------------------
+# The assertion above is silent on 3.13+, where resolve() raises nothing at all.
+# What must hold everywhere is that an unresolvable argument reaches no file: an
+# unresolved path is still absolute, still lands outside the KB, and so still
+# meets the basename fallback. Name the loop after a basename that two live
+# conversions share, so a degraded match has something to destroy.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+LOOP="$(mktemp -d)"; ln -s "$LOOP/b" "$LOOP/a"; ln -s "$LOOP/a" "$LOOP/b"
+set +e
+"$PYTHON" -m factlog eject "$LOOP/a/report.html" --target "$KB" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "a symlink-loop path matching a live basename still deletes nothing" \
+  || bad "symlink-loop path deleted a conversion by basename"
 
 # --- an absolute original outside the KB matches only a FLAT conversion -------
 # ingest gives a path outside sources/ no subtree to mirror, so its conversion is
