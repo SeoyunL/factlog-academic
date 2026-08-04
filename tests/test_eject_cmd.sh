@@ -196,6 +196,40 @@ KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
   && ok "absolute path + --delete-original leaves the same-name sibling intact" \
   || bad "--delete-original deleted a file in another directory"
 
+# --- a KB whose sources/ is a symlink is still recognised as inside the KB -----
+# ingest decides containment by filesystem identity ((target / "sources").resolve(),
+# cli.py:2050). A string-prefix test on the resolved path disagrees with that
+# oracle as soon as sources/ is a symlink: the argument looks like it lies
+# outside the KB and drops to the basename fallback, which deletes the same-name
+# conversion in *another* directory while sparing the one that was named.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+LINKED="$(mktemp -d)/docs"; mv "$KB/sources" "$LINKED"; ln -s "$LINKED" "$KB/sources"
+"$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$KB" --delete-original >/dev/null 2>&1
+[ ! -f "$KB/sources/sub/report.html" ] && [ ! -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "a symlinked sources/ still reduces an absolute path to its KB ref" \
+  || bad "symlinked sources/: the named pair survived"
+[ -f "$KB/sources/report.html" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "a symlinked sources/ does not reach the same-name sibling" \
+  || bad "symlinked sources/: deleted a file in another directory"
+
+# --- a --target spelled in a different case on a case-insensitive filesystem ---
+# Path.resolve() does not fold case on macOS/Windows, so a string-prefix test
+# misses and falls back to the basename. Nothing unusual has to be typed: only
+# --target is spelled differently from the argument. Skipped where the
+# filesystem is case-sensitive (Linux CI), because there the two spellings name
+# genuinely different directories.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+if [ -d "$(dirname "$KB")/WIKI" ]; then
+  "$PYTHON" -m factlog eject "$KB/sources/sub/report.html" \
+    --target "$(dirname "$KB")/WIKI" --delete-original >/dev/null 2>&1
+  [ ! -f "$KB/sources/sub/report.html" ] && [ ! -f "$KB/runs/sources/sub/report.html.md" ] \
+    && ok "a case-different --target still reduces the argument to its KB ref" \
+    || bad "case-different --target: the named pair survived"
+  [ -f "$KB/sources/report.html" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+    && ok "a case-different --target does not reach the same-name sibling" \
+    || bad "case-different --target: deleted a file in another directory"
+fi
+
 # --- an unresolvable path errors like any unknown name (no traceback) ---------
 # resolve() raises RuntimeError on a symlink loop, not OSError; letting it escape
 # turned an ordinary no-match into a crash.
