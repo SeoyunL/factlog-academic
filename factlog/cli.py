@@ -1759,8 +1759,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Conflicts (single-valued relations with >1 distinct object)
     if sv:
         by_key: dict[tuple, set] = {}
+        # Membership folded, matching the gate (check_conflicts). Grouping stays
+        # on the raw pair — that axis is a separate, still-open question — but a
+        # uniformly-NFD KB must at least reach the count, or status prints 0 for
+        # a KB finalize then refuses to compile.
+        sv_folded = common.folded_relation_names(sv)
         for r in engine_rows:
-            if r["relation"] in sv:
+            if common.fold_relation_name(r["relation"]) in sv_folded:
                 by_key.setdefault((r["subject"], r["relation"]), set()).add(r["object"])
         conflicts = {k: v for k, v in by_key.items() if len(v) > 1}
         msg = f"  conflicts:  {len(conflicts)} (over {len(sv)} single-valued relation(s))"

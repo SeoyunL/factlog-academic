@@ -10,7 +10,7 @@ import re
 import sys
 import unicodedata
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -663,6 +663,33 @@ def load_questions() -> list[dict[str, str]]:
     if not rows:
         raise FactlogError("policy/questions.md has no questions. Add lines such as '- [q1] Claude Code가 사용하는 것은 무엇인가?'")
     return rows
+
+
+def fold_relation_name(name: str) -> str:
+    """Return *name* under Unicode canonical composition, for membership tests.
+
+    NFC only — never NFKC, never casefold. Fullwidth ``ＡＢＣ`` and ``ABC`` are
+    different relations, not two spellings of one, and must stay distinct.
+    """
+    return unicodedata.normalize("NFC", name)
+
+
+def folded_relation_names(names: Iterable[str]) -> set[str]:
+    """NFC-fold a set of policy relation names once, for O(1) membership tests.
+
+    ``_relation_names_from`` returns policy names verbatim, so comparing a row's
+    relation against them raw is a byte comparison between two hand-written
+    files: policy/single-valued.md and the extracted facts. A KB written
+    uniformly in NFD — the macOS default for Hangul — then matches nothing, and
+    every consumer that tests membership silently reports it as clean.
+
+    ``check_conflicts`` folds both sides for exactly this reason. Readers that
+    display conflict counts must use the same predicate, or ``factlog status``
+    reports 0 on a KB ``finalize`` then refuses to compile — and unlike the
+    remaining checker/status divergences, this one needs no mixed spellings at
+    all, just one consistently decomposed KB.
+    """
+    return {fold_relation_name(name) for name in names}
 
 
 def _relation_names_from(path: Path) -> set[str]:

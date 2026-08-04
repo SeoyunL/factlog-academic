@@ -34,6 +34,8 @@ from common import (  # noqa: E402
     corroboration_counts,
     engine_facts,
     ensure_dirs,
+    fold_relation_name,
+    folded_relation_names,
     load_facts,
     single_valued_relations,
 )
@@ -63,8 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     single_valued = single_valued_relations()
     if single_valued:
         competing: dict[tuple[str, str], dict[str, int]] = {}
+        # Membership folded, matching the gate (check_conflicts): policy names are
+        # stored verbatim, so a uniformly-NFD KB matches nothing raw and its
+        # competing values are silently never surfaced.
+        sv_folded = folded_relation_names(single_valued)
         for row in engine_facts(facts):
-            if row["relation"] in single_valued:
+            if fold_relation_name(row["relation"]) in sv_folded:
                 competing.setdefault((row["subject"], row["relation"]), {})
                 key = row["object"]
                 competing[(row["subject"], row["relation"])][key] = counts.get(
