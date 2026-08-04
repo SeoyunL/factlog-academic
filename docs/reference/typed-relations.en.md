@@ -74,7 +74,11 @@ It does not stop at the gate. On a conflict `finalize` not only skips compiling
 facts to `facts/accepted.dl`, it also **removes** an existing `facts/accepted.dl`
 from disk, so a stale contradictory engine input cannot keep answering after a
 failed compile. What you actually experience is therefore not "the gate went red"
-but **`/factlog ask` returning nothing until the conflict is resolved**.
+but **`/factlog ask` no longer producing a verified answer until the conflict is
+resolved**. With no engine input left to read, the question falls to the
+wiki-exploration route, which still returns its `UNVERIFIED — wiki exploration`
+block — and those excerpts may quote both sides of the unresolved conflict, so
+they must not be read as a settled answer.
 
 That gate failure is loud; there is also a **quiet** one. If an existing KB holds
 a full-width amount compound term (`amount(１００,"억")`), a query written without
