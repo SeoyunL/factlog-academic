@@ -1026,6 +1026,60 @@ run_payload_case "case-variant accepted.dl, target absent ($case_fold_label) —
 rm -rf "$KB_CASE"
 
 # ---------------------------------------------------------------------------
+# CASES 42-46: THE BASENAME PREFILTER MUST NOT OPEN A HOLE.
+#
+# The gate short-circuits to ALLOW, without canonicalising, when the target's
+# last path component cannot be an engine input. That saves an interpreter spawn
+# on every Write/Edit in the session, and it is the whole reason the fix does not
+# double write latency — but it is a NAME test standing in for a PATH question,
+# and a name lies in five ways. CASE 42 pins the short-circuit itself; 43-46 are
+# the paths that must survive it, each of which the naive form
+# `case "$target_path" in */accepted.dl) ;; *) exit 0 ;; esac` gets wrong.
+#
+# CASE 39 (hard link) is the fifth and already sits above: it is what forces the
+# prefilter to pay for a `stat`.
+#
+# All five run against a stale KB, so "reached the matcher" is observable as
+# exit 2 and "short-circuited" as exit 0.
+# ---------------------------------------------------------------------------
+KB_PRE="$(mktemp -d)"
+kb_stale "$KB_PRE"
+
+# CASE 42: the short-circuit itself. A neighbouring name in the same directory
+# must ALLOW — this is the case that carries the latency saving.
+run_payload_case "prefilter: facts/accepted.dl.bak in a stale KB — allow" \
+  "$KB_PRE" "$(envelope Write "$KB_PRE/facts/accepted.dl.bak")" 0
+
+# CASE 43: SYMLINK whose own name differs from its target's. The prefilter runs
+# BEFORE canonicalisation, so it cannot "resolve it and then see the basename";
+# only the -L test saves this.
+ln -s accepted.dl "$KB_PRE/facts/notes.dl"
+run_payload_case "prefilter: symlink notes.dl -> accepted.dl — deny" \
+  "$KB_PRE" "$(envelope Write "$KB_PRE/facts/notes.dl")" 2
+
+# CASE 44: TRAILING SLASH. Canonicalises to the engine input; does not match a
+# `*/accepted.dl` glob.
+run_payload_case "prefilter: trailing slash on accepted.dl — deny" \
+  "$KB_PRE" "$(envelope Write "$KB_PRE/facts/accepted.dl/")" 2
+
+# CASE 45: TRAILING DOT COMPONENT. Canonicalises to the engine input; its
+# basename is ".".
+run_payload_case "prefilter: accepted.dl/. — deny" \
+  "$KB_PRE" "$(envelope Write "$KB_PRE/facts/accepted.dl/.")" 2
+
+# CASE 46: CASE VARIANT. A case-sensitive glob here would undo the matcher's
+# case handling before the matcher ever ran. Filesystem-dependent for the same
+# reason as CASES 40-41, and asked the same way.
+if [ -e "$KB_PRE/facts/ACCEPTED.DL" ]; then
+  pre_case_expect=2
+else
+  pre_case_expect=0
+fi
+run_payload_case "prefilter: case-variant Accepted.dl reaches the matcher — expect $pre_case_expect" \
+  "$KB_PRE" "$(envelope Write "$KB_PRE/facts/Accepted.dl")" "$pre_case_expect"
+rm -rf "$KB_PRE"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
