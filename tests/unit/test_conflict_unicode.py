@@ -633,6 +633,76 @@ class TestSpellingPayloadMatchesTheGate:
         assert "carries back only status" not in err
 
 
+class TestRelationSpellingIsDisclosed:
+    """One contradiction reported as N lines must say why there are N.
+
+    Membership is folded but grouping is not (the #210 call is deferred), so a
+    relation spelled two ways yields two groups and two CONFLICT lines that are
+    byte-different and visually identical. Collapsing them would mean folding the
+    grouping key — the maintainer decision this PR deliberately leaves open — so
+    the fix here is disclosure, matching what the subject axis already does.
+
+    The policy file does not drive the count: ``sv`` is a set of folded names, so
+    two policy spellings collapse to one element. The count comes purely from
+    distinct raw relation spellings among the rows.
+    """
+
+    def test_mixed_relation_spellings_are_named_in_the_conflict_line(self, monkeypatch, capsys):
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfc("소속"), "B사"),
+            _fact("김철수", _nfd("소속"), "A사"),
+            _fact("김철수", _nfd("소속"), "B사"),
+        ]
+        assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 1
+        err = capsys.readouterr().err
+        assert "(relation written in 2 mixed Unicode normalization forms)" in err
+
+    def test_mixed_relation_spellings_are_printed_escaped(self, monkeypatch, capsys):
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfc("소속"), "B사"),
+            _fact("김철수", _nfd("소속"), "A사"),
+            _fact("김철수", _nfd("소속"), "B사"),
+        ]
+        _run_main(monkeypatch, facts, {_nfc("소속")})
+        err = capsys.readouterr().err
+        assert (
+            f"    relation spellings: {ascii(_nfd('소속'))} (NFD), "
+            f"{ascii(_nfc('소속'))} (NFC)\n"
+        ) in err
+
+    def test_mixed_relation_gets_the_unify_guidance(self, monkeypatch, capsys):
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfc("소속"), "B사"),
+            _fact("김철수", _nfd("소속"), "A사"),
+            _fact("김철수", _nfd("소속"), "B사"),
+        ]
+        _run_main(monkeypatch, facts, {_nfc("소속")})
+        assert "Unify the spelling in sources/" in capsys.readouterr().err
+
+    def test_single_relation_spelling_says_nothing(self, monkeypatch, capsys):
+        # No disclosure when there is nothing to disclose — this is what keeps an
+        # NFC-only KB byte-identical.
+        facts = [_fact("김철수", "소속", "A사"), _fact("김철수", "소속", "B사")]
+        _run_main(monkeypatch, facts, {"소속"})
+        err = capsys.readouterr().err
+        assert "relation written in" not in err
+        assert "relation spellings:" not in err
+
+    def test_distinct_relations_are_not_conflated(self, monkeypatch, capsys):
+        # Two genuinely different relations on one subject are not "spellings".
+        facts = [
+            _fact("김철수", "소속", "A사"),
+            _fact("김철수", "소속", "B사"),
+            _fact("김철수", "직급", "부장"),
+            _fact("김철수", "직급", "과장"),
+        ]
+        _run_main(monkeypatch, facts, {"소속", "직급"})
+        assert "relation written in" not in capsys.readouterr().err
+
+
 class TestNfcOnlyKbByteIdentical:
     """The invariant the issue asks for: an NFC-only KB reports exactly as before."""
 

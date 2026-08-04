@@ -542,12 +542,25 @@ def main(argv: list[str] | None = None) -> int:
     # spelling merely joined is still a contradiction, and unifying the spelling
     # does not resolve it.
     any_mixed = False
+    # Membership is folded but grouping is not (#210 is a maintainer call, see
+    # collect_conflicts), so one contradiction written with the relation spelled
+    # two ways surfaces as two CONFLICT lines that are byte-different and look
+    # identical. Collapsing them means folding the grouping key, which is exactly
+    # the deferred decision — so disclose instead, as the subject axis does. The
+    # count comes from the rows, not from policy/single-valued.md: sv holds
+    # folded names, so several policy spellings collapse to one element there.
+    relation_spellings: dict[tuple[str, str], set[str]] = {}
+    for subject, relation in conflicts:
+        relation_spellings.setdefault((_fold(subject), _fold(relation)), set()).add(relation)
     for key, objects in sorted(conflicts.items()):
         subject, relation = key
         suffix = " (canonical; incl. surface variants)" if aliases and relation in set(aliases.values()) else ""
         subjects = subject_variants[key]
         if len(subjects) > 1:
             suffix += f" (subject written in {len(subjects)} mixed Unicode normalization forms)"
+        relations = sorted(relation_spellings[(_fold(subject), _fold(relation))])
+        if len(relations) > 1:
+            suffix += f" (relation written in {len(relations)} mixed Unicode normalization forms)"
         print(
             f"  CONFLICT: single-valued '{relation}'{suffix} on '{subject}' has "
             f"{len(objects)} values: {', '.join(objects)}",
@@ -559,6 +572,9 @@ def main(argv: list[str] | None = None) -> int:
         if len(subjects) > 1:
             any_mixed = True
             print(f"    subject spellings: {_spellings(subjects)}", file=sys.stderr)
+        if len(relations) > 1:
+            any_mixed = True
+            print(f"    relation spellings: {_spellings(relations)}", file=sys.stderr)
         for obj in objects:
             # Evidence of a *Unicode* merge is that folding collapses spellings,
             # not that the group holds several strings: a typed relation groups on
