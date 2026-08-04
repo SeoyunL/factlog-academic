@@ -50,8 +50,8 @@
 # is a fail-to-previous-behaviour, NOT a fail-closed: it opens no new hole beyond
 # what existed before this resolver, but it is permissive for cross-KB writes.
 # That degrade is made OBSERVABLE: when Python is available but the resolver
-# returns empty (package import failure), a one-line stderr note is emitted so
-# the silent permissive fallback is visible to an operator (see below).
+# returns empty (package import failure), a one-line note is emitted so the
+# silent permissive fallback is visible to an operator (see below).
 # THREE branches DENY without evaluating the freshness predicate:
 #   1. The python-availability check below DENYs when no usable Python 3.11+ is
 #      present, since the predicate cannot then be evaluated. Escape hatch:
@@ -74,9 +74,11 @@
 #
 # Everything else fails OPEN (exit 0). Three of those branches are a check the
 # gate SKIPPED because it could not read the call, and each emits a one-line
-# stderr note — #323 was filed partly because such skips were silent and left
-# the operator believing the gate was running (same rule as the resolver
-# degrade, #244):
+# note — #323 was filed partly because such skips were silent and left the
+# operator believing the gate was running (same rule as the resolver degrade,
+# #244). Notes ride the exit-0 channel the hook contract actually surfaces, a
+# JSON `systemMessage` on stdout; see the _note/_allow helpers below for why a
+# bare stderr line would have reached nobody:
 #   - an unparseable payload;
 #   - an INCOMPLETE record from the extractor — the interpreter died, or wrote
 #     something that is not three NUL-terminated fields. Note this lands the
@@ -112,6 +114,56 @@ HOOK_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 PYTHON_RUNNER_SCRIPT="${FACTLOG_PYTHON_RUNNER:-"$HOOK_DIR/../tools/factlog_python.sh"}"
 PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
 
+# Operator notes on the fail-OPEN paths (see "Everything else fails OPEN" above).
+#
+# CHANNEL. The PreToolUse contract routes each exit code differently:
+#   exit 2      — stderr is handed to Claude as the block reason; stdout ignored.
+#   exit other  — non-blocking error; stderr is shown in the transcript.
+#   exit 0      — non-JSON stdout is "logged but not shown in transcript", and
+#                 the contract makes no promise at all about stderr.
+# Every note below sits on an exit-0 path, so a bare `echo ... >&2` reaches
+# nobody but `claude --debug` and an external capture of the hook process. That
+# is the wrong end of #323: a note that documents a skipped check has to be
+# visible to the person who would otherwise believe the gate ran.
+#
+# The exit-0 channel that IS surfaced is a JSON object on stdout carrying the
+# universal `systemMessage` field ("user-facing warning"). We emit exactly that,
+# and deliberately emit NO `hookSpecificOutput.permissionDecision`:
+# `permissionDecision: "allow"` would skip the normal permission prompt, i.e.
+# this gate would start auto-approving the very writes it just admitted it could
+# not check. With no decision field the call continues through the normal
+# permission flow, unchanged.
+#
+# Notes are BUFFERED rather than printed as they occur, because two notes can
+# fire in one run (resolver degrade + a fail-open branch) and two JSON objects on
+# stdout is not a JSON document. They are also mirrored to stderr, which costs
+# nothing and keeps `claude --debug` and external capture working.
+GATE_NOTES=""
+
+_note() {
+  echo "[factlog GATE] $1" >&2
+  if [ -n "$GATE_NOTES" ]; then
+    GATE_NOTES="$GATE_NOTES $1"
+  else
+    GATE_NOTES="$1"
+  fi
+}
+
+# Allow the tool call, handing any buffered notes to Claude Code as a
+# systemMessage. Escaping goes through json.dumps rather than shell quoting
+# because notes interpolate a tool name and a KB path. If the interpreter cannot
+# run, the systemMessage is dropped and only the stderr mirror survives — that
+# is exactly the "incomplete extractor record" case, where the interpreter is
+# already known to be broken.
+_allow() {
+  if [ -n "$GATE_NOTES" ]; then
+    FACTLOG_GATE_NOTE_TEXT="$GATE_NOTES" "${PYTHON_RUNNER[@]}" -c \
+      'import json, os; print(json.dumps({"systemMessage": "[factlog GATE] " + os.environ["FACTLOG_GATE_NOTE_TEXT"]}))' \
+      2>/dev/null || true
+  fi
+  exit 0
+}
+
 # Python 3.11+ is required for JSON parsing and portable path/mtime handling.
 # Fail closed: without it we cannot evaluate the predicate safely.
 if ! "${PYTHON_RUNNER[@]}" -c 'import sys' >/dev/null 2>&1; then
@@ -142,7 +194,7 @@ else
   # opens no new hole) — but make it OBSERVABLE with a one-line stderr note so an
   # operator can see the resolver was bypassed. This does NOT change the
   # exit-code contract or path matching.
-  echo "[factlog GATE] note: factlog config resolver unavailable; freshness gate falling back to \${FACTLOG_ROOT:-cwd} (KB_ROOT=$KB_ROOT)" >&2
+  _note "note: factlog config resolver unavailable; freshness gate falling back to \${FACTLOG_ROOT:-cwd} (KB_ROOT=$KB_ROOT)"
 fi
 
 # Extract the tool target from the hook payload (issue #323).
@@ -267,9 +319,8 @@ if [ -z "$target_path" ]; then
     # tool calls from inside the session, so the deny message is addressed to a
     # human operator and says where to set it.
     if [ "${FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD:-}" = "1" ]; then
-      echo "[factlog GATE] note: could not read a target path from the $tool_name payload;" >&2
-      echo "  FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 is set, so the write is allowed unchecked." >&2
-      exit 0
+      _note "note: could not read a target path from the $tool_name payload; FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 is set, so the write is allowed unchecked."
+      _allow
     fi
     echo "[factlog GATE] DENIED: could not read a target path from the $tool_name tool payload." >&2
     echo "  Either the tool call carried an empty path — in which case the write itself is" >&2
@@ -301,18 +352,18 @@ if [ -z "$target_path" ]; then
   # noise on every tool call.
   case "$tool_input_kind" in
     unparsed)
-      echo "[factlog GATE] note: hook payload was not parseable JSON; the freshness gate was skipped for this call (fail-open)." >&2
+      _note "note: hook payload was not parseable JSON; the freshness gate was skipped for this call (fail-open)."
       ;;
     incomplete)
-      echo "[factlog GATE] note: the payload extractor returned no complete record; the freshness gate was skipped for this call (fail-open)." >&2
+      _note "note: the payload extractor returned no complete record; the freshness gate was skipped for this call (fail-open)."
       ;;
     absent|other)
       if _is_write_tool "$tool_name"; then
-        echo "[factlog GATE] note: the $tool_name payload carried no tool_input object, so no target path could be read; the freshness gate was skipped for this call (fail-open)." >&2
+        _note "note: the $tool_name payload carried no tool_input object, so no target path could be read; the freshness gate was skipped for this call (fail-open)."
       fi
       ;;
   esac
-  exit 0
+  _allow
 fi
 
 # Normalise: check whether the target is facts/accepted.dl or facts/query.dl
@@ -339,7 +390,7 @@ done
 
 # If the target is not an engine input file, allow the tool to proceed.
 if [ "$is_engine_input" = false ]; then
-  exit 0
+  _allow
 fi
 
 report="${KB_ROOT}/facts/logic_report.txt"
@@ -353,7 +404,7 @@ query="${KB_ROOT}/facts/query.dl"
 # exists. We test the on-disk existence of the *target* (not the path string)
 # so this only relaxes the genuine first-write case.
 if [ ! -f "$report" ] && [ ! -e "$abs_target" ]; then
-  exit 0
+  _allow
 fi
 
 # Predicate: report must exist and be newer than the most recently modified
@@ -403,4 +454,4 @@ if [ "$report_mtime" -lt "$newest_input_mtime" ]; then
 fi
 
 # Report is fresh — allow the write/edit to proceed.
-exit 0
+_allow
