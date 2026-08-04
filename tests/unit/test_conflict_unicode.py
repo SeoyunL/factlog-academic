@@ -405,6 +405,81 @@ class TestReportExposesTheMerge:
         assert "Unify them to one form" in err
 
 
+class TestFoldingThatResolvesAConflict:
+    """When folding dissolves the contradiction, disclosure is the ONLY signal.
+
+    Object-axis folding can drop a pair before any variant map is built: the raw
+    spellings would report a contradiction, the folded ones agree, and the pair
+    never reaches the reporting loop. The checker then exits 0, ``finalize``
+    proceeds to compile, and ``common.dedup_engine_atoms`` keys on the raw
+    triple — so both spellings still land in ``accepted.dl`` as two distinct
+    atoms of the same visible fact. Nothing else in the run mentions it.
+
+    The gate direction differs per axis: subject folding merges rows and can only
+    *create* conflicts (checker stricter), object folding can only *resolve* them
+    (checker more permissive). Only the second needs an advisory.
+    """
+
+    def test_object_fold_that_resolves_a_conflict_is_disclosed(self, monkeypatch, capsys):
+        raws = [_nfc("한국대학교"), _nfd("한국대학교")]
+        facts = [_fact("연구소", "소속", raws[0]), _fact("연구소", "소속", raws[1])]
+        assert _run_main(monkeypatch, facts, {"소속"}) == 0
+        out = capsys.readouterr().out
+        assert "merged into one value" in out
+        # The code points, not just a count: the strings render alike.
+        assert ascii(raws[0]) in out and ascii(raws[1]) in out
+        assert "accepted.dl" in out
+
+    def test_collect_records_the_resolved_group_outside_conflicts(self):
+        raws = [_nfc("한국대학교"), _nfd("한국대학교")]
+        facts = [_fact("연구소", "소속", raws[0]), _fact("연구소", "소속", raws[1])]
+        conflicts, _, objects = check_conflicts.collect_conflicts(facts, {"소속"}, {})
+        assert conflicts == {}
+        assert objects[("연구소", "소속")][_nfc("한국대학교")] == sorted(raws)
+
+    def test_scalar_only_merge_is_not_disclosed(self, monkeypatch, capsys):
+        # #116 cross-notation equivalence, zero decomposed code points. Keying the
+        # advisory on "the group holds several strings" would fire here — that is
+        # the false diagnostic this whole disclosure must not reproduce.
+        facts = [
+            _fact("갑사", "매출", 'amount(5400,"억")'),
+            _fact("갑사", "매출", 'amount(0.54,"조")'),
+        ]
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 0
+        captured = capsys.readouterr()
+        assert captured.out == (
+            "check_conflicts: 0 conflicts across 1 single-valued relation(s)\n"
+        )
+        assert captured.err == ""
+
+    def test_subject_fold_alone_is_not_disclosed(self, monkeypatch, capsys):
+        # Subject folding cannot resolve a contradiction, so there is nothing to
+        # disclose even though the KB does mix spellings.
+        facts = [
+            _fact(_nfc("김철수"), "소속", "A사"),
+            _fact(_nfd("김철수"), "소속", "A사"),
+        ]
+        assert _run_main(monkeypatch, facts, {"소속"}) == 0
+        assert capsys.readouterr().out == (
+            "check_conflicts: 0 conflicts across 1 single-valued relation(s)\n"
+        )
+
+    def test_disclosure_rides_alongside_a_surviving_conflict(self, monkeypatch, capsys):
+        # A resolved merge on one pair and a real contradiction on another: the
+        # advisory must not displace the supersede guidance, or vice versa.
+        raws = [_nfc("한국대학교"), _nfd("한국대학교")]
+        facts = [
+            _fact("연구소", "소속", raws[0]),
+            _fact("연구소", "소속", raws[1]),
+            _fact("갑", "속성", "x"),
+            _fact("갑", "속성", "y"),
+        ]
+        assert _run_main(monkeypatch, facts, {"소속", "속성"}) == 1
+        captured = capsys.readouterr()
+        assert "merged into one value" in captured.out
+        assert "status='superseded'" in captured.err
+
+
 class TestNfcOnlyKbByteIdentical:
     """The invariant the issue asks for: an NFC-only KB reports exactly as before."""
 

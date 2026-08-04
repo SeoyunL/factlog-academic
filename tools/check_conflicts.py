@@ -192,7 +192,11 @@ def collect_conflicts(
     * *subject_variants* maps each reported key to the sorted raw subject strings
       merged under it;
     * *object_variants* maps each reported key to ``{reported object: sorted raw
-      objects}`` for that key's value groups.
+      objects}`` for that key's value groups. Its key set is a **superset** of
+      *conflicts*: a pair whose objects folding collapsed to a single value is
+      not a conflict, yet is retained here so the caller can disclose that the
+      fold is what resolved it (see ``_report_resolved_merges``). *conflicts* and
+      *subject_variants* carry conflicting pairs only.
 
     Either list holds one entry when nothing was merged. More than one means the
     KB writes that string in several Unicode normalization forms, so the reported
@@ -234,14 +238,26 @@ def collect_conflicts(
     collide, and how far #210's "no silent NFC coercion for non-participating
     relations" was meant to reach is a maintainer's call. Raised as a follow-up.
 
-    **Engine divergence (note only):** ``common.dedup_engine_atoms``
-    (``factlog/common.py:1277``) dedups on the **raw** ``(subject, relation,
-    object)`` triple, so the engine still writes an NFC-spelled and an NFD-spelled
-    subject into ``accepted.dl`` as two distinct entities. After this change the
-    checker therefore reports a contradiction the engine cannot see from
-    ``accepted.dl`` alone. For the gate that direction is safe — the checker is
-    the stricter of the two, so nothing slips through — but the engine-side
-    defect remains and is not addressed here.
+    **Engine divergence:** ``common.dedup_engine_atoms`` dedups on the **raw**
+    ``(subject, relation, object)`` triple, so the engine writes an NFC-spelled
+    and an NFD-spelled string into ``accepted.dl`` as two distinct entities. The
+    two folded axes diverge from that in *opposite* directions, and only one of
+    them is safe:
+
+    * **subject axis — checker stricter.** It reports a contradiction the engine
+      cannot see from ``accepted.dl`` alone. The gate closes on a KB the engine
+      would have accepted, so nothing slips through.
+    * **object axis — checker more permissive.** Two objects the raw grouping
+      called a contradiction now agree, so the gate *opens* where it used to
+      close, ``finalize`` compiles, and both spellings reach ``accepted.dl`` as
+      separate atoms — the inflated duplicate count ``dedup_engine_atoms`` exists
+      to prevent, arrived at through the normal path.
+
+    The permissive direction is semantically right: ``common._canonical_value``
+    (#213) already fixed NFC as value equality. What is not acceptable is doing
+    it silently, so the object channel below survives for a pair folding
+    resolved, and ``_report_resolved_merges`` discloses it at exit 0. The
+    engine-side raw-triple dedup itself is a follow-up.
     """
     typed = typed or {}
     aliases = aliases or {}
@@ -275,9 +291,20 @@ def collect_conflicts(
     subject_variants: dict[tuple[str, str], list[str]] = {}
     object_variants: dict[tuple[str, str], dict[str, list[str]]] = {}
     for pair, groups in by_key.items():
-        if len(groups) <= 1:
-            continue
         subjects = raw_subjects[pair]
+        if len(groups) <= 1:
+            # No contradiction to report — but if folding is what collapsed the
+            # objects, it *resolved* one the raw spellings would have fired, and
+            # dropping the pair here would make that the only silent outcome in
+            # the module. Keep the object channel so ``main`` can disclose it.
+            # Gated on the fold, not on len(raws): a #116 scalar merge is not a
+            # Unicode merge and must not be announced as one.
+            if any(len({_fold(r) for r in raws}) < len(raws) for raws in groups.values()):
+                reported = (_representative(subjects), pair[1])
+                object_variants[reported] = {
+                    _representative(raws): sorted(raws) for raws in groups.values()
+                }
+            continue
         # Representative restoration on both axes: report strings as written.
         # Distinct folded subjects cannot share a representative (the choice is a
         # function of the fold), so reported keys stay unique.
@@ -342,6 +369,51 @@ def detect_conflicts(
     return collect_conflicts(facts, single_valued, typed, aliases)[0]
 
 
+def _report_resolved_merges(
+    conflicts: dict[tuple[str, str], list[str]],
+    object_variants: dict[tuple[str, str], dict[str, list[str]]],
+) -> None:
+    """Disclose value groups whose Unicode fold *resolved* a contradiction.
+
+    ``collect_conflicts`` keeps an object channel for a pair that ended up with a
+    single group when folding is what collapsed it. Such a pair is absent from
+    *conflicts* by construction, so nothing else in the report names it — and
+    this is exactly the case where disclosure is the only signal there is. The
+    checker exits 0, ``finalize`` goes on to compile, and
+    ``common.dedup_engine_atoms`` dedups on the raw ``(subject, relation,
+    object)`` triple, so both spellings enter ``accepted.dl`` as two atoms of one
+    visible fact — the inflated duplicate count that function exists to prevent.
+
+    Printed on **stdout**, not stderr: this is an advisory rather than the
+    failure report, and ``finalize`` forwards our stdout unconditionally (it
+    writes ``conflicts.stdout`` before testing the return code), so it survives
+    the exit-0 path where stderr would be dropped.
+    """
+    lines = []
+    for key in sorted(k for k in object_variants if k not in conflicts):
+        subject, relation = key
+        for obj, raws in sorted(object_variants[key].items()):
+            if len({_fold(r) for r in raws}) < len(raws):
+                lines.append(
+                    f"    '{relation}' on '{subject}' value {obj!r} spellings: "
+                    f"{', '.join(ascii(r) for r in raws)}"
+                )
+    if not lines:
+        return
+    print(
+        f"check_conflicts: {len(lines)} value group(s) written in several Unicode "
+        "normalization forms and merged into one value, so no contradiction is "
+        "reported for them:"
+    )
+    for line in lines:
+        print(line)
+    print(
+        "  These spellings are canonically equivalent, but they differ byte-wise and "
+        "engine atoms dedup on the raw triple, so each one still enters "
+        "facts/accepted.dl as a separate atom. Unify them at the source and re-collect."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Detect single-valued-relation contradictions.")
     parser.add_argument("--wiki", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
@@ -358,9 +430,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not conflicts:
         print(f"check_conflicts: 0 conflicts across {len(single_valued)} single-valued relation(s)")
+        _report_resolved_merges(conflicts, object_variants)
         return 0
 
     print(f"check_conflicts: {len(conflicts)} conflict(s) found", file=sys.stderr)
+    _report_resolved_merges(conflicts, object_variants)
     aliases = relation_aliases()
     # Whether folding merged spellings anywhere. This is an *extra* disclosure,
     # never a replacement for the supersede guidance: a contradiction that a mixed
