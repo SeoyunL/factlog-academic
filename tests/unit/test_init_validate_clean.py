@@ -33,6 +33,15 @@ from factlog.cli import _TEMPLATES, _init_kb  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# (heading the scaffold writes, substring tools/validate.py looks for). Kept in
+# this order so a parametrised failure names the section a reader can find.
+SCAFFOLDED_SECTIONS = [
+    ("## 중복 개념 후보", "중복"),
+    ("## 모호한 관계명", "모호"),
+    ("## 출처 부족", "출처"),
+    ("## 기존 내용과 충돌할 수 있는 항목", "충돌"),
+]
+
 
 @pytest.fixture()
 def fresh_kb(tmp_path, capsys):
@@ -95,16 +104,22 @@ class TestFreshInitPassesValidate:
 class TestScaffoldIsNotADoormat:
     """The other direction: a fresh KB passing must not mean validate went blind."""
 
-    def test_removed_review_section_is_still_an_error(self, fresh_kb):
+    @pytest.mark.parametrize("heading,keyword", SCAFFOLDED_SECTIONS)
+    def test_removed_review_section_is_still_an_error(self, fresh_kb, heading, keyword):
+        # Only the heading line goes; the rest of the scaffold stays. validate's
+        # check is a plain substring search over the whole file, so any prose the
+        # scaffold writes that happens to repeat a section's keyword would answer
+        # the check on the deleted heading's behalf and the section could be lost
+        # unnoticed. Running this over all four sections is what keeps the check
+        # total — one section at a time hid exactly that leak in 출처 부족.
         decisions = fresh_kb / "decisions" / "open-questions.md"
-        text = "\n".join(
-            line
-            for line in decisions.read_text(encoding="utf-8").splitlines()
-            if "충돌" not in line
+        lines = decisions.read_text(encoding="utf-8").splitlines()
+        assert heading in lines, f"{heading!r} not scaffolded"
+        decisions.write_text(
+            "\n".join(line for line in lines if line != heading) + "\n", encoding="utf-8"
         )
-        decisions.write_text(text + "\n", encoding="utf-8")
         errors = validate.validate(fresh_kb)
-        assert any("'충돌'" in e for e in errors), errors
+        assert any(repr(keyword) in e for e in errors), errors
 
     def test_deleted_open_questions_is_still_an_error(self, fresh_kb):
         (fresh_kb / "decisions" / "open-questions.md").unlink()

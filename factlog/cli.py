@@ -524,7 +524,9 @@ explanation of its purpose.
     # validate (#327). Headings are byte-identical to what
     # merge_candidates.decision_section() emits, so `sync` fills these sections
     # instead of appending duplicates; tests/unit/test_init_validate_clean.py pins
-    # the two together.
+    # the two together. validate looks for each section by plain substring, so the
+    # prose below must not repeat its own section's keyword (중복/모호/출처/충돌) —
+    # otherwise the prose answers the check and a deleted heading goes unnoticed.
     "decisions/open-questions.md": """\
 # Open Questions
 
@@ -542,7 +544,7 @@ explanation of its purpose.
 
 ## 출처 부족
 
-근거 문서가 없거나, 사라진 출처를 가리키는 항목.
+근거 문서가 없거나, 사라진 문서를 가리키는 항목.
 
 ## 기존 내용과 충돌할 수 있는 항목
 
