@@ -100,6 +100,12 @@
 # which can only make a match LESS likely (i.e. more permissive). It now emits a
 # note like the branches above rather than degrading silently.
 #
+# A basename PREFILTER short-circuits to exit 0 before any canonicalisation
+# when the target's last path component proves it cannot be an engine input.
+# That keeps the gate off the critical path of writes it does not care about;
+# see the prefilter itself for the five ways a name can lie and how each is
+# closed.
+#
 # The "resolves to" in the predicate above means the FILESYSTEM's answer, not
 # string equality of two canonical paths. A hard link and — on a case-folding
 # filesystem such as APFS or NTFS — a differently-cased spelling both name the
@@ -445,6 +451,78 @@ for raw in sys.argv[2:]:
 # path may legally contain a newline.
 sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 "
+
+# PREFILTER. The matcher above is one interpreter spawn, and it is charged to
+# every Write/Edit in every session the plugin is installed in — while the thing
+# it guards is two files in one KB. Almost every one of those writes can be
+# ruled out in the shell, without spawning anything, by looking at the last path
+# component: a path whose basename is neither accepted.dl nor query.dl cannot
+# name an engine input.
+#
+# That rule is only sound with all four of the guards below, each of which was
+# reached by construction against the naive `case "$target_path" in */accepted.dl)`
+# form, and each of which is pinned by a case in tests/test_gate_check.sh:
+#
+#   1. SYMLINK. A symlink's own name says nothing about what it resolves to.
+#      `facts/notes.dl -> accepted.dl` has basename notes.dl and canonicalises
+#      to the engine input; the prefilter runs BEFORE canonicalisation, so it
+#      cannot "see the resolved basename". `-L` is a shell builtin test, so
+#      falling through on one costs nothing. Only the final component matters:
+#      a symlinked PARENT directory does not change the basename.
+#   2. TRAILING SEPARATORS. "…/accepted.dl/" canonicalises to the engine input
+#      but does not match a `*/accepted.dl` glob. Strip them first, backslash
+#      included — the separator question is the same one as in guard 4's note.
+#   3. DOT COMPONENTS. "…/accepted.dl/." canonicalises to the engine input while
+#      its basename is ".". An empty, "." or ".." basename tells us nothing, so
+#      fall through.
+#   4. CASE. On a case-folding filesystem Accepted.dl IS the engine input, so a
+#      case-sensitive glob here would silently undo the matcher's case handling.
+#      The alternatives are spelled out per character rather than via `tr` (a
+#      process spawn on the hot path) or `shopt -s nocasematch` (global state in
+#      a safety gate). ASCII is sufficient: the two names are pure ASCII, and no
+#      non-ASCII codepoint case-folds into one.
+#   5. HARD LINKS. A second name for one inode is invisible to every test above,
+#      so the link count has to be asked for. `stat` costs ~3ms against the
+#      ~70ms interpreter spawn this prefilter exists to avoid — 4% of the saving
+#      to keep the guarantee. Only an existing file can carry one; a path we
+#      cannot stat for any other reason falls through.
+#
+# Every uncertain shape falls THROUGH to the matcher; the prefilter only
+# short-circuits on positive proof that the target cannot be an engine input.
+# Over-matching costs one spawn, so it is always the safe direction here.
+_cannot_be_engine_input() {
+  local path="$1"
+  [ -L "$path" ] && return 1
+  while :; do
+    case "$path" in
+      */|*\\) path="${path%?}" ;;
+      *) break ;;
+    esac
+  done
+  # Split on BOTH separators. Python's os.path treats a backslash as a separator
+  # on Windows, so under Git Bash "C:\kb\facts\accepted.dl" canonicalises to the
+  # engine input while `${path##*/}` hands back the whole string.
+  local base="${path##*/}"
+  base="${base##*\\}"
+  case "$base" in
+    ''|.|..) return 1 ;;
+    [Aa][Cc][Cc][Ee][Pp][Tt][Ee][Dd].[Dd][Ll]) return 1 ;;
+    [Qq][Uu][Ee][Rr][Yy].[Dd][Ll]) return 1 ;;
+  esac
+  if [ -e "$path" ]; then
+    local links
+    if links="$(stat -c %h "$path" 2>/dev/null)" || links="$(stat -f %l "$path" 2>/dev/null)"; then
+      [ "$links" = "1" ] || return 1
+    else
+      return 1
+    fi
+  fi
+  return 0
+}
+
+if _cannot_be_engine_input "$target_path"; then
+  _allow
+fi
 
 # Permissive degrade (enumerated in the header): if the matcher cannot run, fall
 # back to a raw string comparison and the raw target, which can only make a
