@@ -54,13 +54,25 @@ factlog는 두 가지 서로 다른 메커니즘으로 신선도(freshness)를 �
 띄우기 전에 멈추고, `facts/logic_report.txt` 를 쓰지 못한 채 끝납니다. 그러면
 게이트는 계속 거부하고 안내는 계속 같은 곳을 가리킵니다.
 
-훅은 `Write` 와 `Edit` 에만 걸리므로 복구는 **Bash 로** 합니다. 대개는 컴파일을
-먼저 돌려 `facts/accepted.dl` 을 만들면 풀립니다.
+훅은 `Write` 와 `Edit` 에만 걸리므로 복구는 **Bash 로** 합니다. 컴파일을 먼저
+돌려 `facts/accepted.dl` 을 만들면 풀립니다. 단 `facts/candidates.csv` 가 없으면
+컴파일 자체가 `missing facts/candidates.csv` 로 멈추므로, 없을 때만 헤더 한 줄을
+먼저 만들어 줍니다. `factlog init` 은 이 파일을 다시 만들어 주지 않습니다.
 
 ```bash
+cd <KB 루트>
+[ -f facts/candidates.csv ] || \
+  echo 'subject,relation,object,source,status,confidence,note' > facts/candidates.csv
 "${CLAUDE_PLUGIN_ROOT}"/tools/factlog_python.sh "${CLAUDE_PLUGIN_ROOT}"/tools/compile_facts.py
 "${CLAUDE_PLUGIN_ROOT}"/tools/factlog_python.sh "${CLAUDE_PLUGIN_ROOT}"/tools/run_logic_check.py
 ```
+
+빈 `candidates.csv` 로 컴파일하면 사실이 0건인 `accepted.dl` 이 만들어집니다.
+그것으로 로직 체크가 돌고 리포트가 생겨 거부가 풀립니다 — 기존 사실을 지우지
+않습니다. 이미 `candidates.csv` 가 있다면 그대로 컴파일됩니다.
+
+작성 중이던 질의를 버려도 된다면 `facts/query.dl` 을 다른 이름으로 옮기는 것도
+방법입니다. 엔진 입력이 없으면 거부의 전제가 사라집니다.
 
 로직 체크가 다른 이유로 실패한다면 그 오류를 먼저 해결해야 합니다. 게이트를
 우회해 엔진 입력을 고치는 것은 이 거부가 막으려는 바로 그 동작이므로, 탈출구는
