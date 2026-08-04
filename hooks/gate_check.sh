@@ -94,9 +94,23 @@
 #     such a path, so the impact is zero — but a silent exit here would make the
 #     list below false.
 # Two branches stay silent, and neither is a skipped check:
-#   - a `tool_name` outside the write-class list (a Read is not this gate's
-#     business);
+#   - a `tool_name` outside the write-class list, when no path could be read
+#     from it either;
 #   - a payload with no `tool_name` at all.
+#
+# Read that first bullet narrowly: it is about not emitting a NOTE, not about
+# scope. The write-class list gates the fail-closed branch and the notes; it does
+# NOT gate the freshness predicate. Once a target path IS readable, the predicate
+# runs on the TARGET regardless of tool name, so a `Read` of a stale
+# facts/accepted.dl exits 2 — as do Grep, MultiEdit and NotebookEdit. That is
+# deliberate and predates #323. Keying the predicate on the write-class list
+# instead would mean a user who widens their matcher to MultiEdit/NotebookEdit —
+# the very case the list's comment says it defends — gets no guarding at all,
+# because those names are not in it. Denying a read is a false positive that
+# only reaches someone who widened the matcher themselves, and it errs toward
+# guarding; silently dropping the guard for a renamed write tool does not.
+# (The deny text is phrased for a write. If the matcher is ever widened for
+# real, that wording needs revisiting.)
 #
 # WHY THE SPLIT IS A BET, NOT A PRINCIPLE. Branch 2 denies and the third
 # fail-open branch above allows, yet the two know exactly the same thing: both
