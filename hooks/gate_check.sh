@@ -95,9 +95,17 @@
 #   - a `tool_name` outside the write-class list (a Read is not this gate's
 #     business);
 #   - a payload with no `tool_name` at all.
-# One more permissive degrade exists further down: _canon() falls back to the
-# raw path string if the canonicaliser cannot run, which can only make a match
-# LESS likely (i.e. more permissive). It is silent, and predates #323.
+# One more permissive degrade exists further down: the engine-input matcher
+# falls back to a raw string comparison if the canonicaliser returns no verdict,
+# which can only make a match LESS likely (i.e. more permissive). It now emits a
+# note like the branches above rather than degrading silently.
+#
+# The "resolves to" in the predicate above means the FILESYSTEM's answer, not
+# string equality of two canonical paths. A hard link and — on a case-folding
+# filesystem such as APFS or NTFS — a differently-cased spelling both name the
+# same file under a different string, and the gate treats them as the engine
+# input. Its one remaining blind spot is a case-only difference that stat cannot
+# settle AND whose directory probe cannot run; see the matcher for the detail.
 #
 # A gate protecting two files in one KB must not become a global Write/Edit
 # outage, so anything short of positive knowledge falls open.
@@ -373,20 +381,98 @@ fi
 # is not available on macOS/BSD. os.path.realpath resolves symlinks and
 # normalises . / .. segments on all platforms without requiring the path to
 # exist (matching realpath -m semantics).
-_canon() {
-  "${PYTHON_RUNNER[@]}" -c "import os,sys; print(os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1]))))" "$1" 2>/dev/null || printf '%s' "$1"
-}
+#
+# The target and BOTH engine inputs are canonicalised and compared in ONE
+# interpreter run. Three separate runs read the same, and cost three process
+# spawns on a path that now executes for every Write/Edit in the session (before
+# #323 the extractor always returned an empty target, so this block was never
+# reached and its cost was never charged). The gate protects two files; it must
+# not tax every write in every session to do it.
+#
+# String equality of the canonical paths is NOT sufficient. Two different path
+# strings name the same file when:
+#   - they are hard links or two spellings reaching one inode; or
+#   - the filesystem folds case (APFS is case-insensitive by default on macOS,
+#     as is NTFS), so <KB>/facts/Accepted.dl IS <KB>/facts/accepted.dl.
+# The header's "TARGET is an engine input iff it resolves to ..." predicate is
+# false under either unless the comparison asks the filesystem rather than the
+# strings. st_dev/st_ino settles it whenever both paths exist; when the target
+# does not exist yet (a first write) stat cannot answer, so a case-only
+# difference is resolved by probing whether the engine-input DIRECTORY answers
+# to a case-swapped spelling of its own name. The probe is read-only — it
+# creates nothing inside the user's KB.
+#
+# On a case-SENSITIVE filesystem facts/Accepted.dl is a genuinely different
+# file, and the probe correctly reports that, so this does not start denying
+# legitimate writes on Linux.
+GATE_MATCH_PY="
+import os, sys
 
-abs_target="$(_canon "$target_path")"
+def canon(p):
+    return os.path.realpath(os.path.abspath(os.path.expanduser(p)))
 
+def folds_case(directory):
+    # Read-only probe: does <directory> answer to a case-swapped spelling of its
+    # own last component? Only meaningful for a name with cased characters, and
+    # only asked when two canonical paths differ by case alone.
+    parent, name = os.path.split(directory)
+    swapped = name.swapcase()
+    if not parent or not swapped or swapped == name:
+        return False
+    try:
+        return os.path.samestat(os.stat(directory), os.stat(os.path.join(parent, swapped)))
+    except OSError:
+        return False
+
+target = canon(sys.argv[1])
+verdict = \"0\"
+for raw in sys.argv[2:]:
+    engine = canon(raw)
+    if target == engine:
+        verdict = \"1\"
+        break
+    try:
+        if os.path.samestat(os.stat(target), os.stat(engine)):
+            verdict = \"1\"
+            break
+    except OSError:
+        pass
+    if target.lower() == engine.lower() and folds_case(os.path.dirname(engine)):
+        verdict = \"1\"
+        break
+# The canonical target is returned alongside the verdict because the bootstrap
+# branch tests it with -e. NUL-separated for the same reason the extractor is: a
+# path may legally contain a newline.
+sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
+"
+
+# Permissive degrade (enumerated in the header): if the matcher cannot run, fall
+# back to a raw string comparison and the raw target, which can only make a
+# match LESS likely.
 is_engine_input=false
-for engine_file in "${KB_ROOT}/facts/accepted.dl" "${KB_ROOT}/facts/query.dl"; do
-  abs_engine="$(_canon "$engine_file")"
-  if [ "$abs_target" = "$abs_engine" ]; then
-    is_engine_input=true
-    break
-  fi
-done
+match_verdict=""
+abs_target=""
+if ! { IFS= read -r -d '' match_verdict && IFS= read -r -d '' abs_target; } \
+    < <("${PYTHON_RUNNER[@]}" -c "$GATE_MATCH_PY" \
+        "$target_path" "${KB_ROOT}/facts/accepted.dl" "${KB_ROOT}/facts/query.dl" 2>/dev/null); then
+  match_verdict=""
+  abs_target="$target_path"
+fi
+
+case "$match_verdict" in
+  1) is_engine_input=true ;;
+  0) ;;
+  *)
+    _note "note: the path canonicaliser returned no verdict; the engine-input match fell back to a raw string comparison (more permissive) for this call."
+    abs_target="$target_path"
+    for engine_file in "${KB_ROOT}/facts/accepted.dl" "${KB_ROOT}/facts/query.dl"; do
+      if [ "$target_path" = "$engine_file" ]; then
+        is_engine_input=true
+        break
+      fi
+    done
+    ;;
+esac
 
 # If the target is not an engine input file, allow the tool to proceed.
 if [ "$is_engine_input" = false ]; then
