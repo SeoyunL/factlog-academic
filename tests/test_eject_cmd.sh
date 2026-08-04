@@ -177,6 +177,21 @@ KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
 [ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
   && ok "'./report.html' ejects the root-level conversion only" || bad "'./report.html' reached into sub/"
 
+# --- --delete-original on a sources-relative path says what it would need -----
+# 'sub/report.html' names the original a conversion was made *from*, so it
+# selects the conversion and never the original — deliberate, and documented.
+# But --delete-original then printed 0 with no explanation, leaving no way to
+# tell a deliberate no-op from a missed file. Report the spelling that includes
+# the original instead of widening what this one deletes.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+out="$("$PYTHON" -m factlog eject sub/report.html --target "$KB" --delete-original 2>&1)"
+printf '%s' "$out" | grep -qF "sources/sub/report.html is on disk but was not named" \
+  && ok "--delete-original explains why a sources-relative path deleted no original" \
+  || bad "--delete-original silently reported 0 originals"
+[ -f "$KB/sources/sub/report.html" ] && [ -f "$KB/sources/report.html" ] \
+  && ok "the hint does not widen what a sources-relative path deletes" \
+  || bad "sources-relative --delete-original deleted an original"
+
 # --- a KB-relative 'sources/...' path matches that original + its conversion ---
 KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
 out="$("$PYTHON" -m factlog eject sources/report.html --target "$KB" --delete-original 2>&1)"
