@@ -310,9 +310,15 @@ def conversion_origin(path: Path) -> str | None:
     The recorded `source:` may be a bare basename (legacy, pre-#214) OR a
     sources/-relative path (#214: `sub_a/data.hwpx` disambiguates same-name
     originals in different subdirs). Either way this returns just the basename,
-    so every basename-keyed consumer (paired_conversion, eject) is unaffected by
-    the header format — the subdir that #214 encodes lives in the conversion's
-    own mirrored path, not in this pairing signal.
+    so paired_conversion — the one caller, which is basename-keyed — is
+    unaffected by the header format: the subdir that #214 encodes lives in the
+    conversion's own mirrored path, not in this pairing signal.
+
+    `eject` reads the header itself rather than calling this, and since #324 it
+    is *not* basename-keyed: it keys on the conversion's own mirrored subdir
+    joined with this basename, so a path argument cannot reach a same-name
+    original in another directory. Widening what this returns would not reach
+    that code, but narrowing the idea it encodes would mislead it.
     """
     try:
         head = path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
