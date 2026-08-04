@@ -16,6 +16,11 @@ the developer's real ``~/.config/factlog/config.json`` to a pytest temp dir
 that ceases to exist — leaving their ``factlog`` install pointed at nothing.
 Every ``tests/*.sh`` harness already isolates this (see the ``#62`` comments);
 the Python layer was the gap.
+
+Note the asymmetry with ``FACTLOG_ROOT`` below: that one defers to an inherited
+value, this one does not. CI exports ``XDG_CONFIG_HOME`` pointing at the real
+``~/.config``, so honouring whatever is inherited would reinstate the bug on
+exactly the runs nobody watches.
 """
 from __future__ import annotations
 
@@ -30,5 +35,25 @@ if str(_TOOLS) not in sys.path:
 
 # Bind FACTLOG_ROOT to an isolated empty dir before any tool module is imported.
 os.environ.setdefault("FACTLOG_ROOT", tempfile.mkdtemp(prefix="factlog-unit-"))
-# setdefault, so a CI job or developer who already isolated it keeps their value.
-os.environ.setdefault("XDG_CONFIG_HOME", tempfile.mkdtemp(prefix="factlog-unit-cfg-"))
+
+# NOT setdefault. An inherited value is only worth keeping if it is already
+# isolated, and the common case is the opposite: GitHub's runners export
+# XDG_CONFIG_HOME=/home/runner/.config, i.e. the real one. Deferring to that is
+# exactly the bug this guards against, so only an ambient value that resolves
+# OUTSIDE the real ~/.config is honoured.
+_real_config = Path(os.path.expanduser("~")).resolve() / ".config"
+_ambient = os.environ.get("XDG_CONFIG_HOME")
+
+
+def _is_isolated(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        Path(value).resolve().relative_to(_real_config)
+    except ValueError:
+        return True  # outside ~/.config — someone isolated it deliberately
+    return False
+
+
+if not _is_isolated(_ambient):
+    os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="factlog-unit-cfg-")
