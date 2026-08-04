@@ -742,24 +742,57 @@ rm -rf "$KB_EMPTY_FRESH"
 #
 # Three shapes: tool_input missing entirely, a renamed key (the most plausible
 # schema drift), and a tool_input that is not an object.
+#
+# CHANNEL. These assert STDOUT, not stderr. On exit 0 the PreToolUse contract
+# discards plain stderr and does not show plain stdout either; the one exit-0
+# channel a person actually sees is a JSON object carrying `systemMessage`.
+# Asserting the stderr mirror would pin a contract with nothing on the other end
+# of it — the same failure #323 itself was. The helper therefore parses stdout as
+# JSON and reads the field Claude Code reads, and separately checks that no
+# permission decision is smuggled along with it: a gate that just admitted it
+# could not check a write must not also auto-approve it.
 # ---------------------------------------------------------------------------
 blind_note_case() {
   local desc="$1"
   local payload="$2"
 
-  local err
+  local out err
+  out="$(mktemp)"
   err="$(mktemp)"
   local actual_exit=0
-  FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< "$payload" >/dev/null 2>"$err" || actual_exit=$?
+  FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< "$payload" >"$out" 2>"$err" || actual_exit=$?
 
-  if [ "$actual_exit" -eq 0 ] && grep -qF "carried no tool_input object" "$err"; then
-    echo "PASS: $desc — allow with a fail-open note (exit $actual_exit)"
+  local surfaced
+  surfaced="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1]))
+except Exception:
+    print("NO-JSON-ON-STDOUT")
+    raise SystemExit(0)
+message = payload.get("systemMessage")
+if not isinstance(message, str) or "carried no tool_input object" not in message:
+    print("NO-SYSTEM-MESSAGE")
+elif "hookSpecificOutput" in payload or "permissionDecision" in payload:
+    print("SMUGGLED-DECISION")
+else:
+    print("OK")
+' "$out")"
+
+  if [ "$actual_exit" -eq 0 ] && [ "$surfaced" = "OK" ]; then
+    echo "PASS: $desc — allow with a surfaced fail-open note (exit $actual_exit)"
     pass=$((pass + 1))
   else
-    echo "FAIL: $desc — expected allow (exit 0) with a fail-open note; exit=$actual_exit stderr=$(cat "$err")"
+    echo "FAIL: $desc — expected allow (exit 0) with a systemMessage note; exit=$actual_exit verdict=$surfaced stdout=$(cat "$out")"
     fail=$((fail + 1))
   fi
-  rm -f "$err"
+  # The stderr mirror is kept for `claude --debug` and external capture, but it
+  # is not the channel the contract surfaces, so it is checked second.
+  if ! grep -qF "carried no tool_input object" "$err"; then
+    echo "FAIL: $desc — the stderr mirror of the note is missing"
+    fail=$((fail + 1))
+  fi
+  rm -f "$out" "$err"
 }
 
 blind_note_case "write-class call with no tool_input at all" \
@@ -770,19 +803,38 @@ blind_note_case "write-class call with a non-object tool_input" \
   '{"tool_name":"Edit","tool_input":"oops"}'
 
 # A non-write tool in the same shape must stay SILENT — the note must not become
-# noise on every Read/Grep/Bash call in a session.
+# noise on every Read/Grep/Bash call in a session. Silent means BOTH channels:
+# an empty stderr and, now that exit 0 can carry a systemMessage, an empty
+# stdout. A systemMessage on ordinary traffic is a user-visible warning on every
+# tool call, which is worse than the silence it replaced.
+quiet_out="$(mktemp)"
 quiet_err="$(mktemp)"
 quiet_exit=0
 FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< '{"tool_name":"Read","tool_input":"oops"}' \
-  >/dev/null 2>"$quiet_err" || quiet_exit=$?
-if [ "$quiet_exit" -eq 0 ] && [ ! -s "$quiet_err" ]; then
-  echo "PASS: non-write tool with no tool_input object — allow, and silent (exit $quiet_exit)"
+  >"$quiet_out" 2>"$quiet_err" || quiet_exit=$?
+if [ "$quiet_exit" -eq 0 ] && [ ! -s "$quiet_err" ] && [ ! -s "$quiet_out" ]; then
+  echo "PASS: non-write tool with no tool_input object — allow, and silent on both channels (exit $quiet_exit)"
   pass=$((pass + 1))
 else
-  echo "FAIL: non-write tool — expected a silent allow; exit=$quiet_exit stderr=$(cat "$quiet_err")"
+  echo "FAIL: non-write tool — expected a silent allow; exit=$quiet_exit stdout=$(cat "$quiet_out") stderr=$(cat "$quiet_err")"
   fail=$((fail + 1))
 fi
-rm -f "$quiet_err"
+rm -f "$quiet_out" "$quiet_err"
+
+# An ordinary, fully checked allow must be silent too — the hot path is every
+# Write/Edit in the session.
+plain_out="$(mktemp)"
+plain_exit=0
+FACTLOG_ROOT="$KB_ENV7" bash "$GATE" \
+  <<< "$(envelope Write "$KB_ENV7/notes.md")" >"$plain_out" 2>/dev/null || plain_exit=$?
+if [ "$plain_exit" -eq 0 ] && [ ! -s "$plain_out" ]; then
+  echo "PASS: ordinary non-engine-input write — allow with no systemMessage (exit $plain_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: ordinary non-engine-input write — expected a silent allow; exit=$plain_exit stdout=$(cat "$plain_out")"
+  fail=$((fail + 1))
+fi
+rm -f "$plain_out"
 
 # ---------------------------------------------------------------------------
 # CASE 36: UNPARSEABLE PAYLOAD — ALLOW, but say so.
@@ -801,16 +853,26 @@ run_payload_case "unparseable payload — allow (fail-open)" \
 run_payload_case "empty payload — allow (fail-open)" \
   "$KB_ENV7" '' 0
 
-unparsed_err="$(mktemp)"
-FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< 'not json at all' >/dev/null 2>"$unparsed_err" || true
-if grep -qF "hook payload was not parseable JSON" "$unparsed_err"; then
-  echo "PASS: unparseable payload emits a one-line fail-open note"
-  pass=$((pass + 1))
-else
-  echo "FAIL: unparseable payload — expected a fail-open note, got: $(cat "$unparsed_err")"
-  fail=$((fail + 1))
-fi
-rm -f "$unparsed_err"
+unparsed_out="$(mktemp)"
+FACTLOG_ROOT="$KB_ENV7" bash "$GATE" <<< 'not json at all' >"$unparsed_out" 2>/dev/null || true
+unparsed_msg="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("systemMessage", ""))
+except Exception:
+    print("")
+' "$unparsed_out")"
+case "$unparsed_msg" in
+  *"hook payload was not parseable JSON"*)
+    echo "PASS: unparseable payload surfaces a fail-open note as a systemMessage"
+    pass=$((pass + 1))
+    ;;
+  *)
+    echo "FAIL: unparseable payload — expected a systemMessage note, got stdout: $(cat "$unparsed_out")"
+    fail=$((fail + 1))
+    ;;
+esac
+rm -f "$unparsed_out"
 
 # ---------------------------------------------------------------------------
 # CASE 37: INCOMPLETE EXTRACTOR RECORD — ALLOW, but say so.
@@ -819,33 +881,35 @@ rm -f "$unparsed_err"
 # anything else, the shell has no record to reason about. That must fail OPEN
 # (we cannot even tell the call is a write) and must NOT be silent.
 #
-# Simulated hermetically with a FACTLOG_PYTHON_RUNNER shim that answers the
-# `import sys` availability probe and the resolver, then emits a record with no
-# NUL terminators. The KB is stale and the payload targets an engine input, so a
-# working extractor would DENY — reaching exit 0 proves the incomplete-record
-# branch was taken.
+# Simulated hermetically with a FACTLOG_PYTHON_RUNNER shim that breaks ONLY the
+# extractor call and delegates every other invocation to the real runner. That
+# is the realistic shape of this failure — the interpreter is alive, the
+# extraction step is what came back wrong — and it keeps the systemMessage
+# channel available so this case can assert the note where a person would see
+# it. The KB is stale and the payload targets an engine input, so a working
+# extractor would DENY — reaching exit 0 proves the incomplete-record branch was
+# taken.
 # ---------------------------------------------------------------------------
 TRUNC_SHIM="$(mktemp -d)"
-cat > "$TRUNC_SHIM/runner.sh" <<'SH'
+cat > "$TRUNC_SHIM/runner.sh" <<SH
 #!/usr/bin/env bash
-# Behave like tools/factlog_python.sh for the probes the gate makes first, then
-# hand back a record that is not three NUL-terminated fields.
-for arg in "$@"; do
-  case "$arg" in
-    "import sys") exit 0 ;;
-    *resolve_root*) printf '%s' ""; exit 0 ;;
+# Hand back a record that is not three NUL-terminated fields for the extractor
+# call, and pass everything else through to the genuine runner.
+for arg in "\$@"; do
+  case "\$arg" in
+    *PATH_KEYS*) printf 'Write no-nul-here'; exit 0 ;;
   esac
 done
-printf 'Write no-nul-here'
-exit 0
+exec bash "$PYTHON_RUNNER" "\$@"
 SH
 chmod +x "$TRUNC_SHIM/runner.sh"
 
+trunc_out="$(mktemp)"
 trunc_err="$(mktemp)"
 trunc_exit=0
 FACTLOG_PYTHON_RUNNER="$TRUNC_SHIM/runner.sh" FACTLOG_ROOT="$KB_ENV7" \
   bash "$GATE" <<< "$(envelope Write "$KB_ENV7/facts/accepted.dl")" \
-  >/dev/null 2>"$trunc_err" || trunc_exit=$?
+  >"$trunc_out" 2>"$trunc_err" || trunc_exit=$?
 if [ "$trunc_exit" -eq 0 ]; then
   echo "PASS: incomplete extractor record — allow (fail-open) (exit $trunc_exit)"
   pass=$((pass + 1))
@@ -853,14 +917,24 @@ else
   echo "FAIL: incomplete extractor record — expected fail-open (exit 0), got $trunc_exit"
   fail=$((fail + 1))
 fi
-if grep -qF "returned no complete record" "$trunc_err"; then
-  echo "PASS: incomplete extractor record emits a one-line fail-open note"
-  pass=$((pass + 1))
-else
-  echo "FAIL: incomplete extractor record — expected a fail-open note, got: $(cat "$trunc_err")"
-  fail=$((fail + 1))
-fi
-rm -rf "$TRUNC_SHIM" "$trunc_err"
+trunc_msg="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("systemMessage", ""))
+except Exception:
+    print("")
+' "$trunc_out")"
+case "$trunc_msg" in
+  *"returned no complete record"*)
+    echo "PASS: incomplete extractor record surfaces a fail-open note as a systemMessage"
+    pass=$((pass + 1))
+    ;;
+  *)
+    echo "FAIL: incomplete extractor record — expected a systemMessage note, got stdout: $(cat "$trunc_out")"
+    fail=$((fail + 1))
+    ;;
+esac
+rm -rf "$TRUNC_SHIM" "$trunc_out" "$trunc_err"
 
 # ---------------------------------------------------------------------------
 # CASE 38: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 escape hatch.
