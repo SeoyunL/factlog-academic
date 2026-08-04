@@ -141,6 +141,22 @@ seed_dup() {  # $1 = KB path, $2 = path|legacy
     'G,rel,H,sources/sub/report.html,confirmed,0.9,' > "$kb/facts/candidates.csv"
 }
 
+# A KB whose flat conversion really did come from an original outside sources/:
+# nothing under sources/ bears that basename, so the pairing is unambiguous.
+seed_outside() {  # $1 = KB path
+  local kb="$1"
+  "$PYTHON" -m factlog init --target "$kb" >/dev/null
+  mkdir -p "$kb/sources/sub" "$kb/runs/sources/sub"
+  printf '<html>nested</html>\n' > "$kb/sources/sub/report.html"
+  printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\noutside\n' \
+    > "$kb/runs/sources/report.html.md"
+  printf '<!-- ingested-by-factlog | source: sub/report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nnested\n' \
+    > "$kb/runs/sources/sub/report.html.md"
+  printf '%s\n%s\n%s\n' "$H" \
+    'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' \
+    'C,rel,D,runs/sources/sub/report.html.md,confirmed,0.9,' > "$kb/facts/candidates.csv"
+}
+
 # --- a sources-relative path ejects only the conversion made from that path ----
 for style in path legacy; do
   KB="$(mktemp -d)/wiki"; seed_dup "$KB" "$style"
@@ -244,13 +260,45 @@ set -e
 
 # --- an absolute original outside the KB matches only a FLAT conversion -------
 # ingest gives a path outside sources/ no subtree to mirror, so its conversion is
-# flat; a mirrored conversion can never have come from that path.
-KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+# flat; a mirrored conversion can never have come from that path. seed_outside
+# is the honest fixture for this: the KB holds no sources/report.html, so the
+# flat conversion really is the one that argument produced.
+KB="$(mktemp -d)/wiki"; seed_outside "$KB"
 OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
 "$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" >/dev/null 2>&1
 [ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
   && ok "an outside-the-KB original matches its flat conversion, not a mirrored one" \
   || bad "outside-the-KB path reached a mirrored conversion"
+
+# --- ...but not one already paired with an in-KB original of the same name ----
+# ingest stores only src.name for an original outside sources/ (cli.py:2186), so
+# a flat conversion whose header says "report.html" cannot say *which*
+# report.html. When the KB has a sources/report.html of its own, that file — not
+# some path elsewhere on the disk — is what the conversion was made from.
+# Deletion is unprompted and rc=0, so the ambiguous request must select nothing.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
+set +e
+"$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" --purge >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && grep -q "A,rel,B,runs/sources/report.html.md,confirmed," "$KB/facts/candidates.csv" \
+  && ok "an outside path does not claim a flat conversion paired with sources/" \
+  || bad "outside path purged a conversion paired with an in-KB original"
+
+# --- a leading '//' is absolute, and must not degrade to a basename match -----
+# Path("//sub/report.html").is_absolute() is True on POSIX, so it takes the
+# absolute branch, resolves to /sub/report.html, and reaches nothing in the KB.
+# Before the guard it fell back to the basename and deleted the *top-level*
+# conversion — so 'sub//report.html' and '//sub/report.html' deleted different
+# files.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+set +e
+"$PYTHON" -m factlog eject "//sub/report.html" --target "$KB" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "'//sub/report.html' selects nothing instead of falling back to the basename" \
+  || bad "'//sub/report.html' deleted a conversion by basename"
 
 # --- a path is compared as written: '..' and case differences do not match ----
 # Deliberate: eject never normalises a path away from the form a provenance
