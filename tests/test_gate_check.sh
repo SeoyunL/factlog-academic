@@ -258,6 +258,23 @@ else
   echo "FAIL: python3 unavailable — expected fail-closed exit 2, got $nopy_exit"
   fail=$((fail + 1))
 fi
+
+# The escape hatch is named for the ONE deny it releases. CASE 38b already pins
+# that it does not release the freshness deny; this pins the other half, that it
+# does not release the Python-availability deny either. Both halves matter: the
+# hatch's whole justification is that a narrow name cannot grow into a global
+# gate switch, and a name is not a guarantee until something tests it.
+nopy_hatch_exit=0
+PATH="$SHIM_PATH" FACTLOG_ROOT="$KB_NOPY" FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 \
+  "$BASH_BIN" "$GATE" <<< "$(printf '{"file_path":"%s"}' "$KB_NOPY/facts/accepted.dl")" \
+  >/dev/null 2>&1 || nopy_hatch_exit=$?
+if [ "$nopy_hatch_exit" -eq 2 ]; then
+  echo "PASS: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 does NOT release the Python-availability deny (exit $nopy_hatch_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 — Python deny must still fire (exit 2), got $nopy_hatch_exit"
+  fail=$((fail + 1))
+fi
 rm -rf "$KB_NOPY" "$SHIM_PATH"
 
 # ---------------------------------------------------------------------------
@@ -1078,6 +1095,67 @@ fi
 run_payload_case "prefilter: case-variant Accepted.dl reaches the matcher — expect $pre_case_expect" \
   "$KB_PRE" "$(envelope Write "$KB_PRE/facts/Accepted.dl")" "$pre_case_expect"
 rm -rf "$KB_PRE"
+
+# ---------------------------------------------------------------------------
+# CASE 47: MTIME EQUALITY IS FRESH — ALLOW.
+#
+# The freshness comparison is `report_mtime -lt newest_input_mtime`, so a report
+# written in the SAME second as the engine input counts as fresh. That is not an
+# accident to be tightened later: run_logic_check.py writes logic_report.txt
+# immediately after compile_facts.py writes accepted.dl, and on a filesystem
+# with second-granularity mtimes the two land on the same value routinely.
+# Flipping the comparison to `-le` would deny the ordinary path right after a
+# successful /factlog check.
+#
+# Both files are stamped to one fixed second so the case cannot go flaky.
+# ---------------------------------------------------------------------------
+KB_EQ="$(mktemp -d)"
+make_kb "$KB_EQ"
+touch_file "$KB_EQ/facts/accepted.dl"
+touch_file "$KB_EQ/facts/logic_report.txt"
+touch -t 202001011200.00 "$KB_EQ/facts/accepted.dl" "$KB_EQ/facts/logic_report.txt"
+run_payload_case "report and engine input share an mtime — allow (boundary is -lt)" \
+  "$KB_EQ" "$(envelope Write "$KB_EQ/facts/accepted.dl")" 0
+rm -rf "$KB_EQ"
+
+# ---------------------------------------------------------------------------
+# CASE 48: SHIFTED EXTRACTOR RECORD IS NOT SILENT.
+#
+# A NUL inside a JSON string value pushes the extractor's three fields along by
+# one, so `tool_input_kind` receives a path instead of one of the four kinds the
+# extractor writes. The gate falls open, which is right — but before the `*)`
+# arm it did so without a single line on any channel, contradicting the header's
+# enumeration of exactly which branches are silent.
+#
+# The OS rejects a path containing a NUL, so the exit code here is not the
+# interesting part; the note is. Asserted on stdout because that is the channel
+# exit 0 surfaces.
+# ---------------------------------------------------------------------------
+KB_NUL="$(mktemp -d)"
+kb_stale "$KB_NUL"
+nul_out="$(mktemp)"
+nul_exit=0
+FACTLOG_ROOT="$KB_NUL" bash "$GATE" \
+  <<< "$(printf '{"tool_name":"Write","tool_input":{"file_path":"\\u0000%s"}}' "$KB_NUL/facts/accepted.dl")" \
+  >"$nul_out" 2>/dev/null || nul_exit=$?
+nul_msg="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("systemMessage", ""))
+except Exception:
+    print("")
+' "$nul_out")"
+case "$nul_exit:$nul_msg" in
+  0:*"unrecognised record shape"*)
+    echo "PASS: NUL inside file_path — allow, and says the gate was skipped (exit $nul_exit)"
+    pass=$((pass + 1))
+    ;;
+  *)
+    echo "FAIL: NUL inside file_path — expected exit 0 with a systemMessage note; exit=$nul_exit stdout=$(cat "$nul_out")"
+    fail=$((fail + 1))
+    ;;
+esac
+rm -rf "$KB_NUL" "$nul_out"
 
 # ---------------------------------------------------------------------------
 # Summary
