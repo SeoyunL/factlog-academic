@@ -394,6 +394,24 @@ set -e
 [ "$rc2" -ne 0 ] && ok "a case-different path selects nothing (no case folding)" \
   || bad "case-different path matched"
 
+# --- a cited ref spelled with './' or '//' stays reachable by that spelling ----
+# candidates.csv is hand-editable, so a row's source column can carry a spelling
+# ingest never emits. Comparing the argument as written keeps such a row
+# ejectable by the path the user actually typed; normalising both sides only
+# would strand it.
+for spelling in "./report.html" "sub//report.html"; do
+  KB="$(mktemp -d)/wiki"
+  "$PYTHON" -m factlog init --target "$KB" >/dev/null
+  mkdir -p "$KB/sources/sub"; printf 'x\n' > "$KB/sources/sub/report.html"
+  printf '%s\n%s\n' "$H" "A,rel,B,$spelling,confirmed,0.9," > "$KB/facts/candidates.csv"
+  set +e
+  "$PYTHON" -m factlog eject "$spelling" --target "$KB" --purge >/dev/null 2>&1
+  set -e
+  grep -q "^A,rel" "$KB/facts/candidates.csv" \
+    && bad "a cited ref spelled '$spelling' is no longer ejectable" \
+    || ok "a cited ref spelled '$spelling' is still ejectable"
+done
+
 # --- a candidates.csv whose header lacks 'status' is not truncated -------------
 KB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$KB" >/dev/null
