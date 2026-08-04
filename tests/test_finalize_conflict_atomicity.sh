@@ -82,8 +82,15 @@ KB2="$(mktemp -d)/wiki"
 new_conflict_kb "$KB2"
 mkdir -p "$KB2/facts"
 printf 'relation("ProjectX", "owner", "Alice").\nrelation("ProjectX", "owner", "Bob").\n' > "$KB2/facts/accepted.dl"
-rc2=0; "$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1 || rc2=$?
+rc2=0; out2="$("$PYTHON" "$FINALIZE" --target "$KB2" 2>&1)" || rc2=$?
 [ "$rc2" -ne 0 ] && ok "poisoned KB: finalize still fails on the conflict" || bad "poisoned KB: finalize exited 0"
+# The removal is not a detail the user can be left to discover: after it, the KB
+# answers nothing. This is the ONLY branch where accepted.dl actually existed to
+# be removed, so it is the only place the "returns nothing" clause is reachable.
+# docs/reference/typed-relations.md states this consequence; keep the two in step.
+printf '%s' "$out2" | grep -qF "returns nothing" \
+  && ok "poisoned KB: message says /factlog ask returns nothing until resolved" \
+  || bad "poisoned KB: removal message does not state that ask returns nothing"
 if accepted_has_both "$KB2"; then
   bad "#212: pre-poisoned accepted.dl was left intact (not healed)"
 else
