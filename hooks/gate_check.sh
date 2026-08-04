@@ -81,11 +81,9 @@
 # bare stderr line would have reached nobody:
 #   - an unparseable payload;
 #   - an INCOMPLETE record from the extractor — the interpreter died, or wrote
-#     something that is not three NUL-terminated fields. Note this lands the
-#     OPPOSITE way from branch 2's reasoning, deliberately: with no record at
-#     all we cannot tell that the call is even a write, so denying would block
-#     every tool call in the session on evidence we do not have. Branch 2 denies
-#     because we positively know it IS a write we cannot evaluate.
+#     something that is not three NUL-terminated fields. With no record at all
+#     we cannot tell the call is even a write, so denying would block every tool
+#     call in the session on evidence we do not have.
 #   - a write-class `tool_name` whose `tool_input` is absent or is not a JSON
 #     object. The JSON parses and the record is complete, so the two notes above
 #     do not cover it, yet the gate is just as blind. Under the current schema
@@ -99,6 +97,24 @@
 #   - a `tool_name` outside the write-class list (a Read is not this gate's
 #     business);
 #   - a payload with no `tool_name` at all.
+#
+# WHY THE SPLIT IS A BET, NOT A PRINCIPLE. Branch 2 denies and the third
+# fail-open branch above allows, yet the two know exactly the same thing: both
+# read `tool_name`, both find it write-class, and neither can read a path. The
+# earlier claim that one of them "cannot tell the call is a write" is only true
+# of the incomplete-record branch, not of this pair. What actually separates
+# them is the SHAPE of the drift and what it costs to be wrong about it:
+#   - `tool_input` is still an object but its path key was renamed. The envelope
+#     is intact, so the drift is local and probably affects one key. Denying
+#     costs writes to two files in one KB, and the escape hatch releases it.
+#   - the `tool_input` key ITSELF was renamed or restructured. Every Write/Edit
+#     in every session hits this at once, so denying is a global write outage,
+#     and the escape hatch has to be set by a human in a NEW session — which is
+#     unreachable if every write is already blocked.
+# So the split is a deliberate wager that the first drift is likelier and the
+# second is more expensive to guess wrong on, not a rule about what the gate
+# knows. A future maintainer should not generalise it into "we fail closed
+# whenever we know it is a write".
 # One more permissive degrade exists further down: the engine-input matcher
 # falls back to a raw string comparison if the canonicaliser returns no verdict,
 # which can only make a match LESS likely (i.e. more permissive). It now emits a
