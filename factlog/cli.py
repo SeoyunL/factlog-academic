@@ -2457,7 +2457,16 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             # converts to a *flat* runs/sources/<name> whose rebuilt origin is a
             # bare basename. Comparing against that basename keeps the legitimate
             # case working while leaving every mirrored conversion out of reach.
-            return ({kb_rel} if kb_rel is not None else set()), nfc(p.name), raw
+            #
+            # Only when nothing under sources/ claims that basename, though.
+            # ingest stores just src.name for an original outside sources/
+            # (:2186), so a flat conversion's header cannot say *which* file of
+            # that name it came from; when the KB holds one itself, that file is
+            # the answer and this argument is not. Ejecting is unprompted and
+            # exits 0, so an ambiguous argument must select nothing at all.
+            base = nfc(p.name)
+            fallback = base if base and f"sources/{base}" not in disk_refs else None
+            return ({kb_rel} if kb_rel is not None else set()), fallback, raw
         # A relative argument is read KB-relative (`sources/...`, `runs/...`) or
         # sources-relative (`sub/report.html`). PurePosixPath folds "./" and "//"
         # but keeps ".." verbatim: no normpath/realpath here, so the comparison
