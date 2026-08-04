@@ -623,7 +623,7 @@ def load_logic_policy() -> str:
 
 def policy_predicates(policy_program: str | None = None) -> set[str]:
     text = policy_program if policy_program is not None else load_logic_policy()
-    built_in = {"relation", "edge", "path"}
+    built_in = {"relation", "edge", "path", "attr_rel", "entity_node"}
     return {
         name
         for name in re.findall(r"^\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\(", text, flags=re.MULTILINE)
@@ -875,8 +875,12 @@ def attribute_relations() -> set[str]:
 
     Objects of these relations (dates, numbers, ordinals, ...) are excluded from
     entity_set so they do not pollute the entity vocabulary (entity listings,
-    path nodes, count subjects). They remain valid relation-query objects — see
-    value_set and classify_query — so a fact about a literal is still verifiable.
+    path nodes, count subjects). All three axes go through entity_set: entity
+    listings and count subjects read it directly, and the entity GRAPH — both
+    dependency_graph and the engine's entity_node/1 — gates its edges on it, so a
+    literal is not a path node either (#329). They remain valid relation-query
+    objects — see value_set and classify_query — so a fact about a literal is
+    still verifiable.
     Same file format as single-valued.md; absent file → no attribute relations
     → entity_set == value_set (fully backward compatible).
     """
@@ -909,7 +913,11 @@ _TYPED_REL_RE = re.compile(
     r"^(?:`(?P<qname>[^`]+)`|(?P<name>\S+))\s*:\s*(?P<type>\w+)\s+as\s+(?P<alias>\S+)"
     r"(?:\s*\((?P<units>[^)]*)\))?\s*$"
 )
-_TYPED_RESERVED = {"relation", "edge", "path"}  # built-in engine predicates
+# Built-in engine predicates declared by WIRELOG_PROGRAM; a typed-relation alias
+# may not take one of these names. attr_rel/entity_node join the list with #329 —
+# a colliding alias would re-.decl them and the engine silently accepts a
+# duplicate .decl, quietly restoring the literal-as-path-node bug.
+_TYPED_RESERVED = {"relation", "edge", "path", "attr_rel", "entity_node"}
 
 
 def _try(fn):
@@ -1505,15 +1513,47 @@ def build_text_to_datalog_prompt(question: str) -> str:
     return rendered
 
 
-def dependency_graph(facts: list[dict[str, str]]) -> dict[str, list[str]]:
+def dependency_graph(
+    facts: list[dict[str, str]],
+    attribute_rels: set[str] | None = None,
+) -> dict[str, list[str]]:
+    """The entity graph: an edge for every engine fact whose OBJECT is an entity.
+
+    A literal value — the object of a declared attribute relation, and a subject
+    of nothing (see entity_set) — is NOT an entity, so no edge points at it and it
+    can never be a path node. That is exactly what policy/attribute-relations.md
+    promises ("kept OUT of the entity set, so they do not show up as entities,
+    path nodes, or count subjects"); before #329 the promise held on the entity
+    axis only and a date could sit in the middle of a dependency path.
+
+    The membership test is entity_set itself, not "drop every attribute edge": a
+    value that is a subject somewhere, or the object of some non-attribute
+    relation, IS in entity_set, and classify_query already admits it as a path
+    endpoint. Filtering on anything narrower would put the endpoint guard and the
+    path evaluation back into disagreement — the same class of divergence, moved.
+
+    The emitted engine program (WIRELOG_PROGRAM) computes the identical predicate
+    as entity_node/1 and gates `edge` on it; keep the two in step.
+
+    *attribute_rels* overrides the declared attribute relations (a KbContext's, or
+    a hoisted read); None falls back to the module-level attribute_relations().
+    """
+    selected = engine_input_rows(facts)
+    entities = entity_set(selected, attribute_rels)
     graph: dict[str, list[str]] = defaultdict(list)
-    for row in engine_input_rows(facts):
-        graph[row["subject"]].append(row["object"])
+    for row in selected:
+        if row["object"] in entities:
+            graph[row["subject"]].append(row["object"])
     return graph
 
 
-def dependency_path(facts: list[dict[str, str]], start: str, target: str) -> list[str]:
-    graph = dependency_graph(facts)
+def dependency_path(
+    facts: list[dict[str, str]],
+    start: str,
+    target: str,
+    attribute_rels: set[str] | None = None,
+) -> list[str]:
+    graph = dependency_graph(facts, attribute_rels)
     # The engine defines path/2 only over edges (path(S,O):-edge(S,O) / :-edge(S,M),
     # path(M,O)), so a path requires >= 1 edge: match `target` only AFTER at least
     # one hop. This makes a reflexive path("X","X") a verified negative unless a real
@@ -1535,26 +1575,61 @@ def dependency_path(facts: list[dict[str, str]], start: str, target: str) -> lis
 
 
 def first_dependency_path(facts: list[dict[str, str]]) -> list[str]:
+    # Read the attribute-relation policy ONCE and hand it down: this is a nested
+    # scan, and dependency_path would otherwise re-read the file per candidate pair.
+    attribute_rels = attribute_relations()
     entities = sorted({row["subject"] for row in facts})
     targets = sorted({row["object"] for row in facts})
     for start in entities:
         for target in targets:
-            path = dependency_path(facts, start, target)
+            path = dependency_path(facts, start, target, attribute_rels)
             if len(path) > 1:
                 return path
     return []
 
 
+# ``attr_rel`` is a reserved engine EDB predicate populated from
+# policy/attribute-relations.md (see attribute_relation_program). ``entity_node``
+# is the engine's copy of entity_set: every subject, plus every object reached by
+# a relation that is NOT an attribute relation. ``edge`` is gated on it so a
+# literal value can never be a path node — the guarantee the scaffolded
+# policy/attribute-relations.md makes to the user (#329). Negation here is
+# trivially stratified: attr_rel is pure EDB and is never a rule head.
+#
+# The python renderer computes the same predicate in dependency_graph. Change one
+# and tests/unit/test_attribute_path_exclusion.py::TestEngineAndRendererAgree
+# fails; that is deliberate — do not fix one path alone.
 WIRELOG_PROGRAM = """
 .decl relation(subject: symbol, rel: symbol, object: symbol)
 .decl canonical(subject: symbol, rel: symbol, object: symbol)
+.decl attr_rel(rel: symbol)
+.decl entity_node(name: symbol)
 .decl edge(start: symbol, target: symbol)
 .decl path(start: symbol, target: symbol)
 
-edge(S, O) :- relation(S, R, O).
+entity_node(S) :- relation(S, R, O).
+entity_node(O) :- relation(S, R, O), !attr_rel(R).
+edge(S, O) :- relation(S, R, O), entity_node(O).
 path(S, O) :- edge(S, O).
 path(S, O) :- edge(S, M), path(M, O).
 """
+
+
+def attribute_relation_program(names: set[str] | None = None) -> str:
+    """The ``attr_rel/1`` EDB block appended to the engine program.
+
+    *names* defaults to the ambient policy/attribute-relations.md declarations.
+    Emitted in sorted order so the assembled program text is reproducible, and
+    through dl_string so a name carrying a quote or a backslash stays a legal
+    atom. Empty (no declarations) → "" , so the program text for a KB with no
+    attribute relations is byte-identical to WIRELOG_PROGRAM + policy + accepted
+    and every existing path answer is unchanged.
+    """
+    declared = attribute_relations() if names is None else names
+    if not declared:
+        return ""
+    lines = [f"attr_rel({dl_string(name)})." for name in sorted(declared)]
+    return "\n" + "\n".join(lines) + "\n"
 
 
 def decode_wirelog_value(session: EasySession, value: object) -> object:
@@ -1637,7 +1712,17 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     accepted_program = ACCEPTED_DL.read_text(encoding="utf-8")
     policy_program = load_logic_policy()
     specs = typed_relations()
-    base_program = WIRELOG_PROGRAM + "\n" + policy_program + "\n" + accepted_program
+    # attr_rel/1 is EDB, so it must be populated before the engine runs: it is what
+    # keeps a declared literal out of entity_node — and therefore out of path (#329).
+    # "" when nothing is declared, leaving the program byte-identical to before.
+    base_program = (
+        WIRELOG_PROGRAM
+        + attribute_relation_program()
+        + "\n"
+        + policy_program
+        + "\n"
+        + accepted_program
+    )
     if specs:
         _assert_no_alias_collision(specs, base_program)
         # Fail loud BEFORE handing a float-bearing program to the engine: a
@@ -1874,7 +1959,12 @@ def classify_query(
         return False, QUERY_UNKNOWN_PREDICATE, f"unknown predicate: {predicate}"
 
     args = _query_args(query)
-    entities = entity_set(facts)
+    # Read the attribute-relation policy ONCE and reuse it for both the entity
+    # membership check and the path evaluation below, so the endpoint guard and
+    # dependency_path can never disagree about which relations are attributes
+    # (and a path query costs one policy read, not two).
+    _attribute_rels = attribute_relations()
+    entities = entity_set(facts, _attribute_rels)
     # Relation OBJECTS may be literal values (attribute relations), which are not
     # in entity_set; validate them against the broader value_set so a fact about
     # a literal stays queryable. Subjects/path nodes/count subjects must be true
@@ -1937,7 +2027,9 @@ def classify_query(
         for arg in args:
             if not _is_variable(arg) and _arg_value(arg) not in entities:
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(arg)}"
-        if all(_is_quoted_string(arg) for arg in args) and not dependency_path(facts, _arg_value(args[0]), _arg_value(args[1])):
+        if all(_is_quoted_string(arg) for arg in args) and not dependency_path(
+            facts, _arg_value(args[0]), _arg_value(args[1]), _attribute_rels
+        ):
             return False, QUERY_FACT_ABSENT, "path query does not match accepted facts"
         return True, QUERY_OK, "passed"
     if predicate == "count":

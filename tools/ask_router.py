@@ -400,10 +400,14 @@ def did_you_mean_hints(draft: str, facts: list[dict[str, str]]) -> list[dict[str
 
 
 def _reachable_pairs(facts: list[dict[str, str]]) -> set[tuple[str, str]]:
-    """Transitive closure of edge(S,O) :- relation(S, _, O), pure-python.
+    """Transitive closure of the entity graph, pure-python.
 
     Mirrors the wirelog `path` semantics (WIRELOG_PROGRAM) without needing the
     engine, so variable `path` queries resolve even before `/factlog check`.
+    That includes the entity_node/1 gate on `edge`: the object of a declared
+    attribute relation is not an entity, so it is not a path node and never
+    appears as a target here — this branch is what backs `path("X", Y)?`, the
+    one path shape classify_query's endpoint guard cannot inspect (#329).
     """
     graph = dependency_graph(facts)
     pairs: set[tuple[str, str]] = set()
