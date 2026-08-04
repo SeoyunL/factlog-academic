@@ -21,6 +21,7 @@ from common import (
     run_wirelog,
     arg_value,
     is_quoted_string,
+    is_valid_arg,
     query_args,
     quoted_constants,
 )
@@ -61,6 +62,35 @@ def relation_results(line: str, facts: list[dict[str, str]]) -> list[tuple[str, 
     return rows
 
 
+def count_query_error(line: str) -> str | None:
+    """The report's single verdict on a count query's shape, or None when valid.
+
+    Both the Errors section (``validate_query``) and the answer renderer
+    (``evaluate_queries``) route through this function, so the report cannot
+    call a line an error and answer it in the same run.
+
+    The shape rule is not restated here: ``common.is_valid_arg`` is the same
+    predicate ``classify_query`` applies, so the gate and the report cannot
+    disagree about which lines are malformed. They used to. ``validate_query``
+    checked ARITY ONLY, so ``count("S", 'r')?`` and ``count(S, r)?`` — which the
+    gate rejects as malformed — reached ``evaluate_queries``, where a
+    non-double-quoted argument is treated as a WILDCARD rather than a filter.
+    The count then ranged over every relation of that subject and was printed as
+    an engine-verified aggregate (#328). An aggregate is the output a reader is
+    least able to check by eye, which is why answering it wrongly is worse than
+    not answering it.
+
+    Message wording is the gate's, with the offending line appended — the
+    convention every other error in this function follows.
+    """
+    args = query_args(line)
+    if len(args) != 2:
+        return f"count query must have subject and relation arguments: {line}"
+    if not all(is_valid_arg(arg) for arg in args):
+        return f"count arguments must be variables or quoted strings: {line}"
+    return None
+
+
 def validate_query(line: str, entities: set[str], policy_query_predicates: set[str]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -85,8 +115,9 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         return errors, warnings
     if predicate == "count":
         # count(subject, relation)? — engine-verified aggregate (see evaluate_queries).
-        if len(query_args(line)) != 2:
-            errors.append(f"count query must have subject and relation arguments: {line}")
+        count_error = count_query_error(line)
+        if count_error:
+            errors.append(count_error)
         return errors, warnings
     for constant in quoted_constants(line):
         if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
@@ -214,9 +245,10 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
             # count(subject, relation)? -> number of DISTINCT objects for that
             # (subject, relation) over engine facts (0 is a verified answer).
             # Same semantics as ask_router.evaluate's count branch.
-            args = query_args(line)
-            if len(args) == 2:
-                subj_q, rel_q = args
+            # Same verdict validate_query put in the Errors section, so a line
+            # reported as malformed is never also answered here (#328).
+            if count_query_error(line) is None:
+                subj_q, rel_q = query_args(line)
                 subj, rel = arg_value(subj_q), arg_value(rel_q)
                 subj_const = subj_q.startswith('"') and subj_q.endswith('"')
                 rel_const = rel_q.startswith('"') and rel_q.endswith('"')
