@@ -188,6 +188,40 @@ printf -- '- `출시` : date as launch_date\n' > "$KB/policy/typed-relations.md"
 csv '기서비스,출시,2030,sources/x.md,confirmed,0.9,' '기서비스,출시,2030.1,sources/x.md,confirmed,0.9,'
 if run_conflicts; then bad "year-only date: bare 2030 vs 2030.1 NOT detected (bare year mis-parsed as date?)"; else ok "year-only date: bare 2030 degrades to raw and conflicts with scalar 2030.1"; fi
 
+# --- #331: a conflict value carrying non-ASCII digits gets an extra note.
+# The generic advice this command prints ("mark the outdated row superseded")
+# is wrong for this class. Measured: following it on the ASCII row takes
+# check_conflicts from rc=1 to `0 conflicts` / rc=0 while the unparseable
+# full-width row survives as the only engine input — gate green, KB worse.
+printf '# single-valued\n\n- 매출\n' > "$KB/policy/single-valued.md"
+printf -- '- `매출` : amount as revenue_amt\n' > "$KB/policy/typed-relations.md"
+csv '갑사,매출,100억,sources/x.md,confirmed,0.9,' '갑사,매출,１００억,sources/x.md,confirmed,0.9,'
+nout="$("$PYTHON" "$CONFLICTS" --wiki "$KB" 2>&1 || true)"
+printf '%s' "$nout" | grep -qF "non-ASCII digits" \
+  && ok "#331: full-width conflict value gets the extra note" \
+  || bad "#331: no non-ASCII note on a full-width conflict"
+# Match the ESCAPED codepoint, which the raw glyph cannot satisfy. (The CONFLICT
+# line above does print the raw '１００억', so asserting on the glyph would pass
+# even if the note escaped nothing.)
+printf '%s' "$nout" | grep -qF 'uff11' \
+  && ok "#331: the note escapes the offending codepoints" \
+  || bad "#331: note does not name the offending characters as escapes"
+printf '%s' "$nout" | grep -qF "re-collect" \
+  && ok "#331: the note gives the real fix (correct the source)" \
+  || bad "#331: note does not point at the source fix"
+
+# Negative control. Without it the three assertions above would pass just as well
+# against a note printed for EVERY conflict, which would be noise, not guidance.
+printf '# single-valued\n\n- 주_속성\n' > "$KB/policy/single-valued.md"
+rm -f "$KB/policy/typed-relations.md"
+csv '을서비스,주_속성,값가,sources/x.md,confirmed,0.9,' '을서비스,주_속성,값나,sources/x.md,confirmed,0.9,'
+aout="$("$PYTHON" "$CONFLICTS" --wiki "$KB" 2>&1 || true)"
+if printf '%s' "$aout" | grep -qF "non-ASCII digits"; then
+  bad "#331: ASCII-only conflict wrongly carries the non-ASCII note"
+else
+  ok "#331: ASCII-only conflict carries no non-ASCII note"
+fi
+
 # restore clean state
 printf '# single-valued\n\n- 주_속성\n' > "$KB/policy/single-valued.md"
 rm -f "$KB/policy/typed-relations.md"
