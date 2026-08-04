@@ -61,8 +61,10 @@ class TestNoPolicyIsAccepted:
         assert policy_errors(policy_kb) == []
 
     def test_prose_md_and_comment_only_dl(self, policy_kb):
+        # `//` only. `#` is NOT a Datalog comment and must not appear here — see
+        # TestHashIsNotAComment below for why.
         (policy_kb / "policy" / "logic-policy.dl").write_text(
-            "// hand note\n# another note\n", encoding="utf-8"
+            "// hand note\n// another note\n", encoding="utf-8"
         )
         assert policy_errors(policy_kb) == []
 
@@ -96,13 +98,59 @@ class TestRealDriftStillCaught:
         assert any("does not match" in e for e in policy_errors(policy_kb))
 
 
+class TestHashIsNotAComment:
+    """``#`` is a comment in ``logic-policy.extra.dl`` only — never in the main file.
+
+    ``common._load_logic_policy_from`` filters comment-only text out of the
+    *sibling* ``logic-policy.extra.dl``, but reads the main ``logic-policy.dl``
+    verbatim (``read_text().strip()``), so its bytes become the engine program
+    as-is. Measured on the two files, same content::
+
+        logic-policy.dl        = "# hand note\\n"  ->  '# hand note'
+        logic-policy.extra.dl  = "# hand note\\n"  ->  ''
+
+    So validate must not extend extra.dl's amnesty to the main file: a ``#``-only
+    ``.dl`` is not empty to the engine, and ``common`` treats ``#`` reaching the
+    engine as a bug it goes out of its way to prevent on the extra.dl side.
+
+    Scope of the claim: this pins validate's *judgement*, not an engine crash.
+    pyrewire 1.0.4 was measured to accept a stray ``#`` line in the program
+    rather than ParseError on it, so the mismatch is latent today. Nothing
+    legitimate is lost by the stricter reading — ``finalize.POLICY_STUB`` is
+    ``// no policy rules`` and ``generate_logic_policy`` never emits ``#`` into
+    a ``.dl``.
+    """
+
+    def test_hash_only_dl_is_an_error(self, policy_kb):
+        (policy_kb / "policy" / "logic-policy.dl").write_text(
+            "# hand note\n", encoding="utf-8"
+        )
+        assert policy_errors(policy_kb) != [], "a #-only .dl reached the engine unflagged"
+
+    def test_hash_after_slash_comments_is_an_error(self, policy_kb):
+        # The old fixture's exact bytes: the `//` line is a real comment, but the
+        # `#` line still ends up in the engine program.
+        (policy_kb / "policy" / "logic-policy.dl").write_text(
+            "// hand note\n# another note\n", encoding="utf-8"
+        )
+        assert policy_errors(policy_kb) != [], "a #-only .dl reached the engine unflagged"
+
+
 class TestLogicPolicyDlHasRules:
-    @pytest.mark.parametrize(
-        "text", ["", "\n", "   \n\t\n", POLICY_STUB, "// a\n# b\n", "//no space\n"]
-    )
+    @pytest.mark.parametrize("text", ["", "\n", "   \n\t\n", POLICY_STUB, "//no space\n"])
     def test_empty_bodies(self, text):
         assert validate.logic_policy_dl_has_rules(text) is False
 
-    @pytest.mark.parametrize("text", [REAL_DL, "// note\n" + REAL_DL, ".decl foo(x:symbol)\n"])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            REAL_DL,
+            "// note\n" + REAL_DL,
+            ".decl foo(x:symbol)\n",
+            # Not comments here, whatever they look like — see TestHashIsNotAComment.
+            "# b\n",
+            "// a\n# b\n",
+        ],
+    )
     def test_bodies_with_rules(self, text):
         assert validate.logic_policy_dl_has_rules(text) is True

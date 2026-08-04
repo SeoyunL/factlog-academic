@@ -125,14 +125,28 @@ def logic_policy_dl_has_rules(dl_text: str) -> bool:
     """True iff a compiled ``logic-policy.dl`` body carries anything the engine
     would run.
 
-    Empty, whitespace-only, and comment-only bodies all mean "no policy". Both
-    ``//`` (Datalog) and ``#`` (the convention in every other policy file) count
-    as comments, matching ``common._load_logic_policy_from``'s treatment of
-    ``logic-policy.extra.dl`` — notably ``finalize.POLICY_STUB``
-    (``// no policy rules``), which finalize writes for a ruleless policy.
+    Empty, whitespace-only, and comment-only bodies all mean "no policy" — which
+    covers ``finalize.POLICY_STUB`` (``// no policy rules``), what finalize writes
+    for a ruleless policy.
+
+    Only ``//`` counts as a comment. ``#`` does NOT, even though
+    ``common._load_logic_policy_from`` strips ``#`` lines: it does that for the
+    *sibling* ``logic-policy.extra.dl`` alone. This file is read verbatim
+    (``read_text().strip()``), so its bytes reach the engine program as-is::
+
+        logic-policy.dl       = "# hand note\\n"  ->  '# hand note'
+        logic-policy.extra.dl = "# hand note\\n"  ->  ''
+
+    Calling a ``#``-only body "no policy" therefore hands out rc=0 on a file that
+    is not, to the engine, empty — and ``common`` treats ``#`` reaching the engine
+    as a bug it deliberately prevents on the extra.dl side. (Measured: pyrewire
+    1.0.4 happens to tolerate a stray ``#`` line rather than ParseError on it, so
+    this is a latent mismatch, not a live crash.) Nothing legitimate is lost:
+    ``finalize.POLICY_STUB`` is ``// no policy rules`` and generate_logic_policy
+    never emits ``#`` into a ``.dl``.
     """
     return any(
-        stripped and not stripped.startswith("//") and not stripped.startswith("#")
+        stripped and not stripped.startswith("//")
         for stripped in (line.strip() for line in dl_text.splitlines())
     )
 
