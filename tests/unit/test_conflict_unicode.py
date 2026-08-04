@@ -525,6 +525,114 @@ class TestFoldingThatResolvesAConflict:
         assert "status='superseded'" in captured.err
 
 
+class TestSpellingPayloadMatchesTheGate:
+    """The strings listed must be exactly the ones a Unicode fold merged.
+
+    The gate decides *whether* a merge happened; the payload says *which strings*.
+    Both have to come from one computation, because a value group keys on the
+    typed scalar (#116) and can therefore hold strings that are not canonically
+    equivalent at all: ``amount(5400,"억")`` and ``amount(0.54,"조")`` share a
+    group by parsing to 5.4e11, ``제3호`` and ``3위`` by ordinal rank. Dumping the
+    whole group tells the reader those are "canonically equivalent" and asks
+    them to unify two notations #116 exists to keep apart.
+    """
+
+    def test_scalar_equivalents_are_not_listed_as_spellings(self, monkeypatch, capsys):
+        nfc, nfd = _nfc('amount(5400,"억")'), _nfd('amount(5400,"억")')
+        facts = [
+            _fact("갑사", "매출", nfc),
+            _fact("갑사", "매출", nfd),
+            _fact("갑사", "매출", 'amount(0.54,"조")'),
+            _fact("갑사", "매출", 'amount(1,"조")'),
+        ]
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 1
+        lines = [ln for ln in capsys.readouterr().err.splitlines() if "spellings:" in ln]
+        assert len(lines) == 1
+        assert ascii(nfc) in lines[0] and ascii(nfd) in lines[0]
+        assert ascii('amount(0.54,"조")') not in lines[0]
+
+    def test_ordinal_rank_equivalents_are_not_listed_as_spellings(self, monkeypatch, capsys):
+        nfc, nfd = _nfc("제3호"), _nfd("제3호")
+        facts = [
+            _fact("갑", "순위", nfc),
+            _fact("갑", "순위", nfd),
+            _fact("갑", "순위", "3위"),
+            _fact("갑", "순위", "5위"),
+        ]
+        assert _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL) == 1
+        lines = [ln for ln in capsys.readouterr().err.splitlines() if "spellings:" in ln]
+        assert len(lines) == 1
+        assert ascii("3위") not in lines[0]
+
+    def test_each_fold_class_gets_its_own_line(self, monkeypatch, capsys):
+        # One value group, two independent equivalence classes — all four parse to
+        # 5.4e11. "canonically equivalent" is true within each class and false
+        # across them, so one line cannot carry both.
+        facts = [
+            _fact("갑사", "매출", _nfc('amount(5400,"억")')),
+            _fact("갑사", "매출", _nfd('amount(5400,"억")')),
+            _fact("갑사", "매출", _nfc('amount(0.54,"조")')),
+            _fact("갑사", "매출", _nfd('amount(0.54,"조")')),
+            _fact("갑사", "매출", 'amount(1,"조")'),
+        ]
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 1
+        lines = [ln for ln in capsys.readouterr().err.splitlines() if "spellings:" in ln]
+        assert len(lines) == 2
+        for line in lines:
+            assert line.count("(NFC)") == 1 and line.count("(NFD)") == 1
+
+    def test_the_composed_twin_is_kept(self, monkeypatch, capsys):
+        # Listing only the raws where _fold(r) != r would drop the NFC spelling —
+        # the one the reader must unify TO, and the one already on the CONFLICT
+        # line via _representative.
+        raws = [_nfc("한국대학교"), _nfd("한국대학교")]
+        facts = [
+            _fact("연구소", "소속", raws[0]),
+            _fact("연구소", "소속", raws[1]),
+            _fact("연구소", "소속", "서울대학교"),
+        ]
+        _run_main(monkeypatch, facts, {"소속"})
+        lines = [ln for ln in capsys.readouterr().err.splitlines() if "spellings:" in ln]
+        assert len(lines) == 1
+        assert ascii(raws[0]) in lines[0] and ascii(raws[1]) in lines[0]
+
+    def test_non_equivalent_raws_stay_in_the_group(self, monkeypatch, capsys):
+        # Narrowing the payload must not narrow the GROUPING: 5400억 and 0.54조
+        # still collapse to one value, which is what #116 is for.
+        facts = [
+            _fact("갑사", "매출", _nfc('amount(5400,"억")')),
+            _fact("갑사", "매출", _nfd('amount(5400,"억")')),
+            _fact("갑사", "매출", 'amount(0.54,"조")'),
+        ]
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 0
+
+    def test_exit_zero_advisory_also_excludes_scalar_equivalents(self, monkeypatch, capsys):
+        # On this path the line is the ONLY signal the run emits.
+        nfc, nfd = _nfc('amount(5400,"억")'), _nfd('amount(5400,"억")')
+        facts = [
+            _fact("갑사", "매출", nfc),
+            _fact("갑사", "매출", nfd),
+            _fact("갑사", "매출", 'amount(0.54,"조")'),
+        ]
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 0
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "spellings:" in ln]
+        assert len(lines) == 1
+        assert ascii(nfc) in lines[0] and ascii(nfd) in lines[0]
+        assert ascii('amount(0.54,"조")') not in lines[0]
+
+    def test_trailer_describes_the_carry_back_accurately(self, monkeypatch, capsys):
+        # merge_candidates keys on a 4-tuple including the anchor-stripped source
+        # (existing_superseded_keys), and #260 carries back whole superseded rows,
+        # not a status field. The operative warning is unaffected; the
+        # parenthetical was simply false.
+        raws = [_nfc("김철수"), _nfd("김철수")]
+        facts = [_fact(raws[0], "소속", "A사"), _fact(raws[1], "소속", "B사")]
+        _run_main(monkeypatch, facts, {"소속"})
+        err = capsys.readouterr().err
+        assert "(subject, relation, object, source)" in err
+        assert "carries back only status" not in err
+
+
 class TestNfcOnlyKbByteIdentical:
     """The invariant the issue asks for: an NFC-only KB reports exactly as before."""
 

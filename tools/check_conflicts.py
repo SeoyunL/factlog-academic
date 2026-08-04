@@ -152,6 +152,39 @@ def _spellings(raws: list[str]) -> str:
     return ", ".join(f"{ascii(s)} ({_form_label(s)})" for s in raws)
 
 
+def _fold_classes(raws: list[str]) -> list[list[str]]:
+    """Partition *raws* into canonical-equivalence classes, keeping merged ones.
+
+    Returns one sorted list per class that holds more than one spelling, sorted
+    between classes; an empty result means no Unicode merge happened here. This
+    is *the* answer to both "did folding merge anything" and "which strings did
+    it merge" — the gate and the payload have to be one computation, because a
+    value group is keyed on the typed scalar (#116) and can hold strings that are
+    not canonically equivalent at all. ``amount(5400,"억")`` and
+    ``amount(0.54,"조")`` share a group by parsing to 5.4e11, ``제3호`` and ``3위``
+    by ordinal rank (#218). Reporting the whole group calls those "canonically
+    equivalent" and asks the reader to unify notations #116 exists to keep apart.
+
+    Two failure modes this avoids, both worse than the bug:
+
+    * **Do not drop the non-equivalent members from the group itself.** They are
+      the same value and must keep collapsing, or #116's false CONFLICT returns.
+      The narrowing is for the *report*, never for the grouping.
+    * **Do not keep only the members where ``_fold(r) != r``.** That drops the
+      composed twin — precisely the spelling the reader must unify *to*, and the
+      one ``_representative`` already put on the CONFLICT line.
+
+    One class per line matters too: a single group can hold several independent
+    classes (NFC/NFD of ``amount(5400,"억")`` *and* NFC/NFD of
+    ``amount(0.54,"조")`` all key to 5.4e11), and "canonically equivalent" is
+    true within a class but false across them.
+    """
+    classes: dict[str, list[str]] = {}
+    for raw in raws:
+        classes.setdefault(_fold(raw), []).append(raw)
+    return [sorted(members) for _, members in sorted(classes.items()) if len(members) > 1]
+
+
 def _variant_map(groups: dict[tuple, set[str]]) -> dict[str, list[str]]:
     """Return ``{reported object: sorted raw objects}`` for *groups*, key-sorted.
 
@@ -364,7 +397,7 @@ def collect_conflicts(
             # the module. Keep the object channel so ``main`` can disclose it.
             # Gated on the fold, not on len(raws): a #116 scalar merge is not a
             # Unicode merge and must not be announced as one.
-            if any(len({_fold(r) for r in raws}) < len(raws) for raws in groups.values()):
+            if any(_fold_classes(sorted(raws)) for raws in groups.values()):
                 reported = (_representative(subjects), pair[1])
                 object_variants[reported] = _variant_map(groups)
             continue
@@ -441,11 +474,16 @@ def _report_resolved_merges(
     ``collect_conflicts`` keeps an object channel for a pair that ended up with a
     single group when folding is what collapsed it. Such a pair is absent from
     *conflicts* by construction, so nothing else in the report names it — and
-    this is exactly the case where disclosure is the only signal there is. The
-    checker exits 0, ``finalize`` goes on to compile, and
-    ``common.dedup_engine_atoms`` dedups on the raw ``(subject, relation,
-    object)`` triple, so both spellings enter ``accepted.dl`` as two atoms of one
-    visible fact — the inflated duplicate count that function exists to prevent.
+    this is exactly the case where disclosure is the only signal there is: the
+    checker exits 0 and ``finalize`` goes on to compile a KB the raw spellings
+    would have blocked.
+
+    Scope is deliberately the **object** axis, the one where folding *resolves* a
+    contradiction. Mixed spellings also cost duplicate atoms downstream
+    (``common.dedup_engine_atoms`` dedups on the raw triple, so both spellings
+    enter ``accepted.dl``), but that harm is not specific to a resolved conflict
+    and is equally silent before this change — reporting it wherever it occurs is
+    a separate, wider job than this advisory, and a follow-up.
 
     Printed on **stdout**, not stderr: this is an advisory rather than the
     failure report, and ``finalize`` forwards our stdout unconditionally (it
@@ -456,15 +494,15 @@ def _report_resolved_merges(
     for key in sorted(k for k in object_variants if k not in conflicts):
         subject, relation = key
         for obj, raws in sorted(object_variants[key].items()):
-            if len({_fold(r) for r in raws}) < len(raws):
+            for members in _fold_classes(raws):
                 lines.append(
                     f"    '{relation}' on '{subject}' value {obj!r} spellings: "
-                    f"{_spellings(raws)}"
+                    f"{_spellings(members)}"
                 )
     if not lines:
         return
     print(
-        f"check_conflicts: {len(lines)} value group(s) written in several Unicode "
+        f"check_conflicts: {len(lines)} spelling group(s) written in several Unicode "
         "normalization forms and merged into one value, so no contradiction is "
         "reported for them:"
     )
@@ -522,19 +560,18 @@ def main(argv: list[str] | None = None) -> int:
             any_mixed = True
             print(f"    subject spellings: {_spellings(subjects)}", file=sys.stderr)
         for obj in objects:
-            raws = object_variants[key][obj]
-            # Evidence of a *Unicode* merge is that folding collapses the group,
+            # Evidence of a *Unicode* merge is that folding collapses spellings,
             # not that the group holds several strings: a typed relation groups on
             # the parsed scalar, so #116 cross-notation equivalents (amount(5400,
             # "억") and amount(0.54,"조") -> 5.4e11) share a group while being
-            # plain NFC and rendering nothing alike. Keying the disclosure on
-            # len(raws) > 1 fired this whole paragraph — "they render identically",
-            # "merged across normalization forms", "unify the spelling" — at a KB
-            # with zero decomposed code points, none of which was true of it.
-            if len({_fold(r) for r in raws}) < len(raws):
+            # plain NFC and rendering nothing alike. _fold_classes answers "did it
+            # merge" and "what did it merge" at once, so the gate and the strings
+            # printed under it cannot disagree — one line per class, since
+            # "canonically equivalent" holds within a class and not across them.
+            for members in _fold_classes(object_variants[key][obj]):
                 any_mixed = True
                 print(
-                    f"    value {obj!r} spellings: {_spellings(raws)}",
+                    f"    value {obj!r} spellings: {_spellings(members)}",
                     file=sys.stderr,
                 )
     print(
@@ -548,10 +585,11 @@ def main(argv: list[str] | None = None) -> int:
             "they are canonically equivalent but differ byte-wise, so the reported spelling "
             "does not grep to every row behind it (the spellings are listed with their form "
             "under each conflict). Do NOT repair this by editing facts/candidates.csv: "
-            "merge_candidates rebuilds those rows from runs/*.json and carries back only "
-            "status, keyed on the raw (subject, relation, object) triple — so a hand-edited "
-            "spelling is discarded on the next merge, and stops matching the key that "
-            "preserves its 'superseded' mark. Unify the spelling in sources/ and re-collect. "
+            "merge_candidates rebuilds those rows from runs/*.json and matches everything it "
+            "carries back — statuses and superseded rows alike — on the raw "
+            "(subject, relation, object, source) key, so a hand-edited spelling is discarded "
+            "on the next merge and stops matching the key that preserves its 'superseded' "
+            "mark. Unify the spelling in sources/ and re-collect. "
             "That is a separate repair from superseding, and neither substitutes for the other.",
             file=sys.stderr,
         )
