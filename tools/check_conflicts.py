@@ -109,6 +109,34 @@ def _representative(raws: set[str]) -> str:
     return min(raws, key=lambda s: (s != _fold(s), s))
 
 
+def _form_label(value: str) -> str:
+    """Name the Unicode normalization form *value* is written in.
+
+    Only NFC and NFD are named: they are the two forms this module folds between,
+    and telling them apart is what a reader needs in order to know which row to
+    edit. A string can be neither — composed and decomposed syllables mixed
+    inside one string — which is reported as ``"mixed"`` rather than guessed at.
+    A pure-ASCII string is identical under both and is reported ``"NFC"``.
+    """
+    if value == unicodedata.normalize("NFC", value):
+        return "NFC"
+    if value == unicodedata.normalize("NFD", value):
+        return "NFD"
+    return "mixed"
+
+
+def _spellings(raws: list[str]) -> str:
+    """Render *raws* as an escaped, form-labelled list for the report.
+
+    Escaped because the whole difficulty of this conflict class is that the
+    strings render identically, so the code points are the only way to tell them
+    apart; labelled because the code points alone still do not say which form to
+    unify *to*. The answer is on the CONFLICT line above — ``_representative``
+    already picked the NFC spelling — and the label is what connects the two.
+    """
+    return ", ".join(f"{ascii(s)} ({_form_label(s)})" for s in raws)
+
+
 def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     """Return the equivalence key an *object* string is grouped under.
 
@@ -396,7 +424,7 @@ def _report_resolved_merges(
             if len({_fold(r) for r in raws}) < len(raws):
                 lines.append(
                     f"    '{relation}' on '{subject}' value {obj!r} spellings: "
-                    f"{', '.join(ascii(r) for r in raws)}"
+                    f"{_spellings(raws)}"
                 )
     if not lines:
         return
@@ -457,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
         # count without the code points leaves the reader unable to act.
         if len(subjects) > 1:
             any_mixed = True
-            print(f"    subject spellings: {', '.join(ascii(s) for s in subjects)}", file=sys.stderr)
+            print(f"    subject spellings: {_spellings(subjects)}", file=sys.stderr)
         for obj in objects:
             raws = object_variants[key][obj]
             # Evidence of a *Unicode* merge is that folding collapses the group,
@@ -471,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
             if len({_fold(r) for r in raws}) < len(raws):
                 any_mixed = True
                 print(
-                    f"    value {obj!r} spellings: {', '.join(ascii(r) for r in raws)}",
+                    f"    value {obj!r} spellings: {_spellings(raws)}",
                     file=sys.stderr,
                 )
     print(

@@ -345,7 +345,12 @@ class TestReportExposesTheMerge:
         facts = [_fact(raws[0], "소속", "A사"), _fact(raws[1], "소속", "B사")]
         _run_main(monkeypatch, facts, {"소속"})
         err = capsys.readouterr().err
-        assert f"    subject spellings: {ascii(raws[1])}, {ascii(raws[0])}\n" in err
+        # Labelled: an escaped code-point run tells the reader the spellings
+        # differ but not which row to keep. The tool already knows — the
+        # representative on the CONFLICT line above is the NFC one.
+        assert (
+            f"    subject spellings: {ascii(raws[1])} (NFD), {ascii(raws[0])} (NFC)\n"
+        ) in err
 
     def test_mixed_object_spellings_are_printed_escaped(self, monkeypatch, capsys):
         raws = [_nfc("한국대학교"), _nfd("한국대학교")]
@@ -356,7 +361,17 @@ class TestReportExposesTheMerge:
         ]
         _run_main(monkeypatch, facts, {"소속"})
         err = capsys.readouterr().err
-        assert f"    value {raws[0]!r} spellings: {ascii(raws[1])}, {ascii(raws[0])}\n" in err
+        assert (
+            f"    value {raws[0]!r} spellings: "
+            f"{ascii(raws[1])} (NFD), {ascii(raws[0])} (NFC)\n"
+        ) in err
+
+    def test_form_label_names_only_the_two_folded_forms(self):
+        assert check_conflicts._form_label(_nfc("김철수")) == "NFC"
+        assert check_conflicts._form_label(_nfd("김철수")) == "NFD"
+        # Neither form: composed and decomposed syllables in one string. Reported
+        # as such rather than guessed at.
+        assert check_conflicts._form_label(_nfc("김") + _nfd("철수")) == "mixed"
 
     def test_mixed_forms_get_the_unify_guidance_on_top(self, monkeypatch, capsys):
         raws = [_nfc("김철수"), _nfd("김철수")]
