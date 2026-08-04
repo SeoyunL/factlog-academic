@@ -65,6 +65,12 @@ failure, not a warning. `１００억` and `100억` used to fold onto the same s
 and count as one value; the full-width one now keys on its raw string, so for the
 same subject a single-valued relation sees two values.
 
+It does not stop at the gate. On a conflict `finalize` not only skips compiling
+facts to `facts/accepted.dl`, it also **removes** an existing `facts/accepted.dl`
+from disk, so a stale contradictory engine input cannot keep answering after a
+failed compile. What you actually experience is therefore not "the gate went red"
+but **`/factlog ask` returning nothing until the conflict is resolved**.
+
 That gate failure is loud; there is also a **quiet** one. If an existing KB holds
 a full-width amount compound term (`amount(１００,"억")`), a query written without
 the quotes — `amount(１００,억)` — now **misses silently**, because a full-width
@@ -72,8 +78,13 @@ term is no longer a valid amount and so no longer folds to the same canonical
 form as the stored value. That miss is indistinguishable from an engine-verified
 "no such fact", which makes it harder to notice than the failure.
 
-Both cases clear the same way: correct the source of those facts to ASCII and
-re-collect.
+Both cases clear the same way: **correct the source to ASCII digits and
+re-collect**. The `status='superseded'` advice the conflict message prints does
+clear the gate, but superseding the ASCII row rather than the full-width one
+leaves the KB holding a value that does not parse; where the two spellings denote
+the same value neither row is "outdated", so supersede is the wrong tool to begin
+with. `check_conflicts` appends a note whenever a conflicting value carries
+non-ASCII digits.
 
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).
