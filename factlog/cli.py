@@ -2453,9 +2453,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     def selector(name: str) -> tuple[set[str], str | None, str]:
         """Canonicalise one `eject <name>` argument into what the matcher needs:
 
-          refs    — the KB-relative ref(s) the argument names exactly. Always
-                    the normalised spelling: disk and CSV refs are never written
-                    with "./" or "//", so the raw spelling could not match one;
+          refs    — the KB-relative ref(s) the argument names exactly, in both
+                    the raw and the normalised spelling. ingest never writes a
+                    ref containing "./" or "//", but candidates.csv is
+                    hand-editable and a row's source column can carry one, so
+                    the raw form keeps such a row ejectable by the path typed;
           src_rel — the original's path *relative to sources/*, when a path was
                     given; compared against conv_origin to reach the conversion
                     that path produced. None when the argument names no original
@@ -2512,10 +2514,10 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # differently.
         norm = PurePosixPath(raw).as_posix() if "/" in raw else raw
         if norm.startswith("sources/"):
-            return {norm}, norm[len("sources/"):] or None, raw
+            return {raw, norm}, norm[len("sources/"):] or None, raw
         if norm.startswith("runs/sources/"):
-            return {norm}, None, raw  # names a conversion, not an original
-        return {norm}, norm, raw
+            return {raw, norm}, None, raw  # names a conversion, not an original
+        return {raw, norm}, norm, raw
 
     def matches(ref: str, sel: tuple[set[str], str | None, str]) -> bool:
         refs, src_rel, name = sel
