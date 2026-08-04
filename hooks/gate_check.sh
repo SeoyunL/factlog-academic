@@ -510,7 +510,11 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 # by construction — guards 3-7 against the naive
 # `case "$target_path" in */accepted.dl)` form, guards 1-2 against an earlier
 # version of this prefilter that had the other five — and each is pinned by a
-# case in tests/test_gate_check.sh.
+# case in tests/test_gate_check.sh — with one stated exception: the backslash
+# handling folded into guards 4 and 6 is pinned only in the POSIX direction (a
+# literal backslash in a filename must not cause a false deny). The Windows
+# direction it exists for needs a host where os.path is ntpath, so it cannot be
+# exercised from this suite and is asserted by construction.
 #
 # The rule the guards exist to protect is: canon(target) can only equal
 # canon(engine) if their BASENAMES agree, because realpath preserves the final
