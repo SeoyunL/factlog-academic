@@ -98,6 +98,13 @@ def _fold(value: str) -> str:
     ``common._canonical_value`` is deliberately *not* reused: it layers
     amount-quote normalization on top of the Unicode fold, which would perturb
     the typed-literal key space this module builds through ``literal_types``.
+
+    One operation, three call sites, so: this is the *grouping* fold, applied to
+    subjects and objects inside this module. ``common.fold_relation_name`` is the
+    same NFC applied to a policy relation name for a *membership* test, and every
+    consumer that tests membership must use it (see its docstring).
+    ``common.composed_spelling`` picks which raw spelling of a folded group to
+    display. Nothing else should re-derive any of the three.
     """
     return unicodedata.normalize("NFC", value)
 
@@ -135,9 +142,17 @@ def _form_label(value: str) -> str:
 
     Only NFC and NFD are named: they are the two forms this module folds between,
     and telling them apart is what a reader needs in order to know which row to
-    edit. A string can be neither — composed and decomposed syllables mixed
-    inside one string — which is reported as ``"mixed"`` rather than guessed at.
-    A pure-ASCII string is identical under both and is reported ``"NFC"``.
+    edit. A pure-ASCII string is identical under both and is reported ``"NFC"``.
+
+    ``"mixed"`` is the honest answer for everything else, and "everything else" is
+    wider than the obvious case. It covers composed and decomposed syllables mixed
+    inside one string, but also every string that is neither wholly composed nor
+    wholly decomposed: a canonical-order violation (``'q̧́'`` — the combining marks
+    in the wrong order, so it equals neither form), a composition exclusion
+    (``'ä́'`` — NFC cannot recompose it), and a canonical singleton (``'Ω'``
+    U+2126, which NFC replaces with U+03A9 and NFD leaves alone). The label does
+    not claim to explain which of those it is; it says only "not one of the two
+    forms named above", which is what the reader needs before editing the row.
     """
     if value == unicodedata.normalize("NFC", value):
         return "NFC"
