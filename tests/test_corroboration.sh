@@ -80,9 +80,9 @@ printf '%s' "$co" | grep -qF "competing values" \
 # --- two spellings of ONE value are not listed as two competitors (#325) ------
 # Raw grouping printed "한국대 (1 src); 한국대 (1 src)" — one value shown as a
 # contradiction between two strings that render identically, with the gate
-# (check_conflicts) saying there is none. The sources are re-counted over the
-# folded key rather than summed from the raw-triple counts, so one source
-# backing both spellings still counts once.
+# (check_conflicts) saying there is none. (The source re-aggregation and the
+# displayed spelling are pinned separately below; this case only fires the
+# object-axis fold.)
 SKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$SKB" >/dev/null
 printf 'x\n' > "$SKB/sources/a.md"
@@ -104,6 +104,107 @@ co="$("$PYTHON" "$CORR" --wiki "$SKB" 2>&1)"
 printf '%s' "$co" | grep -qF "competing values" \
   && bad "two spellings of one value listed as competing: $(printf '%s' "$co" | tail -2)" \
   || ok "two spellings of one value are not competing values (object axis folded)"
+
+# --- a mixed-subject KB reaches the competing section at all (#325) -----------
+# The reason the subject axis is folded here: raw, the two rows sit in separate
+# (subject, relation) pairs, each holding ONE value, so `contested` is empty and
+# the whole section disappears — a real single-valued competition that the gate
+# (check_conflicts) reports as a conflict is never shown at the source level.
+MKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$MKB" >/dev/null
+printf 'x\n' > "$MKB/sources/a.md"
+"$PYTHON" - "$MKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},A사,sources/a.md,confirmed,0.9,\n"
+    f"{nfd('김철수')},{nfc('소속')},B사,sources/b.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+co="$("$PYTHON" "$CORR" --wiki "$MKB" 2>&1)"
+printf '%s' "$co" | grep -qF "competing values" \
+  && ok "mixed-subject KB reaches the competing section (subject axis folded)" \
+  || bad "mixed-subject competition invisible: $(printf '%s' "$co" | tail -3)"
+printf '%s' "$co" | grep -qF "A사 (1 src); B사 (1 src)" \
+  && ok "both competing values listed under one subject" \
+  || bad "competing values wrong: $(printf '%s' "$co" | tail -2)"
+
+# --- one source backing two spellings counts once (#325) ---------------------
+# The sources are re-aggregated over the folded key instead of being read out of
+# corroboration_counts, which is keyed on the RAW triple: summing the two
+# spellings' counts would report two sources where there is one file.
+OKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$OKB" >/dev/null
+printf 'x\n' > "$OKB/sources/a.md"
+"$PYTHON" - "$OKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+# Both spellings of 한국대 come from the SAME file; 서울대 gives the pair a second
+# value so the competing section prints at all.
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfc('한국대')},sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfd('한국대')},sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfc('서울대')},sources/b.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+co="$("$PYTHON" "$CORR" --wiki "$OKB" 2>&1)"
+# The WHOLE line, not a substring: raw grouping printed 한국대 twice at (1 src)
+# each, which a `grep -qF "한국대 (1 src)"` would happily accept.
+printf '%s' "$co" | grep -qF "김철수 / 소속: 서울대 (1 src); 한국대 (1 src)" \
+  && ok "one source backing two spellings counts once (and is listed once)" \
+  || bad "source aggregation wrong: $(printf '%s' "$co" | tail -2)"
+printf '%s' "$co" | grep -qF "한국대 (2 src)" \
+  && bad "two spellings from one file reported as two sources" \
+  || ok "no double-counted source"
+
+# --- an all-NFD group is reported in the bytes actually written (#325) -------
+# The group key is NFC, but the reported spelling comes from the raw strings via
+# common.composed_spelling. On a uniformly decomposed KB there is no composed
+# member, so printing the key would name a string that appears nowhere in the
+# file — ungreppable, and a false claim about what was written.
+#
+# This guards the NEW code path rather than fixing an old defect: before the
+# grouping was folded there was no key to print and the raw object went straight
+# to stdout, so this KB passed then too. It fails the moment the report reaches
+# for `obj`/`pair[0]` instead of the spelling maps.
+AKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$AKB" >/dev/null
+printf 'x\n' > "$AKB/sources/a.md"
+"$PYTHON" - "$AKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfd('김철수')},{nfd('소속')},{nfd('한국대')},sources/a.md,confirmed,0.9,\n"
+    f"{nfd('김철수')},{nfd('소속')},{nfd('서울대')},sources/b.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+nfd_subject="$("$PYTHON" -c "import unicodedata,sys;sys.stdout.write(unicodedata.normalize('NFD','김철수'))")"
+nfd_object="$("$PYTHON" -c "import unicodedata,sys;sys.stdout.write(unicodedata.normalize('NFD','한국대'))")"
+co="$("$PYTHON" "$CORR" --wiki "$AKB" 2>&1)"
+printf '%s' "$co" | grep -qF "$nfd_object (1 src)" \
+  && ok "all-NFD value reported in the bytes actually written" \
+  || bad "reported a spelling never written: $(printf '%s' "$co" | tail -2)"
+printf '%s' "$co" | grep -qF "$nfd_subject / " \
+  && ok "all-NFD subject reported in the bytes actually written" \
+  || bad "reported a subject spelling never written: $(printf '%s' "$co" | tail -2)"
 
 # --- genuinely different values still compete (control) ----------------------
 DKB="$(mktemp -d)/wiki"
