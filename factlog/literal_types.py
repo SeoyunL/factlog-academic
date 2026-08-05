@@ -120,13 +120,24 @@ def has_non_ascii_digits(value: str) -> bool:
     return any(unicodedata.category(ch) == "Nd" and not ch.isascii() for ch in value)
 
 
+def _escape_codepoint(ch: str) -> str:
+    """``ch`` as the Python escape that decodes back to it. ``\\uXXXX`` holds four
+    hex digits, so a codepoint above the BMP needs the eight-digit ``\\UXXXXXXXX``
+    form — ``\\u1d7cf`` is not an overlong ``𝟏`` but ``\\u1d7c`` followed by ``f``,
+    i.e. a different character. This is not a corner case: 390 of the 760 ``Nd``
+    codepoints are astral (mathematical bold/sans/mono digits U+1D7CE–U+1D7FF,
+    Osmanya, …), and mathematical bold digits arrive by copy-pasting styled text."""
+    return f"\\U{ord(ch):08x}" if ord(ch) > 0xFFFF else f"\\u{ord(ch):04x}"
+
+
 def mark_non_ascii_digits(value: str) -> str:
-    """*value* with every non-ASCII decimal digit replaced by its ``\\uXXXX``
-    escape, so a message can name the offending characters. ``repr`` cannot:
-    ``repr('１００억')`` is ``'１００억'``, indistinguishable from ``'100억'`` in most
-    fonts. Everything else is left verbatim so the value stays readable."""
+    """*value* with every non-ASCII decimal digit replaced by its ``\\uXXXX`` /
+    ``\\UXXXXXXXX`` escape, so a message can name the offending characters.
+    ``repr`` cannot: ``repr('１００억')`` is ``'１００억'``, indistinguishable from
+    ``'100억'`` in most fonts. Everything else is left verbatim so the value stays
+    readable."""
     return "".join(
-        f"\\u{ord(ch):04x}" if unicodedata.category(ch) == "Nd" and not ch.isascii() else ch
+        _escape_codepoint(ch) if unicodedata.category(ch) == "Nd" and not ch.isascii() else ch
         for ch in value
     )
 
