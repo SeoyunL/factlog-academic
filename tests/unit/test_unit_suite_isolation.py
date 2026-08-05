@@ -24,8 +24,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
 _REPO = Path(__file__).resolve().parents[2]
 
 
@@ -37,9 +35,20 @@ def _is_under(child: str, parent: Path) -> bool:
     return True
 
 
-@pytest.mark.parametrize("var", ["FACTLOG_ROOT", "XDG_CONFIG_HOME"])
-def test_env_is_pinned(var):
-    assert os.environ.get(var), f"{var} must be pinned by conftest before any tool import"
+def test_config_home_is_pinned():
+    """Only ``XDG_CONFIG_HOME``: an existence check says nothing about FACTLOG_ROOT.
+
+    Six tool modules (``tools/coverage.py``, ``ask_router.py``, ``entity_audit.py``,
+    ``merge_candidates.py``, ``check_conflicts.py``, ``corroboration.py``) assign
+    ``os.environ["FACTLOG_ROOT"]`` at import time, so in a full run the variable is
+    set whether or not anything pinned it — measured: with this conftest deleted and
+    the variable unset, an existence check on it still passes. What FACTLOG_ROOT
+    needs is a check of its *value*, which is
+    ``test_factlog_root_is_an_empty_throwaway_dir`` below.
+    """
+    assert os.environ.get("XDG_CONFIG_HOME"), (
+        "XDG_CONFIG_HOME must be pinned by conftest before any tool import"
+    )
 
 
 def test_config_home_is_not_the_real_one():
@@ -74,10 +83,19 @@ def test_config_home_is_a_throwaway_dir_made_for_this_run():
     assert _is_under(str(config_home), Path(tempfile.gettempdir()))
 
 
-def test_factlog_root_is_not_a_real_kb():
-    """An empty temp dir, not a directory that happens to hold someone's facts."""
+def test_factlog_root_is_an_empty_throwaway_dir():
+    """A directory with nothing in it, not merely one without a ``facts/`` yet.
+
+    ``FACTLOG_ROOT`` deliberately defers to an inherited value, so this cannot
+    check for a temp-dir prefix — the value is checked instead. "No ``facts/``"
+    was too weak on both ends: a KB whose facts have not been compiled yet
+    passed, and so did the repo root itself, which is what the tool modules
+    resolve to when nothing is pinned.
+    """
     root = Path(os.environ["FACTLOG_ROOT"])
-    assert not (root / "facts").exists(), f"FACTLOG_ROOT points at a populated KB: {root}"
+    assert root.is_dir(), f"FACTLOG_ROOT is not a directory: {root}"
+    leftovers = sorted(p.name for p in root.iterdir())
+    assert not leftovers, f"FACTLOG_ROOT points at a directory with contents: {root} {leftovers}"
 
 
 _PROBE = '''\
