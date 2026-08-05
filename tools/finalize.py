@@ -251,8 +251,13 @@ def main(argv: list[str] | None = None) -> int:
             "\nfinalize: CONTRADICTIONS were found (see CONFLICT lines above); "
             "facts were NOT compiled to facts/accepted.dl"
             + (
+                # NOT "returns nothing": /factlog ask has two routes, and with
+                # accepted.dl gone the wiki-exploration one still answers — as an
+                # UNVERIFIED block whose excerpts can quote both sides of the
+                # unresolved conflict. What is lost is the VERIFIED answer, which
+                # is also what docs/reference/typed-relations.md says.
                 " and the existing facts/accepted.dl was removed, so /factlog ask "
-                "returns nothing until the conflict is resolved"
+                "has no verified answer until the conflict is resolved"
                 if removed
                 else ""
             )

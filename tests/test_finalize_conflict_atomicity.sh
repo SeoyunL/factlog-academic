@@ -88,12 +88,12 @@ rc2=0; out2="$("$PYTHON" "$FINALIZE" --target "$KB2" 2>&1)" || rc2=$?
 # must name it. This is the ONLY branch where accepted.dl actually existed to be
 # removed. docs/reference/typed-relations.md documents the same consequence.
 #
-# Pin the REMOVAL, not the message's "returns nothing" clause: that clause is
-# loose. /factlog ask has two routes (docs/reference/slash-commands.md), and with
+# Pin the REMOVAL, not how the message describes the consequence for /factlog
+# ask. That command has two routes (docs/reference/slash-commands.md), and with
 # accepted.dl gone the wiki-exploration route still returns an
 # `UNVERIFIED — wiki exploration` block whose excerpts can quote both sides of the
-# unresolved conflict. What is actually lost is the VERIFIED answer, so pinning
-# the phrase verbatim would promote an inaccuracy into a tested contract.
+# unresolved conflict; what is actually lost is the VERIFIED answer. The removal
+# is the invariant this file exists for, so that is what gets pinned.
 printf '%s' "$out2" | grep -qF "accepted.dl was removed" \
   && ok "poisoned KB: message states the existing accepted.dl was removed" \
   || bad "poisoned KB: removal message does not state that accepted.dl was removed"

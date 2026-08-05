@@ -271,9 +271,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(objects)} values: {', '.join(objects)}",
             file=sys.stderr,
         )
-        # Same spec lookup detect_conflicts uses (#210): the conflict key is the
-        # canonical relation, which is already NFC when it came from the alias map;
-        # fall back to the NFC form for an NFD-authored name.
+        # The conflict key is the canonical relation, which is already NFC when it
+        # came from the alias map; fall back to the NFC form for an NFD-authored
+        # name. NOT identical to detect_conflicts' lookup: there the second probe
+        # uses the NFC of the ROW's relation, which can differ from the canonical
+        # one when an NFD surface form participates in an alias (#210).
         spec = typed.get(relation) or typed.get(unicodedata.normalize("NFC", relation))
         for line in non_ascii_digit_note(objects, spec) or ():
             print(line, file=sys.stderr)
