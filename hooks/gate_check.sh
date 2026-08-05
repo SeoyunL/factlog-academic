@@ -137,8 +137,9 @@
 # A basename PREFILTER short-circuits to exit 0 before any canonicalisation
 # when the target's last path component proves it cannot be an engine input.
 # That keeps the gate off the critical path of writes it does not care about;
-# see the prefilter itself for the five ways a name can lie and how each is
-# closed.
+# see the prefilter itself for its seven guards — the five ways a target's name
+# can lie about the file it denotes, plus two that are not name questions at all
+# (an unexpanded tilde, and a symlinked engine input) — and how each is closed.
 #
 # The "resolves to" in the predicate above means the FILESYSTEM's answer, not
 # string equality of two canonical paths. A hard link and — on a case-folding

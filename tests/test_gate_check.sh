@@ -1049,8 +1049,12 @@ rm -rf "$KB_CASE"
 # last path component cannot be an engine input. That saves an interpreter spawn
 # on every Write/Edit in the session, and it is the whole reason the fix does not
 # double write latency — but it is a NAME test standing in for a PATH question,
-# and a name lies in five ways. CASE 42 pins the short-circuit itself; 43-46 are
-# the paths that must survive it, each of which the naive form
+# and a name lies in five ways. Those five are guards 3-7 of the prefilter's
+# seven; the other two are not name questions (guard 1 is an unexpanded tilde,
+# guard 2 is a symlinked engine input) and are pinned by CASES 47-49b instead.
+#
+# CASE 42 pins the short-circuit itself; 43-46 are the paths that must survive
+# it, each of which the naive form
 # `case "$target_path" in */accepted.dl) ;; *) exit 0 ;; esac` gets wrong.
 #
 # CASE 39 (hard link) is the fifth and already sits above: it is what forces the
