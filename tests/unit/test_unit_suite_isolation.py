@@ -17,6 +17,7 @@ comments) — the Python layer is the one that was missing it.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,24 @@ def test_resolved_config_path_is_not_the_real_one():
     import factlog_config
 
     assert not _is_under(str(factlog_config.config_path()), Path.home() / ".config")
+
+
+def test_config_home_is_a_throwaway_dir_made_for_this_run():
+    """Not merely "a path that looks isolated" — one this suite created.
+
+    The two assertions above only see *where* ``XDG_CONFIG_HOME`` points, so
+    they hold for any path outside ``~/.config`` — including a developer's real
+    config at ``~/.dotfiles/config`` or ``~/Library/Application Support``.
+    Pointing the variable somewhere non-default is its normal use, not an
+    isolation signal, so what actually has to hold is that conftest overwrote
+    whatever was inherited.
+    """
+    config_home = Path(os.environ["XDG_CONFIG_HOME"])
+    assert config_home.name.startswith("factlog-unit-cfg-"), (
+        f"XDG_CONFIG_HOME was inherited rather than pinned by conftest: {config_home} "
+        "— an inherited path may be the developer's real config under a custom prefix"
+    )
+    assert _is_under(str(config_home), Path(tempfile.gettempdir()))
 
 
 def test_factlog_root_is_not_a_real_kb():
