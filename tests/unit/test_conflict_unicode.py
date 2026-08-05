@@ -73,12 +73,26 @@ class TestTypedObjectFoldedBeforeParse:
 
     def test_all_nfd_kb_cross_notation_amounts_collapse(self):
         # 5400억 == 0.54조 == 5.4e11. In an all-NFD KB neither side parsed before,
-        # so #116's cross-notation equivalence never fired there; now it does.
+        # so #116's cross-notation equivalence never fired there; inside this
+        # module it now does.
+        #
+        # Inside this module ONLY, and that is the whole point of the disclosure
+        # asserted below. The engine hands the RAW object to
+        # literal_types.normalize (common._project_typed_relations), so it still
+        # fails to parse both literals, warns "does not parse as amount; loading
+        # untyped", and inserts neither into `revenue`. The checker is declaring
+        # two values equal on a basis the engine cannot reproduce — permissible
+        # only because it says so out loud. Do not read this pin as an engine-side
+        # gain; aligning the engine is a separate follow-up.
         facts = [
             _fact("갑사", "매출", _nfd('amount(5400,"억")')),
             _fact("갑사", "매출", _nfd('amount(0.54,"조")')),
         ]
-        assert check_conflicts.detect_conflicts(facts, {"매출"}, _TYPED_AMOUNT) == {}
+        scan = check_conflicts.collect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
+        assert scan.conflicts == {}
+        assert scan.parse_merges[("갑사", "매출")] == {
+            _nfd('amount(0.54,"조")'): sorted(f["object"] for f in facts)
+        }
 
     def test_nfd_typed_literals_with_different_values_still_conflict(self):
         # Folding must not swallow a genuine typed contradiction.
@@ -275,11 +289,11 @@ class TestVariantChannels:
     def test_collect_returns_conflicts_and_both_spelling_maps(self):
         raws = [_nfc("김철수"), _nfd("김철수")]
         facts = [_fact(raws[0], "소속", "A사"), _fact(raws[1], "소속", "B사")]
-        conflicts, subjects, objects = check_conflicts.collect_conflicts(facts, {"소속"}, {})
+        scan = check_conflicts.collect_conflicts(facts, {"소속"}, {})
         key = (_nfc("김철수"), "소속")
-        assert conflicts == {key: ["A사", "B사"]}
-        assert subjects[key] == sorted(raws)
-        assert objects[key] == {"A사": ["A사"], "B사": ["B사"]}
+        assert scan.conflicts == {key: ["A사", "B사"]}
+        assert scan.subject_variants[key] == sorted(raws)
+        assert scan.object_variants[key] == {"A사": ["A사"], "B사": ["B사"]}
 
     def test_object_channel_lists_the_merged_spellings(self):
         raws = [_nfc("한국대학교"), _nfd("한국대학교")]
@@ -288,16 +302,16 @@ class TestVariantChannels:
             _fact("연구소", "소속", raws[1]),
             _fact("연구소", "소속", "서울대학교"),
         ]
-        _, _, objects = check_conflicts.collect_conflicts(facts, {"소속"}, {})
+        objects = check_conflicts.collect_conflicts(facts, {"소속"}, {}).object_variants
         merged = objects[("연구소", "소속")]
         assert merged[_nfc("한국대학교")] == sorted(raws)
         assert merged["서울대학교"] == ["서울대학교"]
 
     def test_single_spelling_reports_one_variant_on_both_axes(self):
         facts = [_fact("갑", "속성", "x"), _fact("갑", "속성", "y")]
-        _, subjects, objects = check_conflicts.collect_conflicts(facts, {"속성"}, {})
-        assert subjects[("갑", "속성")] == ["갑"]
-        assert objects[("갑", "속성")] == {"x": ["x"], "y": ["y"]}
+        scan = check_conflicts.collect_conflicts(facts, {"속성"}, {})
+        assert scan.subject_variants[("갑", "속성")] == ["갑"]
+        assert scan.object_variants[("갑", "속성")] == {"x": ["x"], "y": ["y"]}
 
     def test_object_variant_key_order_is_independent_of_row_order(self):
         # The groups are built in a dict keyed off set iteration, so insertion
@@ -308,7 +322,7 @@ class TestVariantChannels:
         base = [_fact("갑", "속성", v) for v in ("a", "b", "c", "d")]
         orders = set()
         for perm in itertools.permutations(base):
-            _, _, objects = check_conflicts.collect_conflicts(list(perm), {"속성"}, {})
+            objects = check_conflicts.collect_conflicts(list(perm), {"속성"}, {}).object_variants
             orders.add(tuple(objects[("갑", "속성")]))
         assert orders == {("a", "b", "c", "d")}
 
@@ -322,10 +336,10 @@ class TestVariantChannels:
             _fact(_nfc("김철수"), "직급", "부장"),
             _fact(_nfc("김철수"), "직급", "과장"),
         ]
-        conflicts, subjects, _ = check_conflicts.collect_conflicts(facts, {"소속", "직급"}, {})
-        assert subjects[(_nfc("김철수"), "소속")] == sorted(raws)
-        assert subjects[(_nfc("김철수"), "직급")] == [_nfc("김철수")]
-        assert conflicts[(_nfc("김철수"), "직급")] == ["과장", "부장"]
+        scan = check_conflicts.collect_conflicts(facts, {"소속", "직급"}, {})
+        assert scan.subject_variants[(_nfc("김철수"), "소속")] == sorted(raws)
+        assert scan.subject_variants[(_nfc("김철수"), "직급")] == [_nfc("김철수")]
+        assert scan.conflicts[(_nfc("김철수"), "직급")] == ["과장", "부장"]
 
 
 def _run_main(monkeypatch, facts, single_valued, typed=None, aliases=None):
@@ -478,9 +492,9 @@ class TestFoldingThatResolvesAConflict:
     def test_collect_records_the_resolved_group_outside_conflicts(self):
         raws = [_nfc("한국대학교"), _nfd("한국대학교")]
         facts = [_fact("연구소", "소속", raws[0]), _fact("연구소", "소속", raws[1])]
-        conflicts, _, objects = check_conflicts.collect_conflicts(facts, {"소속"}, {})
-        assert conflicts == {}
-        assert objects[("연구소", "소속")][_nfc("한국대학교")] == sorted(raws)
+        scan = check_conflicts.collect_conflicts(facts, {"소속"}, {})
+        assert scan.conflicts == {}
+        assert scan.object_variants[("연구소", "소속")][_nfc("한국대학교")] == sorted(raws)
 
     def test_scalar_only_merge_is_not_disclosed(self, monkeypatch, capsys):
         # #116 cross-notation equivalence, zero decomposed code points. Keying the
@@ -631,6 +645,120 @@ class TestSpellingPayloadMatchesTheGate:
         err = capsys.readouterr().err
         assert "(subject, relation, object, source)" in err
         assert "carries back only status" not in err
+
+
+class TestFoldEnabledTypedParseIsDisclosed:
+    """The other way folding resolves a contradiction, and it is not equivalence.
+
+    ``_group_key`` folds *before* ``literal_types.normalize``, so the fold decides
+    whether a typed literal parses at all. ``NFD('제3호')`` does not parse and keys
+    ``("raw", …)``; folded it is ordinal rank 3 and meets ``'3위'``. The previous
+    release reported that pair as a CONFLICT and this one does not — yet
+    ``_fold_classes`` is silent about it, correctly: the two strings are not
+    canonically equivalent, so the equivalence axis has nothing to say. Keying the
+    whole exit-0 disclosure on that axis therefore left the merge with **no**
+    signal at all: exit 0, empty stderr, and ``finalize`` reporting "done — no
+    contradictions" where it used to delete ``facts/accepted.dl``.
+
+    The engine makes it worse, not better: ``common._project_typed_relations``
+    hands ``normalize`` the raw object, so it cannot reproduce the merge and loads
+    both literals untyped. The checker is entitled to be more willing to merge
+    than the engine only while it says so.
+    """
+
+    def test_nfd_typed_literal_merged_with_its_notation_twin_is_disclosed(
+        self, monkeypatch, capsys
+    ):
+        nfd_ordinal = _nfd("제3호")
+        facts = [_fact("갑", "순위", nfd_ordinal), _fact("갑", "순위", "3위")]
+        assert _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL) == 0
+        out = capsys.readouterr().out
+        assert "merged only because a Unicode fold made a typed literal parse" in out
+        assert ascii(nfd_ordinal) in out and ascii("3위") in out
+
+    def test_disclosure_names_the_engine_divergence(self, monkeypatch, capsys):
+        # The actionable half: the reader must not conclude the engine agrees.
+        facts = [_fact("갑", "순위", _nfd("제3호")), _fact("갑", "순위", "3위")]
+        _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL)
+        out = capsys.readouterr().out
+        assert "The engine does not fold" in out
+        assert "Unify the spelling in sources/" in out
+
+    def test_merged_notations_are_not_called_canonically_equivalent(self, monkeypatch, capsys):
+        # They are not, and the equivalence message asks for the wrong repair.
+        facts = [_fact("갑", "순위", _nfd("제3호")), _fact("갑", "순위", "3위")]
+        _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL)
+        out = capsys.readouterr().out
+        assert "merged into one value" not in out
+        assert "NOT canonically equivalent" in out
+
+    def test_all_nfd_typed_kb_is_disclosed(self, monkeypatch, capsys):
+        # The most likely shape of all: normalization is a property of the source
+        # document, so a whole KB arrives decomposed. Neither literal parses as
+        # written, both parse folded, and they collapse onto 5.4e11.
+        raws = [_nfd('amount(5400,"억")'), _nfd('amount(0.54,"조")')]
+        facts = [_fact("갑사", "매출", raws[0]), _fact("갑사", "매출", raws[1])]
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 0
+        out = capsys.readouterr().out
+        assert "made a typed literal parse" in out
+        assert ascii(raws[0]) in out and ascii(raws[1]) in out
+
+    def test_scalar_merge_the_fold_did_not_cause_stays_silent(self, monkeypatch, capsys):
+        # CONTROL for the gate's lower edge, and the pin the previous round's
+        # `len(raws) > 1` mutant survived. #116 cross-notation equivalence, zero
+        # decomposed code points: both literals key to 5.4e11 with or without the
+        # fold, so folding merged nothing and there is nothing to disclose.
+        facts = [
+            _fact("갑사", "매출", 'amount(5400,"억")'),
+            _fact("갑사", "매출", 'amount(0.54,"조")'),
+        ]
+        scan = check_conflicts.collect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
+        assert scan.object_variants == {} and scan.parse_merges == {}
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 0
+        assert capsys.readouterr().out == (
+            "check_conflicts: 0 conflicts across 1 single-valued relation(s)\n"
+        )
+
+    def test_merge_canonical_equivalence_already_explains_is_not_repeated(
+        self, monkeypatch, capsys
+    ):
+        # 제3호 in both forms plus 3위. Unfolded, NFC('제3호') and '3위' already
+        # share rank 3 (#218), and NFD('제3호') joins by canonical equivalence —
+        # which `_fold_classes` reports. Nothing is left for the parse message, so
+        # announcing one here would tell the reader that #218's rank equivalence
+        # is a Unicode artifact.
+        facts = [
+            _fact("갑", "순위", _nfc("제3호")),
+            _fact("갑", "순위", _nfd("제3호")),
+            _fact("갑", "순위", "3위"),
+        ]
+        scan = check_conflicts.collect_conflicts(facts, {"순위"}, _TYPED_ORDINAL)
+        assert scan.parse_merges == {}
+        assert _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL) == 0
+        out = capsys.readouterr().out
+        assert "merged into one value" in out
+        assert "made a typed literal parse" not in out
+
+    def test_untyped_fold_alone_raises_no_parse_message(self, monkeypatch, capsys):
+        # CONTROL: the equivalence path must keep its own message and only that.
+        raws = [_nfc("한국대학교"), _nfd("한국대학교")]
+        facts = [_fact("연구소", "소속", raws[0]), _fact("연구소", "소속", raws[1])]
+        assert _run_main(monkeypatch, facts, {"소속"}) == 0
+        out = capsys.readouterr().out
+        assert "merged into one value" in out
+        assert "made a typed literal parse" not in out
+
+    def test_reported_notations_are_row_order_independent(self):
+        base = [
+            _fact("갑", "순위", _nfd("제3호")),
+            _fact("갑", "순위", "3위"),
+            _fact("갑", "순위", _nfc("제3호")),
+        ]
+        seen = {
+            tuple(sorted(check_conflicts.collect_conflicts(list(perm), {"순위"}, _TYPED_ORDINAL).parse_merges.items()))
+            for perm in itertools.permutations(base)
+        }
+        assert len(seen) == 1
 
 
 class TestRelationSpellingIsDisclosed:

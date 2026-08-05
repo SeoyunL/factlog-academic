@@ -25,6 +25,7 @@ import os
 import sys
 import unicodedata
 from pathlib import Path
+from typing import NamedTuple
 
 _TOOLS_DIR = Path(__file__).parent
 if str(_TOOLS_DIR) not in sys.path:
@@ -42,6 +43,7 @@ from common import (  # noqa: E402
     TypedRelSpec,
     engine_facts,
     ensure_dirs,
+    folded_relation_names,
     load_facts,
     relation_aliases,
     single_valued_relations,
@@ -185,6 +187,56 @@ def _fold_classes(raws: list[str]) -> list[list[str]]:
     return [sorted(members) for _, members in sorted(classes.items()) if len(members) > 1]
 
 
+def _parse_merge(raws: set[str], unfolded_keys: dict[str, tuple]) -> list[str]:
+    """Return the notations folding merged that nothing else explains, or ``[]``.
+
+    ``_fold_classes`` reports the merges Unicode equivalence explains. This
+    reports the ones it does not: a typed literal that ``literal_types.normalize``
+    parses **only after** the fold joins a group it could never have reached
+    unfolded — ``NFD('제3호')`` degrades to ``("raw", …)`` as written and keys as
+    ordinal rank 3 once folded, meeting ``'3위'``. Calling those two "canonically
+    equivalent" would be false, so they need their own sentence, and without one
+    the fold silently resolves a contradiction the previous release reported.
+
+    The test is *not* "the group spans several equivalence classes" — a #116
+    scalar merge does that with no decomposed code point in sight
+    (``amount(5400,"억")`` and ``amount(0.54,"조")`` both key to 5.4e11 with or
+    without the fold), and announcing it as a Unicode merge is the exact false
+    diagnostic ``_fold_classes`` exists to avoid. Nor is it "folding changed the
+    partition", which fires on ``{NFC('제3호'), NFD('제3호'), '3위'}``: there the
+    fold joined ``NFD('제3호')`` to a class ``_fold_classes`` already names, and
+    the rank equivalence to ``'3위'`` was #218's doing, not the fold's.
+
+    So both explanations get to speak first. Two raws are joined when they share
+    an **unfolded** group key (they were one value before the fold — #116/#218
+    equivalence) or when they are **canonically equivalent** (the plain Unicode
+    merge, already listed by ``_fold_classes``). Whatever components survive that
+    were joined by nothing but the fold-enabled parse, and only those are
+    reported — one representative each (NFC spelling preferred, see
+    ``_representative``), since the members inside a component are covered above.
+    """
+    parent = {raw: raw for raw in raws}
+
+    def find(raw: str) -> str:
+        while parent[raw] != raw:
+            parent[raw] = parent[parent[raw]]
+            raw = parent[raw]
+        return raw
+
+    seen: dict[tuple, str] = {}
+    for raw in sorted(raws):
+        for label in (("key", unfolded_keys[raw]), ("fold", _fold(raw))):
+            other = seen.setdefault(label, raw)
+            roots = sorted((find(raw), find(other)))
+            parent[roots[1]] = roots[0]
+    components: dict[str, set[str]] = {}
+    for raw in raws:
+        components.setdefault(find(raw), set()).add(raw)
+    if len(components) <= 1:
+        return []
+    return sorted(_representative(members) for members in components.values())
+
+
 def _variant_map(groups: dict[tuple, set[str]]) -> dict[str, list[str]]:
     """Return ``{reported object: sorted raw objects}`` for *groups*, key-sorted.
 
@@ -261,12 +313,67 @@ def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     notation equivalence (억↔조) starting to work on that KB for the first time.
     The invariant held here is the one the issue asks for: an **NFC-only** KB is
     byte-identical."""
-    folded = _fold(obj)
+    return _typed_key(_fold(obj), spec)
+
+
+def _typed_key(value: str, spec: TypedRelSpec | None) -> tuple:
+    """Tag *value* as a typed scalar when *spec* parses it, else as a raw string."""
     if spec is not None:
-        scalar = literal_types.normalize(spec.type, folded, spec.units)
+        scalar = literal_types.normalize(spec.type, value, spec.units)
         if scalar is not None:
             return ("scalar", scalar)
-    return ("raw", folded)
+    return ("raw", value)
+
+
+def _group_key_unfolded(obj: str, spec: TypedRelSpec | None) -> tuple:
+    """Return the key *obj* would group under if this module did not fold (#325).
+
+    Used only by the disclosure, to answer one question ``_fold_classes`` cannot:
+    **did folding change how these rows partition?** Canonical equivalence is the
+    right axis for the untyped fallback and the wrong one for a typed relation,
+    because folding also decides whether ``literal_types.normalize`` parses at
+    all. ``NFD('제3호')`` does not parse and keys ``("raw", …)``; folded it parses
+    to ordinal rank 3 and meets ``'3위'`` under ``("scalar", 3)``. Those two
+    strings are *not* canonically equivalent, so the fold is what merged them and
+    nothing on the equivalence axis can say so — which is how a pair that main
+    reported as a CONFLICT became a silent exit 0.
+
+    Two rows sharing this key were already one value before the fold, so
+    ``_parse_merge`` uses it to subtract the merges #116/#218 equivalence
+    accounts for on its own.
+    """
+    return _typed_key(obj, spec)
+
+
+class ConflictScan(NamedTuple):
+    """Everything one pass over the facts learned about a single-valued KB.
+
+    A NamedTuple rather than a plain tuple because the channels are no longer two
+    symmetric ones: folding merges strings on several axes and each merge has a
+    different consequence, so the caller has to be able to name the one it is
+    reporting. ``detect_conflicts`` still reads ``.conflicts`` and nothing else.
+
+    * *conflicts* — ``{(reported subject, canonical relation): sorted objects}``,
+      the pairs holding more than one distinct value. The report's exit-1 payload.
+    * *subject_variants* — for each conflicting key, the sorted raw subject
+      spellings the fold merged under it. Conflicting pairs only.
+    * *object_variants* — ``{reported object: sorted raw objects}`` per key. Its
+      key set is a **superset** of *conflicts*: a pair whose objects folding
+      collapsed to a single value is not a conflict, yet is retained so the
+      caller can disclose that the fold is what resolved it.
+    * *parse_merges* — the subset of *object_variants* where folding merged
+      values that neither #116/#218 equivalence nor canonical equivalence
+      explains, by making a typed literal parse (see ``_parse_merge``). Same
+      shape, but the value list is one representative per merged component,
+      because "these are the same string written two ways" is false here and the
+      reader needs the other sentence — including the part where the engine
+      cannot reproduce the merge at all.
+    """
+
+    conflicts: dict[tuple[str, str], list[str]]
+    subject_variants: dict[tuple[str, str], list[str]]
+    object_variants: dict[tuple[str, str], dict[str, list[str]]]
+    parse_merges: dict[tuple[str, str], dict[str, list[str]]]
 
 
 def collect_conflicts(
@@ -274,36 +381,20 @@ def collect_conflicts(
     single_valued: set[str],
     typed: dict[str, TypedRelSpec] | None = None,
     aliases: dict[str, str] | None = None,
-) -> tuple[
-    dict[tuple[str, str], list[str]],
-    dict[tuple[str, str], list[str]],
-    dict[tuple[str, str], dict[str, list[str]]],
-]:
-    """Return ``(conflicts, subject_variants, object_variants)``.
+) -> ConflictScan:
+    """Return a :class:`ConflictScan` — the conflicts plus every spelling channel.
 
-    *conflicts* is exactly what ``detect_conflicts`` returns (see there).
+    ``scan.conflicts`` is exactly what ``detect_conflicts`` returns (see there).
+    The remaining fields are the disclosure channels; each is documented on the
+    NamedTuple. They exist so ``main`` can report what folding did without
+    duplicating the grouping logic, while ``detect_conflicts`` keeps its
+    established return shape (a large body of pinned tests asserts that dict
+    directly).
 
-    The other two are symmetric spelling channels — folding merges strings on the
-    subject axis and on the object axis alike, and a reported representative
-    stands in for every spelling it absorbed on **both**:
-
-    * *subject_variants* maps each reported key to the sorted raw subject strings
-      merged under it;
-    * *object_variants* maps each reported key to ``{reported object: sorted raw
-      objects}`` for that key's value groups. Its key set is a **superset** of
-      *conflicts*: a pair whose objects folding collapsed to a single value is
-      not a conflict, yet is retained here so the caller can disclose that the
-      fold is what resolved it (see ``_report_resolved_merges``). *conflicts* and
-      *subject_variants* carry conflicting pairs only.
-
-    Either list holds one entry when nothing was merged. More than one means the
-    KB writes that string in several Unicode normalization forms, so the reported
-    representative does not grep to every row behind it — which is exactly what
-    the caller has to disclose.
-
-    These channels exist so ``main`` can report a merge without duplicating the
-    grouping logic, while ``detect_conflicts`` keeps its established return shape
-    (a large body of pinned tests asserts that dict directly).
+    A variant list holds one entry when nothing was merged. More than one means
+    the KB writes that string in several Unicode normalization forms, so the
+    reported representative does not grep to every row behind it — which is
+    exactly what the caller has to disclose.
 
     **Subject axis folding (#325):** rows group under the NFC fold of the
     subject, so a contradiction written with the subject NFC on one row and NFD
@@ -356,6 +447,18 @@ def collect_conflicts(
     it silently, so the object channel below survives for a pair folding
     resolved, and ``_report_resolved_merges`` discloses it at exit 0. The
     engine-side raw-triple dedup itself is a follow-up.
+
+    **The engine does not fold at all (#325 follow-up).** ``_group_key`` folds
+    *before* ``literal_types.normalize``; the engine's counterpart,
+    ``common._project_typed_relations``, hands ``normalize`` the raw object (and
+    looks its spec up under the raw relation name). So an NFD-authored typed
+    literal parses here and nowhere else, and this module can declare two values
+    equal on grounds the engine cannot reproduce — it loads both untyped and
+    writes both atoms. Aligning the engine is the root fix and a follow-up of its
+    own: it changes which rows enter the typed side-relations, hence what
+    ``factlog ask`` answers, and it needs the deferred #210 relation-axis call
+    decided first. What belongs *here* is that the checker never merges on that
+    basis in silence — see ``_parse_merge`` and ``_report_resolved_merges``.
     """
     typed = typed or {}
     aliases = aliases or {}
@@ -365,10 +468,16 @@ def collect_conflicts(
     # ``common._relation_names_from`` does not normalize the names it parses out
     # of policy/single-valued.md, so comparing raw would make it a byte
     # comparison between two hand-written files. Membership only — the folded
-    # name is never used as a grouping key (see the loop below).
-    sv = {_fold(_canonicalize(r, aliases)) for r in single_valued}
+    # name is never used as a grouping key (see the loop below). Shared with the
+    # other membership consumers (``factlog status``/``vocab``, ``corroboration``)
+    # through ``common``, so "which predicate decides membership" has one answer.
+    sv = folded_relation_names(_canonicalize(r, aliases) for r in single_valued)
     # (folded subject, canonical_relation) -> group key -> set of raw objects.
     by_key: dict[tuple[str, str], dict[tuple, set[str]]] = {}
+    # Same pair -> raw object -> the key that object would have had unfolded.
+    # Per raw object rather than per group: the disclosure has to know *which*
+    # rows the fold pulled together, not just that it pulled (_parse_merge).
+    unfolded: dict[tuple[str, str], dict[str, tuple]] = {}
     # Same pair -> set of raw subject spellings folded into it.
     raw_subjects: dict[tuple[str, str], set[str]] = {}
     for row in engine_facts(facts):
@@ -384,10 +493,12 @@ def collect_conflicts(
         key = _group_key(obj, spec)
         pair = (_fold(row["subject"]), canon)
         by_key.setdefault(pair, {}).setdefault(key, set()).add(obj)
+        unfolded.setdefault(pair, {})[obj] = _group_key_unfolded(obj, spec)
         raw_subjects.setdefault(pair, set()).add(row["subject"])
     conflicts: dict[tuple[str, str], list[str]] = {}
     subject_variants: dict[tuple[str, str], list[str]] = {}
     object_variants: dict[tuple[str, str], dict[str, list[str]]] = {}
+    parse_merges: dict[tuple[str, str], dict[str, list[str]]] = {}
     for pair, groups in by_key.items():
         subjects = raw_subjects[pair]
         if len(groups) <= 1:
@@ -396,10 +507,21 @@ def collect_conflicts(
             # dropping the pair here would make that the only silent outcome in
             # the module. Keep the object channel so ``main`` can disclose it.
             # Gated on the fold, not on len(raws): a #116 scalar merge is not a
-            # Unicode merge and must not be announced as one.
-            if any(_fold_classes(sorted(raws)) for raws in groups.values()):
+            # Unicode merge and must not be announced as one. Both merge
+            # mechanisms open this gate — canonical equivalence (_fold_classes)
+            # and a typed parse the fold enabled (_parse_merge) — because either
+            # one lets finalize compile a KB the raw spellings would have blocked,
+            # and this advisory is the only signal on that path.
+            merged = {
+                _representative(raws): names
+                for raws in groups.values()
+                if (names := _parse_merge(raws, unfolded[pair]))
+            }
+            if merged or any(_fold_classes(sorted(raws)) for raws in groups.values()):
                 reported = (_representative(subjects), pair[1])
                 object_variants[reported] = _variant_map(groups)
+                if merged:
+                    parse_merges[reported] = merged
             continue
         # Representative restoration on both axes: report strings as written.
         # Distinct folded subjects cannot share a representative (the choice is a
@@ -409,7 +531,7 @@ def collect_conflicts(
         conflicts[reported] = sorted(objects)
         subject_variants[reported] = sorted(subjects)
         object_variants[reported] = objects
-    return conflicts, subject_variants, object_variants
+    return ConflictScan(conflicts, subject_variants, object_variants, parse_merges)
 
 
 def detect_conflicts(
@@ -462,13 +584,10 @@ def detect_conflicts(
     also need to know *which* raw spellings were merged should use
     ``collect_conflicts``, which documents the grouping in full and returns those
     maps alongside this dict."""
-    return collect_conflicts(facts, single_valued, typed, aliases)[0]
+    return collect_conflicts(facts, single_valued, typed, aliases).conflicts
 
 
-def _report_resolved_merges(
-    conflicts: dict[tuple[str, str], list[str]],
-    object_variants: dict[tuple[str, str], dict[str, list[str]]],
-) -> None:
+def _report_resolved_merges(scan: ConflictScan) -> None:
     """Disclose value groups whose Unicode fold *resolved* a contradiction.
 
     ``collect_conflicts`` keeps an object channel for a pair that ended up with a
@@ -485,33 +604,67 @@ def _report_resolved_merges(
     and is equally silent before this change — reporting it wherever it occurs is
     a separate, wider job than this advisory, and a follow-up.
 
+    **Two message classes, because folding merges values two ways.** Canonical
+    equivalence is one; making a typed literal parse is the other, and calling
+    the second "canonically equivalent" would be a false statement about the
+    strings (``NFD('제3호')`` and ``'3위'`` are not equivalent — the fold merely let
+    the first one parse as ordinal rank 3). It also carries a warning the first
+    does not: the engine folds nowhere, so it cannot reproduce that merge at all
+    and loads both literals untyped. Keying the whole disclosure on
+    ``_fold_classes`` left that path completely silent, which is how a KB that
+    reported a CONFLICT on the previous release became "no contradictions".
+
     Printed on **stdout**, not stderr: this is an advisory rather than the
     failure report, and ``finalize`` forwards our stdout unconditionally (it
     writes ``conflicts.stdout`` before testing the return code), so it survives
     the exit-0 path where stderr would be dropped.
     """
+    resolved = sorted(k for k in scan.object_variants if k not in scan.conflicts)
     lines = []
-    for key in sorted(k for k in object_variants if k not in conflicts):
+    for key in resolved:
         subject, relation = key
-        for obj, raws in sorted(object_variants[key].items()):
+        for obj, raws in sorted(scan.object_variants[key].items()):
             for members in _fold_classes(raws):
                 lines.append(
                     f"    '{relation}' on '{subject}' value {obj!r} spellings: "
                     f"{_spellings(members)}"
                 )
-    if not lines:
+    if lines:
+        print(
+            f"check_conflicts: {len(lines)} spelling group(s) written in several Unicode "
+            "normalization forms and merged into one value, so no contradiction is "
+            "reported for them:"
+        )
+        for line in lines:
+            print(line)
+        print(
+            "  These spellings are canonically equivalent, but they differ byte-wise and "
+            "engine atoms dedup on the raw triple, so each one still enters "
+            "facts/accepted.dl as a separate atom. Unify them at the source and re-collect."
+        )
+    parsed = []
+    for key in resolved:
+        subject, relation = key
+        for obj, notations in sorted(scan.parse_merges.get(key, {}).items()):
+            parsed.append(
+                f"    '{relation}' on '{subject}' value {obj!r} notations: "
+                f"{_spellings(notations)}"
+            )
+    if not parsed:
         return
     print(
-        f"check_conflicts: {len(lines)} spelling group(s) written in several Unicode "
-        "normalization forms and merged into one value, so no contradiction is "
-        "reported for them:"
+        f"check_conflicts: {len(parsed)} value(s) merged only because a Unicode fold made "
+        "a typed literal parse, so no contradiction is reported for them:"
     )
-    for line in lines:
+    for line in parsed:
         print(line)
     print(
-        "  These spellings are canonically equivalent, but they differ byte-wise and "
-        "engine atoms dedup on the raw triple, so each one still enters "
-        "facts/accepted.dl as a separate atom. Unify them at the source and re-collect."
+        "  These notations are NOT canonically equivalent: a decomposed literal does not "
+        "parse as its declared type, and folding is what let it reach the scalar its "
+        "counterpart already had. The engine does not fold — it hands the raw object to "
+        "literal_types.normalize — so it loads every one of them untyped and cannot "
+        "reproduce this merge. Unify the spelling in sources/ and re-collect, then re-run "
+        "to see whether a contradiction remains."
     )
 
 
@@ -526,16 +679,21 @@ def main(argv: list[str] | None = None) -> int:
         print("check_conflicts: no single-valued relations declared (policy/single-valued.md); nothing to check")
         return 0
 
-    conflicts, subject_variants, object_variants = collect_conflicts(
+    scan = collect_conflicts(
         load_facts(), single_valued, typed_relations(), relation_aliases()
+    )
+    conflicts, subject_variants, object_variants = (
+        scan.conflicts,
+        scan.subject_variants,
+        scan.object_variants,
     )
     if not conflicts:
         print(f"check_conflicts: 0 conflicts across {len(single_valued)} single-valued relation(s)")
-        _report_resolved_merges(conflicts, object_variants)
+        _report_resolved_merges(scan)
         return 0
 
     print(f"check_conflicts: {len(conflicts)} conflict(s) found", file=sys.stderr)
-    _report_resolved_merges(conflicts, object_variants)
+    _report_resolved_merges(scan)
     aliases = relation_aliases()
     # Whether folding merged spellings anywhere. This is an *extra* disclosure,
     # never a replacement for the supersede guidance: a contradiction that a mixed
