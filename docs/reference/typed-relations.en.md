@@ -99,9 +99,15 @@ clear the gate, but superseding the ASCII row rather than the full-width one
 leaves the KB holding a value that does not parse; where the two spellings denote
 the same value neither row is "outdated", so supersede is the wrong tool to begin
 with. `check_conflicts` appends a note whenever a conflicting value carries
-non-ASCII digits, and the `conflicts:` line of `factlog status` gives the same
-guidance under the same condition. Both spell the offending characters as
-`\uXXXX`, so you can see which one to correct.
+non-ASCII digits, and the `conflicts:` line of `factlog status` carries the same
+guidance **for the conflicts it detects**. The two do not detect the same set:
+`check_conflicts` folds aliases to the canonical name and groups on the scalar
+key, while `status` groups on the raw relation string, so rows collected under an
+alias surface form are reported only by `check_conflicts`. That command is the
+gate's authority.
+
+Both spell the offending characters as `\uXXXX` (`\UXXXXXXXX` above the BMP), so
+you can see which one to correct.
 
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).

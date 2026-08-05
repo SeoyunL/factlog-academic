@@ -89,8 +89,13 @@ amount 가 아니라서 저장본과 같은 정준형으로 접히지 않기 때
 아니라 ASCII 행을 supersede 하면 파싱되지 않는 값이 KB 에 남습니다. 두 표기가 같은
 값을 가리키는 흔한 경우에는 어느 행도 "낡은" 것이 아니므로 supersede 가 애초에
 맞는 도구가 아닙니다 — `check_conflicts` 는 충돌 값에 비-ASCII 숫자가 있으면 그
-점을 알리는 줄을 덧붙입니다. `factlog status` 의 `conflicts:` 줄도 같은 조건에서
-같은 안내를 냅니다. 두 곳 모두 문제가 되는 문자를 `\uXXXX` 로 찍어 주므로 어느
+점을 알리는 줄을 덧붙입니다. `factlog status` 의 `conflicts:` 줄도 **자신이 탐지한
+충돌에 대해서는** 같은 안내를 냅니다. 다만 두 명령의 탐지 조건은 같지 않습니다 —
+`check_conflicts` 는 별칭을 정준 이름으로 접고 스칼라 키로 묶는 반면 `status` 는
+원문 관계 문자열을 그대로 쓰므로, 별칭 표면형으로 수집된 행은 `check_conflicts`
+쪽에서만 충돌로 잡힙니다. 게이트의 판정 기준은 `check_conflicts` 입니다.
+
+두 곳 모두 문제가 되는 문자를 `\uXXXX`(BMP 밖은 `\UXXXXXXXX`) 로 찍어 주므로 어느
 글자를 고쳐야 하는지 눈으로 확인할 수 있습니다.
 
 `factlog vocab` 은 선언된 타입 지정 관계에 `[typed:<type>]` 태그를 붙여 보여
