@@ -1282,20 +1282,33 @@ rm -rf "$KB_PRE"
 # a name the prefilter has never heard of, so a write to the real file behind it
 # IS an engine-input write that the basename test cannot recognise.
 #
-# This one does not self-heal. compile_facts.py writes accepted.dl through
-# temp + os.replace, which breaks a symlink there on the next compile; query.dl
-# is user-authored and never atomically replaced, so the symlink survives.
+# The query.dl half does not self-heal. compile_facts.py writes accepted.dl
+# through temp + os.replace, which breaks a symlink there on the next compile;
+# query.dl is user-authored and never atomically replaced, so the symlink
+# survives indefinitely.
+#
+# BOTH halves are pinned, because the guard is two separate lines and only the
+# query.dl one used to be exercised: deleting
+# `[ -L "${KB_ROOT}/facts/accepted.dl" ]` on its own left the whole suite green
+# while opening exactly this hole (measured: exit 0 against exit 2 at head). The
+# accepted.dl symlink being transient makes the window shorter, not absent — it
+# lasts until the next compile, and the write it lets through is precisely the
+# one the report was supposed to supersede.
 # ---------------------------------------------------------------------------
-KB_ESYM="$(mktemp -d)"
-make_kb "$KB_ESYM"
-mkdir -p "$KB_ESYM/shared"
-touch_file "$KB_ESYM/facts/logic_report.txt"
-set_mtime_past "$KB_ESYM/facts/logic_report.txt"
-touch_file "$KB_ESYM/shared/my-queries.dl"
-ln -s ../shared/my-queries.dl "$KB_ESYM/facts/query.dl"
-run_payload_case "engine input query.dl is a symlink — deny writes to its real file" \
-  "$KB_ESYM" "$(envelope Write "$KB_ESYM/shared/my-queries.dl")" 2
-rm -rf "$KB_ESYM"
+for esym_case in "query.dl:my-queries.dl" "accepted.dl:my-facts.dl"; do
+  esym_engine="${esym_case%%:*}"
+  esym_real="${esym_case#*:}"
+  KB_ESYM="$(mktemp -d)"
+  make_kb "$KB_ESYM"
+  mkdir -p "$KB_ESYM/shared"
+  touch_file "$KB_ESYM/facts/logic_report.txt"
+  set_mtime_past "$KB_ESYM/facts/logic_report.txt"
+  touch_file "$KB_ESYM/shared/$esym_real"
+  ln -s "../shared/$esym_real" "$KB_ESYM/facts/$esym_engine"
+  run_payload_case "engine input $esym_engine is a symlink — deny writes to its real file" \
+    "$KB_ESYM" "$(envelope Write "$KB_ESYM/shared/$esym_real")" 2
+  rm -rf "$KB_ESYM"
+done
 
 # ---------------------------------------------------------------------------
 # CASES 48-49: A LEADING TILDE MUST NOT DISABLE THE GUARDS.
