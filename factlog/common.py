@@ -174,7 +174,7 @@ class KbContext:
         return _relation_names_from(self.policy_dir / "single-valued.md")
 
     def attribute_relations(self) -> set[str]:
-        return _relation_names_from(self.policy_dir / "attribute-relations.md")
+        return _attribute_relations_from(self.policy_dir, lambda: relation_aliases(self.root))
 
     def typed_relations(self) -> dict[str, TypedRelSpec]:
         path = self.policy_dir / "typed-relations.md"
@@ -671,7 +671,14 @@ def _relation_names_from(path: Path) -> set[str]:
 
     Bullets and '#' comments are allowed; the relation name is the first
     `backtick`-quoted token if present, else the first whitespace token (quote a
-    name that contains spaces). Absent file → empty set."""
+    name that contains spaces). Absent file → empty set.
+
+    Names are returned VERBATIM — no NFC coercion. single-valued.md's consumer
+    (check_conflicts._canonicalize) deliberately preserves an NFD-authored name
+    so a non-participating relation is reported exactly as written (#210/#227),
+    and normalizing here breaks its NFD membership test. attribute-relations.md
+    handles the same problem without touching the fact side; see
+    _attribute_relations_from."""
     if not path.is_file():
         return set()
     names: set[str] = set()
@@ -870,6 +877,54 @@ def canonical_variants_of(relation: str, aliases: dict[str, str]) -> set[str]:
     return surface_variants(unicodedata.normalize("NFC", relation), aliases)
 
 
+def _attribute_relations_from(policy_dir: Path, read_aliases) -> set[str]:
+    """Declared attribute relations, plus every surface spelling of the same
+    relation (policy/relation-aliases.md).
+
+    ``relation/3`` — engine input and every python consumer — stores the RAW
+    relation name a fact was written with, so a KB that declares `정식_운영` an
+    attribute relation and aliases `출시일` -> `정식_운영` still let its literals
+    through the exclusion under the surface spelling. Expanding the
+    set here closes the engine and the renderer at once: the engine's attr_rel/1
+    EDB is emitted from this same set and is likewise matched against raw R.
+    check_conflicts already canonicalizes single-valued relations this way.
+
+    Alias expansion is bidirectional (declared name → its canonical → all surface
+    variants) because the policy author may write either spelling.
+
+    BOTH unicode normal forms of every name are emitted, rather than folding
+    either side to NFC. macOS writes NFD routinely, and an NFD-authored
+    attribute-relations.md against NFC facts matched nothing at all — the declared
+    exclusion was simply off, with no diagnostic. Folding the POLICY side alone
+    would only move that miss to the NFD-facts KBs it currently serves, and the
+    FACT side cannot be folded here: the engine matches attr_rel/1 against
+    relation/3's raw R, so a renderer that folded and an engine that could not
+    would disagree — the divergence #329 exists to remove. Carrying both spellings
+    costs at most 2n atoms and keeps the two sides identical.
+
+    *read_aliases* is a CALLABLE, not a dict: a KB that declares no attribute
+    relation must not pay an extra relation-aliases.md read per query, which is
+    the #242 gate invariant tests/unit/test_query_literal_nfc.py pins."""
+    names = _relation_names_from(policy_dir / "attribute-relations.md")
+    if not names:
+        return names
+    aliases = read_aliases()
+    if aliases:
+        expanded = set(names)
+        for name in names:
+            # relation_aliases() keys are NFC-normalized, so look up the NFC form.
+            nfc = unicodedata.normalize("NFC", name)
+            canonical = aliases.get(nfc, nfc)
+            expanded.add(canonical)
+            expanded |= surface_variants(canonical, aliases)
+        names = expanded
+    return names | {
+        form
+        for name in names
+        for form in (unicodedata.normalize("NFC", name), unicodedata.normalize("NFD", name))
+    }
+
+
 def attribute_relations() -> set[str]:
     """Relation names whose object is a LITERAL value, not a first-class entity
     (policy/attribute-relations.md).
@@ -883,9 +938,10 @@ def attribute_relations() -> set[str]:
     (#329). They remain valid relation-query objects — see value_set and
     classify_query — so a fact about a literal is still verifiable.
     Same file format as single-valued.md; absent file → no attribute relations
-    → entity_set == value_set (fully backward compatible).
+    → entity_set == value_set (fully backward compatible). Surface aliases of a
+    declared relation count as declared — see _attribute_relations_from.
     """
-    return _relation_names_from(POLICY_DIR / "attribute-relations.md")
+    return _attribute_relations_from(POLICY_DIR, relation_aliases)
 
 
 # --- typed relations (policy/typed-relations.md) -----------------------------
