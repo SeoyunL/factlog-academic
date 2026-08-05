@@ -10,6 +10,7 @@ from common import (
     QUERY_PREDICATES,
     allowed_relations,
     dependency_path,
+    entity_set,
     value_set,
     ensure_dirs,
     load_accepted_facts,
@@ -61,7 +62,20 @@ def relation_results(line: str, facts: list[dict[str, str]]) -> list[tuple[str, 
     return rows
 
 
-def validate_query(line: str, entities: set[str], policy_query_predicates: set[str]) -> tuple[list[str], list[str]]:
+def validate_query(
+    line: str,
+    entities: set[str],
+    policy_query_predicates: set[str],
+    path_nodes: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Validate one query line against the KB vocabulary.
+
+    *entities* is value_set — entities AND literal values — because a relation
+    query's object may legitimately be a literal. *path_nodes* is the narrower
+    entity_set: a path node must be an entity, which is what classify_query
+    enforces for `ask`. ``None`` means "do not distinguish the two" and keeps the
+    pre-#329 behaviour for the callers that pass three arguments.
+    """
     errors: list[str] = []
     warnings: list[str] = []
     predicate = line.split("(", 1)[0]
@@ -88,6 +102,16 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         if len(query_args(line)) != 2:
             errors.append(f"count query must have subject and relation arguments: {line}")
         return errors, warnings
+    if predicate == "path" and path_nodes is not None:
+        # A path node must be an ENTITY. The object of a declared attribute
+        # relation is a literal value: it is in the KB (so the generic check
+        # below stays silent) but cannot sit on a path. classify_query refuses
+        # the same query outright — say why here too, rather than letting the
+        # result line answer "(not found)", which reads as "the facts do not
+        # connect them" (#329).
+        for constant in quoted_constants(line):
+            if constant in entities and constant not in path_nodes:
+                warnings.append(f"query path argument is not an accepted entity: {constant}")
     for constant in quoted_constants(line):
         if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
             warnings.append(f"query references non-engine entity or relation: {constant}")
@@ -183,7 +207,18 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
     return f"{predicate} results{echo}: {len(rows)} rows{suffix}"
 
 
-def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[str, ...]]], policy_query_predicates: set[str]) -> list[str]:
+def evaluate_queries(
+    facts: list[dict[str, str]],
+    inferred: dict[str, set[tuple[str, ...]]],
+    policy_query_predicates: set[str],
+    path_nodes: set[str] | None = None,
+) -> list[str]:
+    """Render one result line per query in facts/query.dl.
+
+    *path_nodes* is entity_set — the values that may be path endpoints. ``None``
+    means "do not distinguish", the pre-#329 behaviour kept for three-argument
+    callers; ``main`` always passes it.
+    """
     results: list[str] = []
     for line in query_lines():
         predicate = line.split("(", 1)[0]
@@ -194,6 +229,22 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
         elif predicate == "path":
             constants = quoted_constants(line)
             if len(constants) >= 2:
+                # An endpoint that is a literal (object of a declared attribute
+                # relation) is not a path node at all. Name the reason instead of
+                # reporting "(not found)", which claims the facts were searched
+                # and do not connect the two — and which `ask` does not claim,
+                # because classify_query rejects the query as entity_not_accepted
+                # (#329).
+                not_nodes = [
+                    value for value in constants[:2]
+                    if path_nodes is not None and value not in path_nodes
+                ]
+                if not_nodes:
+                    results.append(
+                        f"path {constants[0]} -> {constants[1]}: "
+                        f"(not evaluated — not an accepted entity: {', '.join(not_nodes)})"
+                    )
+                    continue
                 is_reachable = (constants[0], constants[1]) in inferred["path"]
                 trace = dependency_path(facts, constants[0], constants[1]) if is_reachable else []
                 value = " -> ".join(trace) if trace else "(not found)"
@@ -244,6 +295,10 @@ def main() -> None:
     # value_set (entities + literal values) so a query naming a literal object of
     # an attribute relation is not falsely warned as a non-engine entity.
     entities = value_set(facts)
+    # entity_set is the narrower set a path endpoint must belong to — the same
+    # test classify_query applies for `ask`, so the report and the router give
+    # the same answer to the same path query (#329).
+    path_nodes = entity_set(facts)
     relations = allowed_relations(facts)
     errors: list[str] = []
     warnings: list[str] = []
@@ -260,7 +315,7 @@ def main() -> None:
             policy_findings.append(f"{predicate}: {target} ({reason})")
 
     for line in query_lines():
-        query_errors, query_warnings = validate_query(line, entities, policy_query_predicates)
+        query_errors, query_warnings = validate_query(line, entities, policy_query_predicates, path_nodes)
         errors.extend(query_errors)
         warnings.extend([item for item in query_warnings if item.rsplit(": ", 1)[-1] not in relations])
 
@@ -291,7 +346,7 @@ def main() -> None:
     report.extend([f"- {item}" for item in policy_items] or ["- no generated policy predicates"])
     report.append("")
     report.append("Query evaluation:")
-    report.extend([f"- {item}" for item in evaluate_queries(facts, inferred, policy_query_predicates)] or ["- no facts/query.dl found"])
+    report.extend([f"- {item}" for item in evaluate_queries(facts, inferred, policy_query_predicates, path_nodes)] or ["- no facts/query.dl found"])
 
     text = "\n".join(report) + "\n"
     out = FACTS_DIR / "logic_report.txt"

@@ -11,7 +11,9 @@
 #   - NO attribute-relations declared -> path through the literal is reported
 #     (backward compatibility; the scaffolded stub declares nothing)
 #   - declared attribute relation     -> engine path/2 has no pair ending at the
-#     literal, and the report line for that query is "(not found)"
+#     literal, and the report line NAMES the reason rather than answering
+#     "(not found)", which would read as "the facts do not connect them" while
+#     `ask` rejects the same query as entity_not_accepted (#329 round 2)
 #   - a non-attribute edge in the same KB is untouched
 #   - the literal remains a verifiable relation-query object
 #
@@ -95,9 +97,13 @@ printf '%s' "$after" | grep -qF '갑봇 -> 을서비스' \
   || bad "declared attribute -> lost the unrelated edge 갑봇 -> 을서비스: $after"
 
 report="$(FACTLOG_ROOT="$KB" "$PYTHON" "$RLC" 2>&1)"
-printf '%s' "$report" | grep -qF 'path 갑봇 -> 2030.1: (not found)' \
-  && ok "declared attribute -> report answers the literal path query as not found" \
-  || bad "declared attribute -> report still traces a path to the literal"
+printf '%s' "$report" | grep -qF 'path 갑봇 -> 2030.1: (not evaluated — not an accepted entity: 2030.1)' \
+  && ok "declared attribute -> report gives the literal path query its reason" \
+  || bad "declared attribute -> report still traces a path to the literal, or hides the reason"
+
+printf '%s' "$report" | grep -qF 'query path argument is not an accepted entity: 2030.1' \
+  && ok "declared attribute -> report warns with the same wording ask uses" \
+  || bad "declared attribute -> report answers the literal path query with no warning"
 
 printf '%s' "$report" | grep -qF 'path 갑봇 -> 을서비스: 갑봇 -> 을서비스' \
   && ok "declared attribute -> the entity path query still answers" \
