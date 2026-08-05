@@ -623,7 +623,15 @@ def load_logic_policy() -> str:
 
 def policy_predicates(policy_program: str | None = None) -> set[str]:
     text = policy_program if policy_program is not None else load_logic_policy()
-    built_in = {"relation", "edge", "path"}
+    # Every predicate classify_query handles with a dedicated branch, so a
+    # hand-authored `.decl` in logic-policy.extra.dl cannot re-route one of them
+    # through the policy branch. The two paths test membership in a different
+    # order — classify_query checks count BEFORE policy, validate_query checks
+    # policy first — so a `.decl count(...)` used to make the report treat a count
+    # query as a policy query while the gate still treated it as a count, which
+    # reproduces #328's report/gate divergence exactly. `conflict` is deliberately
+    # NOT here: it has no branch of its own and IS meant to be policy-declared.
+    built_in = {"relation", "edge", "path", "count", "review_required"}
     return {
         name
         for name in re.findall(r"^\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\(", text, flags=re.MULTILINE)
