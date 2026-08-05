@@ -1175,6 +1175,67 @@ tilde_case "tilde path through a hard link — deny (guard 7 not disabled)" \
 rm -rf "$TILDE_HOME"
 
 # ---------------------------------------------------------------------------
+# CASE 49b: A LEADING TILDE IN **KB_ROOT** MUST NOT DISABLE GUARD 2.
+#
+# CASES 48-49 above pin the tilde guard on the TARGET. The prefilter carries a
+# SECOND tilde guard, on KB_ROOT, and it closes a different hole: the
+# engine-side guard asks `[ -L "${KB_ROOT}/facts/query.dl" ]`, so a KB_ROOT that
+# is still a literal "~" points that test at a path which does not exist. It
+# answers "not a symlink", and the blindness CASE 47 exists to close is reopened
+# from the KB side — a write to the real file behind a symlinked engine input
+# short-circuits on a basename the prefilter has never heard of.
+#
+# resolve_root() expands the tilde, so KB_ROOT only survives as a literal "~"
+# when the resolver degrades. Reproduced the way CASE 16 does it: a fake plugin
+# root whose factlog/__init__.py raises ImportError, which the gate inserts at
+# sys.path[0] for the resolver invocation only. FACTLOG_ROOT then reaches the
+# prefilter verbatim.
+#
+# Deleting `case "$KB_ROOT" in ~*) return 1 ;; esac` on its own leaves every
+# other case in this file green — CASES 48-49 die only to the TARGET guard — and
+# turns this one into exit 0.
+# ---------------------------------------------------------------------------
+KBTILDE_HOME="$(mktemp -d)"
+KBTILDE_PLUGIN="$(mktemp -d)"
+mkdir -p "$KBTILDE_PLUGIN/hooks" "$KBTILDE_PLUGIN/factlog"
+printf 'raise ImportError("factlog package intentionally broken to degrade the resolver (CASE 49b)")\n' \
+  > "$KBTILDE_PLUGIN/factlog/__init__.py"
+cp "$GATE" "$KBTILDE_PLUGIN/hooks/gate_check.sh"
+
+mkdir -p "$KBTILDE_HOME/kb/facts" "$KBTILDE_HOME/shared"
+touch_file "$KBTILDE_HOME/shared/my-queries.dl"
+ln -s "$KBTILDE_HOME/shared/my-queries.dl" "$KBTILDE_HOME/kb/facts/query.dl"
+touch_file "$KBTILDE_HOME/kb/facts/logic_report.txt"
+set_mtime_past "$KBTILDE_HOME/kb/facts/logic_report.txt"   # stale report → deny
+clear_config
+
+kb_tilde_case() {
+  local desc="$1"
+  local root="$2"
+  local actual_exit=0
+  HOME="$KBTILDE_HOME" FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$root" \
+    bash "$KBTILDE_PLUGIN/hooks/gate_check.sh" \
+    <<< "$(envelope Write "$KBTILDE_HOME/shared/my-queries.dl")" >/dev/null 2>&1 || actual_exit=$?
+  if [ "$actual_exit" -eq 2 ]; then
+    echo "PASS: $desc (exit $actual_exit)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc — expected deny (exit 2), got $actual_exit"
+    fail=$((fail + 1))
+  fi
+}
+
+kb_tilde_case "tilde KB_ROOT over a symlinked engine input — deny (guard 2 not disabled)" \
+  '~/kb'
+# CONTROL: the same KB, same degraded resolver, KB_ROOT spelled absolutely. Guard
+# 2 can reach the symlink, so this denies with or without the KB_ROOT tilde
+# guard — it passes both before and after the fix, and is here only to show the
+# case above is not denying for some reason unrelated to the tilde.
+kb_tilde_case "control: the same KB by absolute path — deny" \
+  "$KBTILDE_HOME/kb"
+rm -rf "$KBTILDE_HOME" "$KBTILDE_PLUGIN"
+
+# ---------------------------------------------------------------------------
 # CASE 50: THE PREDICATE IS KEYED ON THE TARGET, NOT THE TOOL NAME.
 #
 # `_is_write_tool` gates the fail-closed empty-path branch and the fail-open
