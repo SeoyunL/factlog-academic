@@ -1609,6 +1609,7 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     scope_label = "all candidate" if args.all else "engine"
     attr = ctx.attribute_relations()
     sv = ctx.single_valued_relations()
+    sv_folded = common.folded_relation_names(sv)
     typed = ctx.typed_relations()  # {name: TypedRelSpec}; {} when no typed-relations.md
 
     show_e = args.entities or not args.relations
@@ -1635,9 +1636,20 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     if show_r:
         print(f"  relations ({len(rel_counts)}):")
         for name, n in sorted(rel_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            tags = [t for t, on in (("attribute", name in attr), ("single-valued", name in sv)) if on]
-            # typed_relations() keys are NFC-normalized; the CSV-sourced name may be NFD.
+            # Membership folded, matching the gate (check_conflicts) and the two
+            # other consumers. Without it a uniformly-NFD KB gets `conflicts: 1
+            # (over 1 single-valued relation(s))` out of `status` and no
+            # [single-valued] tag here, so the reader is told a conflict exists
+            # and not which relation is functional. The typed lookup two lines
+            # down already folds; leaving this one raw made the same loop
+            # asymmetric.
             tname = unicodedata.normalize("NFC", name)
+            tags = [
+                t
+                for t, on in (("attribute", name in attr), ("single-valued", tname in sv_folded))
+                if on
+            ]
+            # typed_relations() keys are NFC-normalized; the CSV-sourced name may be NFD.
             if tname in typed:
                 tags.append(f"typed:{typed[tname].type}")
             tagstr = f"  [{', '.join(tags)}]" if tags else ""

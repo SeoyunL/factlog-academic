@@ -82,6 +82,54 @@ v_rel="$(printf '%s' "$vout" | sed -nE 's/.*relations \(([0-9]+)\).*/\1/p')"
 [ -n "$v_ent" ] && [ "$s_ent" = "$v_ent" ] && ok "vocab entity count matches status ($v_ent)" || bad "entity count mismatch: status=$s_ent vocab=$v_ent"
 [ -n "$v_rel" ] && [ "$s_rel" = "$v_rel" ] && ok "vocab relation count matches status ($v_rel)" || bad "relation count mismatch: status=$s_rel vocab=$v_rel"
 
+# --- uniformly-NFD KB still gets the [single-valued] tag (#325) ---------------
+# vocab is the third membership consumer. With the tag missing, `status` says
+# "conflicts: 1 (over 1 single-valued relation(s))" on this KB while vocab
+# declines to say WHICH relation is functional — the one question the reader
+# came to vocab with. Written from Python so the two forms survive editor
+# normalization; the composed name goes in policy, the decomposed one in the rows.
+NKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$NKB" >/dev/null
+printf 'x\n' > "$NKB/sources/a.md"
+"$PYTHON" - "$NKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfd('김철수')},{nfd('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfd('김철수')},{nfd('소속')},BBB,sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+out="$("$PYTHON" -m factlog vocab --relations --target "$NKB" 2>&1)"
+printf '%s' "$out" | grep -qF "[single-valued]" \
+  && ok "uniformly-NFD KB gets the [single-valued] tag (membership folded)" \
+  || bad "NFD KB untagged: $(printf '%s' "$out" | tail -2)"
+sout="$("$PYTHON" -m factlog status --target "$NKB" 2>&1)"
+printf '%s' "$sout" | grep -qE "conflicts: +1 \(over 1 single-valued" \
+  && ok "status and vocab agree on the same NFD KB" \
+  || bad "status disagrees: $(printf '%s' "$sout" | grep conflicts)"
+
+# --- fullwidth relation names are NOT merged by the fold (control) ------------
+# NFC only, never NFKC: ＡＢＣ and ABC are different relations. This passes
+# before the fold too — it is the guard on how far the fold may reach.
+FKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$FKB" >/dev/null
+printf 'x\n' > "$FKB/sources/a.md"
+printf '# single-valued\n- ABC\n' > "$FKB/policy/single-valued.md"
+printf '%s\n%s\n' "$H" \
+  'X,ＡＢＣ,V,sources/a.md,confirmed,0.9,' > "$FKB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog vocab --relations --target "$FKB" 2>&1)"
+printf '%s' "$out" | grep -qF "[single-valued]" \
+  && bad "fullwidth relation wrongly tagged single-valued" \
+  || ok "fullwidth relation stays distinct from ASCII (NFC, not NFKC)"
+
 # --- non-KB path errors ------------------------------------------------------
 set +e; "$PYTHON" -m factlog vocab --target "$(mktemp -d)" >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -ne 0 ] && ok "vocab on a non-KB path errors" || bad "non-KB path should error"
