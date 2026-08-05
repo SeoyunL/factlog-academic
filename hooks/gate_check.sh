@@ -207,10 +207,17 @@ _note() {
 
 # Allow the tool call, handing any buffered notes to Claude Code as a
 # systemMessage. Escaping goes through json.dumps rather than shell quoting
-# because notes interpolate a tool name and a KB path. If the interpreter cannot
-# run, the systemMessage is dropped and only the stderr mirror survives — that
-# is exactly the "incomplete extractor record" case, where the interpreter is
-# already known to be broken.
+# because notes interpolate a tool name and a KB path.
+#
+# `2>/dev/null || true` means that if the interpreter cannot run here, the
+# systemMessage is dropped and only the stderr mirror survives. That swallow
+# applies to EVERY note branch, not just the one it was reasoned about: the
+# "incomplete extractor record" case, where the interpreter is already known to
+# be broken and there is nothing better to do. For the other branches it is a
+# silent downgrade to a channel the exit-0 contract does not surface. It is
+# accepted rather than handled because the alternative — letting a failed note
+# take down the allow — would turn a warning into a write outage, which is the
+# one thing this gate must not do.
 _allow() {
   if [ -n "$GATE_NOTES" ]; then
     FACTLOG_GATE_NOTE_TEXT="$GATE_NOTES" "${PYTHON_RUNNER[@]}" -c \
@@ -566,6 +573,13 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 #      compile_facts.py temp+os.replace()s accepted.dl, which breaks a symlink
 #      there on the next compile; query.dl is user-authored and never replaced,
 #      so a symlink on it persists indefinitely.
+#      COST. This guard is about the KB, not about the target, so it answers the
+#      same way for every call in that KB — and it sits at the top of this
+#      function. Symlinking either engine input therefore switches the
+#      short-circuit OFF wholesale: every Write/Edit in that KB pays the matcher
+#      spawn, not just writes that could plausibly be the engine input. That is
+#      the correct trade (the alternative is not seeing the write at all), but it
+#      is the one configuration in which this prefilter stops buying anything.
 #   3. SYMLINK. A symlink's own name says nothing about what it resolves to.
 #      `facts/notes.dl -> accepted.dl` has basename notes.dl and canonicalises
 #      to the engine input; the prefilter runs BEFORE canonicalisation, so it
@@ -601,8 +615,9 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 #
 # Every uncertain shape falls THROUGH to the matcher. Over-matching costs one
 # spawn and can only make the gate stricter, so it is always the safe direction.
-# The short-circuit fires only once all seven ways a name can diverge from its
-# canonical basename have been excluded. Every guard reads the path string
+# The short-circuit fires only once all seven guards have been cleared — the
+# five ways a name can diverge from its canonical basename, plus the two that
+# are not name questions at all. Every guard reads the path string
 # exactly as it arrived — none rewrites it for the next one — so there is no
 # ordering constraint left to get wrong. This is still not the same as proof: a
 # parent directory this process cannot stat would make -L and stat answer "no"
