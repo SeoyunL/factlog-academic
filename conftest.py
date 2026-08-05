@@ -17,9 +17,11 @@ with ``FACTLOG_ROOT``: a test that shells out does not inherit this process's
 ``FACTLOG_ROOT`` unless it passes ``env=`` explicitly, and ``factlog``'s
 config-writing commands (``init``, ``use``, ``setup``, ``lang``) rewrite the
 active-KB config on every run. So any test that shells out to one of them
-without building its own ``env=`` rewrites the developer's real
-``~/.config/factlog/config.json`` to a pytest temp dir that ceases to exist —
-leaving their ``factlog`` install pointed at nothing, silently.
+without building its own ``env=`` writes to the developer's real
+``~/.config/factlog/config.json``: ``init``/``use``/``setup`` repoint ``root``
+at a pytest temp dir that ceases to exist, leaving their ``factlog`` install
+aimed at nothing; ``lang`` edits the same file in place. Either way it happens
+silently.
 ``tests/unit/test_atomic_accepted_write.py`` is the case that actually drilled
 that hole; it now pins its own config home as well, so this file is the net
 under the next one rather than under that one. Every ``tests/*.sh`` harness
