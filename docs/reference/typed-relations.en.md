@@ -103,8 +103,9 @@ non-ASCII digits, and the `conflicts:` line of `factlog status` carries the same
 guidance **for the conflicts it detects**. The two do not detect the same set:
 `check_conflicts` folds aliases to the canonical name and groups on the scalar
 key, while `status` groups on the raw relation string, so rows collected under an
-alias surface form are reported only by `check_conflicts`. That command is the
-gate's authority.
+alias surface form are reported only by `check_conflicts`. Conversely, spellings
+that fold to the same scalar — `amount(5400,"억")` and `amount(0.54,"조")` —
+remain a conflict only in `status`. `check_conflicts` is the gate's authority.
 
 Both spell the offending characters as `\uXXXX` (`\UXXXXXXXX` above the BMP), so
 you can see which one to correct.
