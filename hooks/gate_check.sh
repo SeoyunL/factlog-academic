@@ -187,6 +187,13 @@ PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
 # fire in one run (resolver degrade + a fail-open branch) and two JSON objects on
 # stdout is not a JSON document. They are also mirrored to stderr, which costs
 # nothing and keeps `claude --debug` and external capture working.
+#
+# FREQUENCY. Every note but one reports a condition of the CALL, so it appears
+# on the call that provoked it and nowhere else. The exception is the
+# resolver-degrade note: its condition is a broken install, which persists for
+# the whole session, and it is evaluated before the target path is read — so on
+# such an install it fires on every Write/Edit, KB-related or not. Its emission
+# site below carries the detail.
 GATE_NOTES=""
 
 _note() {
@@ -240,9 +247,21 @@ else
   # package failing to import in the child (corrupt/missing package under the
   # plugin root). That silent, permissive degrade to ${FACTLOG_ROOT:-cwd} is
   # intentional (fail-to-previous-behaviour, protects bootstrap/first-run UX and
-  # opens no new hole) — but make it OBSERVABLE with a one-line stderr note so an
+  # opens no new hole) — but make it OBSERVABLE with a one-line note so an
   # operator can see the resolver was bypassed. This does NOT change the
   # exit-code contract or path matching.
+  #
+  # BEHAVIOUR CHANGE, and the one worth calling out to users: this note used to
+  # be a bare `echo ... >&2`, which on an exit-0 path reached nobody but
+  # `claude --debug`. It is now a user-visible systemMessage. The condition it
+  # reports is install-level and persistent, not per-call — a factlog package
+  # that will not import stays broken for the whole session — and this hook runs
+  # BEFORE the target path is even looked at. So on such an install the warning
+  # fires on EVERY Write/Edit, including files in projects that have no KB
+  # anywhere near them (measured: 3/3 writes to an unrelated source file). That
+  # is the right direction for #244 — a gate that silently is not running should
+  # say so — but it is a repeating warning, and the fix is to repair the install
+  # rather than to quiet the note.
   _note "note: factlog config resolver unavailable; freshness gate falling back to \${FACTLOG_ROOT:-cwd} (KB_ROOT=$KB_ROOT)"
 fi
 
