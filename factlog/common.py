@@ -1785,6 +1785,31 @@ def _is_valid_arg(arg: str) -> bool:
     return _is_variable(arg) or _is_quoted_string(arg)
 
 
+# label -> (expected argument count, the message for a query that misses it).
+# The label is also what _query_shape_error puts in front of its message, so one
+# label selects both of a predicate's signature rules.
+_QUERY_ARITY_RULES: dict[str, tuple[int, str]] = {
+    "relation": (3, "relation query must have subject, relation, and object arguments"),
+    "path": (2, "path query must have start and target arguments"),
+    "count": (2, "count query must have subject and relation arguments"),
+    "policy query": (2, "policy query must have entity and reason arguments"),
+}
+
+
+def _query_arity_error(label: str, args: Sequence[str]) -> str | None:
+    """The bad-arity verdict on *args*, or None when the count is right.
+
+    Paired with `_query_shape_error` and always applied FIRST: a line that
+    violates both rules must get the same reason from the gate, the report and
+    the router, and the gate reports arity first. Checking shape first is not
+    merely a different opinion — it renames the defect. `relation()?` is a
+    zero-argument query, and calling it "arguments must be variables or quoted
+    strings" tells the author to fix the quoting of arguments that are not there.
+    """
+    arity, message = _QUERY_ARITY_RULES[label]
+    return None if len(args) == arity else message
+
+
 def _query_shape_error(label: str, args: Sequence[str]) -> str | None:
     """The malformed-shape verdict on *args*, or None when every one is valid.
 
@@ -1819,6 +1844,7 @@ def _quoted_constants(line: str) -> list[str]:
 #   is_quoted_string(arg)  -> True if arg is a quoted string literal
 #   is_variable(arg)       -> True if arg is a Datalog variable (capitalised)
 #   is_valid_arg(arg)      -> True if arg is a well-formed query argument
+#   query_arity_error(label, args) -> the bad-arity message, or None
 #   query_shape_error(label, args) -> the malformed-shape message, or None
 #   quoted_constants(line) -> every "..." literal in a line
 #
@@ -1835,6 +1861,7 @@ canonical_value = _canonical_value
 is_quoted_string = _is_quoted_string
 is_variable = _is_variable
 is_valid_arg = _is_valid_arg
+query_arity_error = _query_arity_error
 query_shape_error = _query_shape_error
 quoted_constants = _quoted_constants
 
@@ -1943,8 +1970,9 @@ def classify_query(
             return False, QUERY_MALFORMED, "review_required must include the original question string"
         return True, QUERY_REVIEW_REQUIRED, "passed"
     if predicate == "relation":
-        if len(args) != 3:
-            return False, QUERY_BAD_ARITY, "relation query must have subject, relation, and object arguments"
+        arity_error = _query_arity_error("relation", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
         shape_error = _query_shape_error("relation", args)
         if shape_error:
             return False, QUERY_MALFORMED, shape_error
@@ -1988,8 +2016,9 @@ def classify_query(
             return False, QUERY_FACT_ABSENT, "relation query does not match accepted facts"
         return True, QUERY_OK, "passed"
     if predicate == "path":
-        if len(args) != 2:
-            return False, QUERY_BAD_ARITY, "path query must have start and target arguments"
+        arity_error = _query_arity_error("path", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
         shape_error = _query_shape_error("path", args)
         if shape_error:
             return False, QUERY_MALFORMED, shape_error
@@ -2003,8 +2032,9 @@ def classify_query(
         # count(subject, relation)? — how many objects (subject, relation) has.
         # A valid count always has an answer (0 is a verified zero, never a
         # FACT_ABSENT), so it is QUERY_OK whenever the vocabulary is accepted.
-        if len(args) != 2:
-            return False, QUERY_BAD_ARITY, "count query must have subject and relation arguments"
+        arity_error = _query_arity_error("count", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
         shape_error = _query_shape_error("count", args)
         if shape_error:
             return False, QUERY_MALFORMED, shape_error
@@ -2027,8 +2057,9 @@ def classify_query(
                 return False, QUERY_RELATION_NOT_ACCEPTED, f"count relation is not accepted: {_arg_value(relation)}"
         return True, QUERY_OK, "passed"
     if predicate in policy_query_predicates:
-        if len(args) != 2:
-            return False, QUERY_BAD_ARITY, "policy query must have entity and reason arguments"
+        arity_error = _query_arity_error("policy query", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
         shape_error = _query_shape_error("policy query", args)
         if shape_error:
             return False, QUERY_MALFORMED, shape_error
