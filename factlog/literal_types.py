@@ -67,6 +67,9 @@ tool — and falls through one hole:
 
 - **automatic** — under a relation declared **typed**,
   ``common._project_typed_relations`` warns on stderr and loads the fact untyped.
+  The warning names the offending codepoints (``mark_non_ascii_digits``): its
+  ``repr``-rendered value alone cannot tell ``1２3억`` from ``123억``, and the
+  remedy it points at needs the reader to know which character is wrong.
 - **gate** — under a relation declared **single-valued**,
   ``tools/check_conflicts.py`` sees the ASCII/full-width pair as two values and
   exits 1, naming the offending value (``non_ascii_digit_note``).

@@ -545,6 +545,30 @@ class TestFullWidthSurfaces:
         # Only the ASCII row projects; the full-width fact still loads untyped.
         assert session.inserts == [("launch_date", (1, 20200101))]
 
+    def test_projection_warning_names_the_offending_characters(self, capsys):
+        # This is the one AUTOMATIC surfacing path, and the remedy it points at
+        # (correct the source to ASCII and re-collect) is unusable unless the
+        # reader can tell WHICH character is wrong. repr cannot: '1２3억' and
+        # '123억' are indistinguishable in most fonts.
+        import common
+
+        specs = {"매출": common.TypedRelSpec("amount", "revenue_amt")}
+        rows = [{"subject": "갑사", "relation": "매출", "object": "1２3억"}]
+        common._project_typed_relations(self._FakeSession(), specs, rows)
+        err = capsys.readouterr().err
+        assert "\\uff12" in err
+
+    def test_projection_warning_is_unchanged_for_an_ascii_failure(self, capsys):
+        # Negative control: a value that fails for any other reason must read
+        # byte-identically to before, or the escape clause is unconditional noise.
+        import common
+
+        specs = {"매출": common.TypedRelSpec("amount", "revenue_amt")}
+        rows = [{"subject": "갑사", "relation": "매출", "object": "n/a"}]
+        common._project_typed_relations(self._FakeSession(), specs, rows)
+        err = capsys.readouterr().err.strip()
+        assert err == "typed-relations: 'n/a' for '매출' ('갑사') does not parse as amount; loading untyped"
+
 
 class TestAsciiDigitsUnchanged:
     """Regression guard for the narrowing in #331: the ASCII forms that already

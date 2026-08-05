@@ -1601,9 +1601,20 @@ def _project_typed_relations(session, specs, accepted) -> None:
             continue
         scalar = literal_types.normalize(spec.type, row["object"], spec.units)
         if scalar is None:
+            # This is the one surfacing path that runs unconditionally, and the
+            # remedy it points at ("correct the source to ASCII and re-collect")
+            # is unusable unless the reader can see WHICH character is wrong.
+            # repr cannot: '1２3억' and '123억' are indistinguishable in most
+            # fonts. Appended, not substituted, so every other not-parsing value
+            # (a typo, an 'n/a') reads byte-identically to before.
+            marked = (
+                f" (non-ASCII digits: {literal_types.mark_non_ascii_digits(row['object'])})"
+                if literal_types.has_non_ascii_digits(row["object"])
+                else ""
+            )
             print(
                 f"typed-relations: {row['object']!r} for {row['relation']!r} "
-                f"({row['subject']!r}) does not parse as {spec.type}; loading untyped",
+                f"({row['subject']!r}) does not parse as {spec.type}{marked}; loading untyped",
                 file=sys.stderr,
             )
             continue
