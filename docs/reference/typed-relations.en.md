@@ -93,7 +93,9 @@ clear the gate, but superseding the ASCII row rather than the full-width one
 leaves the KB holding a value that does not parse; where the two spellings denote
 the same value neither row is "outdated", so supersede is the wrong tool to begin
 with. `check_conflicts` appends a note whenever a conflicting value carries
-non-ASCII digits.
+non-ASCII digits, and the `conflicts:` line of `factlog status` gives the same
+guidance under the same condition. Both spell the offending characters as
+`\uXXXX`, so you can see which one to correct.
 
 `factlog vocab` shows declared typed relations with a `[typed:<type>]` tag (e.g.
 `[attribute, typed:date]`).
