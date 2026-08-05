@@ -10,7 +10,7 @@ import re
 import sys
 import unicodedata
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -1760,6 +1760,26 @@ def _is_valid_arg(arg: str) -> bool:
     return _is_variable(arg) or _is_quoted_string(arg)
 
 
+def _query_shape_error(label: str, args: Sequence[str]) -> str | None:
+    """The malformed-shape verdict on *args*, or None when every one is valid.
+
+    *label* names the query in the message ("relation", "path", "count",
+    "policy query"), which is the ONLY thing that differs between the four
+    branches — the rule itself is `_is_valid_arg` for every one of them.
+
+    Returning the message rather than a bool is what keeps the three consumers
+    honest. classify_query (the gate), run_logic_check (the report) and
+    ask_router.evaluate (`ask`) must reject the SAME lines with the SAME wording;
+    when each restated the rule, the report's count branch drifted into accepting
+    lines the gate calls malformed and answering them with a wrong aggregate
+    (#328). A caller that phrases its own message can drift again, so callers
+    pass this string through.
+    """
+    if all(_is_valid_arg(arg) for arg in args):
+        return None
+    return f"{label} arguments must be variables or quoted strings"
+
+
 def _quoted_constants(line: str) -> list[str]:
     return re.findall(r'"([^"]+)"', line)
 
@@ -1774,19 +1794,23 @@ def _quoted_constants(line: str) -> list[str]:
 #   is_quoted_string(arg)  -> True if arg is a quoted string literal
 #   is_variable(arg)       -> True if arg is a Datalog variable (capitalised)
 #   is_valid_arg(arg)      -> True if arg is a well-formed query argument
+#   query_shape_error(label, args) -> the malformed-shape message, or None
 #   quoted_constants(line) -> every "..." literal in a line
 #
 # `is_valid_arg` is the SINGLE definition of "a query argument is a variable or a
-# double-quoted string", the rule every classify_query branch applies. It is
-# exported so the report (tools/run_logic_check.py) applies the same predicate
-# instead of restating it: a second copy is exactly how the count branch came to
-# accept lines the gate rejects as malformed (#328).
+# double-quoted string", the rule every classify_query branch applies, and
+# `query_shape_error` is the single place that turns it into a verdict + message.
+# Both are exported so the report (tools/run_logic_check.py) and the router
+# (tools/ask_router.py) apply the same predicate instead of restating it: a
+# second copy is exactly how the count branch came to accept lines the gate
+# rejects as malformed (#328).
 query_args = _query_args
 arg_value = _arg_value
 canonical_value = _canonical_value
 is_quoted_string = _is_quoted_string
 is_variable = _is_variable
 is_valid_arg = _is_valid_arg
+query_shape_error = _query_shape_error
 quoted_constants = _quoted_constants
 
 
@@ -1896,8 +1920,9 @@ def classify_query(
     if predicate == "relation":
         if len(args) != 3:
             return False, QUERY_BAD_ARITY, "relation query must have subject, relation, and object arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "relation arguments must be variables or quoted strings"
+        shape_error = _query_shape_error("relation", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         subject, relation, object_ = args
         # Entity membership must fold on both sides too: accepted facts can carry
         # an NFD-authored subject, while an NFC query must still reach the folded
@@ -1940,8 +1965,9 @@ def classify_query(
     if predicate == "path":
         if len(args) != 2:
             return False, QUERY_BAD_ARITY, "path query must have start and target arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "path arguments must be variables or quoted strings"
+        shape_error = _query_shape_error("path", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         for arg in args:
             if not _is_variable(arg) and _arg_value(arg) not in entities:
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(arg)}"
@@ -1954,8 +1980,9 @@ def classify_query(
         # FACT_ABSENT), so it is QUERY_OK whenever the vocabulary is accepted.
         if len(args) != 2:
             return False, QUERY_BAD_ARITY, "count query must have subject and relation arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "count arguments must be variables or quoted strings"
+        shape_error = _query_shape_error("count", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         subject, relation = args
         # Keep count aligned with relation queries: a subject is accepted across
         # NFC/NFD forms before the relation-name check runs.
@@ -1977,8 +2004,9 @@ def classify_query(
     if predicate in policy_query_predicates:
         if len(args) != 2:
             return False, QUERY_BAD_ARITY, "policy query must have entity and reason arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "policy query arguments must be variables or quoted strings"
+        shape_error = _query_shape_error("policy query", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         if not _is_variable(args[0]) and _arg_value(args[0]) not in entities:
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"policy query entity is not accepted: {_arg_value(args[0])}"
         return True, QUERY_OK, "passed"
