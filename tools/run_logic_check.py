@@ -169,8 +169,14 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         count_error = count_query_error(line)
         if count_error:
             errors.append(count_error)
-        return errors, warnings
-    if predicate in {"relation", "path"}:
+            return errors, warnings
+        # A well-formed count falls through to the shared warning loop below, so
+        # a subject or relation the engine does not carry gets the same
+        # "non-engine entity or relation" warning relation/path queries get. It
+        # used to return here, which left the report's most misreadable answer —
+        # `0 (distinct objects)`, indistinguishable from a verified zero — as the
+        # only signal that the query named something the KB has never heard of.
+    elif predicate in {"relation", "path"}:
         relation_error = shape_error(predicate, line)
         if relation_error:
             errors.append(relation_error)
