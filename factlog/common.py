@@ -629,14 +629,20 @@ def load_logic_policy() -> str:
 
 def policy_predicates(policy_program: str | None = None) -> set[str]:
     text = policy_program if policy_program is not None else load_logic_policy()
-    # Every predicate classify_query handles with a dedicated branch, so a
-    # hand-authored `.decl` in logic-policy.extra.dl cannot re-route one of them
-    # through the policy branch. The two paths test membership in a different
+    # The five predicates classify_query gives a dedicated branch, plus `edge`.
+    # A hand-authored `.decl` in logic-policy.extra.dl must not re-route one of
+    # them through the policy branch: the two paths test membership in a different
     # order — classify_query checks count BEFORE policy, validate_query checks
     # policy first — so a `.decl count(...)` used to make the report treat a count
     # query as a policy query while the gate still treated it as a count, which
-    # reproduces #328's report/gate divergence exactly. `conflict` is deliberately
-    # NOT here: it has no branch of its own and IS meant to be policy-declared.
+    # reproduces #328's report/gate divergence exactly.
+    #
+    # `edge` is here for a different reason and has no branch: it is the engine's
+    # own EDB relation, not a queryable predicate (it is absent from
+    # classify_query's `allowed_predicates`, so a query naming it is rejected as
+    # an unknown predicate). It has been excluded since before that set existed.
+    # `conflict` is deliberately NOT here: it likewise has no branch, but it IS
+    # meant to be policy-declared, and QUERY_PREDICATES lists it.
     built_in = {"relation", "edge", "path", "count", "review_required"}
     return {
         name
