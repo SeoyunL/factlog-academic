@@ -261,8 +261,10 @@ Three things follow from folding, and the report states all three:
   so folding can make a decomposed literal reach the same scalar as a differently
   written twin — `제3호` and `3위` are both ordinal rank 3 once folded. The run
   names those separately, because they are **not** the same string written two
-  ways, and because the engine does not fold at all: it loads both literals
-  untyped and cannot reproduce the merge. Unify the spelling in `sources/`.
+  ways, and because the engine does not fold at all: it loads the decomposed
+  literal untyped (and every one of them when the relation name is decomposed
+  too), so the notations never meet there and the merge is the checker's alone.
+  Unify the spelling in `sources/`.
 
 Repair the spelling **in `sources/` and re-collect**, not in `candidates.csv`:
 `merge` rebuilds those rows from `runs/*.json` and matches everything it carries

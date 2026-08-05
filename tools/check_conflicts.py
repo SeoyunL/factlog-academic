@@ -480,8 +480,18 @@ def collect_conflicts(
     ``common._project_typed_relations``, hands ``normalize`` the raw object (and
     looks its spec up under the raw relation name). So an NFD-authored typed
     literal parses here and nowhere else, and this module can declare two values
-    equal on grounds the engine cannot reproduce — it loads both untyped and
-    writes both atoms. Aligning the engine is the root fix and a follow-up of its
+    equal on grounds the engine cannot reproduce.
+
+    What the engine actually does depends on the relation name, and it never
+    reproduces the merge either way. The projection runs **per row**: with an NFC
+    relation name ``specs.get(row["relation"])`` hits, so the composed literal is
+    inserted typed and only the decomposed one warns and degrades — the two end up
+    on opposite sides of the typed table. With the relation name decomposed too,
+    the spec lookup misses every row and none of them load typed at all. Either
+    way both spellings still reach ``accepted.dl`` as separate atoms, since
+    ``dedup_engine_atoms`` keys on the raw triple.
+
+    Aligning the engine is the root fix and a follow-up of its
     own: it changes which rows enter the typed side-relations, hence what
     ``factlog ask`` answers, and it needs the deferred #210 relation-axis call
     decided first. What belongs *here* is that the checker never merges on that
@@ -651,8 +661,9 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     the second "canonically equivalent" would be a false statement about the
     strings (``NFD('제3호')`` and ``'3위'`` are not equivalent — the fold merely let
     the first one parse as ordinal rank 3). It also carries a warning the first
-    does not: the engine folds nowhere, so it cannot reproduce that merge at all
-    and loads both literals untyped. Keying the whole disclosure on
+    does not: the engine folds nowhere, so it cannot reproduce that merge — it
+    loads the decomposed literal untyped, and every one of them when the relation
+    name is decomposed as well (see ``collect_conflicts``). Keying the disclosure on
     ``_fold_classes`` left that path completely silent, which is how a KB that
     reported a CONFLICT on the previous release became "no contradictions".
 
@@ -704,9 +715,10 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
         "  These notations are NOT canonically equivalent: a decomposed literal does not "
         "parse as its declared type, and folding is what let it reach the scalar its "
         "counterpart already had. The engine does not fold — it hands the raw object to "
-        "literal_types.normalize — so it loads every one of them untyped and cannot "
-        "reproduce this merge. Unify the spelling in sources/ and re-collect, then re-run "
-        "to see whether a contradiction remains."
+        "literal_types.normalize — so it loads the decomposed literal untyped (and, when "
+        "the relation name is decomposed too, every one of them), and the notations never "
+        "meet there. Unify the spelling in sources/ and re-collect, then re-run to see "
+        "whether a contradiction remains."
     )
 
 

@@ -684,6 +684,20 @@ class TestFoldEnabledTypedParseIsDisclosed:
         assert "The engine does not fold" in out
         assert "Unify the spelling in sources/" in out
 
+    def test_engine_claim_is_narrowed_to_the_decomposed_literal(self, monkeypatch, capsys):
+        # `_project_typed_relations` runs per row: with an NFC relation name the
+        # spec lookup hits and the COMPOSED literal is inserted typed (pinned in
+        # tests/unit/test_typed_projection_fake.py). An unconditional "loads every
+        # one of them untyped" is therefore false on this KB — exactly the shape
+        # the message is printed for. The conclusion is unchanged; the mechanism
+        # sentence has to be true as well.
+        facts = [_fact("갑", "순위", _nfd("제3호")), _fact("갑", "순위", "3위")]
+        _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL)
+        out = capsys.readouterr().out
+        assert "loads the decomposed literal untyped" in out
+        assert "when the relation name is decomposed too, every one of them" in out
+        assert "loads every one of them untyped" not in out
+
     def test_merged_notations_are_not_called_canonically_equivalent(self, monkeypatch, capsys):
         # They are not, and the equivalence message asks for the wrong repair.
         facts = [_fact("갑", "순위", _nfd("제3호")), _fact("갑", "순위", "3위")]
