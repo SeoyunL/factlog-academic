@@ -76,6 +76,7 @@ from common import (  # noqa: E402
     is_quoted_string,
     is_variable,
     query_args,
+    query_shape_error,
     classify_query,
     dependency_graph,
     dependency_path,
@@ -460,6 +461,33 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
     return True
 
 
+def _require_shape(label: str, args: list[str]) -> None:
+    """Raise unless every argument is a variable or a double-quoted string.
+
+    `classify_query` rejects these lines as QUERY_MALFORMED, so the render path
+    (cmd_render -> classify -> route "wiki") never reaches `evaluate` with one.
+    The documented `evaluate` subcommand does: cmd_evaluate calls `evaluate`
+    directly, with no classify in front of it — the same asymmetry that made the
+    arity guards above necessary (#257, 1bc172a), and QUERY_BAD_ARITY and
+    QUERY_MALFORMED are routed identically (see the "any shape/vocabulary
+    failure" branch in `classify`).
+
+    Answering anyway is not merely unverified, it is wrong, and each branch is
+    wrong in its own direction because each uses a different predicate to decide
+    "is this argument a constant": `is_variable` here, `is_quoted_string` there.
+    `count("Marie Curie", 'born_in')?` returned count 0 — which reads as a
+    verified negative — while `count(Marie Curie, born_in)?` returned 2 by
+    coincidence, the bare token happening to equal the stored value (#328).
+
+    NotImplementedError is the same exception the unknown-predicate fallthrough
+    and the arity guards raise, so cmd_evaluate turns it into a clean error JSON
+    (rc 2). The message is common.query_shape_error's, i.e. the gate's wording.
+    """
+    message = query_shape_error(label, args)
+    if message:
+        raise NotImplementedError(message)
+
+
 def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     """Evaluate a validated engine query: relation, path, or a policy predicate.
 
@@ -472,11 +500,14 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
 
     A truly unknown predicate raises NotImplementedError rather than returning 0
     rows, so a caller never mistakes an unsupported predicate for a verified
-    negative. A malformed count or policy query raises for the same reason.
+    negative. A malformed count or policy query raises for the same reason, and
+    so does an argument of any predicate that is neither a variable nor a quoted
+    string (see `_require_shape`).
     """
     predicate = _predicate_of(draft)
     args = query_args(draft)
     if predicate == "relation":
+        _require_shape("relation", args)
         rows = evaluate_relation(draft, facts)
         result: dict[str, object] = {"rows": rows, "count": len(rows)}
         # Optional, additive coverage hint (#189) for a verified-negative relation
@@ -499,6 +530,13 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # accepted, bogus count (> 2 args) (#257).
         if len(args) != 2:
             raise NotImplementedError("count query must have subject and relation arguments")
+        # Shape AFTER arity, the order classify_query uses, so a line violating
+        # both gets the same reason from both paths. Without this the count below
+        # treated a bare token as a constant and a single-quoted one as a
+        # wildcard, so `count(Marie Curie, born_in)?` answered 2 and
+        # `count("Marie Curie", 'born_in')?` answered 0 — a verified negative for
+        # a query the gate rejects as malformed (#328).
+        _require_shape("count", args)
         subject, relation = arg_value(args[0]), arg_value(args[1])
         rel_variants: set[str] = set()
         if is_quoted_string(args[1]):
@@ -512,6 +550,7 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         }
         return {"rows": [[str(len(objects))]], "count": len(objects)}
     if predicate == "path":
+        _require_shape("path", args)
         if len(args) == 2 and all(is_quoted_string(a) for a in args):
             path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
             rows = [path] if path else []
@@ -549,6 +588,10 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # and ask agree that a malformed policy query has no answer.
         if len(args) != 2:
             raise NotImplementedError("policy query must have entity and reason arguments")
+        # Shape after arity, as in the count branch: `pred(Alice, stale)?` has the
+        # right arity but pins nothing, so policy_row_matches passed every row and
+        # the whole extent came back bound to an entity it is not about (#328).
+        _require_shape("policy query", args)
         try:
             inferred = run_wirelog()
         except Exception as exc:  # noqa: BLE001 — engine/loader raise non-FactlogError too
