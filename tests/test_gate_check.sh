@@ -1384,7 +1384,7 @@ mkdir -p "$KBTILDE_HOME/kb/facts" "$KBTILDE_HOME/shared"
 touch_file "$KBTILDE_HOME/shared/my-queries.dl"
 ln -s "$KBTILDE_HOME/shared/my-queries.dl" "$KBTILDE_HOME/kb/facts/query.dl"
 touch_file "$KBTILDE_HOME/kb/facts/logic_report.txt"
-set_mtime_past "$KBTILDE_HOME/kb/facts/logic_report.txt"   # stale report → deny
+set_mtime_past "$KBTILDE_HOME/kb/facts/logic_report.txt"   # the report the CONTROL arm reads
 clear_config
 
 kb_tilde_case() {
@@ -1409,6 +1409,13 @@ kb_tilde_case "tilde KB_ROOT over a symlinked engine input — deny (guard 2 not
 # 2 can reach the symlink, so this denies with or without the KB_ROOT tilde
 # guard — it passes both before and after the fix, and is here only to show the
 # case above is not denying for some reason unrelated to the tilde.
+#
+# It is a loose control: the two arms differ in TWO things, not one. A literal
+# "~" hides the whole KB from the shell, so the tilde arm cannot see the report
+# either and denies on "facts/logic_report.txt does not exist", while this arm
+# reads the report and denies on "is stale" (both measured). The pin is still
+# exact — deleting the KB_ROOT tilde guard flips this case and nothing else —
+# but do not read the pair as isolating a single variable.
 kb_tilde_case "control: the same KB by absolute path — deny" \
   "$KBTILDE_HOME/kb"
 rm -rf "$KBTILDE_HOME" "$KBTILDE_PLUGIN"
@@ -1484,11 +1491,17 @@ run_payload_case "control: real engine input in the same KB — deny" \
 # The mirror of the case above. `<KB>/facts/link\` is a single component whose
 # last character happens to be a backslash; realpath resolves it as-is and lands
 # on the engine input. The prefilter strips no trailing separator at all, so
-# both of these reach the matcher — but the two guards that get them there fail
-# differently, and both are pinned: -L catches the symlink on the name as
-# written, while the hard link survives -L and is caught by the backslash split
-# emptying the basename. This is the case that kills a trailing-separator strip
-# that also removed `\`: every filesystem guard would then interrogate
+# both of these reach the matcher — but they get there by different routes.
+# -L catches the symlink on the name as written. The hard link survives -L and
+# is then covered REDUNDANTLY: at HEAD the backslash split empties its basename
+# so guard 5's `''` arm fires first, and with the split removed guard 7's
+# link-count check catches it instead. Neither is pinned by this case, because
+# either one alone is enough — removing BOTH is what leaks it (measured: exit 0,
+# against exit 2 at HEAD and with either single removal). See the stated
+# exception in gate_check.sh for why the split is asserted by construction.
+#
+# This is the case that kills a trailing-separator strip that also removed `\`:
+# every filesystem guard would then interrogate
 # `<KB>/facts/link` — a different file, or none — and the short-circuit would
 # fire on a write the canonicaliser sends straight to accepted.dl.
 bslash_link="$KB_BSLASH/facts/link\\"
