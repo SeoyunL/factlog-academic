@@ -127,9 +127,11 @@ def test_pins_cover_tests_outside_the_unit_dir(tmp_path):
     fake ``HOME`` and no inherited ``XDG_CONFIG_HOME``, so only the repo-root
     conftest can satisfy it.
     """
-    probe_dir = Path(tempfile.mkdtemp(dir=_REPO / "tests", prefix="pin_probe_"))
     home = tmp_path / "home"
     (home / ".config").mkdir(parents=True)
+    # Created last, immediately before the try: nothing between the two lines can
+    # raise, so the probe dir cannot be orphaned inside the work tree.
+    probe_dir = Path(tempfile.mkdtemp(dir=_REPO / "tests", prefix="pin_probe_"))
     try:
         (probe_dir / "test_probe.py").write_text(_PROBE, encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
