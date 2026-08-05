@@ -1771,14 +1771,26 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Conflicts (single-valued relations with >1 distinct object)
     if sv:
         by_key: dict[tuple, set] = {}
-        # Membership folded, matching the gate (check_conflicts). Grouping stays
-        # on the raw pair — that axis is a separate, still-open question — but a
-        # uniformly-NFD KB must at least reach the count, or status prints 0 for
-        # a KB finalize then refuses to compile.
+        # Membership folded, matching the gate (check_conflicts), and so are the
+        # two axes the gate folds for grouping: the subject and the untyped
+        # object. Leaving the grouping raw made this count disagree with the gate
+        # in BOTH directions once the gate started folding — it printed 0 on a
+        # mixed-subject KB finalize refuses to compile, and 1 with
+        # "⚠ resolve via superseded" on a KB whose only defect is two spellings
+        # of one value, where superseding is the wrong repair and would drop a
+        # source's corroboration. The relation axis stays raw, matching the gate,
+        # which defers that decision (#210).
+        #
+        # This is still a count, not the gate: it does not parse typed literals,
+        # so a #116 cross-notation pair (5400억 / 0.54조) is two values here and
+        # one to check_conflicts. Closing that needs the checker's grouping
+        # shared rather than reimplemented — a follow-up, since `tools/` is not
+        # importable from the installed package (pyproject packages = ["factlog"]).
         sv_folded = common.folded_relation_names(sv)
         for r in engine_rows:
             if common.fold_relation_name(r["relation"]) in sv_folded:
-                by_key.setdefault((r["subject"], r["relation"]), set()).add(r["object"])
+                key = (unicodedata.normalize("NFC", r["subject"]), r["relation"])
+                by_key.setdefault(key, set()).add(unicodedata.normalize("NFC", r["object"]))
         conflicts = {k: v for k, v in by_key.items() if len(v) > 1}
         msg = f"  conflicts:  {len(conflicts)} (over {len(sv)} single-valued relation(s))"
         if conflicts:

@@ -41,6 +41,7 @@ os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 import literal_types  # noqa: E402
 from common import (  # noqa: E402
     TypedRelSpec,
+    composed_spelling,
     engine_facts,
     ensure_dirs,
     folded_relation_names,
@@ -121,8 +122,12 @@ def _representative(raws: set[str]) -> str:
     deterministic and still a spelling actually written (which is the guarantee
     that matters), but no more greppable than any other member. The labelled
     spelling list is what carries the reader there in that case.
+
+    Shared with ``corroboration`` through ``common.composed_spelling``: both
+    modules stand a representative in front of a folded group and must pick the
+    same one, or the two reports name different rows for one value.
     """
-    return min(raws, key=lambda s: (s != _fold(s), s))
+    return composed_spelling(raws)
 
 
 def _form_label(value: str) -> str:

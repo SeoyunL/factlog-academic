@@ -77,6 +77,47 @@ printf '%s' "$co" | grep -qF "competing values" \
   && ok "uniformly-NFD KB reaches competing values (membership folded)" \
   || bad "NFD KB competing values missed: $(printf '%s' "$co" | tail -3)"
 
+# --- two spellings of ONE value are not listed as two competitors (#325) ------
+# Raw grouping printed "한국대 (1 src); 한국대 (1 src)" — one value shown as a
+# contradiction between two strings that render identically, with the gate
+# (check_conflicts) saying there is none. The sources are re-counted over the
+# folded key rather than summed from the raw-triple counts, so one source
+# backing both spellings still counts once.
+SKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$SKB" >/dev/null
+printf 'x\n' > "$SKB/sources/a.md"
+"$PYTHON" - "$SKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfc('한국대')},sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfd('한국대')},sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+co="$("$PYTHON" "$CORR" --wiki "$SKB" 2>&1)"
+printf '%s' "$co" | grep -qF "competing values" \
+  && bad "two spellings of one value listed as competing: $(printf '%s' "$co" | tail -2)" \
+  || ok "two spellings of one value are not competing values (object axis folded)"
+
+# --- genuinely different values still compete (control) ----------------------
+DKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$DKB" >/dev/null
+printf 'x\n' > "$DKB/sources/a.md"
+printf '# single-valued\n- 소속\n' > "$DKB/policy/single-valued.md"
+printf '%s\n%s\n%s\n' "subject,relation,object,source,status,confidence,note" \
+  '김철수,소속,A사,sources/a.md,confirmed,0.9,' \
+  '김철수,소속,B사,sources/a.md,confirmed,0.9,' > "$DKB/facts/candidates.csv"
+co="$("$PYTHON" "$CORR" --wiki "$DKB" 2>&1)"
+printf '%s' "$co" | grep -qF "competing values" \
+  && ok "distinct values still reported as competing" \
+  || bad "folding swallowed a real competition: $(printf '%s' "$co" | tail -2)"
+
 echo ""
 echo "========================================"
 echo "test_corroboration: $pass passed, $fail failed"

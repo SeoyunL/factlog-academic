@@ -692,6 +692,32 @@ def folded_relation_names(names: Iterable[str]) -> set[str]:
     return {fold_relation_name(name) for name in names}
 
 
+def composed_spelling(spellings: Iterable[str]) -> str:
+    """Return the spelling to display on behalf of a Unicode-folded group.
+
+    Deterministic, and always one of the strings as written (provenance). Where
+    the group holds several normalization forms the **composed (NFC)** spelling
+    wins; ties break lexicographically.
+
+    Plain ``min`` would be deterministic too, but it picks the wrong member in
+    practice: Hangul conjoining jamo (U+1100…) sort below precomposed syllables
+    (U+AC00…), so ``min`` on a mixed group *always* returns the decomposed form —
+    the one that will not match if the reader types or pastes the name into a
+    search from an NFC editor. Preferring NFC makes the reported string the one
+    most likely to grep.
+
+    The grep argument only holds where the group *has* a composed member. On a
+    uniformly decomposed KB every candidate is NFD and this returns NFD — still
+    deterministic and still a spelling actually written, which is the guarantee
+    that matters.
+
+    The fold is the same NFC as ``fold_relation_name``; the separate name is
+    because this one is applied to subjects and values, not to policy relation
+    names, and only the latter is a membership test.
+    """
+    return min(spellings, key=lambda s: (s != unicodedata.normalize("NFC", s), s))
+
+
 def _relation_names_from(path: Path) -> set[str]:
     """Parse a policy file that lists relation names, one per line.
 

@@ -91,6 +91,51 @@ printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" \
   && ok "uniformly-NFD KB reaches the conflict count (membership folded)" \
   || bad "NFD KB not counted: $(printf '%s' "$out" | grep conflicts)"
 
+# --- status agrees with the gate on both mixed-spelling axes (#325) -----------
+# The gate folds the subject and the untyped object for grouping. A raw grouping
+# here disagreed in both directions: 0 on a KB finalize refuses to compile, and
+# 1 with "resolve via superseded" on a KB whose only defect is two spellings of
+# one value — where superseding is the WRONG repair and drops a source's
+# corroboration. Written from Python so the forms survive editor normalization.
+divergence_case() {  # $1 = which axis is mixed; sets $KBX
+  KBX="$(mktemp -d)/wiki"
+  "$PYTHON" -m factlog init --target "$KBX" >/dev/null
+  printf 'x\n' > "$KBX/sources/a.md"
+  "$PYTHON" - "$KBX" "$1" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb, axis = Path(sys.argv[1]), sys.argv[2]
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+if axis == "subject":     # a REAL contradiction, hidden by a mixed subject
+    rows = [(nfc("김철수"), nfc("소속"), "AAA"), (nfd("김철수"), nfc("소속"), "BBB")]
+else:                     # NOT a contradiction: one value, two spellings
+    rows = [(nfc("김철수"), nfc("소속"), nfc("한국대")), (nfc("김철수"), nfc("소속"), nfd("한국대"))]
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    + "".join(f"{s},{r},{o},sources/a.md,confirmed,0.9,\n" for s, r, o in rows),
+    encoding="utf-8",
+)
+PY
+}
+CHK="$PLUGIN_ROOT/tools/check_conflicts.py"
+divergence_case subject
+set +e; "$PYTHON" "$CHK" --wiki "$KBX" >/dev/null 2>&1; grc=$?; set -e
+out="$("$PYTHON" -m factlog status --target "$KBX" 2>&1)"
+[ "$grc" -eq 1 ] && printf '%s' "$out" | grep -qE "conflicts: +1 " \
+  && ok "mixed-subject KB: status agrees with the gate (both see the contradiction)" \
+  || bad "mixed-subject divergence: gate rc=$grc, $(printf '%s' "$out" | grep conflicts)"
+divergence_case object
+set +e; "$PYTHON" "$CHK" --wiki "$KBX" >/dev/null 2>&1; grc=$?; set -e
+out="$("$PYTHON" -m factlog status --target "$KBX" 2>&1)"
+[ "$grc" -eq 0 ] && printf '%s' "$out" | grep -qE "conflicts: +0 " \
+  && ok "mixed-object KB: status agrees with the gate (no contradiction, no superseded advice)" \
+  || bad "mixed-object divergence: gate rc=$grc, $(printf '%s' "$out" | grep conflicts)"
+printf '%s' "$out" | grep -qF "resolve via superseded" \
+  && bad "status advises superseding a row whose only defect is its spelling" \
+  || ok "no superseded advice when folding resolves the pair"
+
 # --- logic report freshness (report mtime pinned; each input checked) ---------
 printf 'errors: 0\nwarnings: 2\n' > "$KB/facts/logic_report.txt"
 printf 'relation("x","r","y").\n' > "$KB/facts/accepted.dl"

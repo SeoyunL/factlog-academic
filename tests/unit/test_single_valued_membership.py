@@ -56,6 +56,26 @@ class TestFoldingHelpers:
         # NFC only: fullwidth is a different relation, not a spelling.
         assert common.fold_relation_name("ＡＢＣ") != common.fold_relation_name("ABC")
 
+    def test_composed_spelling_prefers_nfc_over_plain_min(self):
+        # The three consumers that stand a representative in front of a folded
+        # group must pick the same member, so the choice lives in common. Plain
+        # min() returns the DECOMPOSED form — conjoining jamo (U+1100…) sort below
+        # precomposed syllables (U+AC00…) — which is the spelling that will not
+        # match what a reader types from an NFC editor.
+        raws = {_nfc("한국대학교"), _nfd("한국대학교")}
+        assert min(raws) == _nfd("한국대학교")  # the trap
+        assert common.composed_spelling(raws) == _nfc("한국대학교")
+
+    def test_composed_spelling_is_a_string_actually_written(self):
+        # Uniformly decomposed group: no composed member exists, so provenance
+        # wins over greppability and the returned string is still one of the raws.
+        raws = {_nfd("한국대학교"), _nfd("서울대학교")}
+        assert common.composed_spelling(raws) in raws
+
+    def test_check_conflicts_uses_the_shared_chooser(self):
+        raws = {_nfc("김철수"), _nfd("김철수")}
+        assert check_conflicts._representative(raws) == common.composed_spelling(raws)
+
 
 class TestReadersAgreeWithTheGate:
     """The KB shape that diverged: relation uniformly NFD, policy NFC."""
