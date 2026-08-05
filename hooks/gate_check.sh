@@ -538,15 +538,29 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 # `case "$target_path" in */accepted.dl)` form, guards 1-2 against an earlier
 # version of this prefilter that had the other five. Every guard that IS a line
 # of code is pinned by a case in tests/test_gate_check.sh: delete the line and at
-# least one case goes red. Two things are NOT pinned that way, and both are
-# stated rather than implied.
-#   - The backslash SPLIT in guard 6 is asserted by construction. Deleting it
-#     changes nothing this suite can observe (measured: it stays fully green),
-#     because the direction it serves needs a host where os.path is ntpath.
-#     CASES 51/51b do not pin the split; what they pin is the POSIX direction it
-#     must not break — a literal backslash is an ordinary filename character and
-#     must not cause a false deny — which is what rules out the obvious wrong
-#     implementation of rewriting `\` to `/` before the match.
+# least one case goes red — with the exceptions below, which are stated rather
+# than implied.
+#   - NEITHER line of guard 6's basename computation is pinned, and the two are
+#     invisible to this suite for opposite reasons.
+#     The SPLIT is asserted by construction: deleting it changes nothing this
+#     suite can observe (measured: it stays fully green), because the direction
+#     it serves needs a host where os.path is ntpath. CASES 51/51b do not pin
+#     the split; what they pin is the POSIX direction it must not break — a
+#     literal backslash is an ordinary filename character and must not cause a
+#     false deny — which is what rules out the obvious wrong implementation of
+#     rewriting `\` to `/` before the match.
+#     The ASSIGNMENT above it is invisible for the opposite reason. Delete it
+#     and `base` is unset — which does NOT trip the `set -u` at the top of this
+#     file, because substring-removal expansions are exempt: `${base##pattern}`
+#     on an unset name yields the empty string. That this is a property of the
+#     expansion FORM, and not of one interpreter, is shown by the contrast
+#     WITHIN a single shell: under the same `set -u`, both `${base##*/}` and
+#     `${base##*\\}` yield empty at exit 0 while a plain `$base` errors.
+#     The result is that every name hits guard 5's `''` arm, the short-circuit
+#     never fires at all, and every call goes to the matcher. So the failure
+#     mode of losing this line is "the prefilter stops OPTIMISING", never "the
+#     prefilter stops GUARDING" — strictly more conservative, only slower, and
+#     therefore invisible to a suite that reads exit codes.
 #   - Guard 4 is not a line of code at all; it is the decision NOT to strip
 #     trailing separators. It is pinned in the direction that can do damage —
 #     CASE 46b goes red if a strip is reintroduced anywhere AFTER the -L test —
