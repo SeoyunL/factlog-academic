@@ -508,6 +508,67 @@ else
 fi
 rm -rf "$KB_OK" "$ok_err"
 
+# ---------------------------------------------------------------------------
+# CASE 17c: THE RESOLVER-DEGRADE NOTE ON THE CHANNEL A PERSON ACTUALLY SEES.
+#
+# CASE 16 asserts the stderr mirror, and it can only ever assert that: it is a
+# DENY, where the contract hands stderr to Claude and `_allow` never runs. So
+# nothing pinned this note to the exit-0 channel, and reverting `_note` to the
+# bare `echo ... >&2` it replaced left the whole suite green — the same shape of
+# hole #323 itself was.
+#
+# On exit 0 the one channel the contract surfaces is a JSON object on stdout
+# carrying `systemMessage`, so that is what this case reads. Same broken plugin
+# root as CASE 16; the target is deliberately NOT an engine input, because that
+# is what takes the run through `_allow` instead of the deny path.
+# ---------------------------------------------------------------------------
+DEGRADE_PLUGIN="$(mktemp -d)"
+mkdir -p "$DEGRADE_PLUGIN/hooks" "$DEGRADE_PLUGIN/factlog"
+printf 'raise ImportError("factlog package intentionally broken for the exit-0 degrade note (CASE 17c)")\n' \
+  > "$DEGRADE_PLUGIN/factlog/__init__.py"
+cp "$GATE" "$DEGRADE_PLUGIN/hooks/gate_check.sh"
+
+KB_DEGRADE="$(mktemp -d)"
+make_kb "$KB_DEGRADE"
+clear_config
+
+degrade_out="$(mktemp)"
+degrade_err="$(mktemp)"
+degrade_exit=0
+FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_DEGRADE" \
+  bash "$DEGRADE_PLUGIN/hooks/gate_check.sh" \
+  <<< "$(printf '{"file_path":"%s"}' "$KB_DEGRADE/notes.md")" \
+  >"$degrade_out" 2>"$degrade_err" || degrade_exit=$?
+
+degrade_verdict="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1]))
+except Exception:
+    print("NO-JSON-ON-STDOUT")
+    raise SystemExit(0)
+message = payload.get("systemMessage")
+if not isinstance(message, str) or "factlog config resolver unavailable" not in message:
+    print("NO-SYSTEM-MESSAGE")
+elif "hookSpecificOutput" in payload or "permissionDecision" in payload:
+    print("SMUGGLED-DECISION")
+else:
+    print("OK")
+' "$degrade_out")"
+
+if [ "$degrade_exit" -eq 0 ] && [ "$degrade_verdict" = "OK" ]; then
+  echo "PASS: resolver degrade on an allow surfaces the note as a systemMessage (exit $degrade_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: resolver degrade on an allow — expected exit 0 with a systemMessage; exit=$degrade_exit verdict=$degrade_verdict stdout=$(cat "$degrade_out")"
+  fail=$((fail + 1))
+fi
+if ! grep -qF "factlog config resolver unavailable" "$degrade_err"; then
+  echo "FAIL: resolver degrade on an allow — the stderr mirror of the note is missing"
+  fail=$((fail + 1))
+fi
+rm -rf "$DEGRADE_PLUGIN" "$KB_DEGRADE" "$degrade_out" "$degrade_err"
+
 # ===========================================================================
 # CASES 18-38: REAL HOOK ENVELOPE (#323)
 #
@@ -952,6 +1013,104 @@ case "$trunc_msg" in
     ;;
 esac
 rm -rf "$TRUNC_SHIM" "$trunc_out" "$trunc_err"
+
+# ---------------------------------------------------------------------------
+# CASE 37b: THE MATCHER'S RAW-STRING FALLBACK — ALLOW, but say so.
+#
+# The header enumerates one more permissive degrade than the payload branches:
+# if the canonicaliser returns no verdict, the engine-input test falls back to
+# comparing the RAW target string against the two engine paths, which can only
+# make a match less likely. Nothing pinned it — not the exit code, not the note,
+# not the raw comparison itself — so deleting the `_note` line left the suite
+# green even though the header claims the branch "emits a note like the branches
+# above rather than degrading silently".
+#
+# Same shim idiom as CASE 37, aimed one call further along: `folds_case` appears
+# only in the matcher script, so this breaks the matcher and delegates the
+# python probe, the resolver and the extractor to the real runner.
+#
+# Both directions of the fallback are asserted against a STALE KB:
+#   - a symlink whose own name is not an engine input reaches the matcher (the
+#     prefilter's -L guard), and the raw comparison cannot see through it, so the
+#     gate degrades OPEN — with the note saying so;
+#   - the engine path spelled exactly still matches as a raw string, so the
+#     freshness deny survives the degrade.
+#
+# "Exactly" is meant literally, and the KB root is therefore taken through
+# `pwd -P`: resolve_root() hands back a canonical KB_ROOT, so on macOS, where
+# $TMPDIR lives under the /var -> /private/var symlink, an uncanonicalised
+# fixture path would make the raw comparison miss. That miss is the fallback
+# behaving as documented (a string test is strictly weaker than canon()), not a
+# defect — but it would leave the deny direction untested here.
+# ---------------------------------------------------------------------------
+KB_RAW="$(cd "$(mktemp -d)" && pwd -P)"
+kb_stale "$KB_RAW"
+ln -s accepted.dl "$KB_RAW/facts/notes.dl"
+
+MATCH_SHIM="$(mktemp -d)"
+cat > "$MATCH_SHIM/runner.sh" <<SH
+#!/usr/bin/env bash
+# Break ONLY the matcher call — its script is the one mentioning folds_case —
+# and pass every other invocation through to the genuine runner.
+for arg in "\$@"; do
+  case "\$arg" in
+    *folds_case*) exit 1 ;;
+  esac
+done
+exec bash "$PYTHON_RUNNER" "\$@"
+SH
+chmod +x "$MATCH_SHIM/runner.sh"
+
+raw_out="$(mktemp)"
+raw_err="$(mktemp)"
+raw_exit=0
+FACTLOG_PYTHON_RUNNER="$MATCH_SHIM/runner.sh" FACTLOG_ROOT="$KB_RAW" \
+  bash "$GATE" <<< "$(envelope Write "$KB_RAW/facts/notes.dl")" \
+  >"$raw_out" 2>"$raw_err" || raw_exit=$?
+
+raw_verdict="$(bash "$PYTHON_RUNNER" -c '
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1]))
+except Exception:
+    print("NO-JSON-ON-STDOUT")
+    raise SystemExit(0)
+message = payload.get("systemMessage")
+if not isinstance(message, str) or "returned no verdict" not in message:
+    print("NO-SYSTEM-MESSAGE")
+elif "hookSpecificOutput" in payload or "permissionDecision" in payload:
+    print("SMUGGLED-DECISION")
+else:
+    print("OK")
+' "$raw_out")"
+
+if [ "$raw_exit" -eq 0 ] && [ "$raw_verdict" = "OK" ]; then
+  echo "PASS: matcher raw fallback degrades open and surfaces a note as a systemMessage (exit $raw_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: matcher raw fallback — expected exit 0 with a systemMessage note; exit=$raw_exit verdict=$raw_verdict stdout=$(cat "$raw_out")"
+  fail=$((fail + 1))
+fi
+if ! grep -qF "returned no verdict" "$raw_err"; then
+  echo "FAIL: matcher raw fallback — the stderr mirror of the note is missing"
+  fail=$((fail + 1))
+fi
+
+# The other direction: with the matcher broken, an exactly-spelled engine path
+# still matches as a raw string, so the freshness deny is not lost to the
+# degrade. This pins the raw comparison loop, not the note.
+raw_deny_exit=0
+FACTLOG_PYTHON_RUNNER="$MATCH_SHIM/runner.sh" FACTLOG_ROOT="$KB_RAW" \
+  bash "$GATE" <<< "$(envelope Write "$KB_RAW/facts/accepted.dl")" \
+  >/dev/null 2>&1 || raw_deny_exit=$?
+if [ "$raw_deny_exit" -eq 2 ]; then
+  echo "PASS: matcher raw fallback still denies an exactly-spelled engine path (exit $raw_deny_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: matcher raw fallback — exactly-spelled engine path must still deny (exit 2), got $raw_deny_exit"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_RAW" "$MATCH_SHIM" "$raw_out" "$raw_err"
 
 # ---------------------------------------------------------------------------
 # CASE 38: FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1 escape hatch.
