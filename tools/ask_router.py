@@ -75,6 +75,7 @@ from common import (  # noqa: E402
     canonical_variants_of,
     is_quoted_string,
     is_variable,
+    query_arity_error,
     query_args,
     query_shape_error,
     classify_query,
@@ -461,29 +462,36 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
     return True
 
 
-def _require_shape(label: str, args: list[str]) -> None:
-    """Raise unless every argument is a variable or a double-quoted string.
+def _require_signature(label: str, args: list[str]) -> None:
+    """Raise unless *args* has the right COUNT and every one is a valid argument.
 
-    `classify_query` rejects these lines as QUERY_MALFORMED, so the render path
-    (cmd_render -> classify -> route "wiki") never reaches `evaluate` with one.
-    The documented `evaluate` subcommand does: cmd_evaluate calls `evaluate`
-    directly, with no classify in front of it — the same asymmetry that made the
-    arity guards above necessary (#257, 1bc172a), and QUERY_BAD_ARITY and
-    QUERY_MALFORMED are routed identically (see the "any shape/vocabulary
-    failure" branch in `classify`).
+    `classify_query` rejects these lines as QUERY_BAD_ARITY or QUERY_MALFORMED,
+    so the render path (cmd_render -> classify -> route "wiki") never reaches
+    `evaluate` with one. The documented `evaluate` subcommand does: cmd_evaluate
+    calls `evaluate` directly, with no classify in front of it — the asymmetry
+    that made the first arity guards necessary (#257, 1bc172a). The two codes are
+    routed identically (see the "any shape/vocabulary failure" branch in
+    `classify`), so there is no basis for guarding one and not the other.
 
-    Answering anyway is not merely unverified, it is wrong, and each branch is
-    wrong in its own direction because each uses a different predicate to decide
-    "is this argument a constant": `is_variable` here, `is_quoted_string` there.
-    `count("Marie Curie", 'born_in')?` returned count 0 — which reads as a
-    verified negative — while `count(Marie Curie, born_in)?` returned 2 by
+    Answering anyway is not merely unverified, it is wrong, and each consumer was
+    wrong in its own direction because each used a different predicate to decide
+    "is this argument a constant": `is_variable` here, `is_quoted_string` in the
+    report. `count("Marie Curie", 'born_in')?` returned count 0 — which reads as
+    a verified negative — while `count(Marie Curie, born_in)?` returned 2 by
     coincidence, the bare token happening to equal the stored value (#328).
+    On arity, relation and path returned 0 rows for a query the gate rejects:
+    `relation("Marie Curie", "born_in", "Warsaw", X)?` denied a fact that IS in
+    the KB, because `evaluate_relation` drops a non-3-arity query to [] and an
+    empty relation result renders as a verified negative.
+
+    Arity is tested before shape, as in classify_query and run_logic_check: a
+    line breaking both rules must get one reason, the same one, from all three.
 
     NotImplementedError is the same exception the unknown-predicate fallthrough
-    and the arity guards raise, so cmd_evaluate turns it into a clean error JSON
-    (rc 2). The message is common.query_shape_error's, i.e. the gate's wording.
+    raises, so cmd_evaluate turns it into a clean error JSON (rc 2). The messages
+    are common's, i.e. the gate's wording.
     """
-    message = query_shape_error(label, args)
+    message = query_arity_error(label, args) or query_shape_error(label, args)
     if message:
         raise NotImplementedError(message)
 
@@ -500,14 +508,13 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
 
     A truly unknown predicate raises NotImplementedError rather than returning 0
     rows, so a caller never mistakes an unsupported predicate for a verified
-    negative. A malformed count or policy query raises for the same reason, and
-    so does an argument of any predicate that is neither a variable nor a quoted
-    string (see `_require_shape`).
+    negative. A query whose argument COUNT or argument SHAPE the gate rejects
+    raises for the same reason, on every predicate (see `_require_signature`).
     """
     predicate = _predicate_of(draft)
     args = query_args(draft)
     if predicate == "relation":
-        _require_shape("relation", args)
+        _require_signature("relation", args)
         rows = evaluate_relation(draft, facts)
         result: dict[str, object] = {"rows": rows, "count": len(rows)}
         # Optional, additive coverage hint (#189) for a verified-negative relation
@@ -523,20 +530,14 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # When the relation arg is a quoted canonical name (surface_variants
         # non-empty), count DISTINCT objects across the canonical AND all its
         # surface variants — symmetry with the relation branch (#227).
-        # Guard arity BEFORE unpacking: a count with != 2 args is malformed. Match
-        # classify_query (BAD_ARITY) and raise the same NotImplementedError the
-        # unknown-predicate fallthrough uses, so cmd_evaluate turns it into a clean
-        # error JSON instead of an uncaught IndexError (< 2 args) or a silently
-        # accepted, bogus count (> 2 args) (#257).
-        if len(args) != 2:
-            raise NotImplementedError("count query must have subject and relation arguments")
-        # Shape AFTER arity, the order classify_query uses, so a line violating
-        # both gets the same reason from both paths. Without this the count below
-        # treated a bare token as a constant and a single-quoted one as a
-        # wildcard, so `count(Marie Curie, born_in)?` answered 2 and
+        # Guard the signature BEFORE unpacking: a count with != 2 args would
+        # raise an uncaught IndexError (< 2) or be silently accepted with the
+        # extra arg ignored (> 2) (#257), and a malformed one would treat a bare
+        # token as a constant and a single-quoted one as a wildcard, so
+        # `count(Marie Curie, born_in)?` answered 2 while
         # `count("Marie Curie", 'born_in')?` answered 0 — a verified negative for
-        # a query the gate rejects as malformed (#328).
-        _require_shape("count", args)
+        # a query the gate rejects (#328).
+        _require_signature("count", args)
         subject, relation = arg_value(args[0]), arg_value(args[1])
         rel_variants: set[str] = set()
         if is_quoted_string(args[1]):
@@ -550,7 +551,7 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         }
         return {"rows": [[str(len(objects))]], "count": len(objects)}
     if predicate == "path":
-        _require_shape("path", args)
+        _require_signature("path", args)
         if len(args) == 2 and all(is_quoted_string(a) for a in args):
             path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
             rows = [path] if path else []
@@ -576,22 +577,18 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # verified negative). Catch broad Exception — never BaseException, so
         # KeyboardInterrupt/SystemExit still propagate — because the engine may
         # raise non-FactlogError types.
-        # Guard arity BEFORE evaluating, like the count branch above (#257) and
-        # for the same reason: with a malformed query no constant lines up with a
-        # column, so the filter passes rows it cannot have checked — `pred("X")?`
-        # returned a filtered-looking count and `pred(E, R, "zzz")?` returned 0
-        # rows, which renders as a verified negative for a query classify_query
-        # already rejects as BAD_ARITY. classify_query rejects these too, so the
-        # render path never reaches here; the `evaluate` subcommand does, and
-        # cmd_evaluate turns NotImplementedError into a clean error JSON.
-        # run_logic_check drops the result line on the same shapes, so the report
-        # and ask agree that a malformed policy query has no answer.
-        if len(args) != 2:
-            raise NotImplementedError("policy query must have entity and reason arguments")
-        # Shape after arity, as in the count branch: `pred(Alice, stale)?` has the
-        # right arity but pins nothing, so policy_row_matches passed every row and
-        # the whole extent came back bound to an entity it is not about (#328).
-        _require_shape("policy query", args)
+        # Guard the signature BEFORE evaluating, like the count branch above
+        # (#257) and for the same reason: with a malformed query no constant lines
+        # up with a column, so the filter passes rows it cannot have checked —
+        # `pred("X")?` returned a filtered-looking count, `pred(E, R, "zzz")?`
+        # returned 0 rows (a verified negative for a query classify_query rejects
+        # as BAD_ARITY), and `pred(Alice, stale)?` pinned nothing at all, so the
+        # whole extent came back bound to an entity it is not about (#328).
+        # classify_query rejects all of these, so the render path never reaches
+        # here; the `evaluate` subcommand does, and cmd_evaluate turns
+        # NotImplementedError into a clean error JSON. run_logic_check drops the
+        # result line on the same lines, so the report and ask agree.
+        _require_signature("policy query", args)
         try:
             inferred = run_wirelog()
         except Exception as exc:  # noqa: BLE001 — engine/loader raise non-FactlogError too
