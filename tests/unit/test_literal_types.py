@@ -637,3 +637,17 @@ class TestNonAsciiDigitDiagnostics:
     def test_mark_is_a_noop_when_the_predicate_is_false(self):
         for value in ("100억", "3rd", "²", ""):
             assert lt.mark_non_ascii_digits(value) == value
+
+    def test_mark_escapes_astral_digits_with_the_eight_digit_form(self):
+        # 390 of the 760 Nd codepoints are above the BMP (mathematical
+        # bold/sans/mono digits, Osmanya, ...), and mathematical bold digits do
+        # arrive by copy-pasting styled text. `\\uXXXX` cannot spell them: the
+        # 5-digit overflow decodes as a DIFFERENT character, so the escape must
+        # be the 8-digit `\\UXXXXXXXX` form above 0xFFFF.
+        assert lt.mark_non_ascii_digits("𝟏𝟎𝟎억") == "\\U0001d7cf\\U0001d7ce\\U0001d7ce억"
+
+    def test_every_marked_escape_round_trips_back_to_its_character(self):
+        # The property the escape exists for: what is printed must decode to the
+        # character that was replaced. Sampled across BMP and astral Nd blocks.
+        for ch in ("１", "١", "१", "๑", "𝟏", "𝟶", "\U000104a1"):
+            assert lt.mark_non_ascii_digits(ch).encode().decode("unicode_escape") == ch
