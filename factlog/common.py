@@ -875,12 +875,12 @@ def attribute_relations() -> set[str]:
 
     Objects of these relations (dates, numbers, ordinals, ...) are excluded from
     entity_set so they do not pollute the entity vocabulary (entity listings,
-    path nodes, count subjects). All three axes go through entity_set: entity
-    listings and count subjects read it directly, and the entity GRAPH — both
-    dependency_graph and the engine's entity_node/1 — gates its edges on it, so a
-    literal is not a path node either (#329). They remain valid relation-query
-    objects — see value_set and classify_query — so a fact about a literal is
-    still verifiable.
+    path nodes, count subjects). All three axes apply ONE exclusion rule, spelled
+    once in _entity_nodes: entity listings and count subjects read entity_set,
+    and the entity GRAPH — both dependency_graph and the engine's entity_node/1 —
+    gates its edges on the same predicate, so a literal is not a path node either
+    (#329). They remain valid relation-query objects — see value_set and
+    classify_query — so a fact about a literal is still verifiable.
     Same file format as single-valued.md; absent file → no attribute relations
     → entity_set == value_set (fully backward compatible).
     """
@@ -1345,6 +1345,24 @@ def value_set(facts: list[dict[str, str]] | None = None) -> set[str]:
     return {value for row in selected for value in [row["subject"], row["object"]] if value}
 
 
+def _entity_nodes(rows: list[dict[str, str]], literal_rels: set[str]) -> set[str]:
+    """The engine's ``entity_node/1``, computed literally over engine-input *rows*.
+
+        entity_node(S) :- relation(S, R, O).
+        entity_node(O) :- relation(S, R, O), !attr_rel(R).
+
+    Deliberately WITHOUT a truthiness guard: the engine admits every subject
+    unconditionally, empty string included, so an empty value is an engine path
+    node. Graph membership must be this set — see dependency_graph. Vocabulary is
+    a different question and entity_set drops the empty string on top of this."""
+    nodes: set[str] = set()
+    for row in rows:
+        nodes.add(row["subject"])
+        if row["relation"] not in literal_rels:
+            nodes.add(row["object"])
+    return nodes
+
+
 def entity_set(
     facts: list[dict[str, str]] | None = None,
     attribute_rels: set[str] | None = None,
@@ -1355,18 +1373,17 @@ def entity_set(
     up as entities (entity listings, path nodes, count subjects). With no
     policy/attribute-relations.md this equals value_set (backward compatible).
 
+    This is ``_entity_nodes`` (the engine's entity_node/1) minus the empty string:
+    an incomplete row must not offer "" as a name to list, suggest or accept as a
+    query argument. Do NOT reuse this as the entity GRAPH's membership test — the
+    engine has no such guard there and the two would diverge (#329).
+
     *attribute_rels* overrides which relations count as attribute (literal-valued)
     relations; pass a KbContext's attribute_relations() to read a non-default KB.
     None falls back to the module-level (ambient-root) attribute_relations()."""
     selected = engine_input_rows(facts if facts is not None else load_accepted_facts())
     literal_rels = attribute_relations() if attribute_rels is None else attribute_rels
-    entities: set[str] = set()
-    for row in selected:
-        if row["subject"]:
-            entities.add(row["subject"])
-        if row["object"] and row["relation"] not in literal_rels:
-            entities.add(row["object"])
-    return entities
+    return {value for value in _entity_nodes(selected, literal_rels) if value}
 
 
 def allowed_relations(facts: list[dict[str, str]] | None = None) -> set[str]:
@@ -1526,11 +1543,18 @@ def dependency_graph(
     path nodes, or count subjects"); before #329 the promise held on the entity
     axis only and a date could sit in the middle of a dependency path.
 
-    The membership test is entity_set itself, not "drop every attribute edge": a
-    value that is a subject somewhere, or the object of some non-attribute
-    relation, IS in entity_set, and classify_query already admits it as a path
-    endpoint. Filtering on anything narrower would put the endpoint guard and the
-    path evaluation back into disagreement — the same class of divergence, moved.
+    The membership test is entity_node/1 itself (``_entity_nodes``), not "drop
+    every attribute edge": a value that is a subject somewhere, or the object of
+    some non-attribute relation, IS a node, and classify_query already admits it
+    as a path endpoint. Filtering on anything narrower would put the endpoint
+    guard and the path evaluation back into disagreement — the same class of
+    divergence, moved.
+
+    It is not entity_set either, close as the two are: entity_set additionally
+    drops the empty string, which is right for a vocabulary listing and wrong
+    here, because the engine's entity_node/1 has no such guard. Reusing it made
+    `ask` render an engine-derived path as "no such fact (verified negative)" on
+    a KB with an incomplete row — which run_logic_check reports yet exits 0 on.
 
     The emitted engine program (WIRELOG_PROGRAM) computes the identical predicate
     as entity_node/1 and gates `edge` on it; keep the two in step.
@@ -1539,10 +1563,11 @@ def dependency_graph(
     a hoisted read); None falls back to the module-level attribute_relations().
     """
     selected = engine_input_rows(facts)
-    entities = entity_set(selected, attribute_rels)
+    literal_rels = attribute_relations() if attribute_rels is None else attribute_rels
+    nodes = _entity_nodes(selected, literal_rels)
     graph: dict[str, list[str]] = defaultdict(list)
     for row in selected:
-        if row["object"] in entities:
+        if row["object"] in nodes:
             graph[row["subject"]].append(row["object"])
     return graph
 

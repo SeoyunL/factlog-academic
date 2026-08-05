@@ -53,6 +53,15 @@ ATTRS = {"정식_운영"}
 FACTS_LITERAL_IS_SUBJECT = FACTS + [R("2030.1", "후속", "정서비스")]
 # The literal is ALSO the object of a NON-attribute relation -> likewise an entity.
 FACTS_LITERAL_IS_ENTITY_OBJECT = FACTS + [R("무서비스", "참조", "2030.1")]
+# An incomplete row (compile_facts reports it as an error but exits 0, so it DOES
+# reach the engine). `entity_node(S) :- relation(S, R, O).` admits every subject
+# unconditionally, empty string included, so the empty value is an engine path
+# node and 갑봇 -> 을서비스 is an engine-derived path. The renderer must agree —
+# see TestEmptyValuesAgreeWithTheEngine.  No attribute relation is involved.
+FACTS_WITH_EMPTY_VALUES = [
+    R("갑봇", "통합", ""),
+    R("", "통합", "을서비스"),
+]
 
 
 @pytest.fixture
@@ -126,6 +135,37 @@ class TestPathAxis:
         assert ("갑봇", "을서비스") in pairs
 
 
+class TestEmptyValuesAgreeWithTheEngine:
+    """REGRESSION PIN for the graph-membership test itself. #329 first routed the
+    renderer's membership through ``entity_set``, whose truthiness guard exists to
+    keep the empty string out of a VOCABULARY listing. Graph membership is a
+    different question: the engine's ``entity_node(S) :- relation(S, R, O).`` has
+    no such guard, so an empty value IS an engine path node. Reusing entity_set
+    made the renderer drop edges the engine keeps, and `ask` then answered an
+    engine-derived path with "no such fact (verified negative)".
+
+    An incomplete row is reported by run_logic_check as an error but does not stop
+    the pipeline (exit 0), so this input reaches users.
+    """
+
+    def test_empty_value_is_a_path_node_in_the_python_renderer(self, attrs):
+        attrs(set())
+        assert common.dependency_path(FACTS_WITH_EMPTY_VALUES, "갑봇", "을서비스") == [
+            "갑봇", "", "을서비스",
+        ]
+
+    def test_empty_value_is_not_offered_as_vocabulary(self, attrs):
+        # entity_set keeps its guard — this is the property the reuse conflated.
+        attrs(set())
+        assert "" not in common.entity_set(FACTS_WITH_EMPTY_VALUES, set())
+
+    def test_engine_derives_the_transitive_pair(self, attrs, monkeypatch):
+        # Non-vacuous half of the parity case: the engine really does derive it,
+        # so a renderer that drops it turns a positive into a verified negative.
+        attrs(set())
+        assert ("갑봇", "을서비스") in engine_path_pairs(FACTS_WITH_EMPTY_VALUES, monkeypatch)
+
+
 class TestLiteralThatIsAlsoAnEntity:
     """NEGATIVE CONTROLS — these pass before AND after the fix, by construction:
     nothing was excluded before. They exist to kill the cruder fix (drop every
@@ -163,6 +203,8 @@ class TestEngineAndRendererAgree:
             (FACTS, set()),                              # nothing declared -> unchanged
             (FACTS_LITERAL_IS_SUBJECT, ATTRS),
             (FACTS_LITERAL_IS_ENTITY_OBJECT, ATTRS),
+            (FACTS_WITH_EMPTY_VALUES, set()),
+            (FACTS_WITH_EMPTY_VALUES, ATTRS),
         ],
     )
     def test_reachable_pairs_match_engine_path(self, facts, declared, attrs, monkeypatch):
