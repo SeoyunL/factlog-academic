@@ -368,12 +368,19 @@ class ConflictScan(NamedTuple):
       because "these are the same string written two ways" is false here and the
       reader needs the other sentence — including the part where the engine
       cannot reproduce the merge at all.
+    * *relation_variants* — ``{(reported subject, NFC relation): sorted raw
+      relation spellings}`` wherever one folded relation was written more than
+      one way for a subject. Membership folds but grouping does not, so those
+      rows sit in **separate** pairs: a contradiction between them is invisible
+      to this module, and at exit 0 nothing else in the run mentions the rows at
+      all. Keyed on all pairs, not only conflicting ones, for that reason.
     """
 
     conflicts: dict[tuple[str, str], list[str]]
     subject_variants: dict[tuple[str, str], list[str]]
     object_variants: dict[tuple[str, str], dict[str, list[str]]]
     parse_merges: dict[tuple[str, str], dict[str, list[str]]]
+    relation_variants: dict[tuple[str, str], list[str]]
 
 
 def collect_conflicts(
@@ -480,6 +487,11 @@ def collect_conflicts(
     unfolded: dict[tuple[str, str], dict[str, tuple]] = {}
     # Same pair -> set of raw subject spellings folded into it.
     raw_subjects: dict[tuple[str, str], set[str]] = {}
+    # (folded subject, folded relation) -> raw relation spellings seen, and the
+    # raw subjects under them. Grouping does not fold the relation axis, so these
+    # rows sit in separate pairs and never meet; the disclosure is what says so.
+    raw_relations: dict[tuple[str, str], set[str]] = {}
+    relation_subjects: dict[tuple[str, str], set[str]] = {}
     for row in engine_facts(facts):
         relation = row["relation"]
         canon = _canonicalize(relation, aliases)
@@ -495,6 +507,9 @@ def collect_conflicts(
         by_key.setdefault(pair, {}).setdefault(key, set()).add(obj)
         unfolded.setdefault(pair, {})[obj] = _group_key_unfolded(obj, spec)
         raw_subjects.setdefault(pair, set()).add(row["subject"])
+        split = (pair[0], _fold(canon))
+        raw_relations.setdefault(split, set()).add(canon)
+        relation_subjects.setdefault(split, set()).add(row["subject"])
     conflicts: dict[tuple[str, str], list[str]] = {}
     subject_variants: dict[tuple[str, str], list[str]] = {}
     object_variants: dict[tuple[str, str], dict[str, list[str]]] = {}
@@ -531,7 +546,14 @@ def collect_conflicts(
         conflicts[reported] = sorted(objects)
         subject_variants[reported] = sorted(subjects)
         object_variants[reported] = objects
-    return ConflictScan(conflicts, subject_variants, object_variants, parse_merges)
+    relation_variants = {
+        (_representative(relation_subjects[split]), split[1]): sorted(names)
+        for split, names in raw_relations.items()
+        if len(names) > 1
+    }
+    return ConflictScan(
+        conflicts, subject_variants, object_variants, parse_merges, relation_variants
+    )
 
 
 def detect_conflicts(
@@ -668,6 +690,50 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     )
 
 
+def _report_split_relations(scan: ConflictScan) -> None:
+    """Disclose subjects whose single-valued relation is written several ways.
+
+    Membership folds and grouping does not, so those rows *pass* the membership
+    test, enter the grouping loop, and then split on the relation axis into pairs
+    that never meet. When each pair holds one value the module reports "0
+    conflicts" about rows that, read together, contradict each other — and the
+    likeliest mixed KB is exactly this one, because a normalization form is a
+    property of the source document and the filesystem it came from, so a whole
+    row flips at once rather than one field.
+
+    Deferring the *grouping* decision is the #210 maintainer call this change
+    leaves open (see ``collect_conflicts``). Deferring the *disclosure* is not the
+    same thing: at exit 0 there is no CONFLICT line to hang the
+    "(relation written in N mixed Unicode normalization forms)" suffix on, so
+    without this the run says nothing at all.
+
+    Pairs already covered by a CONFLICT line are skipped — that line carries the
+    suffix and the spelling list on stderr, and repeating it here would double-
+    report one fact in two streams.
+    """
+    conflicting = {(_fold(s), _fold(r)) for s, r in scan.conflicts}
+    lines = []
+    for key in sorted(scan.relation_variants):
+        subject, relation = key
+        if (_fold(subject), relation) in conflicting:
+            continue
+        lines.append(f"    on '{subject}' spellings: {_spellings(scan.relation_variants[key])}")
+    if not lines:
+        return
+    print(
+        f"check_conflicts: {len(lines)} subject(s) whose single-valued relation is written in "
+        "several Unicode normalization forms, so their rows were compared separately:"
+    )
+    for line in lines:
+        print(line)
+    print(
+        "  Relation-name membership is folded but grouping is not, so rows spelled one way "
+        "were never compared against rows spelled the other, and a contradiction between "
+        "them would not be reported above. Unify the spelling in sources/ and re-collect, "
+        "then re-run."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Detect single-valued-relation contradictions.")
     parser.add_argument("--wiki", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
@@ -690,10 +756,12 @@ def main(argv: list[str] | None = None) -> int:
     if not conflicts:
         print(f"check_conflicts: 0 conflicts across {len(single_valued)} single-valued relation(s)")
         _report_resolved_merges(scan)
+        _report_split_relations(scan)
         return 0
 
     print(f"check_conflicts: {len(conflicts)} conflict(s) found", file=sys.stderr)
     _report_resolved_merges(scan)
+    _report_split_relations(scan)
     aliases = relation_aliases()
     # Whether folding merged spellings anywhere. This is an *extra* disclosure,
     # never a replacement for the supersede guidance: a contradiction that a mixed
@@ -704,19 +772,22 @@ def main(argv: list[str] | None = None) -> int:
     # collect_conflicts), so one contradiction written with the relation spelled
     # two ways surfaces as two CONFLICT lines that are byte-different and look
     # identical. Collapsing them means folding the grouping key, which is exactly
-    # the deferred decision — so disclose instead, as the subject axis does. The
-    # count comes from the rows, not from policy/single-valued.md: sv holds
-    # folded names, so several policy spellings collapse to one element there.
-    relation_spellings: dict[tuple[str, str], set[str]] = {}
-    for subject, relation in conflicts:
-        relation_spellings.setdefault((_fold(subject), _fold(relation)), set()).add(relation)
+    # the deferred decision — so disclose instead, as the subject axis does.
+    # ``relation_variants`` counts spellings over every pair examined, not only
+    # the conflicting ones: a row hiding under the other spelling is invisible to
+    # this conflict whether or not it happens to conflict by itself, and that is
+    # the fact worth naming. Re-keyed on the fold so the reported subject (a raw
+    # spelling) finds it. The count comes from the rows, not from
+    # policy/single-valued.md: sv holds folded names, so several policy spellings
+    # collapse to one element there.
+    relation_spellings = {(_fold(s), r): names for (s, r), names in scan.relation_variants.items()}
     for key, objects in sorted(conflicts.items()):
         subject, relation = key
         suffix = " (canonical; incl. surface variants)" if aliases and relation in set(aliases.values()) else ""
         subjects = subject_variants[key]
         if len(subjects) > 1:
             suffix += f" (subject written in {len(subjects)} mixed Unicode normalization forms)"
-        relations = sorted(relation_spellings[(_fold(subject), _fold(relation))])
+        relations = relation_spellings.get((_fold(subject), _fold(relation)), [relation])
         if len(relations) > 1:
             suffix += f" (relation written in {len(relations)} mixed Unicode normalization forms)"
         print(

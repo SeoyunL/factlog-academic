@@ -761,6 +761,89 @@ class TestFoldEnabledTypedParseIsDisclosed:
         assert len(seen) == 1
 
 
+class TestSplitRelationIsDisclosedAtExitZero:
+    """Rows that pass membership and then vanish on the relation axis.
+
+    Membership folds, grouping does not, so a KB whose rows flipped NFC↔NFD as a
+    whole — subject and relation together, the realistic shape — enters the
+    grouping loop and then splits into two singleton pairs. The checker looked at
+    two rows that contradict each other and printed "0 conflicts". Deferring the
+    grouping decision is the #210 maintainer call; deferring the *disclosure* has
+    no such justification, because at exit 0 there is no CONFLICT line to hang
+    the existing "(relation written in N mixed …)" suffix on.
+    """
+
+    def test_whole_row_flipped_is_disclosed(self, monkeypatch, capsys):
+        rel = [_nfc("소속"), _nfd("소속")]
+        facts = [
+            _fact(_nfc("김철수"), rel[0], "A사"),
+            _fact(_nfd("김철수"), rel[1], "B사"),
+        ]
+        assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 0
+        out = capsys.readouterr().out
+        assert "single-valued relation is written in" in out
+        assert ascii(rel[0]) in out and ascii(rel[1]) in out
+        assert "never compared against" in out
+
+    def test_split_relation_names_the_subject_as_written(self, monkeypatch, capsys):
+        facts = [
+            _fact(_nfc("김철수"), _nfc("소속"), "A사"),
+            _fact(_nfd("김철수"), _nfd("소속"), "B사"),
+        ]
+        _run_main(monkeypatch, facts, {_nfc("소속")})
+        assert f"on '{_nfc('김철수')}'" in capsys.readouterr().out
+
+    def test_conflicting_pair_is_not_disclosed_twice(self, monkeypatch, capsys):
+        # CONTROL (passes before this change too): the CONFLICT line already
+        # carries the suffix and the spelling list on stderr, and repeating it on
+        # stdout would report one fact in two streams.
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfc("소속"), "B사"),
+            _fact("김철수", _nfd("소속"), "A사"),
+            _fact("김철수", _nfd("소속"), "B사"),
+        ]
+        assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 1
+        captured = capsys.readouterr()
+        assert "single-valued relation is written in" not in captured.out
+        assert "(relation written in 2 mixed Unicode normalization forms)" in captured.err
+
+    def test_non_conflicting_spelling_still_reaches_the_conflict_line(self, monkeypatch, capsys):
+        # One spelling conflicts on its own, the other holds a single value. The
+        # hidden row is invisible to that conflict either way, so the suffix must
+        # count spellings over every pair examined, not only conflicting ones.
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfc("소속"), "B사"),
+            _fact("김철수", _nfd("소속"), "C사"),
+        ]
+        assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 1
+        captured = capsys.readouterr()
+        assert "(relation written in 2 mixed Unicode normalization forms)" in captured.err
+        assert "single-valued relation is written in" not in captured.out
+
+    def test_single_relation_spelling_says_nothing(self, monkeypatch, capsys):
+        # CONTROL: this is what keeps an NFC-only KB byte-identical.
+        facts = [_fact("김철수", "소속", "A사"), _fact("김철수", "직급", "부장")]
+        assert _run_main(monkeypatch, facts, {"소속", "직급"}) == 0
+        assert capsys.readouterr().out == (
+            "check_conflicts: 0 conflicts across 2 single-valued relation(s)\n"
+        )
+
+    def test_two_subjects_are_not_conflated(self, monkeypatch, capsys):
+        # CONTROL: the channel is keyed per subject, so one subject's mixed
+        # spelling must not implicate another's.
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfd("소속"), "B사"),
+            _fact("박영희", _nfc("소속"), "C사"),
+        ]
+        _run_main(monkeypatch, facts, {_nfc("소속")})
+        out = capsys.readouterr().out
+        assert "1 subject(s)" in out
+        assert "박영희" not in out
+
+
 class TestRelationSpellingIsDisclosed:
     """One contradiction reported as N lines must say why there are N.
 
