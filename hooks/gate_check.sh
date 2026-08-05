@@ -561,11 +561,27 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 #     mode of losing this line is "the prefilter stops OPTIMISING", never "the
 #     prefilter stops GUARDING" — strictly more conservative, only slower, and
 #     therefore invisible to a suite that reads exit codes.
+#   - Guard 7's BSD `stat -f %l` fallback is unpinned for the same "safe
+#     direction" reason: remove it and, on a host whose stat rejects the GNU
+#     `-c %h` form, the query simply fails, the stat-failure arm below returns 1,
+#     and the call goes to the matcher. Slower, never leakier — so an exit-code
+#     suite cannot see it (measured: fully green without it). Note this is the
+#     FALLBACK only. The stat-failure ARM it falls into is a different matter
+#     and IS pinned, by CASE 39b, because neutering that one runs off the end of
+#     the function into `return 0` and short-circuits a write to a hard link.
 #   - Guard 4 is not a line of code at all; it is the decision NOT to strip
 #     trailing separators. It is pinned in the direction that can do damage —
 #     CASE 46b goes red if a strip is reintroduced anywhere AFTER the -L test —
 #     but not in the other, because a strip placed before -L changes no verdict
 #     and only buys the short-circuit back for directory-shaped names.
+#
+# What those exceptions have in common is the test to apply to any future one:
+# removing them makes the prefilter less OPTIMISING, never less GUARDING. A line
+# that fails the other way does not belong on this list however hard it is to
+# reach — it needs a case. That is the difference between guard 7's `stat -f`
+# fallback, which is a bullet above, and guard 7's stat-failure ARM, which is
+# CASE 39b: the first sends more calls to the matcher, the second lets a call
+# run off the end of this function into `return 0`.
 #
 # The rule the guards exist to protect is: canon(target) can only equal
 # canon(engine) if their BASENAMES agree, because realpath preserves the final

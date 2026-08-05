@@ -1163,6 +1163,71 @@ run_payload_case "hard link to accepted.dl — deny (same inode)" \
 rm -rf "$KB_LINK"
 
 # ---------------------------------------------------------------------------
+# CASE 39b: WHEN `stat` CANNOT ANSWER, GUARD 7 MUST FALL THROUGH — DENY.
+#
+# Guard 7 asks the link count so a second name for the engine input's inode
+# cannot short-circuit. It has two arms: a count that is not 1 falls through,
+# and — reached when BOTH `stat -c %h` and `stat -f %l` fail — an "I could not
+# ask" arm that also falls through. CASE 39 above pins the first arm. The second
+# was unpinned, and it is NOT the safe direction: turn it into a no-op and a
+# path we cannot stat runs off the end of the function into `return 0`, which
+# short-circuits a write to a hard link of a stale engine input.
+#
+# THE SHIM ONLY BREAKS THE LINK-COUNT QUERY. A `stat` that fails outright would
+# also break _mtime() (fail-closed branch 3), and the case would then pass
+# through a completely different branch — verified: with an always-fail stat,
+# HEAD denies with "could not read mtime", not the freshness deny. Failing only
+# on the %h/%l formats keeps the deny the genuine stale-report deny and leaves
+# guard 7's stat-failure arm as the only thing under test. The matcher is
+# unaffected either way; it uses Python's os.stat, not this binary.
+# ---------------------------------------------------------------------------
+KB_STATFAIL="$(mktemp -d)"
+kb_stale "$KB_STATFAIL"
+ln "$KB_STATFAIL/facts/accepted.dl" "$KB_STATFAIL/facts/hardlink.dl"
+
+STAT_SHIM="$(mktemp -d)"
+REAL_STAT="$(command -v stat)"
+cat > "$STAT_SHIM/stat" <<SH
+#!/bin/sh
+# Fail exactly the two link-count formats the prefilter uses; delegate the rest
+# (notably _mtime's %Y/%m) to the genuine stat.
+for a in "\$@"; do
+  case "\$a" in %h|%l) exit 1 ;; esac
+done
+exec "$REAL_STAT" "\$@"
+SH
+chmod +x "$STAT_SHIM/stat"
+
+statfail_exit=0
+PATH="$STAT_SHIM:$PATH" FACTLOG_ROOT="$KB_STATFAIL" bash "$GATE" \
+  <<< "$(envelope Write "$KB_STATFAIL/facts/hardlink.dl")" >/dev/null 2>&1 || statfail_exit=$?
+if [ "$statfail_exit" -eq 2 ]; then
+  echo "PASS: link count unavailable — guard 7 falls through, hard link still denied (exit $statfail_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: link count unavailable — expected deny (exit 2), got $statfail_exit"
+  fail=$((fail + 1))
+fi
+
+# CONTROL: the same shim on a target that is NOT the engine input must still
+# allow, so the case above is not passing because a broken stat denies
+# everything. The target has to EXIST for this to be worth anything — guard 7
+# sits behind `[ -e "$path" ]`, so a non-existent file skips the stat entirely
+# and would never reach the arm under test. Passes before and after the fix.
+touch_file "$KB_STATFAIL/facts/other.dl"
+statfail_allow_exit=0
+PATH="$STAT_SHIM:$PATH" FACTLOG_ROOT="$KB_STATFAIL" bash "$GATE" \
+  <<< "$(envelope Write "$KB_STATFAIL/facts/other.dl")" >/dev/null 2>&1 || statfail_allow_exit=$?
+if [ "$statfail_allow_exit" -eq 0 ]; then
+  echo "PASS: control: link count unavailable on a non-engine-input target — allow (exit $statfail_allow_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: control: link count unavailable on a non-engine-input target — expected allow (exit 0), got $statfail_allow_exit"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_STATFAIL" "$STAT_SHIM"
+
+# ---------------------------------------------------------------------------
 # CASES 40-41: CASE-FOLDING FILESYSTEM.
 #
 # On APFS (macOS default) and NTFS, facts/Accepted.dl IS facts/accepted.dl —
@@ -1491,13 +1556,16 @@ run_payload_case "control: real engine input in the same KB — deny" \
 # The mirror of the case above. `<KB>/facts/link\` is a single component whose
 # last character happens to be a backslash; realpath resolves it as-is and lands
 # on the engine input. The prefilter strips no trailing separator at all, so
-# both of these reach the matcher — but they get there by different routes.
-# -L catches the symlink on the name as written. The hard link survives -L and
-# is then covered REDUNDANTLY: at HEAD the backslash split empties its basename
-# so guard 5's `''` arm fires first, and with the split removed guard 7's
-# link-count check catches it instead. Neither is pinned by this case, because
-# either one alone is enough — removing BOTH is what leaks it (measured: exit 0,
-# against exit 2 at HEAD and with either single removal). See the stated
+# both of these reach the matcher — and BOTH are covered redundantly, by two
+# guards each, so this case pins none of the four lines individually.
+#   symlink   `link\`: at HEAD guard 3's -L fires first; remove -L and the
+#             backslash split empties the basename so guard 5's `''` arm takes
+#             it instead.
+#   hard link `hl\`:   at HEAD the split empties the basename and guard 5 fires
+#             first; remove the split and guard 7's link count takes it instead.
+# In each row either guard alone suffices, so a single removal still denies —
+# removing BOTH members of a row is what leaks it (measured per row: exit 2 at
+# HEAD and at either single removal, exit 0 with both gone). See the stated
 # exception in gate_check.sh for why the split is asserted by construction.
 #
 # This is the case that kills a trailing-separator strip that also removed `\`:
