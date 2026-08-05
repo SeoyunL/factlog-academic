@@ -1802,9 +1802,20 @@ def cmd_status(args: argparse.Namespace) -> int:
             # there): the class must match the one `common` currently exports.
             from factlog.common import FactlogError
 
+            # OSError/ValueError too, and not only for tidiness: typed_relations()
+            # reads logic-policy.dl to compute reserved names, so a policy file
+            # that is not UTF-8 (cp949 is realistic here) raises
+            # UnicodeDecodeError — a ValueError, which main()'s handler re-raises
+            # as a raw traceback. This call site is the only thing that made
+            # `status` decode that file at all.
+            #
+            # Widened HERE and not in common._try: every other caller of
+            # typed_relations() (finalize, check_conflicts, vocab) must keep
+            # failing loudly on an unreadable policy. Only `status` trades the
+            # warning for finishing the report.
             try:
                 typed = ctx.typed_relations()
-            except FactlogError:
+            except (FactlogError, OSError, ValueError):
                 typed = {}
             for relation, hits in flagged.items():
                 # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
