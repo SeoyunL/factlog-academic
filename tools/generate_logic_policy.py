@@ -40,7 +40,7 @@ PREDICATE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 RELATION_RE = re.compile(r"^[^\s\"`(),.]+$")
 # "canonical" is cheap insurance: it is unreachable via infer_fixture_predicate
 # today and any canonical/3 head is already rejected at load by
-# common._assert_no_canonical_head, so adding it here is not load-bearing. It is
+# common._assert_no_reserved_head, so adding it here is not load-bearing. It is
 # listed anyway so a bullet can never generate a canonical(...) HEAD if predicate
 # inference ever grows a path that returns "canonical".
 RESERVED_PREDICATES = {

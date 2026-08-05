@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for #227 COMMIT 3: reserved-predicate guard for canonical head rules.
 
-- _assert_no_canonical_head raises FactlogError on a canonical rule head.
-- _assert_no_canonical_head raises on a bare canonical fact line.
-- _assert_no_canonical_head is SILENT when canonical appears only in a rule body.
+- _assert_no_reserved_head raises FactlogError on a canonical rule head.
+- _assert_no_reserved_head raises on a bare canonical fact line.
+- _assert_no_reserved_head is SILENT when canonical appears only in a rule body.
 - _load_logic_policy_from raises when extra.dl contains a canonical head.
 - _load_logic_policy_from is silent when extra.dl uses canonical only in body.
+
+#329 round 2 extends the same guard to attr_rel and entity_node — see
+TestReservedAttributePredicates for what each one does when it is NOT caught.
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ import factlog.common as fcommon
 
 
 # ---------------------------------------------------------------------------
-# _assert_no_canonical_head — direct unit tests
+# _assert_no_reserved_head — direct unit tests
 # ---------------------------------------------------------------------------
 
 class TestAssertNoCanonicalHead:
@@ -31,13 +34,13 @@ class TestAssertNoCanonicalHead:
             canonical(X, "결론", O) :- relation(X, "concludes", O).
         """)
         with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_rejects_bare_canonical_fact(self):
         """A bare canonical fact line (no neck) must raise FactlogError."""
         policy = 'canonical("doc1", "결론", "true").\n'
         with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_allows_canonical_in_rule_body(self):
         """canonical appearing only in the rule body (after :-) must NOT raise."""
@@ -48,16 +51,16 @@ class TestAssertNoCanonicalHead:
               canonical(X, "철회상태", _).
         """)
         # Must not raise
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
     def test_allows_canonical_body_single_line(self):
         """Single-line rule with canonical only after :- must NOT raise."""
         policy = '.decl c(x: symbol, r: symbol)\nc(X, "r") :- canonical(X, "rel", _).\n'
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
     def test_empty_policy_is_allowed(self):
         """Empty policy text must not raise."""
-        fcommon._assert_no_canonical_head("")
+        fcommon._assert_no_reserved_head("")
 
     def test_rejects_bare_canonical_fact_after_rule_end_same_line(self):
         """A bare canonical fact sharing a physical line with a preceding rule's
@@ -65,42 +68,42 @@ class TestAssertNoCanonicalHead:
         through as an in-body reference (#261)."""
         policy = 'foo(X, "r") :-\n  relation(X, "a", _). canonical(X, "b", "z").\n'
         with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_rejects_canonical_head_after_rule_end_no_space(self):
         """Same evasion with no whitespace after the terminator."""
         policy = 'foo(X, "r") :- relation(X, "a", _).canonical(Y, "b", Z) :- bar(Y, Z).\n'
         with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_allows_two_statements_one_line_both_legal(self):
         """Two statements on one physical line, neither heading canonical, must
         NOT raise (no false positive from the finer splitting)."""
         policy = 'foo(X, "r") :- canonical(X, "a", _). bar("y", "z").\n'
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
     def test_comment_only_is_allowed(self):
         """Comment-only lines must not raise."""
         policy = "// canonical(X, Y, Z) :- something(X).\n# also a comment\n"
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
     def test_rejects_canonical_head_before_neck_on_same_line(self):
         """canonical(...) appearing before :- on the same line is a head."""
         policy = 'canonical(X, "r", O) :- relation(X, "r", O).\n'
         with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_error_message_mentions_relation_aliases(self):
         """Error message should mention relation-aliases.md to guide the author."""
         policy = 'canonical("A", "b", "C").\n'
         with pytest.raises(fcommon.FactlogError, match="relation-aliases.md"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_error_message_mentions_rule_bodies(self):
         """Error message should tell the author canonical may appear only in bodies."""
         policy = 'canonical(X, "r", O) :- relation(X, "r", O).\n'
         with pytest.raises(fcommon.FactlogError, match="rule bodies"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_rejects_canonical_head_with_space_before_paren(self):
         """`canonical (X, ...) :- ...` (space before the paren) is still a head —
@@ -108,37 +111,37 @@ class TestAssertNoCanonicalHead:
         with rc=0. Head tokenization tolerates the whitespace."""
         policy = 'canonical (X, "r", O) :- relation(X, "r", O).\n'
         with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_rejects_bare_canonical_fact_with_space_before_paren(self):
         """A bare `canonical (...)` fact with a space before the paren is a head."""
         policy = 'canonical ("doc1", "결론", "true").\n'
         with pytest.raises(fcommon.FactlogError, match="reserved engine EDB predicate"):
-            fcommon._assert_no_canonical_head(policy)
+            fcommon._assert_no_reserved_head(policy)
 
     def test_allows_not_canonical_head(self):
         """A user predicate that merely CONTAINS the reserved name — `not_canonical`
         — must NOT be rejected as a canonical head. A substring match flagged it,
         so a legitimate policy could no longer run `factlog check`."""
         policy = 'not_canonical(X, "r") :- relation(X, "r", _).\n'
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
     def test_allows_not_canonical_bare_fact(self):
         """A bare `not_canonical(...)` fact must not be mistaken for a canonical head."""
         policy = 'not_canonical("A", "b").\n'
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
     def test_allows_not_canonical_in_body(self):
         """`not_canonical` used only in a rule body must be allowed."""
         policy = 'conflict(X, "r") :- not_canonical(X, "r", _).\n'
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
     def test_canonical_in_string_literal_not_flagged(self):
         """A string literal containing 'canonical(' must not trigger the guard."""
         # The word "canonical" inside a quoted string is not a predicate call.
         policy = '.decl conflict(entity: symbol, reason: symbol)\nconflict(X, "canonical(X)") :- relation(X, "rel", _).\n'
         # "canonical(" appears only inside a quoted string after :-; guard must pass.
-        fcommon._assert_no_canonical_head(policy)
+        fcommon._assert_no_reserved_head(policy)
 
 
 # ---------------------------------------------------------------------------
@@ -204,3 +207,82 @@ class TestLoadLogicPolicyCanonicalHeadGuard:
         dl = _make_kb(tmp_path, dl_text=dl_text, extra_text=extra_text)
         result = fcommon._load_logic_policy_from(dl)
         assert "canonical" in result
+
+
+# ---------------------------------------------------------------------------
+# #329 round 2 — the same guard for attr_rel / entity_node
+# ---------------------------------------------------------------------------
+
+class TestReservedAttributePredicates:
+    """attr_rel and entity_node are engine-owned exactly as canonical is, and the
+    guard covered only canonical. Measured on the PR head, in a real KB with
+    `정식_운영` declared an attribute relation:
+
+    * one line in logic-policy.extra.dl —
+      ``attr_rel(R) :- relation(S, R, O), R = "존재하지않음".`` — restored
+      ``engine path/2 : [('갑봇','2030.1'), ('갑봇','을서비스'), ('을서비스','2030.1')]``
+      against ``renderer pairs: [('갑봇','을서비스')]`` with rc=0 and no error:
+      the engine/renderer divergence #329 exists to remove, silently back.
+    * ``.decl entity_node(entity: symbol, reason: symbol)`` plus a rule — the
+      standard shape of a policy predicate in this repo, so an existing KB can
+      already be named that — died with a bare
+      ``pyrewire._core.errors.ExecError: execution error`` traceback (SIGSEGV in
+      an isolated probe with a matching fact). It works on main.
+
+    The control for both is the canonical case above, which has always failed loudly.
+    """
+
+    def test_rejects_attr_rel_head_in_extra_dl(self, tmp_path):
+        # The exact line measured to silently revert the #329 filter.
+        dl = _make_kb(
+            tmp_path,
+            dl_text="// generated\n.decl conflict(entity: symbol, reason: symbol)\n",
+            extra_text='attr_rel(R) :- relation(S, R, O), R = "존재하지않음".\n',
+        )
+        with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
+            fcommon._load_logic_policy_from(dl)
+
+    def test_rejects_bare_attr_rel_fact(self):
+        with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
+            fcommon._assert_no_reserved_head('attr_rel("정식_운영").\n')
+
+    def test_rejects_entity_node_head(self):
+        # Adds rows to the derived predicate -> literals return to the graph.
+        with pytest.raises(fcommon.FactlogError, match="entity_node is a reserved engine"):
+            fcommon._assert_no_reserved_head("entity_node(O) :- relation(S, R, O).\n")
+
+    def test_rejects_entity_node_redeclaration_without_any_rule(self, tmp_path):
+        # A .decl alone already changes the arity the program compiles against;
+        # this is the shape that produced the raw ExecError traceback.
+        dl = _make_kb(
+            tmp_path,
+            dl_text="// generated\n.decl entity_node(entity: symbol, reason: symbol)\n",
+        )
+        with pytest.raises(fcommon.FactlogError, match="entity_node is a reserved engine"):
+            fcommon._load_logic_policy_from(dl)
+
+    def test_rejects_attr_rel_redeclaration(self):
+        with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
+            fcommon._assert_no_reserved_head(".decl attr_rel(rel: symbol)\n")
+
+    def test_allows_both_in_rule_bodies(self):
+        # CONTROL — passes before and after. Reading them is the point of #227's
+        # body allowance; only a head or a re-.decl corrupts the program.
+        policy = textwrap.dedent("""\
+            .decl literal_rel(entity: symbol, reason: symbol)
+            literal_rel(R, "attribute") :- attr_rel(R), entity_node(R).
+        """)
+        fcommon._assert_no_reserved_head(policy)
+
+    def test_allows_a_user_predicate_that_merely_contains_the_name(self):
+        # CONTROL — passes before and after. Pins the both-directions requirement
+        # the canonical guard already carries, now for the widened name set.
+        fcommon._assert_no_reserved_head("my_entity_node(X) :- relation(X, R, O).\n")
+        fcommon._assert_no_reserved_head("attr_rel_audit(R) :- relation(S, R, O).\n")
+
+    def test_message_names_the_identifier_and_suggests_a_rename(self):
+        with pytest.raises(fcommon.FactlogError) as excinfo:
+            fcommon._assert_no_reserved_head("entity_node(O) :- relation(S, R, O).\n")
+        message = str(excinfo.value)
+        assert "entity_node" in message
+        assert "my_entity_node" in message  # actionable alternative

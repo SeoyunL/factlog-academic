@@ -609,11 +609,12 @@ def _load_logic_policy_from(logic_policy_dl: Path) -> str:
             # Avoid a leading newline when the base is empty (no compiled
             # logic-policy.dl) so the engine program text stays clean.
             text = (text + "\n" + extra_text) if text else extra_text
-    # Guard: canonical is a reserved EDB predicate; a head occurrence in policy
-    # text silently corrupts the engine program (pyrewire treats canonical as IDB
-    # and drops all compile-emitted EDB atoms). Fail loud here, after the full
-    # policy text (base + extra.dl) is assembled, so the check covers both files.
-    _assert_no_canonical_head(text)
+    # Guard: canonical/attr_rel/entity_node are engine-owned predicates; a head or
+    # a re-.decl in policy text silently corrupts the engine program (pyrewire
+    # treats the EDB as IDB and drops the injected atoms) or kills it outright.
+    # Fail loud here, after the full policy text (base + extra.dl) is assembled,
+    # so the check covers both files.
+    _assert_no_reserved_head(text)
     return text
 
 
@@ -1079,46 +1080,80 @@ def _assert_no_alias_collision(specs: dict[str, TypedRelSpec], program_text: str
             )
 
 
-def _assert_no_canonical_head(policy_text: str) -> None:
-    """Raise FactlogError if the policy text contains a canonical/3 rule head or fact.
+# Engine predicate names a hand-authored policy may not HEAD or re-``.decl``.
+# Each is owned by the engine program: canonical and attr_rel are EDB filled from
+# outside the policy, entity_node is derived from them. Value = the "why" the
+# error message shows. See _assert_no_reserved_head for what each failure looks
+# like when it is NOT caught.
+_RESERVED_POLICY_HEADS = {
+    "canonical": "a reserved engine EDB predicate (populated from relation-aliases.md)",
+    "attr_rel": "a reserved engine EDB predicate (populated from policy/attribute-relations.md)",
+    "entity_node": (
+        "a reserved engine predicate (derived from relation/3 and attr_rel/1; it is "
+        "what keeps a literal value out of the entity graph)"
+    ),
+}
 
-    ``canonical`` is a reserved engine EDB predicate emitted by compile_facts into
-    accepted.dl and declared in WIRELOG_PROGRAM.  It may appear freely in rule
-    *bodies* (right of ``:-``) — that is the whole point of #227.  But a rule
-    that *heads* ``canonical`` (left of ``:-``, or a bare canonical fact line)
-    makes pyrewire treat canonical as IDB and silently drops every compile-emitted
-    EDB atom, producing wrong answers with rc=0.
+
+def _reserved_head_error(name: str) -> FactlogError:
+    return FactlogError(
+        f"{name} is {_RESERVED_POLICY_HEADS[name]}; it may appear only in rule "
+        "bodies, not as a rule head, a bare fact, or a .decl in "
+        f"logic-policy(.extra).dl. Rename your predicate (e.g. my_{name})."
+    )
+
+
+def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None) -> None:
+    """Raise FactlogError if the policy text HEADS or re-``.decl``s a reserved
+    engine predicate (*reserved*, default :data:`_RESERVED_POLICY_HEADS`).
+
+    Every name in that set is declared by WIRELOG_PROGRAM and owned by the engine.
+    Each fails differently, and none of them fails usefully on its own:
+
+    * ``canonical`` is EDB emitted by compile_facts into accepted.dl.  A head makes
+      pyrewire treat it as IDB and silently drop every compile-emitted EDB atom —
+      wrong answers with rc=0 (#227).
+    * ``attr_rel`` is EDB emitted from policy/attribute-relations.md.  Same failure
+      shape, and its consequence is that declared literals silently return to the
+      entity graph: measured, one ``attr_rel(R) :- relation(S, R, O), R = "…".``
+      line put engine path/2 back to ``[('갑봇','2030.1'), …]`` while the python
+      renderer still answered ``[('갑봇','을서비스')]``, rc=0 — exactly the
+      engine/renderer divergence #329 removed (#329 round 2).
+    * ``entity_node`` is derived (``edge`` is gated on it).  A policy head ADDS
+      rows to it and puts literals back in the graph; a ``.decl`` at another arity
+      — ``pred(entity, reason)``, this repo's standard policy-predicate shape — made
+      pyrewire raise a bare ``ExecError: execution error`` traceback, and with a
+      matching fact present it died with SIGSEGV.
+
+    They may appear freely in rule *bodies* (right of ``:-``) — that is the whole
+    point of #227.
 
     Detection strategy: split the policy into logical STATEMENTS (a clause up to its
     terminating ``.``), stripping quoted strings first so ``"canonical("`` inside a
     reason literal is not mistaken for a predicate call.  Then tokenize each
     statement's HEAD — the predicate name left of ``:-``, or the whole clause for a
-    bare fact — and reject it only when that name is exactly ``canonical``.  A
+    bare fact — and reject it only when that name is exactly a reserved one.  A
     substring search was wrong in BOTH directions and this replaces it: ``canonical
     (X, ...)`` with a space before the paren slipped past ``find("canonical(")`` (a
     head evaded the guard, rc=0), while ``not_canonical(X, ...)`` — a user predicate
     that merely CONTAINS the reserved name — was rejected as a head.
 
-    The ``.decl canonical`` in WIRELOG_PROGRAM is never passed as *policy_text*, but
-    a hand-authored ``.decl canonical(...)`` in the policy re-declares the engine EDB
+    The ``.decl``s in WIRELOG_PROGRAM are never passed as *policy_text*, but a
+    hand-authored ``.decl canonical(...)`` in the policy re-declares the engine EDB
     and is still rejected (checked, then stripped, before statement splitting because
     a ``.decl`` directive carries no clause-terminating dot and would otherwise merge
     into — and mask — the head of the statement that follows it).
 
     Raises :class:`FactlogError` on first offending line with an actionable message.
     """
-    _ERR = (
-        "canonical is a reserved engine EDB predicate (populated from "
-        "relation-aliases.md); it may appear only in rule bodies, not as a "
-        "rule head/fact in logic-policy(.extra).dl"
-    )
+    names = set(_RESERVED_POLICY_HEADS) if reserved is None else reserved
     # Drop comment lines, strip quoted literals, then split into logical
     # STATEMENTS on clause-terminating '.' rather than per physical line. A period
     # terminates a clause unless it opens a '.decl'-style directive (dot followed
     # by a letter at a token start) or sits inside a float (dot between digits).
-    # Per-line tracking mis-classified a canonical head/fact that shares a physical
+    # Per-line tracking mis-classified a reserved head/fact that shares a physical
     # line with a preceding rule's terminator as an in-body reference (#261); a
-    # statement is a full clause, so canonical-left-of-neck (or no neck at all)
+    # statement is a full clause, so reserved-name-left-of-neck (or no neck at all)
     # is unambiguously a head/fact.
     kept = [
         line
@@ -1128,12 +1163,13 @@ def _assert_no_canonical_head(policy_text: str) -> None:
     bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
     # A `.decl <name>(...)` directive has no clause-terminating '.', so it merges into
     # the statement that follows it and would hide that statement's real head from the
-    # tokenizer below. Reject a `.decl canonical(...)` re-declaration first (preserving
-    # the prior guard's behavior), then strip every `.decl ...(...)` so the head
-    # tokenizer sees only rule heads and bare facts.
+    # tokenizer below. Reject a reserved re-declaration first, then strip every
+    # `.decl ...(...)` so the head tokenizer sees only rule heads and bare facts. The
+    # .decl check is not redundant with the head check: `.decl entity_node(a, b)` alone
+    # — no rule at all — already changes the arity the engine program compiles against.
     for name in re.findall(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", bare):
-        if name == "canonical":
-            raise FactlogError(_ERR)
+        if name in names:
+            raise _reserved_head_error(name)
     bare = re.sub(r"\.decl\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", bare)
 
     for statement in _split_policy_statements(bare):
@@ -1145,10 +1181,10 @@ def _assert_no_canonical_head(policy_text: str) -> None:
         # name rules out `not_canonical`.
         head = statement.split(":-", 1)[0]
         m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", head)
-        if m and m.group(1) == "canonical":
-            # A canonical head or bare fact → reject.
-            raise FactlogError(_ERR)
-        # canonical to the right of the neck → body reference → allowed.
+        if m and m.group(1) in names:
+            # A reserved head or bare fact → reject.
+            raise _reserved_head_error(m.group(1))
+        # A reserved name to the right of the neck → body reference → allowed.
 
 
 def _split_policy_statements(text: str) -> list[str]:
@@ -1156,7 +1192,7 @@ def _split_policy_statements(text: str) -> list[str]:
 
     A '.' ends a clause EXCEPT when it opens a directive (a '.decl'-style dot at a
     token start: preceded by whitespace/start and followed by a letter) or sits
-    inside a float (a dot between two digits). This lets `_assert_no_canonical_head`
+    inside a float (a dot between two digits). This lets `_assert_no_reserved_head`
     see each head/fact/rule as one unit even when several share a physical line."""
     statements: list[str] = []
     buf: list[str] = []
