@@ -266,3 +266,37 @@ class TestAttributeRelationProgramText:
         # that rejects the WHOLE program (relation/3 included: a dead KB).
         emitted = fl_common.attribute_relation_program({'q"uote'})
         assert emitted == '\nattr_rel("q\\"uote").\n'
+
+
+class TestDocstringQuotesTheRealProgram:
+    """``_entity_nodes``' docstring reproduces the two ``entity_node`` rules from
+    WIRELOG_PROGRAM verbatim, and nothing tied the two copies together.
+
+    A reviewer editing the docstring copy — believing they were mutating the
+    engine — left the whole suite green and drew a false conclusion about the
+    parity guard from it. The duplication earns its place (a reader of
+    ``_entity_nodes`` needs the rule in front of them), so tie it instead of
+    deleting it: the quoted rules must be exactly the entity_node rules the
+    program actually contains, in both directions.
+    """
+
+    @staticmethod
+    def _entity_node_rules(text: str) -> set[str]:
+        return {
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("entity_node(")
+        }
+
+    def test_docstring_and_program_state_the_same_rules(self):
+        quoted = self._entity_node_rules(fl_common._entity_nodes.__doc__)
+        emitted = self._entity_node_rules(fl_common.WIRELOG_PROGRAM)
+        assert quoted == emitted
+
+    def test_the_comparison_is_not_vacuous(self):
+        # Both sides must actually carry the two rules — an empty == empty pass
+        # would make the pin above worthless.
+        assert self._entity_node_rules(fl_common.WIRELOG_PROGRAM) == {
+            "entity_node(S) :- relation(S, R, O).",
+            "entity_node(O) :- relation(S, R, O), !attr_rel(R).",
+        }
