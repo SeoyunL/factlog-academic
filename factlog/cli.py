@@ -1808,8 +1808,20 @@ def cmd_status(args: argparse.Namespace) -> int:
                 typed = {}
             for relation, hits in flagged.items():
                 # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
-                if typed.get(unicodedata.normalize("NFC", relation)) is not None:
-                    odd.update(literal_types.mark_non_ascii_digits(o) for o in hits)
+                spec = typed.get(unicodedata.normalize("NFC", relation))
+                if spec is None:
+                    continue
+                # Carrying non-ASCII digits is not the same as failing to parse: a
+                # declared UNIT NAME may carry them (`amount(100,"억１")` under a
+                # declared `억１` unit) and still normalize to a scalar, which the
+                # engine reads fine. Ask the normalizer, so this line and
+                # check_conflicts' note fire on the one predicate that decides
+                # raw-vs-scalar in the first place.
+                odd.update(
+                    literal_types.mark_non_ascii_digits(o)
+                    for o in hits
+                    if literal_types.normalize(spec.type, o, spec.units) is None
+                )
         if odd:
             # A set, so one offender shared by several conflict groups is named once.
             print(

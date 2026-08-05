@@ -106,6 +106,23 @@ else
   ok "#331: status does not flag an untyped relation"
 fi
 
+# Negative control 1b: non-ASCII digits in the declared UNIT NAME. The value
+# parses to a scalar, so calling it out as unreadable would be false — the flag
+# has to ask the normalizer, not just the digit predicate.
+printf '# single-valued\n- 매출\n' > "$KB/policy/single-valued.md"
+printf -- '- `매출` : amount as revenue_amt (억１=100000000)\n' > "$KB/policy/typed-relations.md"
+printf '%s\n%s\n%s\n' "$H" \
+  '갑사,매출,"amount(100,""억１"")",sources/a.md,confirmed,0.9,' \
+  '갑사,매출,"amount(200,""억１"")",sources/a.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "#331: unit-name conflict still counted" || bad "#331: unit-name conflict not counted: $(printf '%s' "$out"|grep conflicts)"
+if printf '%s' "$out" | grep -qF "non-ASCII digits"; then
+  bad "#331: status flags a value that PARSES (the unit name carries the digits)"
+else
+  ok "#331: status does not flag a value whose non-ASCII digits are in the unit name"
+fi
+rm -f "$KB/policy/typed-relations.md"
+
 # Negative control 2: restore the ASCII-only conflict, which must NOT be flagged —
 # otherwise the two assertions above would pass against an unconditional warning.
 printf '# single-valued\n- 주속성\n' > "$KB/policy/single-valued.md"

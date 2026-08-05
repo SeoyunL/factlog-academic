@@ -206,6 +206,14 @@ def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[
     outdated row is exactly the right fix. Every clause of this note would be
     false there, and it would steer the user away from the one action that works.
 
+    **Carrying non-ASCII digits is not the same as failing to parse**, so the
+    normalizer decides, not the digit predicate alone. The unit group is outside
+    the digit policy on purpose and ``_parse_amount_units`` does not validate a
+    unit NAME, so a declared unit may carry them: ``amount(100,"억１")`` under a
+    declared ``억１`` unit normalizes to a scalar and ``_group_key`` keys it
+    ``("scalar", …)``. Both leading clauses of the note would be false there.
+    Asking ``normalize`` converges this note and ``_group_key`` on one predicate.
+
     Two things the wording deliberately does NOT claim:
 
     * that supersession cannot resolve the conflict — superseding the offending
@@ -218,7 +226,12 @@ def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[
     Pure; never raises."""
     if spec is None:
         return None
-    offenders = [o for o in objects if literal_types.has_non_ascii_digits(o)]
+    offenders = [
+        o
+        for o in objects
+        if literal_types.has_non_ascii_digits(o)
+        and literal_types.normalize(spec.type, o, spec.units) is None
+    ]
     if not offenders:
         return None
     shown = ", ".join(f"'{literal_types.mark_non_ascii_digits(o)}'" for o in offenders)

@@ -80,6 +80,29 @@ class TestAsciiCleanGroupsGetNoNote:
     def test_empty_group_gets_no_note(self):
         assert check_conflicts.non_ascii_digit_note([], _AMOUNT_SPEC) is None
 
+    def test_non_ascii_digits_in_the_UNIT_NAME_get_no_note(self):
+        # The unit group is deliberately outside the digit policy, and
+        # _parse_amount_units does not validate the unit NAME, so a declared unit
+        # may carry non-ASCII digits. Such a value parses to a scalar and
+        # _group_key keys it ("scalar", …) — every clause of the note ("does not
+        # parse", "compared here as a raw string") would be false. Carrying
+        # non-ASCII digits is not the same as failing to parse.
+        spec = common.TypedRelSpec("amount", "revenue", {"억１": 100000000})
+        objects = ['amount(100,"억１")', 'amount(200,"억１")']
+        assert all(literal_types.has_non_ascii_digits(o) for o in objects)
+        assert literal_types.normalize(spec.type, objects[0], spec.units) == 10000000000
+        assert check_conflicts._group_key(objects[0], spec) == ("scalar", 10000000000)
+        assert check_conflicts.non_ascii_digit_note(objects, spec) is None
+
+    def test_only_the_values_that_really_fail_to_parse_are_named(self):
+        # Mixed group: the unit-name value parses, the numeral one does not. The
+        # note must name the second only — naming both would restate the false
+        # claim about the first.
+        spec = common.TypedRelSpec("amount", "revenue", {"억１": 100000000})
+        note = "\n".join(check_conflicts.non_ascii_digit_note(['amount(100,"억１")', "２００억"], spec))
+        assert "\\uff12\\uff10\\uff10억" in note
+        assert "억\\uff11" not in note
+
 
 class TestTypedNonAsciiDigitGroupsGetTheNote:
     def test_note_names_the_offender_as_escapes(self):
