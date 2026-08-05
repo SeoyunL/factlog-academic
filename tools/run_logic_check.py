@@ -317,7 +317,13 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
                 if (not is_quoted_string(subj_q) or f["subject"] == subj)
                 and (not is_quoted_string(rel_q) or f["relation"] == rel)
             }
-            results.append(f"count results: {len(objects)} (distinct objects)")
+            # Echo the query, as policy_result_line does (17cf7d3): a malformed
+            # line now drops out of this list, so 3 query lines can leave 2 result
+            # lines and positional correspondence silently breaks. Unlike the
+            # policy echo this is unconditional — count has no "Policy evaluation:"
+            # extent line for a variable-only query to be read against, and a
+            # dropped line misaligns every shape equally.
+            results.append(f"count results (query: {line}): {len(objects)} (distinct objects)")
         elif predicate == "review_required":
             constants = quoted_constants(line)
             question = constants[0] if constants else "(missing question)"
