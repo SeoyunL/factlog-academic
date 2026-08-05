@@ -16,8 +16,8 @@ with ``FACTLOG_ROOT``: a test that shells out does not inherit this process's
 rewrites the active-KB config on every run. ``tests/unit/test_atomic_accepted_write.py``
 does exactly that, so without this pin one ``pytest`` run rewrites the
 developer's real ``~/.config/factlog/config.json`` to a pytest temp dir that
-ceases to exist — leaving their ``factlog`` install pointed at nothing. Most
-``tests/*.sh`` harnesses isolate it per-harness (see the ``#62`` comments); the
+ceases to exist — leaving their ``factlog`` install pointed at nothing. Every
+``tests/*.sh`` harness isolates it per-harness (see the ``#62`` comments); the
 Python layer was the gap.
 
 Note the asymmetry between the two: ``FACTLOG_ROOT`` defers to an inherited

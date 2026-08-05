@@ -12,7 +12,7 @@ no longer exists. Nothing fails, and they find out the next time they run
 Asserting the *environment* rather than the writing test's behaviour is
 deliberate: it holds no matter which test shells out, including ones added
 later, and — via the subprocess probe below — including ones added outside
-``tests/unit/``. Most ``tests/*.sh`` harnesses isolate this per-harness (see
+``tests/unit/``. Every ``tests/*.sh`` harness isolates this per-harness (see
 the ``#62`` comments); the Python layer is the one that was missing it.
 """
 from __future__ import annotations
