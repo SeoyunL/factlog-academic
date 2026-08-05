@@ -575,13 +575,24 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 #     but not in the other, because a strip placed before -L changes no verdict
 #     and only buys the short-circuit back for directory-shaped names.
 #
-# What those exceptions have in common is the test to apply to any future one:
-# removing them makes the prefilter less OPTIMISING, never less GUARDING. A line
-# that fails the other way does not belong on this list however hard it is to
-# reach — it needs a case. That is the difference between guard 7's `stat -f`
-# fallback, which is a bullet above, and guard 7's stat-failure ARM, which is
-# CASE 39b: the first sends more calls to the matcher, the second lets a call
-# run off the end of this function into `return 0`.
+# TWO of the three are here because removing them is less OPTIMISING, never less
+# GUARDING. That is the test to apply to any future exception, and it is the one
+# that would have caught guard 7's stat-failure arm: compare the `stat -f`
+# fallback, which merely sends more calls to the matcher, against the ARM it
+# falls into, which lets a call run off the end of this function into
+# `return 0`. The first is a bullet above; the second is CASE 39b.
+#
+# The backslash split does NOT fit that test, and its bullet deliberately does
+# not claim it. It is here for the other reason — the direction it serves cannot
+# be reached from this host at all, so it is asserted by construction. On a Git
+# Bash host, removing it WOULD be less guarding: with os.path as ntpath,
+# `C:\kb\facts\accepted.dl` canonicalises to the engine input, but with no split
+# the whole string survives as the basename, matches neither engine name, and
+# short-circuits.
+#
+# Either justification has to be stated explicitly, and there are only those
+# two. "Hard to reach" on its own is NOT one of them — that is what the
+# stat-failure arm looked like, and it failed open.
 #
 # The rule the guards exist to protect is: canon(target) can only equal
 # canon(engine) if their BASENAMES agree, because realpath preserves the final
