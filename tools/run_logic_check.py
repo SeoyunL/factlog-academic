@@ -21,6 +21,7 @@ from common import (
     run_wirelog,
     arg_value,
     is_quoted_string,
+    query_arity_error,
     query_args,
     query_shape_error,
     quoted_constants,
@@ -62,13 +63,14 @@ def relation_results(line: str, facts: list[dict[str, str]]) -> list[tuple[str, 
     return rows
 
 
-def shape_error(label: str, line: str) -> str | None:
-    """The report's verdict on *line*'s ARGUMENT SHAPE, or None when valid.
+def query_error(label: str, line: str) -> str | None:
+    """The report's single verdict on *line*'s SIGNATURE, or None when answerable.
 
-    The rule is not restated here: ``common.query_shape_error`` is the same
-    function ``classify_query`` applies, so the gate and the report cannot
-    disagree about which lines are malformed, nor word the verdict differently.
-    They used to, on every predicate:
+    Neither rule is restated here: ``common.query_arity_error`` and
+    ``common.query_shape_error`` are the same two functions ``classify_query``
+    applies, in the same order, so the gate and the report cannot disagree about
+    which lines are answerable nor word the verdict differently. They used to, on
+    every predicate:
 
     - ``count`` was checked on ARITY ONLY, so ``count("S", 'r')?`` reached
       ``evaluate_queries``, where a non-double-quoted argument is treated as a
@@ -76,49 +78,41 @@ def shape_error(label: str, line: str) -> str | None:
       that subject and was printed as an engine-verified aggregate (#328). An
       aggregate is the output a reader is least able to check by eye, which is
       why answering it wrongly is worse than not answering it.
-    - ``relation`` and ``path`` were not shape-checked AT ALL — they fell through
-      to the generic warning loop. Same mechanism, wider blast radius:
-      ``relation("Marie Curie", 'born_in', O)?`` reported rows spanning every
-      relation of the subject, each carrying a nonsense binding
-      (``'born_in'=worked_at``).
     - a policy query was checked on arity only, so ``stale_entity(Alice, stale)?``
       had both bare tokens taken for variables and rendered the predicate's WHOLE
       extent with invented bindings (``Alice=Bob``).
+    - ``relation`` and ``path`` were checked on NEITHER rule — they fell through
+      to the generic warning loop. Same mechanism, wider blast radius:
+      ``relation("Marie Curie", 'born_in', O)?`` reported rows spanning every
+      relation of the subject, each carrying a nonsense binding
+      (``'born_in'=worked_at``), and an arity violation was answered as a
+      confident NEGATIVE about a fact that is in the KB:
 
-    Callers pair this with the arity rule their predicate has (see
-    ``count_query_error`` / ``policy_query_error``) and use ONE verdict for both
-    the Errors section and the answer renderer, so the report cannot call a line
-    an error and answer it in the same run.
+          relation("Marie Curie", "born_in", "Warsaw", X)?
+            gate   -> bad_arity
+            report -> relation results: 0 rows
+          path("Marie Curie", "Warsaw", "Poland")?
+            gate   -> bad_arity
+            report -> path Marie Curie -> Warsaw: Marie Curie -> Warsaw
+
+      A dropped extra argument is a plausible typo, and both answers read as
+      engine-verified.
+
+    ARITY IS CHECKED FIRST, which is not interchangeable with the other order:
+    it decides the DIAGNOSIS a line that breaks both rules receives. Shape-first
+    told the author of ``relation()?`` that "arguments must be variables or
+    quoted strings" — advice about the quoting of arguments that are not there.
+
+    One verdict serves both the Errors section (``validate_query``) and the
+    answer renderers (``evaluate_queries``, ``policy_result_line``), so the
+    report cannot call a line an error and answer it in the same run.
 
     Message wording is the gate's, with the offending line appended — the
     convention every other error in this module follows.
     """
-    message = query_shape_error(label, query_args(line))
+    args = query_args(line)
+    message = query_arity_error(label, args) or query_shape_error(label, args)
     return f"{message}: {line}" if message else None
-
-
-def count_query_error(line: str) -> str | None:
-    """The report's single verdict on a count query, or None when it is answerable.
-
-    Arity before shape, the order ``classify_query``'s count branch uses, so the
-    two paths give the same reason for a line that violates both.
-    """
-    if len(query_args(line)) != 2:
-        return f"count query must have subject and relation arguments: {line}"
-    return shape_error("count", line)
-
-
-def policy_query_error(line: str) -> str | None:
-    """The report's single verdict on a policy query, or None when answerable.
-
-    Same arity-then-shape order as ``count_query_error`` and as the gate's policy
-    branch. ``validate_query`` and ``policy_result_line`` both route through it,
-    which is what keeps the Errors section and the rendered answer from
-    disagreeing — the arity half of that pairing is what ``1bc172a`` established.
-    """
-    if len(query_args(line)) != 2:
-        return f"policy query must have entity and reason arguments: {line}"
-    return shape_error("policy query", line)
 
 
 def validate_query(line: str, entities: set[str], policy_query_predicates: set[str]) -> tuple[list[str], list[str]]:
@@ -136,7 +130,7 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
             errors.append(f"review_required must include the original question string: {line}")
         return errors, warnings
     if predicate in policy_query_predicates:
-        policy_error = policy_query_error(line)
+        policy_error = query_error("policy query", line)
         if policy_error:
             errors.append(policy_error)
             return errors, warnings
@@ -146,7 +140,7 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         return errors, warnings
     if predicate == "count":
         # count(subject, relation)? — engine-verified aggregate (see evaluate_queries).
-        count_error = count_query_error(line)
+        count_error = query_error("count", line)
         if count_error:
             errors.append(count_error)
             return errors, warnings
@@ -157,9 +151,9 @@ def validate_query(line: str, entities: set[str], policy_query_predicates: set[s
         # `0 (distinct objects)`, indistinguishable from a verified zero — as the
         # only signal that the query named something the KB has never heard of.
     elif predicate in {"relation", "path"}:
-        relation_error = shape_error(predicate, line)
-        if relation_error:
-            errors.append(relation_error)
+        signature_error = query_error(predicate, line)
+        if signature_error:
+            errors.append(signature_error)
             return errors, warnings
     for constant in quoted_constants(line):
         if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
@@ -211,7 +205,7 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
 def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str | None:
     """Render one policy query's result, or None when the query is malformed.
 
-    The test is `policy_query_error`, the SAME verdict validate_query puts in the
+    The test is `query_error`, the SAME verdict validate_query puts in the
     Errors section, so a line the report is rejecting never also receives an
     answer here. Four shapes reach this function malformed, and each used to be
     answered:
@@ -244,7 +238,7 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
     tests/golden/logic_report.txt, and its section header already says it is the
     policy evaluation rather than the answer to any one query.
     """
-    if policy_query_error(line) is not None:
+    if query_error("policy query", line) is not None:
         return None
     args = query_args(line)
     rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
@@ -274,7 +268,7 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
         elif predicate == "path":
             # Same verdict validate_query put in the Errors section, so a line
             # reported as malformed is never also answered here (#328).
-            if shape_error("path", line) is not None:
+            if query_error("path", line) is not None:
                 continue
             constants = quoted_constants(line)
             if len(constants) >= 2:
@@ -283,7 +277,7 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
                 value = " -> ".join(trace) if trace else "(not found)"
                 results.append(f"path {constants[0]} -> {constants[1]}: {value}")
         elif predicate == "relation":
-            if shape_error("relation", line) is not None:
+            if query_error("relation", line) is not None:
                 continue
             rows = relation_results(line, facts)
             args = query_args(line)
@@ -307,7 +301,7 @@ def evaluate_queries(facts: list[dict[str, str]], inferred: dict[str, set[tuple[
             # report answers 0. Which side is right is #227's question, not this
             # guard's; what is fixed here is that both refuse the SAME malformed
             # lines.
-            if count_query_error(line) is not None:
+            if query_error("count", line) is not None:
                 continue
             subj_q, rel_q = query_args(line)
             subj, rel = arg_value(subj_q), arg_value(rel_q)

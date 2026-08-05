@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Report / gate / router parity on a query's ARGUMENT SHAPE (#328).
+"""Report / gate / router parity on a query's SIGNATURE — arity and shape (#328).
 
-The gate (``classify_query``) requires every query argument to be a Datalog
-variable or a double-quoted string, on all four predicates. Neither of the other
-two consumers enforced that, so each answered lines the gate rejects as
-``malformed`` — and answered them WRONGLY, because each decides "is this
+The gate (``classify_query``) applies two rules to every query: the argument
+COUNT its predicate takes, then whether each argument is a Datalog variable or a
+double-quoted string. Neither of the other two consumers applied both — count and
+policy checked arity only, relation and path checked neither — so each answered
+lines the gate rejects, and answered them WRONGLY, because each decides "is this
 argument a constant" with its own predicate:
 
     count("Marie Curie", 'born_in')?
@@ -14,15 +15,22 @@ argument a constant" with its own predicate:
                 is a constant there, and no fact has the relation "'born_in'")
       gate   -> (False, 'malformed', 'count arguments must be ...')
 
-The same mechanism ran through the other predicates: ``relation`` returned rows
-spanning two relations with a ``'born_in'=worked_at`` binding, ``path`` returned
-the whole reachable set, and a policy query returned the predicate's whole extent
-bound to an entity it is not about (``Alice=Bob``).
+    relation("Marie Curie", "born_in", "Warsaw", X)?     # this triple IS a fact
+      report -> relation results: 0 rows                 # reads as a denial
+      router -> {'rows': [], 'count': 0}
+      gate   -> (False, 'bad_arity', 'relation query must have ...')
 
-The fix is one shared rule — ``common.query_shape_error`` — applied by all three,
-so the classes below assert the same verdict on all three paths for the same
-line. Testing only two of them is what let this survive: the count arity guard
-(#257, 1bc172a) was pinned on the report AND the router precisely because
+The same mechanism ran through the rest: shape-malformed ``relation`` returned
+rows spanning two relations with a ``'born_in'=worked_at`` binding, ``path``
+returned the whole reachable set, a policy query returned the predicate's whole
+extent bound to an entity it is not about (``Alice=Bob``), and an over-long
+``path`` answered using the first two constants and ignoring the rest.
+
+The fix is two shared rules — ``common.query_arity_error`` then
+``common.query_shape_error`` — applied in that order by all three, so the classes
+below assert the same verdict AND the same message on all three paths for the
+same line. Testing only two of them is what let this survive: the count arity
+guard (#257, 1bc172a) was pinned on the report AND the router precisely because
 ``cmd_evaluate`` calls ``evaluate`` with no ``classify`` in front of it, and a
 test that imports only ``run_logic_check`` cannot see a router-only mutant.
 
@@ -32,8 +40,8 @@ so the gate goes on to reject it (``entity_not_accepted``) while the report
 answers ``0 (distinct objects)`` — a verified zero for a subject the KB has never
 heard of. ``tests/test_count_check.sh`` pins that zero as intended behaviour, so
 it is not changed here; ``validate_query`` now at least emits the same
-"non-engine entity or relation" warning it emits for relation/path. Shape parity
-is exact; vocabulary parity is not, and this file does not claim it.
+"non-engine entity or relation" warning it emits for relation/path. Signature
+parity is exact; vocabulary parity is not, and this file does not claim it.
 """
 from __future__ import annotations
 
@@ -64,18 +72,41 @@ INFERRED = {
     "path": {("Marie Curie", "Warsaw")},
 }
 
-# Shapes the gate rejects as malformed: an argument that is neither a Datalog
-# variable nor a double-quoted string. Single quotes are not a string literal in
-# this dialect, and a bare token is a variable only if it is capitalised — a
-# lowercase identifier is the case a hand-written copy of the rule gets wrong, so
-# every predicate carries one.
-MALFORMED = [
+# Lines the gate rejects as QUERY_BAD_ARITY: the wrong number of arguments.
+# Every one of these is well-SHAPED, so each reaches the arity rule and only the
+# arity rule — which is what makes them the pins for the arity half, and what
+# makes their expected message the arity message on all three paths.
+#
+# The first two were answered, not merely unchecked. A dropped or duplicated
+# argument is a plausible typo, and `relation results: 0 rows` about a triple
+# that IS in the KB reads as an engine-verified denial.
+BAD_ARITY = [
+    'relation("Marie Curie", "born_in", "Warsaw", X)?',   # the triple exists
+    'path("Marie Curie", "Warsaw", "Poland")?',           # answered the path
+    'relation("Marie Curie", "born_in")?',
+    "relation()?",                                        # 0 args, not "bad quoting"
+    'count("Marie Curie", "born_in", "extra")?',
+    f'{POLICY_PREDICATE}("Marie Curie")?',
+]
+
+# Lines the gate rejects as QUERY_MALFORMED: right argument count, but an
+# argument that is neither a Datalog variable nor a double-quoted string. Single
+# quotes are not a string literal in this dialect, and a bare token is a variable
+# only if it is capitalised — a lowercase identifier is the case a hand-written
+# copy of the rule gets wrong, so every predicate carries one.
+MALFORMED_SHAPE = [
     "relation(\"Marie Curie\", 'born_in', O)?",
     "relation(Marie Curie, born_in, O)?",
     'relation("Marie Curie", "born_in", warsaw)?',
     "path(Marie Curie, Warsaw)?",
     "path('Marie Curie', \"Warsaw\")?",
     'path("Marie Curie", warsaw)?',
+    # Two DOUBLE-quoted constants, so `len(constants) >= 2` in the path renderer
+    # is satisfied and the answer is blocked by the shape guard alone. Every
+    # other malformed path here has fewer than two, so the renderer's own
+    # condition would block it and the guard could be deleted unnoticed. Arity is
+    # 2, so the arity guard does not cover this line either.
+    'path("Marie Curie", "Warsaw"junk)?',
     "count(\"Marie Curie\", 'born_in')?",
     "count(Marie Curie, born_in)?",
     "count(x, y)?",
@@ -83,6 +114,8 @@ MALFORMED = [
     f"{POLICY_PREDICATE}(\"Marie Curie\", 'stale')?",
     f"{POLICY_PREDICATE}(x, R)?",
 ]
+
+REFUSED = BAD_ARITY + MALFORMED_SHAPE
 
 WELL_FORMED = [
     'relation("Marie Curie", "born_in", O)?',
@@ -116,21 +149,27 @@ def _gate(line):
     return classify_query(line, FACTS, POLICY_PROGRAM)
 
 
-class TestMalformedShapeIsRefusedByEveryPath:
-    """The three consumers reject the same lines, with the same wording."""
+class TestBadSignatureIsRefusedByEveryPath:
+    """The three consumers reject the same lines, with the same wording.
 
-    @pytest.mark.parametrize("line", MALFORMED)
+    Comparing against the gate's own `reason` rather than a literal is what pins
+    the ORDER of the two rules as well as their outcome: a path that checked
+    shape before arity would still refuse `relation()?`, but would call it bad
+    quoting instead of a zero-argument query, and these assertions fail.
+    """
+
+    @pytest.mark.parametrize("line", REFUSED)
     def test_report_reports_the_gates_message(self, line):
         _ok, _code, reason = _gate(line)
         assert _report_errors(line) == [f"{reason}: {line}"]
 
-    @pytest.mark.parametrize("line", MALFORMED)
+    @pytest.mark.parametrize("line", REFUSED)
     def test_report_renders_no_answer(self, monkeypatch, line):
         # The report must not answer a line it is calling an error: the wrong
         # number is what a reader takes away, not the Errors section.
         assert _report_answer(monkeypatch, line) == []
 
-    @pytest.mark.parametrize("line", MALFORMED)
+    @pytest.mark.parametrize("line", REFUSED)
     def test_router_raises_the_gates_message(self, monkeypatch, line):
         # `ask_router.py evaluate` calls evaluate() with no classify in front of
         # it, so the gate's verdict does not protect this path.
@@ -141,7 +180,7 @@ class TestMalformedShapeIsRefusedByEveryPath:
 
 
 class TestVerdictsAgreeOnAllThreePaths:
-    @pytest.mark.parametrize("line", MALFORMED + WELL_FORMED)
+    @pytest.mark.parametrize("line", REFUSED + WELL_FORMED)
     def test_answerable_by_all_or_by_none(self, monkeypatch, line):
         gate_ok, code, reason = _gate(line)
         report_ok = not _report_errors(line)
