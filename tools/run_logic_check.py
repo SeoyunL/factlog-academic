@@ -235,10 +235,10 @@ def evaluate_queries(
                 # and do not connect the two — and which `ask` does not claim,
                 # because classify_query rejects the query as entity_not_accepted
                 # (#329).
-                not_nodes = [
-                    value for value in constants[:2]
-                    if path_nodes is not None and value not in path_nodes
-                ]
+                not_nodes = (
+                    [value for value in constants[:2] if value not in path_nodes]
+                    if path_nodes is not None else []
+                )
                 if not_nodes:
                     results.append(
                         f"path {constants[0]} -> {constants[1]}: "

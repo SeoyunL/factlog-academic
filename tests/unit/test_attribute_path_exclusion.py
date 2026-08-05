@@ -75,14 +75,14 @@ def attrs(monkeypatch):
     return _bind
 
 
-def engine_path_pairs(facts: list[dict[str, str]], monkeypatch) -> set[tuple[str, str]]:
+def engine_path_pairs(facts: list[dict[str, str]], monkeypatch, tmp_path) -> set[tuple[str, str]]:
     """path/2 as the REAL emitted program computes it, via ``common.run_wirelog``.
 
     Everything run_wirelog reads is redirected at the module boundary — accepted
     atoms, policy text, typed relations, aliases — so the assembly under test is
     the production one and only its *inputs* are synthetic.
     """
-    accepted_dl = tmp_accepted_dl(facts)
+    accepted_dl = tmp_accepted_dl(facts, tmp_path)
     monkeypatch.setattr(fl_common, "ACCEPTED_DL", accepted_dl)
     monkeypatch.setattr(fl_common, "load_accepted_facts", lambda: list(facts))
     monkeypatch.setattr(fl_common, "load_logic_policy", lambda: "")
@@ -92,11 +92,8 @@ def engine_path_pairs(facts: list[dict[str, str]], monkeypatch) -> set[tuple[str
     return {tuple(row) for row in inferred["path"]}
 
 
-def tmp_accepted_dl(facts):
-    import tempfile
-    from pathlib import Path
-
-    path = Path(tempfile.mkdtemp(prefix="factlog-attrpath-")) / "accepted.dl"
+def tmp_accepted_dl(facts, tmp_path):
+    path = tmp_path / "accepted.dl"
     path.write_text("\n".join(common.dl_atom(row) for row in facts) + "\n", encoding="utf-8")
     return path
 
@@ -108,9 +105,9 @@ class TestPathAxis:
         assert "2030.1" not in common.entity_set(FACTS, declared)
         assert common.dependency_path(FACTS, "갑봇", "2030.1") == []
 
-    def test_literal_is_not_a_path_node_in_the_emitted_engine_program(self, attrs, monkeypatch):
+    def test_literal_is_not_a_path_node_in_the_emitted_engine_program(self, attrs, monkeypatch, tmp_path):
         attrs(ATTRS)
-        pairs = engine_path_pairs(FACTS, monkeypatch)
+        pairs = engine_path_pairs(FACTS, monkeypatch, tmp_path)
         assert ("을서비스", "2030.1") not in pairs
         assert ("갑봇", "2030.1") not in pairs
         assert ("갑봇", "을서비스") in pairs  # non-vacuous: the entity edge survives
@@ -159,11 +156,11 @@ class TestEmptyValuesAgreeWithTheEngine:
         attrs(set())
         assert "" not in common.entity_set(FACTS_WITH_EMPTY_VALUES, set())
 
-    def test_engine_derives_the_transitive_pair(self, attrs, monkeypatch):
+    def test_engine_derives_the_transitive_pair(self, attrs, monkeypatch, tmp_path):
         # Non-vacuous half of the parity case: the engine really does derive it,
         # so a renderer that drops it turns a positive into a verified negative.
         attrs(set())
-        assert ("갑봇", "을서비스") in engine_path_pairs(FACTS_WITH_EMPTY_VALUES, monkeypatch)
+        assert ("갑봇", "을서비스") in engine_path_pairs(FACTS_WITH_EMPTY_VALUES, monkeypatch, tmp_path)
 
 
 class TestLiteralThatIsAlsoAnEntity:
@@ -207,9 +204,9 @@ class TestEngineAndRendererAgree:
             (FACTS_WITH_EMPTY_VALUES, ATTRS),
         ],
     )
-    def test_reachable_pairs_match_engine_path(self, facts, declared, attrs, monkeypatch):
+    def test_reachable_pairs_match_engine_path(self, facts, declared, attrs, monkeypatch, tmp_path):
         attrs(declared)
-        assert ask_router._reachable_pairs(facts) == engine_path_pairs(facts, monkeypatch)
+        assert ask_router._reachable_pairs(facts) == engine_path_pairs(facts, monkeypatch, tmp_path)
 
 
 class TestNoAttributeRelationsIsUnchanged:
@@ -247,3 +244,25 @@ class TestAttributeObjectsStayQueryable:
             'relation("을서비스", "정식_운영", "2030.1")?', FACTS, policy_program=""
         )
         assert (ok, code) == (True, common.QUERY_OK)
+
+
+class TestAttributeRelationProgramText:
+    """The emitted ``attr_rel/1`` EDB block. Its docstring promises three things
+    and none was exercised — the ``names`` argument had no caller and no test."""
+
+    def test_no_declarations_emit_nothing(self):
+        # This is what makes a KB without attribute-relations.md byte-identical
+        # to WIRELOG_PROGRAM + policy + accepted.
+        assert fl_common.attribute_relation_program(set()) == ""
+
+    def test_names_are_emitted_sorted(self):
+        # Sorted so the assembled program text is reproducible run to run.
+        assert fl_common.attribute_relation_program({"나", "가", "다"}) == (
+            '\nattr_rel("가").\nattr_rel("나").\nattr_rel("다").\n'
+        )
+
+    def test_a_name_carrying_a_quote_stays_a_legal_atom(self):
+        # dl_string, not an f-string: an unescaped quote would be a ParseError
+        # that rejects the WHOLE program (relation/3 included: a dead KB).
+        emitted = fl_common.attribute_relation_program({'q"uote'})
+        assert emitted == '\nattr_rel("q\\"uote").\n'

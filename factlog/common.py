@@ -884,9 +884,9 @@ def _attribute_relations_from(policy_dir: Path, read_aliases) -> set[str]:
     ``relation/3`` — engine input and every python consumer — stores the RAW
     relation name a fact was written with, so a KB that declares `정식_운영` an
     attribute relation and aliases `출시일` -> `정식_운영` still let its literals
-    through the exclusion under the surface spelling. Expanding the
-    set here closes the engine and the renderer at once: the engine's attr_rel/1
-    EDB is emitted from this same set and is likewise matched against raw R.
+    through the exclusion under the surface spelling. Expanding the set here
+    closes the engine and the renderer at once: the engine's attr_rel/1 EDB is
+    emitted from this same set and is likewise matched against a raw R.
     check_conflicts already canonicalizes single-valued relations this way.
 
     Alias expansion is bidirectional (declared name → its canonical → all surface
@@ -1688,20 +1688,6 @@ def dependency_path(
         seen.add(node)
         for nxt in graph.get(node, []):
             queue.append((nxt, path + [nxt]))
-    return []
-
-
-def first_dependency_path(facts: list[dict[str, str]]) -> list[str]:
-    # Read the attribute-relation policy ONCE and hand it down: this is a nested
-    # scan, and dependency_path would otherwise re-read the file per candidate pair.
-    attribute_rels = attribute_relations()
-    entities = sorted({row["subject"] for row in facts})
-    targets = sorted({row["object"] for row in facts})
-    for start in entities:
-        for target in targets:
-            path = dependency_path(facts, start, target, attribute_rels)
-            if len(path) > 1:
-                return path
     return []
 
 
