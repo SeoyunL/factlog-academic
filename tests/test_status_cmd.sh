@@ -193,11 +193,15 @@ printf '%s' "$broken_out" | grep -qE "conflicts: +1 \(over 1 single-valued" && o
 # Same claim, a failure that is NOT a FactlogError. typed_relations() reads
 # logic-policy.dl to compute reserved names, so a policy file that is not UTF-8
 # (cp949 is realistic here — the CLI already forces UTF-8 on cp949 consoles)
-# raises UnicodeDecodeError. Nothing catches it: it is not a FactlogError, so
-# main()'s friendly handler re-raises and the user gets a raw traceback. Only
-# this file is newly exposed; a cp949 typed-relations.md / single-valued.md /
-# attribute-relations.md aborts status on main too (measured), and those are read
-# long before this block, so they are out of reach here by construction.
+# raises UnicodeDecodeError. Nothing caught it: it is not a FactlogError, so
+# main()'s friendly handler re-raised and the user got a raw traceback.
+#
+# The widened catch covers typed-relations.md itself too — this block is the only
+# place cmd_status reads that file, so on main a cp949 copy was simply never
+# decoded (rc=0, full report) and HEAD now matches. What it cannot cover is a
+# cp949 single-valued.md or attribute-relations.md: those abort status on main
+# too (measured, rc=1 on both trees) and are read at cli.py:1692-1693, long
+# before this block, so they are out of reach here by construction.
 "$PYTHON" -c "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes('// 정책\n'.encode('cp949'))" "$BROKEN/policy/logic-policy.dl"
 set +e; cp949_out="$("$PYTHON" -m factlog status --target "$BROKEN" 2>/dev/null)"; cp949_rc=$?; set -e
 [ "$cp949_rc" = "0" ] && ok "#331: non-UTF-8 logic-policy.dl — status still exits 0" || bad "#331: non-UTF-8 logic-policy.dl aborts status (rc=$cp949_rc)"
