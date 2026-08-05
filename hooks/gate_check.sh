@@ -540,10 +540,13 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 # of code is pinned by a case in tests/test_gate_check.sh: delete the line and at
 # least one case goes red. Two things are NOT pinned that way, and both are
 # stated rather than implied.
-#   - The backslash handling folded into guard 6 is pinned only in the POSIX
-#     direction (a literal backslash in a filename must not cause a false deny).
-#     The Windows direction it exists for needs a host where os.path is ntpath,
-#     so it cannot be exercised from this suite and is asserted by construction.
+#   - The backslash SPLIT in guard 6 is asserted by construction. Deleting it
+#     changes nothing this suite can observe (measured: it stays fully green),
+#     because the direction it serves needs a host where os.path is ntpath.
+#     CASES 51/51b do not pin the split; what they pin is the POSIX direction it
+#     must not break — a literal backslash is an ordinary filename character and
+#     must not cause a false deny — which is what rules out the obvious wrong
+#     implementation of rewriting `\` to `/` before the match.
 #   - Guard 4 is not a line of code at all; it is the decision NOT to strip
 #     trailing separators. It is pinned in the direction that can do damage —
 #     CASE 46b goes red if a strip is reintroduced anywhere AFTER the -L test —
