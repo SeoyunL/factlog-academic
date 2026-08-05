@@ -1869,7 +1869,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(
                 "              ⚠ non-ASCII digits in " + ", ".join(f"'{o}'" for o in sorted(odd))
                 + " — superseding a row clears the gate but can keep a value that does"
-                " not parse; correct the source to ASCII and re-collect"
+                " not parse; correct the source to ASCII and re-collect, then supersede"
+                " the outdated row if the values still differ"
             )
     else:
         print("  conflicts:  n/a (no single-valued relations declared in policy/single-valued.md)")

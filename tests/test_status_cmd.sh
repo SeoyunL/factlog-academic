@@ -78,6 +78,11 @@ out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
 printf '%s' "$out" | grep -qF "non-ASCII digits" && ok "#331: status flags the non-ASCII digit value" || bad "#331: status does not flag it: $(printf '%s' "$out"|grep conflicts)"
 # The ESCAPED codepoint; the raw glyph cannot satisfy this.
 printf '%s' "$out" | grep -qF 'uff11' && ok "#331: status escapes the offending codepoints" || bad "#331: status does not escape the offending characters"
+# The same claim check_conflicts' note makes: re-collection does not REPLACE
+# supersession — for genuinely different values (100억 vs ２００억) correcting the
+# source leaves 100억 vs 200억, still a conflict supersession must settle. Both
+# surfacing points have to say so or one of them is telling half the truth.
+printf '%s' "$out" | grep -qF "if the values still differ" && ok "#331: status names supersession as the follow-up" || bad "#331: status drops the supersede-if-still-different clause"
 
 # One offender shared by TWO conflict groups must be named once, not once per
 # group. The values are collected into a set before rendering.
