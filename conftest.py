@@ -41,10 +41,27 @@ with ``monkeypatch.setenv``.
 """
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 
-os.environ.setdefault("FACTLOG_ROOT", tempfile.mkdtemp(prefix="factlog-tests-"))
+
+def _throwaway(prefix: str) -> str:
+    """A temp dir this process owns and removes when it exits.
+
+    Only directories created here are registered for removal — an inherited
+    ``FACTLOG_ROOT`` belongs to whoever set it.
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
+    return path
+
+
+# Deferring to an inherited value, but without the mkdtemp that setdefault would
+# evaluate — and leave behind — even when the variable is already set.
+if not os.environ.get("FACTLOG_ROOT"):
+    os.environ["FACTLOG_ROOT"] = _throwaway("factlog-tests-")
 
 # NOT setdefault, and no escape hatch for values that merely look isolated.
-os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="factlog-tests-cfg-")
+os.environ["XDG_CONFIG_HOME"] = _throwaway("factlog-tests-cfg-")
