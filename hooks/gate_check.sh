@@ -509,18 +509,26 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 # That rule holds only with every one of the seven guards below. Each was reached
 # by construction — guards 3-7 against the naive
 # `case "$target_path" in */accepted.dl)` form, guards 1-2 against an earlier
-# version of this prefilter that had the other five — and each is pinned by a
-# case in tests/test_gate_check.sh — with one stated exception: the backslash
-# handling folded into guards 4 and 6 is pinned only in the POSIX direction (a
-# literal backslash in a filename must not cause a false deny). The Windows
-# direction it exists for needs a host where os.path is ntpath, so it cannot be
-# exercised from this suite and is asserted by construction.
+# version of this prefilter that had the other five. Every guard that IS a line
+# of code is pinned by a case in tests/test_gate_check.sh: delete the line and at
+# least one case goes red. Two things are NOT pinned that way, and both are
+# stated rather than implied.
+#   - The backslash handling folded into guard 6 is pinned only in the POSIX
+#     direction (a literal backslash in a filename must not cause a false deny).
+#     The Windows direction it exists for needs a host where os.path is ntpath,
+#     so it cannot be exercised from this suite and is asserted by construction.
+#   - Guard 4 is not a line of code at all; it is the decision NOT to strip
+#     trailing separators. It is pinned in the direction that can do damage —
+#     CASE 46b goes red if a strip is reintroduced anywhere AFTER the -L test —
+#     but not in the other, because a strip placed before -L changes no verdict
+#     and only buys the short-circuit back for directory-shaped names.
 #
 # The rule the guards exist to protect is: canon(target) can only equal
 # canon(engine) if their BASENAMES agree, because realpath preserves the final
-# component. Guards 1-3 cover the ways the target's canonical basename differs
-# from the string we are reading; guard 2 covers the same for the ENGINE side;
-# guards 4-7 cover names that differ while still denoting one file.
+# component. Guards 3-7 are the five ways the TARGET's name can lie about the
+# file it denotes. The other two are not name questions: guard 1 is about the
+# path string not yet having been through expanduser, and guard 2 is about the
+# ENGINE side rather than the target.
 #
 #   1. TILDE. canon() runs expanduser; nothing in this function does. A leading
 #      "~" therefore makes -L, -e and stat interrogate a literal "~/…" that does
@@ -544,12 +552,18 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 #      cannot "see the resolved basename". `-L` is a shell builtin test, so
 #      falling through on one costs nothing. Only the final component matters:
 #      a symlinked PARENT directory does not change the basename.
-#   4. TRAILING SLASHES. "…/accepted.dl/" canonicalises to the engine input but
-#      does not match a `*/accepted.dl` glob. Strip them BEFORE guards 3 and 7,
-#      which ask the filesystem and must see the name the canonicaliser will.
-#      Slashes ONLY — on POSIX a trailing backslash is part of the filename, so
-#      stripping it would point those guards at a different file. Guard 6 still
-#      SPLITS on backslash; that is a Windows-basename question, not this one.
+#   4. TRAILING SEPARATORS. "…/accepted.dl/" canonicalises to the engine input
+#      but does not match a `*/accepted.dl` glob. Nothing is stripped: a
+#      trailing separator makes `${path##*/}` empty, and an empty basename
+#      already falls through on guard 5's arm. An earlier version DID strip,
+#      which bought the short-circuit back for these names — but a name ending
+#      in a separator denotes a DIRECTORY, which is not a shape Write/Edit can
+#      act on, so that saving is on traffic which does not arrive. What it cost
+#      was an ordering constraint: the strip had to run BEFORE guards 3 and 7,
+#      because `-L` on a name ending in a separator resolves the link and
+#      answers "no". Getting that order wrong opened a real hole (a symlink
+#      with a trailing slash short-circuited). Not stripping is the more
+#      conservative reading of the name and leaves no order to get wrong.
 #   5. DOT COMPONENTS. "…/accepted.dl/." canonicalises to the engine input while
 #      its basename is ".". An empty, "." or ".." basename tells us nothing, so
 #      fall through.
@@ -568,11 +582,9 @@ sys.stdout.write(verdict + \"\\0\" + target + \"\\0\")
 # Every uncertain shape falls THROUGH to the matcher. Over-matching costs one
 # spawn and can only make the gate stricter, so it is always the safe direction.
 # The short-circuit fires only once all seven ways a name can diverge from its
-# canonical basename have been excluded — and the guards run in an order that
-# keeps that true: the trailing-separator strip comes before the -L test,
-# because -L on a name ending in a separator resolves the link and answers
-# "no". Guards that ask the filesystem must see the same name the
-# canonicaliser will. This is still not the same as proof: a
+# canonical basename have been excluded. Every guard reads the path string
+# exactly as it arrived — none rewrites it for the next one — so there is no
+# ordering constraint left to get wrong. This is still not the same as proof: a
 # parent directory this process cannot stat would make -L and stat answer "no"
 # for a reason other than the truth. That case cannot be reached by a write the
 # same process could perform, so it is left uncovered rather than guarded.
@@ -582,23 +594,12 @@ _cannot_be_engine_input() {
   case "$KB_ROOT" in ~*) return 1 ;; esac
   [ -L "${KB_ROOT}/facts/accepted.dl" ] && return 1
   [ -L "${KB_ROOT}/facts/query.dl" ] && return 1
-  # Strip `/` only, never `\`. On POSIX a backslash is an ordinary filename
-  # character, so `facts/link\` is a ONE-component name that realpath resolves
-  # as-is. Stripping it would make the filesystem guards below interrogate
-  # `facts/link` — a different file, or none — while the canonicaliser still
-  # lands on the engine input. The backslash SPLIT at the basename stays: that
-  # is what the Windows direction needs, and a Windows trailing backslash
-  # yields an empty basename, which falls through anyway.
-  while :; do
-    case "$path" in
-      */) path="${path%/}" ;;
-      *) break ;;
-    esac
-  done
-  # AFTER the strip, never before: a trailing separator makes the shell's -L
-  # resolve the link, so `notes.dl/` answers "not a symlink" while
-  # realpath() still lands on accepted.dl. Stripping first asks -L about the
-  # same name the canonicaliser will see.
+  # `$path` is never rewritten before the filesystem guards — in particular no
+  # trailing separator is stripped (guard 4). A trailing separator makes the
+  # shell's -L resolve the link, so `notes.dl/` answers "not a symlink" while
+  # realpath() still lands on accepted.dl; a strip would have to run before this
+  # test to fix that, and a strip placed after it silently reopens the hole.
+  # Instead such a name yields an empty basename below and falls through.
   [ -L "$path" ] && return 1
   # Split on BOTH separators. Python's os.path treats a backslash as a separator
   # on Windows, so under Git Bash "C:\kb\facts\accepted.dl" canonicalises to the
