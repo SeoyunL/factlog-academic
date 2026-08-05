@@ -49,9 +49,15 @@ class TestAtomicWriteHelper:
 
 def _seed_kb(tmp_path):
     kb = tmp_path / "kb"
+    # `factlog init` rewrites the active-KB config at $XDG_CONFIG_HOME/factlog/
+    # unconditionally. The repo-root conftest already pins that variable for the
+    # whole process, but this is the call that does the writing, so it names its
+    # own throwaway config home too: a future edit that passes a hand-built env=
+    # here would otherwise silently reopen the hole (#62).
     subprocess.run(
         [sys.executable, "-m", "factlog", "init", "--target", str(kb)],
         capture_output=True, check=True,
+        env={**os.environ, "XDG_CONFIG_HOME": str(kb.parent / "cfg")},
     )
     (kb / "sources" / "a.md").write_text("a\n")
     rows = [(f"S{i}", "uses", f"O{i}") for i in range(6)]
