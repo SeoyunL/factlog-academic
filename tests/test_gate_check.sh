@@ -1098,10 +1098,12 @@ run_payload_case "prefilter: case-variant Accepted.dl reaches the matcher — ex
 # CASE 46b: SYMLINK **AND** TRAILING SLASH TOGETHER. CASES 43 and 44 each pin
 # one of these alone; neither crosses them, and the crossing is where the hole
 # was. A trailing separator makes the shell's -L resolve the link, so -L answers
-# "not a symlink" while realpath() still lands on accepted.dl — the strip loop
-# then hands the glob a basename it does not match and the short-circuit fires.
-# Guards that ask the filesystem must run AFTER the strip, on the same name the
-# canonicaliser will see.
+# "not a symlink" while realpath() still lands on accepted.dl. An earlier
+# version stripped the separator to fix that, which only moved the problem: the
+# strip had to run before -L, and running it after handed the glob a basename it
+# does not match and fired the short-circuit. Nothing is stripped now — the
+# empty basename falls through — so this case is the pin that dies if a strip is
+# ever reintroduced anywhere after the -L test.
 run_payload_case "prefilter: symlink with a trailing slash — deny" \
   "$KB_PRE" "$(envelope Write "$KB_PRE/facts/notes.dl/")" 2
 run_payload_case "prefilter: symlink with two trailing slashes — deny" \
@@ -1303,15 +1305,16 @@ run_payload_case "control: real engine input in the same KB — deny" \
 
 # CASE 51b: A NAME ENDING IN A BACKSLASH IS ONE COMPONENT ON POSIX — DENY.
 #
-# The mirror of the case above, and the reason the trailing-separator strip
-# takes `/` ONLY. `<KB>/facts/link\` is a single component whose last character
-# happens to be a backslash; realpath resolves it as-is and lands on the engine
-# input. If the strip removed the `\`, every guard that asks the filesystem
-# would interrogate `<KB>/facts/link` — a different file, or none — and the
-# short-circuit would fire on a write the canonicaliser sends straight to
-# accepted.dl. Both link kinds are covered because the two guards fail
-# differently: -L catches the symlink, the link-count check catches the hard
-# link, and stripping blinds both.
+# The mirror of the case above. `<KB>/facts/link\` is a single component whose
+# last character happens to be a backslash; realpath resolves it as-is and lands
+# on the engine input. The prefilter strips no trailing separator at all, so
+# both of these reach the matcher — but the two guards that get them there fail
+# differently, and both are pinned: -L catches the symlink on the name as
+# written, while the hard link survives -L and is caught by the backslash split
+# emptying the basename. This is the case that kills a trailing-separator strip
+# that also removed `\`: every filesystem guard would then interrogate
+# `<KB>/facts/link` — a different file, or none — and the short-circuit would
+# fire on a write the canonicaliser sends straight to accepted.dl.
 bslash_link="$KB_BSLASH/facts/link\\"
 bslash_hard="$KB_BSLASH/facts/hl\\"
 ln -s accepted.dl "$bslash_link"
