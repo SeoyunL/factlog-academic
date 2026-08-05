@@ -798,7 +798,7 @@ class TestSplitRelationIsDisclosedAtExitZero:
         ]
         assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 0
         out = capsys.readouterr().out
-        assert "single-valued relation(s) written in" in out
+        assert "(subject, relation) pair(s)" in out
         assert ascii(rel[0]) in out and ascii(rel[1]) in out
         assert "never compared against" in out
 
@@ -822,7 +822,7 @@ class TestSplitRelationIsDisclosedAtExitZero:
         ]
         assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 1
         captured = capsys.readouterr()
-        assert "single-valued relation(s) written in" not in captured.out
+        assert "(subject, relation) pair(s)" not in captured.out
         assert "(relation written in 2 mixed Unicode normalization forms)" in captured.err
 
     def test_non_conflicting_spelling_still_reaches_the_conflict_line(self, monkeypatch, capsys):
@@ -837,7 +837,7 @@ class TestSplitRelationIsDisclosedAtExitZero:
         assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 1
         captured = capsys.readouterr()
         assert "(relation written in 2 mixed Unicode normalization forms)" in captured.err
-        assert "single-valued relation(s) written in" not in captured.out
+        assert "(subject, relation) pair(s)" not in captured.out
 
     def test_single_relation_spelling_says_nothing(self, monkeypatch, capsys):
         # CONTROL: this is what keeps an NFC-only KB byte-identical.
@@ -857,12 +857,12 @@ class TestSplitRelationIsDisclosedAtExitZero:
         ]
         _run_main(monkeypatch, facts, {_nfc("소속")})
         out = capsys.readouterr().out
-        assert "1 single-valued relation(s) written in" in out
+        assert "1 (subject, relation) pair(s)" in out
         assert "박영희" not in out
 
-    def test_header_counts_what_it_prints(self, monkeypatch, capsys):
-        # One subject, two split relations: the count is over (subject, relation)
-        # pairs, so calling them "subjects" made this KB read as two people.
+    def test_header_counts_pairs_not_relations(self, monkeypatch, capsys):
+        # One subject, two split relations. Naming the SUBJECT axis miscounts here
+        # — "2 subject(s)" reads as two people when there is one.
         facts = [
             _fact("김철수", _nfc("소속"), "A사"),
             _fact("김철수", _nfd("소속"), "B사"),
@@ -871,8 +871,27 @@ class TestSplitRelationIsDisclosedAtExitZero:
         ]
         assert _run_main(monkeypatch, facts, {_nfc("소속"), _nfc("직급")}) == 0
         out = capsys.readouterr().out
-        assert "2 single-valued relation(s) written in" in out
+        assert "2 (subject, relation) pair(s)" in out
         assert "subject(s)" not in out
+        assert len([ln for ln in out.splitlines() if ln.startswith("    on ")]) == 2
+
+    def test_header_counts_pairs_not_subjects(self, monkeypatch, capsys):
+        # The mirror image: two subjects, one split relation each. Naming the
+        # RELATION axis miscounts here — "2 relation(s) … for one subject" reads
+        # as one person with two relations when there are two people with one.
+        # Both pins are needed because the header has been wrong in each
+        # direction in turn; the count is over pairs and names neither axis.
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfd("소속"), "B사"),
+            _fact("박영희", _nfc("소속"), "C사"),
+            _fact("박영희", _nfd("소속"), "D사"),
+        ]
+        assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 0
+        out = capsys.readouterr().out
+        assert "2 (subject, relation) pair(s)" in out
+        assert "for one subject" not in out
+        assert f"on '{_nfc('김철수')}'" in out and f"on '{_nfc('박영희')}'" in out
         assert len([ln for ln in out.splitlines() if ln.startswith("    on ")]) == 2
 
 

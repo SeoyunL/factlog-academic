@@ -752,9 +752,15 @@ def _report_split_relations(scan: ConflictScan) -> None:
         lines.append(f"    on '{subject}' spellings: {_spellings(scan.relation_variants[key])}")
     if not lines:
         return
+    # One line per (subject, relation) pair, so the header names that unit and no
+    # other. Naming either axis alone miscounts in one direction or the other:
+    # "N subject(s)" reads as N people when one subject has two split relations,
+    # and "N relation(s) … for one subject" reads as one person when N subjects
+    # each have one. There is no single axis to name — the pair is the count.
     print(
-        f"check_conflicts: {len(lines)} single-valued relation(s) written in several Unicode "
-        "normalization forms for one subject, so their rows were compared separately:"
+        f"check_conflicts: {len(lines)} (subject, relation) pair(s) whose single-valued relation "
+        "is written in several Unicode normalization forms, so their rows were compared "
+        "separately:"
     )
     for line in lines:
         print(line)
