@@ -1832,7 +1832,22 @@ def cmd_status(args: argparse.Namespace) -> int:
                 flagged.setdefault(relation, set()).update(hits)
         odd: set[str] = set()
         if flagged:
-            typed = ctx.typed_relations()
+            # typed_relations() FAILS LOUDLY on a broken policy (non-ASCII alias,
+            # alias collision/duplicate, a units clause on a non-amount line). That
+            # is right for the commands that must not run on a bad policy, but
+            # `status` is the command you run to find out WHAT is bad, so it has to
+            # stay total: a policy error costs this supplementary warning only, and
+            # the report (conflicts, logic freshness, engine) still prints in full.
+            # The error itself is not swallowed — every other entry point still
+            # raises it, and status has no output line to attach it to here.
+            # Resolved lazily for the same reason `main` does it (see the comment
+            # there): the class must match the one `common` currently exports.
+            from factlog.common import FactlogError
+
+            try:
+                typed = ctx.typed_relations()
+            except FactlogError:
+                typed = {}
             for relation, hits in flagged.items():
                 # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
                 if typed.get(unicodedata.normalize("NFC", relation)) is not None:

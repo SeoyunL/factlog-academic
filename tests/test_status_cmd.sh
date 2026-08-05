@@ -148,6 +148,26 @@ typed_lines="$(printf '%s\n' "$clean_out" | grep -c '^typed-relations:' || true)
 [ "$typed_lines" = "0" ] && ok "#331: clean ASCII KB — no typed-relations warning on stdout" || bad "#331: clean ASCII KB — $typed_lines typed-relations line(s) on stdout"
 printf '%s' "$clean_out" | grep -qE "conflicts: +0 \(over 1 single-valued" && ok "#331: clean ASCII KB — 0 conflicts reported" || bad "#331: clean ASCII KB — conflicts line wrong: $(printf '%s' "$clean_out"|grep conflicts)"
 
+# A BROKEN typed-relations policy must not abort the report. `status` is the
+# command you run to find out what is wrong with a KB, so it has to be total:
+# typed_relations() raises FactlogError on a non-ASCII alias (among others), and
+# the flagging block above is the first status code path ever to call it. Left
+# unguarded that exception costs the `logic:` line and turns rc 0 into 1 —
+# a regression against everything documented in docs/reference/active-kb.md.
+BROKEN="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$BROKEN" >/dev/null
+printf 'x\n' > "$BROKEN/sources/a.md"
+printf '# single-valued\n- 매출\n' > "$BROKEN/policy/single-valued.md"
+printf -- '- `매출` : amount as 매출액\n' > "$BROKEN/policy/typed-relations.md"   # alias is not ASCII
+# The full-width value is what makes `flagged` non-empty and so reaches the call.
+printf '%s\n%s\n%s\n' "$H" \
+  '갑사,매출,100억,sources/a.md,confirmed,0.9,' \
+  '갑사,매출,１００억,sources/a.md,confirmed,0.9,' > "$BROKEN/facts/candidates.csv"
+set +e; broken_out="$("$PYTHON" -m factlog status --target "$BROKEN" 2>/dev/null)"; broken_rc=$?; set -e
+[ "$broken_rc" = "0" ] && ok "#331: broken typed policy + full-width conflict — status still exits 0" || bad "#331: broken typed policy aborts status (rc=$broken_rc)"
+printf '%s' "$broken_out" | grep -qE "logic: +" && ok "#331: broken typed policy — report still reaches the logic line" || bad "#331: broken typed policy truncates the report before logic:"
+printf '%s' "$broken_out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "#331: broken typed policy — conflicts still counted" || bad "#331: broken typed policy — conflicts line wrong: $(printf '%s' "$broken_out"|grep conflicts)"
+
 # --- logic report freshness (report mtime pinned; each input checked) ---------
 printf 'errors: 0\nwarnings: 2\n' > "$KB/facts/logic_report.txt"
 printf 'relation("x","r","y").\n' > "$KB/facts/accepted.dl"
