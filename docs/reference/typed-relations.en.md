@@ -64,6 +64,12 @@ category is rejected for the same reason — Arabic-Indic `١٠٠`, Devanagari `
 Thai `๑๒๓` — precisely the strings `int()` and `Decimal()` accept silently as
 100 / 123.
 
+The rule is about **fact values**, not about the declaration file. A `units`
+clause still goes through `Decimal`, so `units(억=１００００００００)` is accepted
+as `100000000` and a unit NAME is not checked for digits at all. The value is
+computed correctly either way; write declarations in ASCII regardless, so the
+file reads the way the values it governs have to be written.
+
 ⚠️ **Migrating an existing KB.** If full-width values collected before this rule
 are still in the KB, `tools/check_conflicts.py` may now exit **1** — a gate
 failure, not a warning. `１００억` and `100억` used to fold onto the same scalar
