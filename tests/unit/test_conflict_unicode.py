@@ -643,7 +643,10 @@ class TestSpellingPayloadMatchesTheGate:
         facts = [_fact(raws[0], "소속", "A사"), _fact(raws[1], "소속", "B사")]
         _run_main(monkeypatch, facts, {"소속"})
         err = capsys.readouterr().err
-        assert "(subject, relation, object, source)" in err
+        # The anchor is stripped before matching (row["source"].partition("#")[0]
+        # in merge_candidates), so naming a bare `source` overstates how precise
+        # the key is — and SKILL.md already said it correctly.
+        assert "(subject, relation, object, source-without-anchor)" in err
         assert "carries back only status" not in err
 
 
@@ -795,7 +798,7 @@ class TestSplitRelationIsDisclosedAtExitZero:
         ]
         assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 0
         out = capsys.readouterr().out
-        assert "single-valued relation is written in" in out
+        assert "single-valued relation(s) written in" in out
         assert ascii(rel[0]) in out and ascii(rel[1]) in out
         assert "never compared against" in out
 
@@ -819,7 +822,7 @@ class TestSplitRelationIsDisclosedAtExitZero:
         ]
         assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 1
         captured = capsys.readouterr()
-        assert "single-valued relation is written in" not in captured.out
+        assert "single-valued relation(s) written in" not in captured.out
         assert "(relation written in 2 mixed Unicode normalization forms)" in captured.err
 
     def test_non_conflicting_spelling_still_reaches_the_conflict_line(self, monkeypatch, capsys):
@@ -834,7 +837,7 @@ class TestSplitRelationIsDisclosedAtExitZero:
         assert _run_main(monkeypatch, facts, {_nfc("소속")}) == 1
         captured = capsys.readouterr()
         assert "(relation written in 2 mixed Unicode normalization forms)" in captured.err
-        assert "single-valued relation is written in" not in captured.out
+        assert "single-valued relation(s) written in" not in captured.out
 
     def test_single_relation_spelling_says_nothing(self, monkeypatch, capsys):
         # CONTROL: this is what keeps an NFC-only KB byte-identical.
@@ -854,8 +857,23 @@ class TestSplitRelationIsDisclosedAtExitZero:
         ]
         _run_main(monkeypatch, facts, {_nfc("소속")})
         out = capsys.readouterr().out
-        assert "1 subject(s)" in out
+        assert "1 single-valued relation(s) written in" in out
         assert "박영희" not in out
+
+    def test_header_counts_what_it_prints(self, monkeypatch, capsys):
+        # One subject, two split relations: the count is over (subject, relation)
+        # pairs, so calling them "subjects" made this KB read as two people.
+        facts = [
+            _fact("김철수", _nfc("소속"), "A사"),
+            _fact("김철수", _nfd("소속"), "B사"),
+            _fact("김철수", _nfc("직급"), "부장"),
+            _fact("김철수", _nfd("직급"), "과장"),
+        ]
+        assert _run_main(monkeypatch, facts, {_nfc("소속"), _nfc("직급")}) == 0
+        out = capsys.readouterr().out
+        assert "2 single-valued relation(s) written in" in out
+        assert "subject(s)" not in out
+        assert len([ln for ln in out.splitlines() if ln.startswith("    on ")]) == 2
 
 
 class TestRelationSpellingIsDisclosed:

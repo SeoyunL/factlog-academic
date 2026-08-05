@@ -753,8 +753,8 @@ def _report_split_relations(scan: ConflictScan) -> None:
     if not lines:
         return
     print(
-        f"check_conflicts: {len(lines)} subject(s) whose single-valued relation is written in "
-        "several Unicode normalization forms, so their rows were compared separately:"
+        f"check_conflicts: {len(lines)} single-valued relation(s) written in several Unicode "
+        "normalization forms for one subject, so their rows were compared separately:"
     )
     for line in lines:
         print(line)
@@ -864,8 +864,8 @@ def main(argv: list[str] | None = None) -> int:
             "under each conflict). Do NOT repair this by editing facts/candidates.csv: "
             "merge_candidates rebuilds those rows from runs/*.json and matches everything it "
             "carries back — statuses and superseded rows alike — on the raw "
-            "(subject, relation, object, source) key, so a hand-edited spelling is discarded "
-            "on the next merge and stops matching the key that preserves its 'superseded' "
+            "(subject, relation, object, source-without-anchor) key, so a hand-edited spelling "
+            "is discarded on the next merge and stops matching the key that preserves its 'superseded' "
             "mark. Unify the spelling in sources/ and re-collect. "
             "That is a separate repair from superseding, and neither substitutes for the other.",
             file=sys.stderr,

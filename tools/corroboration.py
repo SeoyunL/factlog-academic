@@ -80,6 +80,14 @@ def main(argv: list[str] | None = None) -> int:
         # ("한국대 (1 src); 한국대 (1 src)", indistinguishable on screen), which
         # invites superseding a row that says the same thing as its twin. The
         # relation axis stays raw, matching the gate's deferred #210 decision.
+        #
+        # This is a source-level view, not the gate: like `factlog status` it does
+        # not parse typed literals, so a #116 cross-notation pair
+        # (`amount(5400,"억")` and `amount(0.54,"조")`, one value to
+        # check_conflicts) is still listed here as two competing values while the
+        # gate exits 0. Closing that needs the checker's grouping shared rather
+        # than reimplemented — a follow-up, since `tools/` is not importable from
+        # the installed package (pyproject packages = ["factlog"]).
         sv_folded = folded_relation_names(single_valued)
         for row in engine_facts(facts):
             if fold_relation_name(row["relation"]) not in sv_folded:
