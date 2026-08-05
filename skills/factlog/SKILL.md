@@ -577,6 +577,12 @@ means the question→query step (`/factlog query`) was skipped and the AC3
 contract artifact is missing. Do not treat the query step as optional — run it
 before `/factlog check`.
 
+A *present* `facts/query.dl` whose every line was rejected prints
+`no answerable queries in facts/query.dl (see Errors)` instead. That is a
+different problem with a different remedy: the query step ran, and the Errors
+section above names the line and the rule it breaks. Fix the query rather than
+re-running `/factlog query`.
+
 ### Step 3 — Show the report verbatim
 
 Read `facts/logic_report.txt` and output its **full text** with no omissions.
