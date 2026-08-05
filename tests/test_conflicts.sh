@@ -228,6 +228,23 @@ else
   ok "#331: untyped relation carries no non-ASCII note"
 fi
 
+# Negative control 1b (non-ASCII digits in the declared UNIT NAME). The unit group
+# is outside the digit policy on purpose and _parse_amount_units does not validate
+# the name, so this value parses to a scalar and _group_key keys it ("scalar", …).
+# "does not parse" / "compared here as a raw string" would both be false.
+printf '# single-valued\n\n- 매출\n' > "$KB/policy/single-valued.md"
+printf -- '- `매출` : amount as revenue_amt (억１=100000000)\n' > "$KB/policy/typed-relations.md"
+csv '갑사,매출,"amount(100,""억１"")",sources/x.md,confirmed,0.9,' '갑사,매출,"amount(200,""억１"")",sources/x.md,confirmed,0.9,'
+unitout="$("$PYTHON" "$CONFLICTS" --wiki "$KB" 2>&1 || true)"
+printf '%s' "$unitout" | grep -qF "CONFLICT" \
+  && ok "#331: differing amounts under a full-width unit name still conflict" \
+  || bad "#331: unit-name conflict not reported at all"
+if printf '%s' "$unitout" | grep -qF "non-ASCII digits"; then
+  bad "#331: a value that PARSES wrongly carries the note (it is not a raw-string comparison)"
+else
+  ok "#331: non-ASCII digits in the unit name carry no note (the value parses)"
+fi
+
 # Negative control 2 (ASCII-only, typed). Without these the assertions above would
 # pass just as well against a note printed for EVERY conflict.
 printf '# single-valued\n\n- 주_속성\n' > "$KB/policy/single-valued.md"
