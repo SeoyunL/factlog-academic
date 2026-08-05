@@ -388,7 +388,17 @@ def main() -> None:
     report.extend([f"- {item}" for item in policy_items] or ["- no generated policy predicates"])
     report.append("")
     report.append("Query evaluation:")
-    report.extend([f"- {item}" for item in evaluate_queries(facts, inferred, policy_query_predicates)] or ["- no facts/query.dl found"])
+    query_results = evaluate_queries(facts, inferred, policy_query_predicates)
+    if query_results:
+        report.extend([f"- {item}" for item in query_results])
+    elif query_lines():
+        # A file whose every line was refused is not a missing file. SKILL.md
+        # reads "no facts/query.dl found" as "the /factlog query step was
+        # skipped", so printing it here would send the reader to re-run a step
+        # they already ran instead of to the Errors section above.
+        report.append("- no answerable queries in facts/query.dl (see Errors)")
+    else:
+        report.append("- no facts/query.dl found")
 
     text = "\n".join(report) + "\n"
     out = FACTS_DIR / "logic_report.txt"
