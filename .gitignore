@@ -14,6 +14,11 @@ env/
 # factlog runtime artifacts (generated inside a target KB)
 runs/
 
+# Scratch dir that tests/unit/test_unit_suite_isolation.py drops in the work tree
+# to prove the env pins reach outside tests/unit/. It removes it in a finally;
+# this is the net for a run that was killed before that ran.
+tests/pin_probe_*/
+
 # oh-my-claudecode session/runtime state — local only, never committed
 .omc/
 
