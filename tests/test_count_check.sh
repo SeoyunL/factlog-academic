@@ -60,9 +60,11 @@ facts = [
     {"subject": "을서비스", "relation": "포함", "object": "값다"},  # different subject
 ]
 res = r.evaluate_queries(facts, {}, set())
-if "count results: 2 (distinct objects)" not in res:
+# Each count result line echoes the query it answers (#328): a malformed line is
+# dropped from this list, so position alone no longer identifies the query.
+if 'count results (query: count("갑봇", "포함")?): 2 (distinct objects)' not in res:
     problems.append(f"expected distinct count 2, got: {res}")
-if "count results: 0 (distinct objects)" not in res:
+if 'count results (query: count("갑봇", "없는관계")?): 0 (distinct objects)' not in res:
     problems.append(f"expected verified 0 for absent relation, got: {res}")
 
 print("OK" if not problems else "FAIL: " + " | ".join(problems))

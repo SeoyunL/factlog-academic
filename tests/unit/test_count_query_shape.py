@@ -92,7 +92,7 @@ class TestWellFormedCountUnchanged:
 
     def test_well_formed_count_still_evaluates(self, monkeypatch):
         assert _evaluate(monkeypatch, 'count("Marie Curie", "born_in")?') == [
-            "count results: 2 (distinct objects)"
+            'count results (query: count("Marie Curie", "born_in")?): 2 (distinct objects)'
         ]
 
     def test_arity_message_unchanged(self):
