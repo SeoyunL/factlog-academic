@@ -190,6 +190,19 @@ set +e; broken_out="$("$PYTHON" -m factlog status --target "$BROKEN" 2>/dev/null
 printf '%s' "$broken_out" | grep -qE "logic: +" && ok "#331: broken typed policy — report still reaches the logic line" || bad "#331: broken typed policy truncates the report before logic:"
 printf '%s' "$broken_out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "#331: broken typed policy — conflicts still counted" || bad "#331: broken typed policy — conflicts line wrong: $(printf '%s' "$broken_out"|grep conflicts)"
 
+# Same claim, a failure that is NOT a FactlogError. typed_relations() reads
+# logic-policy.dl to compute reserved names, so a policy file that is not UTF-8
+# (cp949 is realistic here — the CLI already forces UTF-8 on cp949 consoles)
+# raises UnicodeDecodeError. Nothing catches it: it is not a FactlogError, so
+# main()'s friendly handler re-raises and the user gets a raw traceback. Only
+# this file is newly exposed; a cp949 typed-relations.md / single-valued.md /
+# attribute-relations.md aborts status on main too (measured), and those are read
+# long before this block, so they are out of reach here by construction.
+"$PYTHON" -c "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes('// 정책\n'.encode('cp949'))" "$BROKEN/policy/logic-policy.dl"
+set +e; cp949_out="$("$PYTHON" -m factlog status --target "$BROKEN" 2>/dev/null)"; cp949_rc=$?; set -e
+[ "$cp949_rc" = "0" ] && ok "#331: non-UTF-8 logic-policy.dl — status still exits 0" || bad "#331: non-UTF-8 logic-policy.dl aborts status (rc=$cp949_rc)"
+printf '%s' "$cp949_out" | grep -qE "logic: +" && ok "#331: non-UTF-8 logic-policy.dl — report still reaches the logic line" || bad "#331: non-UTF-8 logic-policy.dl truncates the report before logic:"
+
 # --- logic report freshness (report mtime pinned; each input checked) ---------
 printf 'errors: 0\nwarnings: 2\n' > "$KB/facts/logic_report.txt"
 printf 'relation("x","r","y").\n' > "$KB/facts/accepted.dl"
