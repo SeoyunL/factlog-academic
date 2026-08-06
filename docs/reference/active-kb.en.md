@@ -2,9 +2,10 @@
 
 > 🌐 **English** | [한국어](active-kb.md)
 
-After `factlog init`/`setup` (or `factlog use <kb>`), the chosen KB is recorded
-as the **active KB**, so `ingest`/`ask`/`sync` and the tools target it from any
-working directory — no `--target`/`--wiki` needed:
+`factlog use <kb>` — or the first `factlog init`/`setup` while no active KB is
+set yet — records the chosen KB as the **active KB**, so `ingest`/`ask`/`sync`
+and the tools target it from any working directory — no `--target`/`--wiki`
+needed:
 
 ```bash
 factlog use ~/wiki        # make ~/wiki the active KB (recorded in config)
@@ -30,7 +31,7 @@ wins. Which one won is printed on `factlog where`'s `resolved from:` line.
 |------|--------|---------------|-------------------------------------|
 | 1 | command-line flag | `--target <path>` (`--wiki <path>` on some tools) | (not shown — see below) |
 | 2 | environment variable | `export FACTLOG_ROOT=<path>` | `env ($FACTLOG_ROOT)` |
-| 3 | active-KB config | `factlog use <path>` (or recorded automatically by `factlog init`/`setup`) | `config file` |
+| 3 | active-KB config | `factlog use <path>` (or the first `init`/`setup`, while no active KB is set) | `config file` |
 | 4 | current directory | (the fallback when nothing else is set) | `current directory` |
 
 Rank 1 never appears in `factlog where`'s output because `where` itself does not
@@ -41,6 +42,46 @@ Whichever way a path arrives, it goes through `~` expansion and absolute-path
 normalization. If the config file is missing, its JSON is corrupt, or its `root`
 field is empty, resolution **falls through to the next rank instead of crashing** —
 ultimately to the current directory.
+
+## Creating a KB and choosing the active one are separate acts
+
+`init`/`setup` **create** a KB; `use` **chooses** the active one. So there are
+only three cases in which `init`/`setup` touch the active-KB setting:
+
+| Situation | Active KB |
+|-----------|-----------|
+| No active KB set yet | set to the KB just created (the first-run experience, unchanged) |
+| The target already is the active KB | unchanged (the config file is not even rewritten) |
+| Another KB is already active | **left alone**. The new KB is not activated, and the output says how to switch |
+
+```text
+factlog init: created /tmp/scratch
+factlog init: active KB unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT active
+  to work in it: factlog use /tmp/scratch   (or re-run with --activate)
+```
+
+The point is that creating one throwaway KB must not cost you the KB you were
+working in. Pass `--activate` to create and switch in one step, or
+`--no-activate` to leave the setting untouched even when none is set yet (scripts,
+scratch KBs). Passing both is a usage error (exit code 2).
+
+If you relied on `init`/`setup` moving the active KB for you, add `--activate` or
+follow with `factlog use <path>`. The changed behaviour is printed where it
+happens, so it never changes silently.
+
+A configured active KB whose path does not currently exist (an unmounted volume,
+say) is still your choice: `init` will not take the setting over. Moving it is
+always something you do on purpose.
+
+With `--target` omitted, `init`/`setup` pick their target in the same order every
+other command uses: `$FACTLOG_ROOT` > active-KB config > `~/wiki`. The current
+directory is deliberately not in that chain — an `init` run from anywhere
+scattering a KB layout into that spot would be the worse default. A target you
+did not spell out is printed with where it came from.
+
+```text
+factlog init: no --target given; using /Users/me/wiki (from the active KB config)
+```
 
 ## Checking which KB won
 

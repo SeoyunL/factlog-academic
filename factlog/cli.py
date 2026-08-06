@@ -3240,7 +3240,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--target",
         default=None,
         help="KB root whose runs/sources/ receives the conversions "
-        "(default: the active KB set by `factlog init`/`use`, else cwd)",
+        "(default: the active KB set by `factlog use`, else cwd)",
     )
     ingest.add_argument(
         "--force",

@@ -39,9 +39,10 @@ factlog는 **프로젝트별 지식베이스(KB) 폴더**를 만들어, 그 안�
 
 ## KB 폴더 구조 — 내 파일은 어디에 넣나
 
-`/factlog setup`(또는 `factlog init`)은 **KB 폴더 하나**를 만듭니다. 기본 위치는
-홈 디렉터리 아래 `~/wiki` 이고(`~` 는 홈 디렉터리 — macOS `/Users/<이름>`,
-Windows `C:\Users\<이름>`), `--target <경로>` 로 원하는 위치를 고를 수 있습니다
+`/factlog setup`(또는 `factlog init`)은 **KB 폴더 하나**를 만듭니다. 처음 쓴다면
+기본 위치는 홈 디렉터리 아래 `~/wiki` 이고(`~` 는 홈 디렉터리 — macOS
+`/Users/<이름>`, Windows `C:\Users\<이름>`), 이미 활성 KB가 있거나 `$FACTLOG_ROOT`
+가 설정돼 있으면 그쪽이 대상이 됩니다. `--target <경로>` 로 원하는 위치를 고를 수 있습니다
 (예: `/factlog setup --target ~/my-report`). setup 은 만든 KB의 **절대경로를 요약에
 출력**하므로, 그 경로를 파일 탐색기(Windows)·Finder(macOS)로 열면 됩니다.
 

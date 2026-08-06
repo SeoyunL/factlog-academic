@@ -2,9 +2,9 @@
 
 > 🌐 [English](active-kb.en.md) | **한국어**
 
-`factlog init`/`setup`(또는 `factlog use <kb>`) 이후, 선택한 KB가 **활성 KB**로
-기록됩니다. 그래서 `ingest`/`ask`/`sync` 및 도구들이 어느 작업 디렉터리에서든
-그 KB를 대상으로 동작합니다 — `--target`/`--wiki` 가 필요 없습니다.
+`factlog use <kb>`(또는 아직 활성 KB가 없을 때의 첫 `factlog init`/`setup`)로 고른
+KB가 **활성 KB**로 기록됩니다. 그래서 `ingest`/`ask`/`sync` 및 도구들이 어느 작업
+디렉터리에서든 그 KB를 대상으로 동작합니다 — `--target`/`--wiki` 가 필요 없습니다.
 
 *Claude Code에 입력:*
 
@@ -39,7 +39,7 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 |------|------|-----------|------------------------------------------|
 | 1 | 명령줄 플래그 | `--target <경로>` (도구에 따라 `--wiki <경로>`) | (표시되지 않음 — 아래 참고) |
 | 2 | 환경 변수 | `export FACTLOG_ROOT=<경로>` | `env ($FACTLOG_ROOT)` |
-| 3 | 활성 KB 설정 | `factlog use <경로>` (또는 `factlog init`/`setup` 이 자동 기록) | `config file` |
+| 3 | 활성 KB 설정 | `factlog use <경로>` (활성 KB가 아직 없으면 첫 `init`/`setup` 이 기록) | `config file` |
 | 4 | 현재 디렉터리 | (아무것도 지정하지 않았을 때의 폴백) | `current directory` |
 
 1순위가 `factlog where` 출력에 나타나지 않는 이유는, `where` 자신이 `--target` 을
@@ -49,6 +49,44 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 경로는 어느 경로로 들어오든 `~` 확장과 절대경로 정규화를 거칩니다. 설정 파일이
 없거나, JSON이 깨졌거나, `root` 필드가 비어 있으면 **크래시하지 않고 다음 순위로
 떨어집니다** — 최종적으로는 현재 디렉터리입니다.
+
+## KB를 만드는 일과 활성 KB를 고르는 일은 별개입니다
+
+`init`/`setup` 은 KB를 **만드는** 명령이고, 활성 KB를 **고르는** 명령은 `use` 입니다.
+그래서 `init`/`setup` 이 활성 KB 설정을 건드리는 경우는 다음 셋뿐입니다.
+
+| 상황 | 활성 KB |
+|------|---------|
+| 활성 KB가 아직 없음 | 방금 만든 KB로 설정 (첫 실행 경험 그대로) |
+| 대상이 이미 활성 KB임 | 그대로 (설정 파일을 다시 쓰지도 않음) |
+| 다른 KB가 이미 활성 상태 | **그대로 유지**. 만든 KB는 활성화되지 않고, 바꾸는 방법을 함께 출력 |
+
+```text
+factlog init: created /tmp/scratch
+factlog init: active KB unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT active
+  to work in it: factlog use /tmp/scratch   (or re-run with --activate)
+```
+
+임시 KB 하나를 만들려고 `init` 을 돌렸다가 원래 쓰던 KB를 잃는 일이 없도록 하기
+위해서입니다. 만들면서 바로 활성화하려면 `--activate` 를, 활성 KB가 없는 상태에서도
+설정 파일을 만들고 싶지 않으면(스크립트·임시 KB) `--no-activate` 를 씁니다. 두 플래그를
+같이 주면 사용 오류(종료 코드 2)입니다.
+
+이미 활성 KB가 있는 상태에서 `init`/`setup` 이 활성 KB를 옮겨 주기를 기대하던
+방식이라면, `--activate` 를 붙이거나 뒤이어 `factlog use <경로>` 를 실행하세요.
+바뀐 동작은 출력에 그대로 적히므로, 조용히 달라지지는 않습니다.
+
+설정된 활성 KB의 경로가 지금 존재하지 않더라도(외장 볼륨을 마운트하지 않은 경우 등)
+`init` 은 그 설정을 가져가지 않습니다. 옮기는 것은 언제나 사용자의 명시적인 행동입니다.
+
+`--target` 을 생략하면 `init`/`setup` 도 다른 명령과 같은 순서로 대상을 정합니다:
+`$FACTLOG_ROOT` > 활성 KB 설정 > `~/wiki`. 현재 디렉터리는 이 사슬에 없습니다 —
+아무 데서나 실행한 `init` 이 그 자리에 KB 뼈대를 흩뿌리는 편이 더 나쁜 기본값이기
+때문입니다. 명시하지 않아 골라진 대상은 어디서 왔는지와 함께 출력됩니다.
+
+```text
+factlog init: no --target given; using /Users/me/wiki (from the active KB config)
+```
 
 ## 어느 KB가 이겼는지 확인하기
 
