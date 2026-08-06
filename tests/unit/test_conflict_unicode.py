@@ -73,26 +73,28 @@ class TestTypedObjectFoldedBeforeParse:
 
     def test_all_nfd_kb_cross_notation_amounts_collapse(self):
         # 5400억 == 0.54조 == 5.4e11. In an all-NFD KB neither side parsed before,
-        # so #116's cross-notation equivalence never fired there; inside this
-        # module it now does.
+        # so #116's cross-notation equivalence never fired there; it now does.
         #
-        # Inside this module ONLY, and that is the whole point of the disclosure
-        # asserted below. The engine hands the RAW object to
-        # literal_types.normalize (common._project_typed_relations), so it still
-        # fails to parse both literals, warns "does not parse as amount; loading
-        # untyped", and inserts neither into `revenue`. The checker is declaring
-        # two values equal on a basis the engine cannot reproduce — permissible
-        # only because it says so out loud. Do not read this pin as an engine-side
-        # gain; aligning the engine is a separate follow-up.
+        # And it fires on BOTH sides. `literal_types.parse_amount` composes its
+        # lookup key, so the raw NFD literal parses without any help from this
+        # module's fold: the engine, which hands `normalize` the raw object
+        # (common._project_typed_relations), reaches the same 5.4e11 and inserts
+        # both rows into `revenue`. Nothing here is a merge only this module can
+        # see, so `parse_merges` is empty and the exit-0 disclosure stays silent —
+        # asserted directly, since an empty `parse_merges` is the difference
+        # between "the engine agrees" and "the reader was not told".
         facts = [
             _fact("갑사", "매출", _nfd('amount(5400,"억")')),
             _fact("갑사", "매출", _nfd('amount(0.54,"조")')),
         ]
         scan = check_conflicts.collect_conflicts(facts, {"매출"}, _TYPED_AMOUNT)
         assert scan.conflicts == {}
-        assert scan.parse_merges[("갑사", "매출")] == {
-            _nfd('amount(0.54,"조")'): sorted(f["object"] for f in facts)
-        }
+        assert scan.parse_merges == {}
+        # The engine's own path agrees, row for row — that is why no disclosure
+        # is owed here (contrast the ordinal case, where it still is).
+        assert {
+            common.literal_types.normalize("amount", f["object"], None) for f in facts
+        } == {540_000_000_000}
 
     def test_nfd_typed_literals_with_different_values_still_conflict(self):
         # Folding must not swallow a genuine typed contradiction.
@@ -709,16 +711,31 @@ class TestFoldEnabledTypedParseIsDisclosed:
         assert "merged into one value" not in out
         assert "NOT canonically equivalent" in out
 
-    def test_all_nfd_typed_kb_is_disclosed(self, monkeypatch, capsys):
+    def test_all_nfd_ordinal_kb_is_disclosed(self, monkeypatch, capsys):
         # The most likely shape of all: normalization is a property of the source
-        # document, so a whole KB arrives decomposed. Neither literal parses as
-        # written, both parse folded, and they collapse onto 5.4e11.
-        raws = [_nfd('amount(5400,"억")'), _nfd('amount(0.54,"조")')]
-        facts = [_fact("갑사", "매출", raws[0]), _fact("갑사", "매출", raws[1])]
-        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 0
+        # document, so a whole KB arrives decomposed. `_ORDINAL_KO_RE` spells its
+        # markers composed (제/호/위), so neither NFD literal parses as written,
+        # both parse folded, and they collapse onto rank 3 — a merge only this
+        # module makes, hence a disclosure.
+        raws = [_nfd("제3호"), _nfd("3위")]
+        facts = [_fact("갑", "순위", raws[0]), _fact("갑", "순위", raws[1])]
+        assert _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL) == 0
         out = capsys.readouterr().out
         assert "made a typed literal parse" in out
         assert ascii(raws[0]) in out and ascii(raws[1]) in out
+
+    def test_all_nfd_amount_kb_needs_no_disclosure(self, monkeypatch, capsys):
+        # The same shape on the `amount` axis is NOT disclosed, and must not be:
+        # `parse_amount` composes its unit lookup key, so the engine parses these
+        # rows exactly as this module does (pinned above and in
+        # tests/unit/test_amount_units_unicode.py). Disclosing here would tell the
+        # reader to go unify a spelling that changes nothing.
+        raws = [_nfd('amount(5400,"억")'), _nfd('amount(0.54,"조")')]
+        facts = [_fact("갑사", "매출", raws[0]), _fact("갑사", "매출", raws[1])]
+        assert _run_main(monkeypatch, facts, {"매출"}, _TYPED_AMOUNT) == 0
+        assert capsys.readouterr().out == (
+            "check_conflicts: 0 conflicts across 1 single-valued relation(s)\n"
+        )
 
     def test_scalar_merge_the_fold_did_not_cause_stays_silent(self, monkeypatch, capsys):
         # CONTROL for the gate's lower edge, and the pin the previous round's

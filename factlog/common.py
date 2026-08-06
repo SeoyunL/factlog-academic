@@ -984,7 +984,18 @@ def _parse_amount_units(body: str) -> dict[str, int]:
     Comma-separated ``unit=number`` pairs; the value may be written ``1e8`` or
     ``100000000`` but MUST resolve to a **positive integer** (the engine projects
     amounts into an int64 column). A non-positive / non-integer / non-numeric
-    value, or a malformed pair, → FactlogError (fail loudly)."""
+    value, or a malformed pair, → FactlogError (fail loudly).
+
+    Unit names are stored **NFC-folded** (``fold_relation_name``), and the
+    duplicate check runs on the folded key. The lookup side folds too
+    (``literal_types.parse_amount``), so a units clause written in NFD — the
+    macOS default for Hangul — resolves the same objects as an NFC one. Without
+    the fold the two sides are a raw byte comparison between a policy file and
+    an extracted object: on an NFD KB every amount would fail to parse, and two
+    spellings of one value (``5400억`` / ``0.54조``) would split into a CONFLICT
+    that no normalization message explains. NFC only, never NFKC — same rule as
+    ``fold_relation_name``. An all-ASCII / all-NFC clause folds to itself, so
+    this is byte-identical for KBs that were already composed."""
     units: dict[str, int] = {}
     for pair in body.split(","):
         pair = pair.strip()
@@ -993,7 +1004,7 @@ def _parse_amount_units(body: str) -> dict[str, int]:
         if "=" not in pair:
             raise FactlogError(f"typed-relations: malformed unit pair {pair!r} (expected unit=number)")
         unit, _, value = pair.partition("=")
-        unit = unit.strip()
+        unit = fold_relation_name(unit.strip())
         value = value.strip()
         if not unit:
             raise FactlogError(f"typed-relations: empty unit name in {pair!r}")

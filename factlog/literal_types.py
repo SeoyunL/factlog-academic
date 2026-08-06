@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import re
+import unicodedata
 from decimal import Decimal
 
 # The literal types this module can normalize. The declaration parser validates
@@ -198,6 +199,17 @@ def parse_amount(raw: str, units: dict[str, int]) -> int | None:
     *units*. This applies to the caller-supplied table too, and only succeeds when
     the stripped stem is a known unit — an unknown stem (``백만원``) stays ``None``.
 
+    The lookup key is **NFC-folded** before it meets *units* (the same NFC as
+    ``common.fold_relation_name``; this module stays pure, so it normalizes
+    directly rather than importing ``common``). An object written in NFD — the
+    macOS default for Hangul — is a different byte string from the composed unit
+    name it means, so an unfolded lookup misses and the amount silently loads
+    untyped; two spellings of one value then split into a contradiction. Folding
+    here also protects a caller-supplied table, and lets the ``억원`` currency
+    fallback below see a composed ``원`` to strip. NFC only, never NFKC:
+    fullwidth ``ＡＢＣ`` and ``ABC`` stay different units. An already-composed or
+    ASCII unit folds to itself, so composed KBs are byte-identical.
+
     Scope (first cut): Korean monetary units only (the table's keys). A leading
     ``제`` (ordinal marker), a ``%``, or any unit not in *units* -> ``None``.
     ``3 GB`` / ASCII-space units are out of scope.
@@ -211,6 +223,7 @@ def parse_amount(raw: str, units: dict[str, int]) -> int | None:
         if not m:
             return None
         unit = m.group("unit").strip()
+    unit = unicodedata.normalize("NFC", unit)
     multiplier = units.get(unit)
     if multiplier is None:
         # Prose fallback: a fused currency suffix (``억원``). Strip one trailing
