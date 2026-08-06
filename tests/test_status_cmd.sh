@@ -91,6 +91,34 @@ printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" \
   && ok "uniformly-NFD KB reaches the conflict count (membership folded)" \
   || bad "NFD KB not counted: $(printf '%s' "$out" | grep conflicts)"
 
+# --- the POLICY file is the decomposed side (#325) ----------------------------
+# The case above folds only the row side: with the policy name already composed,
+# `folded_relation_names(sv)` is the identity there and dropping it changes
+# nothing. Membership is a comparison between two hand-written files and either
+# one can be the decomposed one — a policy file edited on macOS against rows a
+# script emitted composed. Both halves have to fold, so this pins the half the
+# rows-NFD case cannot reach.
+"$PYTHON" - "$KB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfd('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},BBB,sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" \
+  && ok "NFD policy file with composed rows reaches the conflict count" \
+  || bad "NFD policy not folded: $(printf '%s' "$out" | grep conflicts)"
+
 # --- status agrees with the gate on both mixed-spelling axes (#325) -----------
 # The gate folds the subject and the untyped object for grouping. A raw grouping
 # here disagreed in both directions: 0 on a KB finalize refuses to compile, and

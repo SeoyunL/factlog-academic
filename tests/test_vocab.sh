@@ -116,6 +116,32 @@ printf '%s' "$sout" | grep -qE "conflicts: +1 \(over 1 single-valued" \
   && ok "status and vocab agree on the same NFD KB" \
   || bad "status disagrees: $(printf '%s' "$sout" | grep conflicts)"
 
+# --- the POLICY file is the decomposed side (#325) ----------------------------
+# The case above folds only the row side: with the policy name already composed,
+# `folded_relation_names(sv)` is the identity there and dropping it changes
+# nothing. Membership compares two hand-written files and either one can be the
+# decomposed one, so this pins the half the rows-NFD case cannot reach.
+"$PYTHON" - "$NKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfd('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},BBB,sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+out="$("$PYTHON" -m factlog vocab --relations --target "$NKB" 2>&1)"
+printf '%s' "$out" | grep -qF "[single-valued]" \
+  && ok "NFD policy file with composed rows still gets the [single-valued] tag" \
+  || bad "NFD policy not folded: $(printf '%s' "$out" | tail -2)"
+
 # --- fullwidth relation names are NOT merged by the fold (control) ------------
 # NFC only, never NFKC: ＡＢＣ and ABC are different relations. This passes
 # before the fold too — it is the guard on how far the fold may reach.

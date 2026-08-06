@@ -77,6 +77,32 @@ printf '%s' "$co" | grep -qF "competing values" \
   && ok "uniformly-NFD KB reaches competing values (membership folded)" \
   || bad "NFD KB competing values missed: $(printf '%s' "$co" | tail -3)"
 
+# the POLICY file is the decomposed side (#325). The case above folds only the
+# row side: with the policy name already composed, `folded_relation_names` is the
+# identity there and dropping it changes nothing. Membership compares two
+# hand-written files and either one can be the decomposed one, so this pins the
+# half the rows-NFD case cannot reach.
+"$PYTHON" - "$KB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfd('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},BBB,sources/b.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+co="$("$PYTHON" "$CORR" --wiki "$KB" 2>&1)"
+printf '%s' "$co" | grep -qF "competing values" \
+  && ok "NFD policy file with composed rows reaches competing values" \
+  || bad "NFD policy not folded: $(printf '%s' "$co" | tail -3)"
+
 # --- two spellings of ONE value are not listed as two competitors (#325) ------
 # Raw grouping printed "한국대 (1 src); 한국대 (1 src)" — one value shown as a
 # contradiction between two strings that render identically, with the gate
