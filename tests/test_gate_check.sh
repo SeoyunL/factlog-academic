@@ -1651,6 +1651,117 @@ esac
 rm -rf "$KB_NUL" "$nul_out"
 
 # ---------------------------------------------------------------------------
+# CASES 54-58: A REPORT OF A RUN THE ENGINE NEVER COMPLETED (#338).
+#
+# run_logic_check.py used to write facts/logic_report.txt only on the success
+# path, so a KB whose engine cannot start (pyrewire missing, facts/accepted.dl
+# absent) left whatever report was already there — and this gate, which compares
+# mtimes only, read it as this run's result. It now writes a report that records
+# the failure, and that report is FRESH: /factlog check just wrote it. On the
+# mtime test alone it would satisfy branch C and hand out edit rights on engine
+# inputs exactly when the engine is broken, which is the one state this gate
+# exists for. These cases pin the content test that prevents it, in both
+# directions.
+#
+# The body below is the marker line as run_logic_check.py writes it
+# (ENGINE_FAILED_STATUS_LINE); the two constants are matched whole-line and must
+# be changed together.
+# ---------------------------------------------------------------------------
+write_failed_report() {
+  # A report exactly as run_logic_check.py writes it when the engine could not
+  # run: the marker on its own line, plus the reason line the deny message
+  # quotes back. Written AFTER the engine input so it is unambiguously fresh —
+  # the point of these cases is that freshness is not sufficient.
+  local root="$1"
+  {
+    echo "Logic Check Report"
+    echo "=================="
+    echo "status: engine-did-not-run"
+    echo "engine: wirelog / pyrewire"
+    echo "input: facts/accepted.dl"
+    echo "reason: missing facts/accepted.dl; run tools/compile_facts.py first"
+  } > "$root/facts/logic_report.txt"
+}
+
+# CASE 54: engine input exists, report is FRESH but records an engine that never
+# ran — DENY. Pre-#338 the gate allowed this (mtime says fresh).
+KB_FAILREP="$(mktemp -d)"
+make_kb "$KB_FAILREP"
+touch_file "$KB_FAILREP/facts/accepted.dl"
+set_mtime_past "$KB_FAILREP/facts/accepted.dl"
+write_failed_report "$KB_FAILREP"
+run_case "fresh report recording an engine that never ran — deny" \
+  "$KB_FAILREP" "$KB_FAILREP/facts/accepted.dl" 2
+
+# CASE 55: the deny message must carry the CAUSE. Pointing at /factlog check
+# here would name the command that just failed, which is the loop #338 is about.
+failrep_err="$(mktemp)"
+failrep_exit=0
+FACTLOG_ROOT="$KB_FAILREP" bash "$GATE" \
+  <<< "$(envelope Write "$KB_FAILREP/facts/accepted.dl")" \
+  >/dev/null 2>"$failrep_err" || failrep_exit=$?
+if [ "$failrep_exit" -eq 2 ] \
+   && grep -q "could not run the engine" "$failrep_err" \
+   && grep -q "reason: missing facts/accepted.dl" "$failrep_err"; then
+  echo "PASS: deny message names the engine failure and its reason (exit $failrep_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: deny message names the engine failure and its reason — exit=$failrep_exit stderr=$(cat "$failrep_err")"
+  fail=$((fail + 1))
+fi
+rm -rf "$KB_FAILREP" "$failrep_err"
+
+# CASE 56: BOOTSTRAP survives a failed check. Running /factlog check in a fresh
+# KB fails (no facts/accepted.dl yet) and now leaves a failure report behind. If
+# that report counted as a report, the FIRST creation of facts/query.dl — a
+# write this gate has always allowed — would start being denied, replacing one
+# deadlock with another.
+KB_FAILBOOT="$(mktemp -d)"
+make_kb "$KB_FAILBOOT"
+write_failed_report "$KB_FAILBOOT"
+run_case "bootstrap: only a failure report, query.dl not yet created — allow" \
+  "$KB_FAILBOOT" "$KB_FAILBOOT/facts/query.dl" 0
+rm -rf "$KB_FAILBOOT"
+
+# CASE 57: the same relaxation where it is NOT vacuous. CASE 56's KB has no
+# engine input at all, so it would be allowed by freshness alone (nothing to be
+# stale against) and does not exercise the bootstrap clause. Here an engine input
+# exists and is NEWER than the failure report, so freshness denies and only the
+# bootstrap clause can allow — which is the answer this gate has always given
+# when no report of a completed run exists and the target is being created for
+# the first time. Bootstrap has never consulted mtimes, and a failure report must
+# not be what changes that.
+KB_FAILBOOT2="$(mktemp -d)"
+make_kb "$KB_FAILBOOT2"
+write_failed_report "$KB_FAILBOOT2"
+set_mtime_past "$KB_FAILBOOT2/facts/logic_report.txt"
+touch_file "$KB_FAILBOOT2/facts/accepted.dl"
+run_case "bootstrap: failure report older than accepted.dl, query.dl not yet created — allow" \
+  "$KB_FAILBOOT2" "$KB_FAILBOOT2/facts/query.dl" 0
+rm -rf "$KB_FAILBOOT2"
+
+# CASE 58: the content test must not over-deny. A fresh report of a COMPLETED
+# run — one that legitimately found nothing, so its counts are all 0 — carries no
+# marker and is allowed, as before. This is the pair to CASE 54: it is what makes
+# "the engine ran and found nothing" distinguishable from "the engine never ran"
+# rather than merely stricter.
+KB_ZERO="$(mktemp -d)"
+make_kb "$KB_ZERO"
+touch_file "$KB_ZERO/facts/accepted.dl"
+set_mtime_past "$KB_ZERO/facts/accepted.dl"
+{
+  echo "Logic Check Report"
+  echo "=================="
+  echo "engine: wirelog / pyrewire"
+  echo "engine facts: 0"
+  echo "errors: 0"
+  echo "warnings: 0"
+} > "$KB_ZERO/facts/logic_report.txt"
+run_case "fresh report of a completed run with 0 facts — allow" \
+  "$KB_ZERO" "$KB_ZERO/facts/accepted.dl" 0
+rm -rf "$KB_ZERO"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
