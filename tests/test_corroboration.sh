@@ -232,6 +232,68 @@ printf '%s' "$co" | grep -qF "$nfd_subject / " \
   && ok "all-NFD subject reported in the bytes actually written" \
   || bad "reported a subject spelling never written: $(printf '%s' "$co" | tail -2)"
 
+# --- the head line and the fact list use the same equivalence as the clause ---
+# One fact written in two forms and backed by two different files. Keyed on the
+# raw triple it is two facts with one source each, and the corroboration signal
+# this tool exists to give — "backed by >1 source" — is under-reported on the
+# one KB shape #325 is about. The clause below already folded, so before this
+# the two halves of one report disagreed.
+HKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$HKB" >/dev/null
+printf 'x\n' > "$HKB/sources/a.md"
+printf 'y\n' > "$HKB/sources/b.md"
+"$PYTHON" - "$HKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfc('에이사')},sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfd('에이사')},sources/b.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+co="$("$PYTHON" "$CORR" --wiki "$HKB" 2>&1)"
+printf '%s' "$co" | grep -qF "1 fact(s); 1 backed by >1 source" \
+  && ok "head line counts two spellings of one fact as one corroborated fact" \
+  || bad "head line still raw: $(printf '%s' "$co" | head -2)"
+printf '%s' "$co" | grep -qF "2 source(s): 김철수, 소속," \
+  && ok "fact list credits both sources to the one folded fact" \
+  || bad "fact list still raw: $(printf '%s' "$co" | head -3)"
+printf '%s' "$co" | grep -qF "competing values" \
+  && bad "one value in two spellings listed as a competition" \
+  || ok "the clause and the head line agree (no competition on one value)"
+
+# --- one file backing two spellings is still one source (#325) ----------------
+# The other edge of the same fold, and the reason sources are re-aggregated over
+# the folded key instead of summing corroboration_counts: both spellings come
+# from ONE file, so the merged fact has one source, not two. Fails before this
+# change for the same reason as the case above (two facts, not one).
+SKB2="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$SKB2" >/dev/null
+printf 'x\n' > "$SKB2/sources/a.md"
+"$PYTHON" - "$SKB2" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfc('에이사')},sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},{nfd('에이사')},sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+co="$("$PYTHON" "$CORR" --wiki "$SKB2" 2>&1)"
+printf '%s' "$co" | grep -qF "1 fact(s); 0 backed by >1 source" \
+  && ok "two spellings from one file stay one source" \
+  || bad "source double-counted: $(printf '%s' "$co" | head -2)"
+
 # --- genuinely different values still compete (control) ----------------------
 DKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$DKB" >/dev/null

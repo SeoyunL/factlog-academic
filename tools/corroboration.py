@@ -33,7 +33,6 @@ os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 
 from common import (  # noqa: E402
     composed_spelling,
-    corroboration_counts,
     engine_facts,
     ensure_dirs,
     fold_relation_name,
@@ -52,15 +51,47 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_dirs()
     facts = load_facts()
-    counts = corroboration_counts(facts)
+    # Folded FOR DISPLAY, here rather than in `common.corroboration_counts`:
+    # `factlog/compile_facts.py` reads that helper too, and the raw triple is the
+    # right key there (engine atoms are the raw triple). This report is the only
+    # caller that has to read.
+    #
+    # The competing-values clause below folds the subject and object axes; the
+    # head line and this list used the raw triple, so one report answered "how
+    # many facts, how many corroborated" on one equivalence and "which values
+    # compete" on another. Two spellings of one fact backed by two different
+    # sources were counted as two facts with one source each — the corroboration
+    # signal this tool exists to give, under-reported in exactly the mixed KB
+    # #325 is about. Sources are counted per folded fact, so a source backing
+    # both spellings counts once (summing the raw counts would double it). The
+    # relation axis stays raw, matching the gate's deferred #210 decision.
+    backing: dict[tuple[str, str, str], set[str]] = {}
+    triple_spellings: dict[tuple[str, str, str], tuple[set[str], set[str]]] = {}
+    for row in engine_facts(facts):
+        key = (
+            unicodedata.normalize("NFC", row["subject"]),
+            row["relation"],
+            unicodedata.normalize("NFC", row["object"]),
+        )
+        backing.setdefault(key, set()).add(row["source"])
+        subjects, objects = triple_spellings.setdefault(key, (set(), set()))
+        subjects.add(row["subject"])
+        objects.add(row["object"])
+    counts = {key: len(srcs) for key, srcs in backing.items()}
     if not counts:
         print("corroboration: no engine-input facts")
         return 0
 
     multi = sum(1 for n in counts.values() if n > 1)
     print(f"corroboration: {len(counts)} fact(s); {multi} backed by >1 source")
-    for (subject, relation, object_), n in sorted(counts.items()):
-        print(f"  {n} source(s): {subject}, {relation}, {object_}")
+    for key, n in sorted(counts.items()):
+        # Report spellings that were actually written, the same provenance rule
+        # the competing-values clause follows.
+        subjects, objects = triple_spellings[key]
+        print(
+            f"  {n} source(s): {composed_spelling(subjects)}, {key[1]}, "
+            f"{composed_spelling(objects)}"
+        )
 
     # Source-level view of single-valued competition: same (subject, relation)
     # given different objects (each with its own source support).
