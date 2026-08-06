@@ -120,8 +120,9 @@ class TestLookupKeyFolded:
         assert lt.parse_amount(_nfd("100억원"), lt.DEFAULT_AMOUNT_UNITS) == 10**10
 
     def test_fullwidth_unit_stays_unknown(self):
-        # NFC, never NFKC: the compatibility variant is a different unit, not a
-        # second spelling of one.
+        # CONTROL (passes before and after): NFC, never NFKC. The compatibility
+        # variant is a different unit, not a second spelling of one — this is the
+        # guard that the fold introduced here did not reach for NFKC.
         assert lt.parse_amount("100Ｗ", {"W": 1}) is None
 
     def test_unknown_unit_still_none(self):
@@ -162,7 +163,9 @@ class TestGateOnAnAllNfdTypedKb:
         assert conflicts == {}
 
     def test_a_real_disagreement_on_an_nfd_table_still_conflicts(self):
-        # Folding must not swallow a genuine contradiction: 5400억 != 1조.
+        # CONTROL (passes before and after, by different routes: unparsed raw
+        # strings before, distinct scalars after). Folding must not swallow a
+        # genuine contradiction: 5400억 != 1조.
         facts = [
             _fact(_nfd("삼성"), _nfd("매출"), _nfd("5400억"), "sources/a.md"),
             _fact(_nfd("삼성"), _nfd("매출"), _nfd("1조"), "sources/b.md"),

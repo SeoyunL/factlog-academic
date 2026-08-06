@@ -725,7 +725,10 @@ class TestFoldEnabledTypedParseIsDisclosed:
         assert ascii(raws[0]) in out and ascii(raws[1]) in out
 
     def test_one_representative_per_component_not_every_member(self):
-        # `_parse_merge` reports ONE representative per component: the members
+        # MUTATION PIN (passes on this branch before and after; it exists because
+        # replacing `_representative(members)` with every member left the whole
+        # suite green). `_parse_merge` reports ONE representative per component:
+        # the members
         # inside a component are canonically equivalent, so `_fold_classes`
         # already lists them and repeating them here says "the fold enabled a
         # parse" about a plain Unicode merge. NFD('제3호') is its own component;
