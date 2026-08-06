@@ -113,6 +113,32 @@ class TestReportIsWrittenWhenTheEngineCannotRun:
         )
         assert MARKER in _report(kb).read_text(encoding="utf-8")
 
+    def test_program_the_engine_refuses_still_writes_a_report(self, tmp_path):
+        """A cause that is NOT a FactlogError.
+
+        A policy program pyrewire cannot parse raises its own ParseError from
+        inside ``run_wirelog``, with no factlog exception type involved. Catching
+        only FactlogError would satisfy every other case here and still leave the
+        previous report standing for this one, which is why this case exists
+        rather than being folded into the two above.
+        """
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        with (kb / "policy" / "logic-policy.dl").open("a", encoding="utf-8") as fh:
+            fh.write("this is not a datalog program (((\n")
+
+        result = _run(kb)
+
+        assert result.returncode != 0, result.stdout
+        assert _report(kb).is_file(), (
+            f"no report written; stderr={result.stderr!r}"
+        )
+        text = _report(kb).read_text(encoding="utf-8")
+        assert MARKER in text
+        # The traceback still reaches stderr — the report does not replace it.
+        assert "ParseError" in result.stderr
+        assert "reason type: ParseError" in text
+
 
 class TestTheFailureReportDoesNotReadAsAResult:
     """The distinction the report has to carry: "the engine could not run" is
