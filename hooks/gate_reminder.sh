@@ -20,11 +20,19 @@
 # with trains the reader to skip the line, and then it is not there when it
 # matters. This is the same defect #323 fixed in hooks/gate_check.sh.
 #
-# NOT SHARED WITH gate_check.sh, yet. Both hooks now read the same envelope with
-# the same key precedence, and #337 asks for one extractor sourced by both. That
-# refactor touches gate_check.sh, which is under change elsewhere, so the
-# extraction below is deliberately a duplicate for now and is the thing to
-# delete when the shared helper lands.
+# NOT SHARED WITH gate_check.sh, and that is a KNOWN COST, not an oversight.
+# Both hooks now read the same envelope with the same key precedence, so the
+# extractor below is a second copy of gate_check.sh's — and #337 exists because
+# a second, sloppier reader of this envelope drifted from the real one. A third
+# copy schedules the next divergence; saying "we will de-duplicate later" is the
+# promise that produced this bug.
+#
+# It is duplicated anyway because #338 is changing gate_check.sh's freshness
+# predicate right now (a report that records the engine did not run must stop
+# counting as a valid result), and two simultaneous refactors of a security gate
+# is the worse risk. The de-duplication is #359, which names #338 as its
+# predecessor — a tracked item with an unblocking condition, not a comment.
+# Whoever takes #359 deletes the extractor below and sources the shared one.
 #
 # HOW MUCH IT CHECKS. Far less than gate_check.sh, on purpose. gate_check.sh
 # resolves the active KB root, canonicalises the path, and asks the filesystem
