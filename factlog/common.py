@@ -1402,8 +1402,25 @@ def _strip_directives(text: str) -> str:
     whole fact — five characters, `.plan `, and the report's path answer flipped
     silently. pyrewire does the opposite: it takes the fact. So whenever the text
     that would be consumed is followed by `.` or `:-`, it is given back and only
-    the keyword is removed. That covers every directive, including any this
-    engine does not implement today, without depending on which ones it does.
+    the keyword is removed. The neck counts because a rule head after a directive
+    is a clause too, and `.plan attr_rel(R) :- …` is engine-accepted. That covers
+    every directive, including any this engine does not implement today, without
+    depending on which ones it does.
+
+    A competing rule was available — never treat an atom followed by `(` as the
+    operand — and the two disagree on exactly one shape::
+
+        .limitsize attr_rel(n=10)
+        p(X) :- relation(X,_,_).      here: PASS      paren rule: REJECT
+
+    This one PASSES it: `attr_rel(n=10)` is followed by neither `.` nor `:-`, so
+    it reads as the directive's own operand. pyrewire refuses that program either
+    way (measured), so PASS cannot carry a wrong answer to a user and REJECT
+    could not have saved one. The clause-terminator rule was chosen because it
+    generalises to any directive taking a bare name, where the paren rule assumes
+    operands are unparenthesised — an assumption `.limitsize p2(n=10)` already
+    breaks, and refusing that shape is the false-rejection failure mode this
+    guard has been sent back for twice.
     """
     out: list[str] = []
     pos = 0

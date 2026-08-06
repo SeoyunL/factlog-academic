@@ -628,6 +628,20 @@ _PARENLESS_DIRECTIVES = [
     '.pragma "x" "y"',
     ".type T",
 ]
+# The same keywords with NOTHING of their own to consume. A separate axis from
+# the list above, not extra cases in it: with no operand the strip reaches past
+# the directive and takes the following clause, which is where the round-5
+# blocker lived.
+_NO_OPERAND_DIRECTIVES = [
+    ".output",
+    ".printsize",
+    ".input",
+    ".limitsize",
+    ".override",
+    ".plan",
+    ".pragma",
+    ".type",
+]
 
 
 class TestAParenlessDirectiveDoesNotHideTheNextStatement:
@@ -658,17 +672,45 @@ class TestAParenlessDirectiveDoesNotHideTheNextStatement:
 
     The other 18 (`.input`, `.limitsize`, `.override`, `.plan`, `.pragma`,
     `.type`) leave text pyrewire refuses with ParseError, so a regression there
-    would be loud. They are pinned at this level anyway because the fix is one
-    rule — the neckless statement gets scanned — rather than a list of directives
-    to watch, and which column a directive falls in is a property of the parser,
-    not of this guard. `TestAParenlessDirectiveReachesTheEngine` carries the
-    end-to-end half for the cells that actually move an answer.
+    would be loud. They are pinned at this level anyway, and the reason is
+    measured rather than hypothesised — see
+    :class:`TestLoudAndSilentDependOnSurroundingText`, where one preceding clause
+    moves the same text between the columns inside a single pyrewire build.
+    `TestAParenlessDirectiveReachesTheEngine` carries the end-to-end half for the
+    cells that actually move an answer.
+
+    Every directive here carries an OPERAND. The no-operand form is a separate
+    axis, exercised below and in
+    :class:`TestADirectiveCannotSwallowAClause`, because it is where the round-5
+    blocker lived: with no operand to consume, the strip reached past the
+    directive and took the following clause instead.
     """
 
     @pytest.mark.parametrize("name", _RESERVED)
     @pytest.mark.parametrize("directive", _PARENLESS_DIRECTIVES)
     def test_a_bare_reserved_fact_after_a_directive_is_refused(self, name, directive):
         policy = f"{directive}\n{_FUSED_FACT[name]}\n"
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("directive", _NO_OPERAND_DIRECTIVES)
+    @pytest.mark.parametrize("gap", ["\n", " "], ids=["next-line", "same-line"])
+    @pytest.mark.parametrize(
+        "lead", ["", "p(X) :- relation(X,_,_).\n"], ids=["no-clause", "after-clause"]
+    )
+    def test_an_operandless_directive_does_not_hide_the_fact(
+        self, name, directive, gap, lead
+    ):
+        """Second axis: the keyword with nothing of its own to consume.
+
+        PLACEMENT is what decides whether this discriminates, and only the
+        same-line rows do. With the fact on the NEXT line the operand pattern
+        cannot reach it — it is same-line-only since round 4 — so those rows pass
+        before and after the round-5 fix and are controls. The same-line rows are
+        the blocker: with no operand present, the strip took the clause instead.
+        """
+        policy = f"{lead}{directive}{gap}{_FUSED_FACT[name]}\n"
         with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
             fcommon._assert_no_reserved_head(policy)
 
@@ -811,9 +853,14 @@ class TestADirectiveCannotSwallowAClause:
     follows it is `.` or `:-`.
 
     On the real assembled program only `.plan` is silent; the other directives
-    leave text pyrewire refuses. All 14 are pinned anyway, for the reason the
-    round-4 set is: which directive lands in which column is a property of the
-    parser, and a version that implements `.plan` would move it.
+    leave text pyrewire refuses. All 14 are pinned anyway, and the reason is
+    measured rather than hypothesised — see
+    :class:`TestLoudAndSilentDependOnSurroundingText`. The blocker needs three
+    things at once (no operand, the fact behind it, a PRECEDING clause), and
+    adding or removing that preceding clause moves the same text between the
+    loud and silent columns inside a single pyrewire build. Which column a case
+    lands in is therefore a property of neither the directive nor the guard, so
+    the guard cannot be tuned to the silent ones.
     """
 
     @pytest.mark.parametrize("name", _RESERVED)
@@ -855,4 +902,124 @@ class TestADirectiveCannotSwallowAClause:
         # CONTROL — nothing follows it at all, so there is no clause to give back.
         fcommon._assert_no_reserved_head(
             'foo2(X, "a") :- relation(X, _, _).\n.limitsize entity_node(n=10)\n'
+        )
+
+
+class TestLoudAndSilentDependOnSurroundingText:
+    """Why every cell is pinned and not just the ones that are silent today.
+
+    The round-5 blocker needs three things together — the directive has NO
+    operand, the reserved fact follows it, and there is a PRECEDING clause.
+    Measured on the pre-fix tree against the real assembled program::
+
+        .plan attr_rel("v0").                      guard PASS  engine ParseError  loud
+        p(X) :- relation(X,_,_).
+        .plan attr_rel("v0").                      guard PASS  engine ACCEPTS     SILENT
+        p(X) :- relation(X,_,_).
+        .output attr_rel("v0").                    guard PASS  engine ParseError  loud
+
+    One preceding clause moves the same text from loud to silent, inside a single
+    pyrewire build. So "which cases are silent" is a property of the surrounding
+    text, not of the directive and not of the guard — there is no subset the
+    guard could be tuned to, and a pin set restricted to today's silent cells
+    would be measuring the corpus rather than the rule.
+
+    These rows are about the ENGINE's behaviour, so they do not move when the
+    guard changes; they are here to justify the pin set, not to detect a
+    regression in it.
+    """
+
+    ACCEPTED = (
+        'relation("갑봇", "통합", "을서비스").\n'
+        'relation("을서비스", "정식_운영", "2030.1").\n'
+        'relation("갑봇", "참조", "병문서").\n'
+    )
+
+    def _program(self, policy: str) -> str:
+        # The real assembly, as run_wirelog builds it.
+        return (
+            fcommon.WIRELOG_PROGRAM
+            + fcommon.attribute_relation_program({"정식_운영"})
+            + "\n.decl p(x: symbol)\n.decl p2(x: symbol)\n"
+            + policy
+            + "\n"
+            + self.ACCEPTED
+        )
+
+    def _compiles(self, policy: str) -> bool:
+        pyrewire = pytest.importorskip("pyrewire")
+        try:
+            pyrewire.EasySession(self._program(policy))
+            return True
+        except Exception:
+            return False
+
+    def test_a_preceding_clause_is_what_makes_it_silent(self):
+        without = '.plan attr_rel("v0").\n'
+        with_clause = 'p(X) :- relation(X,_,_).\n.plan attr_rel("v0").\n'
+        assert self._compiles(without) is False
+        assert self._compiles(with_clause) is True
+
+    def test_the_same_shape_under_another_directive_stays_loud(self):
+        # The directive matters too, so neither dimension alone predicts it.
+        assert self._compiles('p(X) :- relation(X,_,_).\n.output attr_rel("v0").\n') is False
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_the_guard_refuses_all_of_them_regardless(self, name):
+        for policy in (
+            f'.plan {_FUSED_FACT[name]}\n',
+            f'p(X) :- relation(X,_,_).\n.plan {_FUSED_FACT[name]}\n',
+            f'p(X) :- relation(X,_,_).\n.output {_FUSED_FACT[name]}\n',
+        ):
+            with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+                fcommon._assert_no_reserved_head(policy)
+
+
+class TestTheOneShapeWhereTheTwoCandidateRulesDisagree:
+    """`.limitsize attr_rel(n=10)` followed by a clause — documented, not incidental.
+
+    Two rules were on the table for deciding when a directive may keep what
+    follows it:
+
+    * give the text back when it is followed by a clause terminator or a neck
+      (what this guard does), and
+    * never treat an atom followed by `(` as an operand.
+
+    They agree everywhere except here. This guard PASSES this shape, because
+    `attr_rel(n=10)` is not followed by `.` or `:-` and so reads as the
+    directive's own operand. The paren rule would REJECT it.
+
+    Neither is a correctness defect: pyrewire refuses this program either way
+    (measured), so PASS cannot let a wrong answer reach a user, and REJECT
+    cannot refuse policy the engine would have run — which is the failure mode
+    that sent this PR back twice.
+
+    The clause-terminator rule was chosen because it generalises to any
+    directive taking a bare name, whereas the paren rule assumes operands are
+    unparenthesised — an assumption `.limitsize p2(n=10)` already breaks.
+    """
+
+    POLICY = '.limitsize attr_rel(n=10)\np(X) :- relation(X,_,_).\n'
+
+    def test_this_guard_passes_it(self):
+        fcommon._assert_no_reserved_head(self.POLICY)
+
+    def test_the_engine_refuses_it_either_way(self):
+        pyrewire = pytest.importorskip("pyrewire")
+        program = (
+            fcommon.WIRELOG_PROGRAM
+            + fcommon.attribute_relation_program({"정식_운영"})
+            + "\n.decl p(x: symbol)\n"
+            + self.POLICY
+            + '\nrelation("갑봇", "참조", "병문서").\n'
+        )
+        with pytest.raises(Exception):
+            pyrewire.EasySession(program)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_the_parenthesised_operand_form_still_loads(self, name):
+        # The reason PASS is the safe side here: this is the shape a policy
+        # author writes on purpose, and refusing it would be a false rejection.
+        fcommon._assert_no_reserved_head(
+            f'.limitsize {name}(n=10)\nfoo2(X, "a") :- relation(X, _, _).\n'
         )
