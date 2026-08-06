@@ -465,8 +465,133 @@ def evaluate_queries(
     return results
 
 
+# The line that tells a reader — and hooks/gate_check.sh — that this report
+# describes a run in which THE ENGINE NEVER RAN. It is the whole discriminator
+# between "engine ran and found nothing" and "there is nothing to find out from
+# here", so it is matched as a whole line, byte for byte, on both sides. Change
+# it in one place only together with the other (`grep -qxF` in the gate).
+#
+# The marker is NEGATIVE — a successful report carries no status line at all —
+# for one reason: the success report's text is a published contract
+# (tests/golden/logic_report.txt, examples/sample-kb/facts/logic_report.txt, and
+# every report already sitting in a user's KB), and a positive `status: ok`
+# marker would make every one of those read as unrecognised. The only writer of
+# facts/logic_report.txt is _write_report below, so "carries no marker" and
+# "written by the success path" are the same set for every report this repo
+# produces. The cost is that a report truncated inside its first three lines
+# would lose the marker and read as a success; _write_report closes that by
+# replacing the file atomically, so a reader sees either the whole failure
+# report or the previous file.
+ENGINE_FAILED_STATUS_LINE = "status: engine-did-not-run"
+
+
+def _write_report(text: str) -> None:
+    """Put *text* in facts/logic_report.txt, atomically.
+
+    temp + os.replace, not write_text: the gate reads this file to decide
+    whether editing engine inputs is allowed, and a write interrupted after the
+    header but before ENGINE_FAILED_STATUS_LINE would leave a file that is
+    neither report yet passes the gate as one.
+    """
+    out = FACTS_DIR / "logic_report.txt"
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, out)
+
+
+def engine_failure_report(exc: BaseException) -> str:
+    """The report for a run that could not run the engine (#338).
+
+    Until this existed, an engine that could not start — pyrewire missing or too
+    old, facts/accepted.dl absent, a policy program the engine refuses — left
+    facts/logic_report.txt *untouched*. Two things followed, and the second is
+    the reason this function reports failure rather than staying silent:
+
+    - the previous run's report survived on disk and read as this run's result.
+      A reader (and `/factlog check`'s output) had nothing to tell the two
+      apart, so a report describing facts that are no longer compiled looked
+      current;
+    - the gate's freshness predicate had nothing to compare against, so it
+      denied every edit to an engine input and pointed at `/factlog check`,
+      which is the command that had just failed.
+
+    What this report may and may not say:
+
+    - It states the CAUSE and nothing about the KB. Every count a successful
+      report carries (engine facts, policy findings, errors, warnings) is
+      OMITTED rather than written as 0 — `engine facts: 0` is a claim that the
+      engine ran over an empty KB, which is exactly the sentence this report
+      must not produce.
+    - It does NOT satisfy the gate. A report of a run that did not happen is not
+      evidence that editing facts/accepted.dl or facts/query.dl is safe, so
+      ENGINE_FAILED_STATUS_LINE keeps the deny in place — the gate's message
+      just changes from "run /factlog check" to the actual cause. Recovery is
+      the Bash route in docs/guide/determinism.md, which the hook's Write|Edit
+      matcher deliberately leaves open.
+    - It does not change the exit code. main re-raises, so `/factlog check`
+      still fails and still prints the error on stderr; this file is a side
+      effect of failing, never a sign of success.
+
+    *reason* is collapsed to a single line: the format is line-oriented and read
+    by `grep -qxF` on the other side, and an engine ParseError's message spans
+    several lines.
+    """
+    reason = " ".join(str(exc).split()) or exc.__class__.__name__
+    accepted = FACTS_DIR / "accepted.dl"
+    query = FACTS_DIR / "query.dl"
+    return "\n".join(
+        [
+            "Logic Check Report",
+            "==================",
+            ENGINE_FAILED_STATUS_LINE,
+            "engine: wirelog / pyrewire",
+            "input: facts/accepted.dl",
+            f"reason: {reason}",
+            f"reason type: {type(exc).__name__}",
+            f"facts/accepted.dl: {'present' if accepted.is_file() else 'MISSING'}",
+            f"facts/query.dl: {'present' if query.is_file() else 'absent'}",
+            "",
+            "The engine did not run, so this report says NOTHING about the KB.",
+            "The counts a successful report carries — engine facts, policy",
+            "findings, errors, warnings — are missing above rather than 0,",
+            "because 0 would mean the engine ran and found nothing.",
+            "",
+            "Any earlier report has been replaced, so nothing here can be read as",
+            "an older run's result. Writes to facts/accepted.dl and",
+            "facts/query.dl stay denied while this status line is present.",
+            "",
+            "Recovery: fix the cause above and re-run the logic check. When the",
+            "check cannot run at all, see the Bash recovery in",
+            "docs/guide/determinism.md — the gate's Write|Edit matcher leaves it",
+            "open on purpose.",
+            "",
+        ]
+    )
+
+
 def main() -> None:
     ensure_dirs()
+    try:
+        text = build_report_text()
+    except Exception as exc:
+        # Report the failure, then let it propagate untouched: run_cli prints a
+        # FactlogError on stderr and exits 1, anything else keeps its traceback.
+        # ensure_dirs is deliberately OUTSIDE this — "not a factlog KB root" has
+        # no facts/ to write into, and is not a statement about the engine.
+        _write_report(engine_failure_report(exc))
+        raise
+    _write_report(text)
+    print(text)
+
+
+def build_report_text() -> str:
+    """The report for a run that reached the engine, byte-identical to what this
+    module has always written (tests/golden/logic_report.txt pins it).
+
+    It is a separate function only so main can tell a report it could build from
+    one it could not: everything here presumes ``run_wirelog`` returned, and the
+    one caller turns any exception raised below into ``engine_failure_report``.
+    """
     facts = load_accepted_facts()
     candidates = load_facts()
     inferred = run_wirelog()
@@ -547,10 +672,7 @@ def main() -> None:
         # no result line, because a path result names its two endpoints.
         report.append("- no answerable queries in facts/query.dl (see Errors)")
 
-    text = "\n".join(report) + "\n"
-    out = FACTS_DIR / "logic_report.txt"
-    out.write_text(text, encoding="utf-8")
-    print(text)
+    return "\n".join(report) + "\n"
 
 
 if __name__ == "__main__":
