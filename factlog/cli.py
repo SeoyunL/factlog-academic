@@ -1635,6 +1635,15 @@ def cmd_vocab(args: argparse.Namespace) -> int:
             print("    (none)")
     if show_r:
         print(f"  relations ({len(rel_counts)}):")
+        # Counting is on the raw name (the fold is a membership predicate, not a
+        # grouping key — see check_conflicts), so two spellings of one relation
+        # are two lines that render identically. Tagging membership made the pair
+        # indistinguishable: both lines now say [single-valued], where before one
+        # of them was at least untagged. Name the normalization form on exactly
+        # the names that share a folded spelling with another — the same reason
+        # check_conflicts prints escaped, form-labelled spellings. A KB with no
+        # such pair prints byte-identically to before.
+        folded_rel = Counter(common.fold_relation_name(name) for name in rel_counts)
         for name, n in sorted(rel_counts.items(), key=lambda kv: (-kv[1], kv[0])):
             # Membership folded, matching the gate (check_conflicts) and the two
             # other consumers. Without it a uniformly-NFD KB gets `conflicts: 1
@@ -1653,7 +1662,8 @@ def cmd_vocab(args: argparse.Namespace) -> int:
             if tname in typed:
                 tags.append(f"typed:{typed[tname].type}")
             tagstr = f"  [{', '.join(tags)}]" if tags else ""
-            print(f"    [{n:>3}] {name}{tagstr}")
+            form = f"  ({common.normalization_form(name)})" if folded_rel[tname] > 1 else ""
+            print(f"    [{n:>3}] {name}{form}{tagstr}")
         if not rel_counts:
             print("    (none)")
     return 0

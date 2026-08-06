@@ -692,6 +692,35 @@ def folded_relation_names(names: Iterable[str]) -> set[str]:
     return {fold_relation_name(name) for name in names}
 
 
+def normalization_form(value: str) -> str:
+    """Name the Unicode normalization form *value* is written in.
+
+    Only NFC and NFD are named: they are the two forms this codebase folds
+    between, and telling them apart is what a reader needs in order to know which
+    row to edit. A pure-ASCII string is identical under both and is reported
+    ``"NFC"``.
+
+    ``"mixed"`` is the honest answer for everything else, and "everything else"
+    is wider than the obvious case. It covers composed and decomposed syllables
+    mixed inside one string, but also every string that is neither wholly
+    composed nor wholly decomposed: a canonical-order violation (``'q̧́'`` — the
+    combining marks in the wrong order, so it equals neither form), a composition
+    exclusion (``'ä́'`` — NFC cannot recompose it), and a canonical singleton
+    (``'Ω'`` U+2126, which NFC replaces with U+03A9 and NFD leaves alone). The
+    label does not claim to explain which of those it is; it says only "not one
+    of the two forms named above", which is what the reader needs.
+
+    Shared so that ``check_conflicts`` and ``factlog vocab`` label a form the
+    same way — two reports that disagree about which form a string is in are
+    worse than one that says nothing.
+    """
+    if value == unicodedata.normalize("NFC", value):
+        return "NFC"
+    if value == unicodedata.normalize("NFD", value):
+        return "NFD"
+    return "mixed"
+
+
 def composed_spelling(spellings: Iterable[str]) -> str:
     """Return the spelling to display on behalf of a Unicode-folded group.
 

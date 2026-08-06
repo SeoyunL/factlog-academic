@@ -47,6 +47,7 @@ from common import (  # noqa: E402
     fold_relation_name,
     folded_relation_names,
     load_facts,
+    normalization_form,
     relation_aliases,
     single_valued_relations,
     typed_relations,
@@ -141,25 +142,12 @@ def _representative(raws: set[str]) -> str:
 def _form_label(value: str) -> str:
     """Name the Unicode normalization form *value* is written in.
 
-    Only NFC and NFD are named: they are the two forms this module folds between,
-    and telling them apart is what a reader needs in order to know which row to
-    edit. A pure-ASCII string is identical under both and is reported ``"NFC"``.
-
-    ``"mixed"`` is the honest answer for everything else, and "everything else" is
-    wider than the obvious case. It covers composed and decomposed syllables mixed
-    inside one string, but also every string that is neither wholly composed nor
-    wholly decomposed: a canonical-order violation (``'q̧́'`` — the combining marks
-    in the wrong order, so it equals neither form), a composition exclusion
-    (``'ä́'`` — NFC cannot recompose it), and a canonical singleton (``'Ω'``
-    U+2126, which NFC replaces with U+03A9 and NFD leaves alone). The label does
-    not claim to explain which of those it is; it says only "not one of the two
-    forms named above", which is what the reader needs before editing the row.
+    ``common.normalization_form``, not a local copy: ``factlog vocab`` labels the
+    same forms for the same reason (two names that render identically), and a
+    report that disagrees with another about which form a string is in is worse
+    than one that says nothing. See that docstring for what ``"mixed"`` covers.
     """
-    if value == unicodedata.normalize("NFC", value):
-        return "NFC"
-    if value == unicodedata.normalize("NFD", value):
-        return "NFD"
-    return "mixed"
+    return normalization_form(value)
 
 
 def _spellings(raws: list[str]) -> str:

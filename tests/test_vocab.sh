@@ -142,6 +142,39 @@ printf '%s' "$out" | grep -qF "[single-valued]" \
   && ok "NFD policy file with composed rows still gets the [single-valued] tag" \
   || bad "NFD policy not folded: $(printf '%s' "$out" | tail -2)"
 
+# --- two spellings of one relation are told apart on screen (#325) ------------
+# Counting is on the raw name, so a KB with both spellings prints two lines that
+# render identically. Tagging membership made them indistinguishable: before,
+# one of the two was at least untagged. The form label is the same remedy
+# check_conflicts applies with its escaped spelling lists.
+FKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$FKB" >/dev/null
+printf 'x\n' > "$FKB/sources/a.md"
+"$PYTHON" - "$FKB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfd('김철수')},{nfd('소속')},BBB,sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+out="$("$PYTHON" -m factlog vocab --relations --target "$FKB" 2>&1)"
+printf '%s' "$out" | grep -qF "(NFC)  [single-valued]" \
+  && printf '%s' "$out" | grep -qF "(NFD)  [single-valued]" \
+  && ok "both spellings of one relation are labelled with their form" \
+  || bad "indistinguishable lines: $(printf '%s' "$out" | tail -3)"
+# ...and a KB with no such pair is untouched (control: passes before and after).
+out="$("$PYTHON" -m factlog vocab --relations --target "$NKB" 2>&1)"
+printf '%s' "$out" | grep -qE "\((NFC|NFD|mixed)\)" \
+  && bad "form label printed where no two names share a spelling" \
+  || ok "single-spelling KB prints no form label"
+
 # --- fullwidth relation names are NOT merged by the fold (control) ------------
 # NFC only, never NFKC: ＡＢＣ and ABC are different relations. This passes
 # before the fold too — it is the guard on how far the fold may reach.
