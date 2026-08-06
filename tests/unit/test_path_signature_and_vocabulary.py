@@ -19,10 +19,13 @@ other half is removed here, which is why these pins exist:
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import run_logic_check as rlc
 from factlog import common as fl_common
+from factlog.common import WIRELOG_PROGRAM as WIRELOG
 
 
 def R(subject: str, relation: str, object_: str) -> dict[str, str]:
@@ -127,10 +130,35 @@ class TestBuiltInExclusionsAreTheUnion:
 
     @pytest.mark.parametrize(
         "predicate",
-        ["relation", "edge", "path", "count", "review_required", "attr_rel", "entity_node"],
+        [
+            "relation",
+            "edge",
+            "path",
+            "count",
+            "review_required",
+            # WIRELOG_PROGRAM declares all three; `canonical` was the one the set
+            # had been missing while the comment already described it. Adding it
+            # left the sample-kb's policy_predicates, all five gate verdicts, and
+            # the whole logic_report.txt byte-identical.
+            "canonical",
+            "attr_rel",
+            "entity_node",
+        ],
     )
     def test_a_built_in_never_becomes_a_policy_predicate(self, predicate):
         program = f".decl {predicate}(entity: symbol, reason: symbol)\n"
+        assert fl_common.policy_predicates(program) == set()
+
+    def test_every_wirelog_declared_name_is_excluded(self):
+        """The set must not drift from the engine program it mirrors: every name
+        WIRELOG_PROGRAM `.decl`s is engine-owned and cannot be a policy predicate."""
+        declared = set(
+            re.findall(r"^\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\(", WIRELOG, flags=re.M)
+        )
+        assert declared  # the program really does declare things
+        program = "".join(
+            f".decl {name}(entity: symbol, reason: symbol)\n" for name in sorted(declared)
+        )
         assert fl_common.policy_predicates(program) == set()
 
     @pytest.mark.parametrize(

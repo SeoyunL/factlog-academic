@@ -638,15 +638,17 @@ def policy_predicates(policy_program: str | None = None) -> set[str]:
     # report treat a count query as a policy query while the gate still treated it
     # as a count, which reproduces #328's report/gate divergence exactly.
     #
-    # `edge` is here for a different reason and has no branch: it is the engine's
-    # own EDB relation, not a queryable predicate (it is absent from
-    # classify_query's `allowed_predicates`, so a query naming it is rejected as
-    # an unknown predicate). It has been excluded since before that set existed.
-    # `attr_rel` and `entity_node` are the same kind of engine-owned relation,
-    # declared by WIRELOG_PROGRAM, and are what keep a declared literal out of the
-    # entity graph (#329). `_assert_no_reserved_head` already refuses a policy that
-    # re-`.decl`s either, so a loadable policy cannot reach this filter with one —
-    # the exclusion is what makes that true of a program assembled by hand too.
+    # The rest are engine-owned relations with no branch at all: `edge`, and the
+    # three names WIRELOG_PROGRAM declares — `canonical`, `attr_rel`,
+    # `entity_node`, the last two being what keep a declared literal out of the
+    # entity graph (#329). None is a queryable predicate (all are absent from
+    # classify_query's `allowed_predicates`, so a query naming one is rejected as
+    # an unknown predicate); `edge` has been excluded since before that set
+    # existed. `_assert_no_reserved_head` already refuses a policy that re-`.decl`s
+    # any of the three, so a loadable policy cannot reach this filter carrying one
+    # — the exclusion is what makes that true of a program assembled by hand too,
+    # and `canonical` was the one the set had been missing while this comment
+    # already described it.
     # `conflict` is deliberately NOT here: it likewise has no branch, but it IS
     # meant to be policy-declared, and QUERY_PREDICATES lists it.
     built_in = {
@@ -655,6 +657,7 @@ def policy_predicates(policy_program: str | None = None) -> set[str]:
         "path",
         "count",
         "review_required",
+        "canonical",
         "attr_rel",
         "entity_node",
     }
