@@ -1677,9 +1677,20 @@ def cmd_vocab(args: argparse.Namespace) -> int:
         # are two lines that render identically. Tagging membership made the pair
         # indistinguishable: both lines now say [single-valued], where before one
         # of them was at least untagged. Name the normalization form on exactly
-        # the names that share a folded spelling with another — the same reason
-        # check_conflicts prints escaped, form-labelled spellings. A KB with no
-        # such pair prints byte-identically to before.
+        # the names that share a folded spelling with another. A KB with no such
+        # pair prints byte-identically to before.
+        #
+        # Scope, stated exactly: this separates **NFC from NFD**, which is the
+        # pair that actually occurs (a composed name beside its macOS-decomposed
+        # twin). It does NOT make every pair distinguishable, because the label
+        # is three-valued: two names that are each neither wholly composed nor
+        # wholly decomposed — NFC('소속')+NFD('기관') beside NFD('소속')+NFC('기관')
+        # — both render as `소속기관  (mixed)` and stay identical on screen.
+        # ``check_conflicts._spellings`` does not have that gap because it
+        # escapes the string *and* labels it; this prints the name as written and
+        # labels it, so the label is carrying the whole distinction. Escaping
+        # here would close it, at the cost of making every such line unreadable
+        # for the common case — deliberately not done; see the follow-up.
         folded_rel = Counter(common.fold_relation_name(name) for name in rel_counts)
         for name, n in sorted(rel_counts.items(), key=lambda kv: (-kv[1], kv[0])):
             # Membership folded, matching the gate (check_conflicts) and the two

@@ -759,7 +759,7 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     print(
         f"check_conflicts: {len(parsed)} value(s) merged only because a Unicode fold made "
         "a typed literal parse, so the notations below are counted as one value "
-        "(any CONFLICT above already reflects that):"
+        "wherever this run reports a count:"
     )
     for line in parsed:
         print(line)
@@ -851,13 +851,20 @@ def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[
     Asking ``normalize`` converges this note and ``_group_key`` on one predicate.
 
     ``_parse_amount_units`` does now **NFC-fold** a unit name (#325), which is a
-    normalization and not a validation, so the example above is unaffected: NFC
-    leaves every non-ASCII digit alone — fullwidth ``１`` U+FF11 is untouched
-    (only NFKC would map it), as are Arabic-Indic, Devanagari and Thai digits.
-    The fold therefore cannot make a value the digit policy rejects start
-    parsing, nor the reverse. It also runs strictly *after* the numeric group has
-    already matched ``[0-9]``, so it is downstream of the digit gate in the one
-    direction that matters.
+    normalization and not a validation, so the example above is unaffected. That
+    fold runs at policy load, *before* any value meets the ``[0-9]`` numeric
+    group — it is upstream of the digit gate, not downstream of it — so its
+    harmlessness cannot rest on ordering. It rests on the fold itself: NFC does
+    not change a single non-ASCII digit, anywhere in Unicode. Of the 750
+    non-ASCII ``Nd`` code points, 80 carry a decomposition mapping and **none of
+    those mappings is canonical** — every one is compatibility-tagged, which is
+    precisely what NFKC would apply and NFC will not. So no ``Nd`` code point is
+    touched by NFC or NFD, ``has_non_ascii_digits`` is invariant under canonical
+    equivalence as a general fact rather than as a claim about fullwidth, and the
+    fold can neither make a value the digit policy rejects start parsing nor the
+    reverse. (Measured on unicodedata 16.0.0; the property is a Unicode
+    invariant, not a version accident — a canonical decomposition for a digit
+    would merge two digits into one character.)
 
     Two things the wording deliberately does NOT claim:
 

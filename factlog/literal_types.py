@@ -325,8 +325,17 @@ def parse_amount(raw: str, units: dict[str, int]) -> int | None:
     macOS default for Hangul — is a different byte string from the composed unit
     name it means, so an unfolded lookup misses and the amount silently loads
     untyped; two spellings of one value then split into a contradiction. Folding
-    here also protects a caller-supplied table, and lets the ``억원`` currency
-    fallback below see a composed ``원`` to strip. NFC only, never NFKC:
+    here also lets the ``억원`` currency fallback below see a composed ``원`` to
+    strip.
+
+    For a **caller-supplied** table this narrows rather than widens: a *composed*
+    table now matches NFD objects, and a hand-built *decomposed* table — which
+    matched an NFD object by raw bytes before #325 — stops matching, because only
+    the lookup side is folded and the caller's keys are left as given. Every
+    in-repo caller passes either ``DEFAULT_AMOUNT_UNITS`` or the output of
+    ``common._parse_amount_units``, both composed, so no caller changes
+    behaviour; a new caller building a units dict by hand must compose its keys.
+    NFC only, never NFKC:
     fullwidth ``ＡＢＣ`` and ``ABC`` stay different units. An already-composed or
     ASCII unit folds to itself, so composed KBs are byte-identical.
 

@@ -171,17 +171,26 @@ class TestUnitNameFoldDoesNotDisturbTheDigitPolicy:
 
     Both touch ``parse_amount``, so the two policies have to be shown not to
     interfere. They cannot, for a reason worth stating once: the fold is **NFC**,
-    and NFC leaves every non-ASCII digit alone — only NFKC maps fullwidth ``１``
-    U+FF11 onto ``1``. The fold also runs strictly after the numeric group has
-    matched ``[0-9]``, so it is downstream of the digit gate in the direction
-    that matters.
+    and NFC does not change a single non-ASCII digit anywhere in Unicode. Of the
+    750 non-ASCII ``Nd`` code points, 80 carry a decomposition mapping and none
+    of those is canonical — every one is compatibility-tagged, which is what
+    NFKC applies and NFC does not. The unit-name fold's position is *not* part of
+    that argument: it runs at policy load, before any value reaches the ``[0-9]``
+    numeric group, so it is upstream of the digit gate rather than downstream.
 
-    **Every test in this class is a CONTROL**: each one passes both with and
-    without the #325 fold, verified by reverting both fold sites on the merged
-    tree (24/24 still green). That is the point — the claim being held down is
-    "#325 changed nothing here", and a test that only passed after the fold would
-    be evidence of exactly the interference this class denies. The pins that do
-    fail pre-fix live in tests/unit/test_amount_units_unicode.py.
+    **Five of the six tests here are CONTROLS**: they pass both with and without
+    the #325 fold, verified by reverting both fold sites (still green). That is
+    the point — the claim is "#325 changed nothing here", and a test that only
+    passed after the fold would be evidence of the very interference this class
+    denies.
+
+    The exception is ``test_note_stays_silent_on_an_nfd_table_that_now_parses``,
+    labelled at its own definition: it is a **conjunction pin**, green with both
+    folds and with neither, red with either one alone. It belongs here anyway —
+    what it holds down is that the two folds stay a matched pair, which is a
+    precondition for the non-interference the rest of the class asserts. The pins
+    that fail against the pre-#325 tree live in
+    tests/unit/test_amount_units_unicode.py.
     """
 
     def test_nfc_never_changes_a_non_ascii_digit(self):
@@ -215,11 +224,16 @@ class TestUnitNameFoldDoesNotDisturbTheDigitPolicy:
         assert common._parse_amount_units("억=１００００００００") == {"억": 100000000}
 
     def test_note_stays_silent_on_an_nfd_table_that_now_parses(self):
-        # The #325 fix's own KB shape, and a control by construction: an NFD
-        # table met an NFD object as raw bytes even before the fold, so these
-        # parsed then too. What the fold changed is the MIXED case, not this one.
-        # Held here because the note's silence must survive either way — the
-        # values carry only ASCII digits.
+        # CONJUNCTION PIN — dies if either fold is reverted alone. Measured:
+        # both folds green, neither fold green, table-fold-only red,
+        # lookup-fold-only red. NOT a control, unlike the rest of this class.
+        #
+        # An NFD table met an NFD object as raw bytes before #325, and meets it
+        # again once both ends compose; revert one end and the two stop meeting.
+        # So what this holds down is that the two folds stay a matched pair —
+        # which is the precondition for the non-interference the class asserts,
+        # not an instance of it. The values carry only ASCII digits, so the
+        # note's silence is the observable either way.
         units = common._parse_amount_units(_nfd("억=1e8, 조=1e12"))
         spec = common.TypedRelSpec("amount", "revenue", units)
         objects = [_nfd("5400억"), _nfd("1조")]

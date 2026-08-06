@@ -15,8 +15,11 @@ The message named neither normalization nor the equality, so the only repair
 visible to the reader was to supersede a legitimate row.
 
 Both ends fold now: the table stores NFC keys (duplicate check included) and the
-lookup key is composed before it meets the table, which also protects a
-caller-supplied table. NFC only, never NFKC — fullwidth stays a different unit.
+lookup key is composed before it meets the table. For a caller-supplied table
+that narrows rather than widens — a composed one now matches NFD objects, while
+a hand-built decomposed one stops matching, since only the lookup side folds.
+Every in-repo caller passes a composed table, so none changes behaviour. NFC
+only, never NFKC — fullwidth stays a different unit.
 """
 from __future__ import annotations
 

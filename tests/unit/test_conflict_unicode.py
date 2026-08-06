@@ -786,15 +786,30 @@ class TestFoldEnabledTypedParseIsDisclosed:
     ):
         # The exit-0 wording ("so no contradiction is reported for them") is false
         # on this path — one IS reported, just not between these two notations.
+        #
+        # The headline must also make no CLAIM ABOUT POSITION. This advisory goes
+        # to stdout and the CONFLICT lines to stderr, and this function is called
+        # BEFORE the loop that prints them, so "any CONFLICT above" was false in
+        # program order and unverifiable in any order once the streams are
+        # separated or redirected apart. Asserting on stderr as well, because a
+        # stdout-only assertion cannot see a claim made about a stderr line —
+        # which is exactly how the directional wording survived.
         facts = [
             _fact("Acme", "순위", _nfd("제3호")),
             _fact("Acme", "순위", "3위"),
             _fact("Acme", "순위", "5위"),
         ]
         _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL)
-        out = capsys.readouterr().out
+        captured = capsys.readouterr()
+        out, err = captured.out, captured.err
         assert "counted as one value" in out
         assert "no contradiction is reported for them" not in out
+        # The CONFLICT line this advisory would have been pointing at is on the
+        # other stream, and is emitted after this text.
+        assert "CONFLICT: single-valued" in err
+        assert "CONFLICT" not in out
+        headline = next(li for li in out.splitlines() if "merged only because" in li)
+        assert "above" not in headline and "below:" not in headline
 
     def test_all_nfd_amount_kb_needs_no_disclosure(self, monkeypatch, capsys):
         # The same shape on the `amount` axis is NOT disclosed, and must not be:
