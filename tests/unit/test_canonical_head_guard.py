@@ -1086,14 +1086,19 @@ class TestGiveBackIsNotLineLocal:
             fcommon._assert_no_reserved_head(policy)
 
     @pytest.mark.parametrize("name", _RESERVED)
-    def test_the_operand_side_stays_line_local(self, name):
-        """CONTROL for the asymmetry, and the reason it is an asymmetry.
+    def test_the_round_four_shapes_are_still_refused(self, name):
+        """The round-4 shapes, still refused.
 
-        `.pragma "x" "y"` loses its operands to the literal strip, leaving a bare
-        keyword. If the OPERAND pattern also crossed newlines it would take the
-        head of the next statement — the bug fixed in round 4. Widening only the
-        tail side must not bring it back."""
-        fcommon._assert_no_reserved_head  # noqa: B018 - referenced for clarity
+        Read what this does and does not show. It pins the OUTCOME — `.pragma
+        "x" "y"` above a reserved head is refused — and that outcome no longer
+        depends on the operand pattern being line-local: widening it to `\\s+`
+        leaves every row here refused, because the tail rule gives back an atom
+        followed by `.` or `:-` wherever that proof sits. Measured, not assumed.
+
+        So the operand side's `[^\\S\\n]` is unpinned, and cannot be pinned from
+        here — there is no observable difference to assert on. It is deliberate
+        redundancy behind the tail rule, and this test is a regression pin for
+        round 4's outcome rather than a control for that narrowness."""
         with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
             fcommon._assert_no_reserved_head(f'.pragma "x" "y"\n{_HEADS[name]}\n')
         with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):

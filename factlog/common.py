@@ -1370,11 +1370,22 @@ _DIRECTIVE_RE = re.compile(
 # What a directive may own: the relation it names and that relation's
 # parenthesised parameters, on the directive's own line.
 #
-# `[^\S\n]` — same-line whitespace only. A directive's operand is on the
-# directive's own line, and `\s` would let the strip cross the newline and eat the
-# head of the NEXT statement: `.pragma "x" "y"` loses its quoted operands to the
-# literal strip that runs first, leaving a bare `.pragma`, and `\s+\w+` then
-# reached the `canonical(` on the following line and deleted it.
+# `[^\S\n]` — same-line whitespace only, because a directive's operand is on the
+# directive's own line.
+#
+# Round 4 HAD the defect this narrowness was introduced for: `.pragma "x" "y"`
+# loses its quoted operands to the literal strip that runs first, leaving a bare
+# `.pragma`, and `\s+\w+` then reached the `canonical(` on the following line and
+# deleted it. That is history, not a description of this code — since the tail
+# rule below matches with `\s*`, an atom taken from the next line is now given
+# straight back, and widening this pattern to `\s+` changes no verdict: measured,
+# the round-4 shapes still refuse and the suite is unchanged at 1612.
+#
+# So this constraint is deliberate redundancy, not the thing currently holding
+# the line, and it is UNPINNED — there is no observable difference to assert on,
+# which is exactly why the claim it used to carry could rot unnoticed. It is kept
+# because the two sides answer different questions and should not drift into
+# sharing an answer by accident.
 _DIRECTIVE_OPERAND_RE = re.compile(
     r"[^\S\n]+[A-Za-z_][A-Za-z0-9_]*(?:[^\S\n]*\([^)]*\))?"
 )
