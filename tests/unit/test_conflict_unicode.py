@@ -471,10 +471,14 @@ class TestFoldingThatResolvesAConflict:
 
     Object-axis folding can drop a pair before any variant map is built: the raw
     spellings would report a contradiction, the folded ones agree, and the pair
-    never reaches the reporting loop. The checker then exits 0, ``finalize``
-    proceeds to compile, and ``common.dedup_engine_atoms`` keys on the raw
-    triple — so both spellings still land in ``accepted.dl`` as two distinct
-    atoms of the same visible fact. Nothing else in the run mentions it.
+    never reaches the reporting loop. The checker then exits 0 and ``finalize``
+    proceeds to compile. Nothing else in the run mentions it.
+
+    Until #342 the compile made it concrete: ``dedup_engine_atoms`` keyed on the
+    raw triple, so both spellings landed in ``accepted.dl`` as two distinct atoms
+    of the same visible fact. They are one atom now, which changes what the
+    advisory should SAY but not whether it is owed — the author still wrote two
+    strings and the gate still treated them as one value on their behalf.
 
     The gate direction differs per axis: subject folding merges rows and can only
     *create* conflicts (checker stricter), object folding can only *resolve* them
@@ -490,6 +494,12 @@ class TestFoldingThatResolvesAConflict:
         # The code points, not just a count: the strings render alike.
         assert ascii(raws[0]) in out and ascii(raws[1]) in out
         assert "accepted.dl" in out
+        # …and what it says about accepted.dl has to match what compile does.
+        # This message was written when the two spellings each became their own
+        # atom; #342 collapsed them, so the old sentence would now send the
+        # reader looking for a duplicate that is not there.
+        assert "single facts/accepted.dl atom" in out
+        assert "separate atom" not in out
 
     def test_collect_records_the_resolved_group_outside_conflicts(self):
         raws = [_nfc("한국대학교"), _nfd("한국대학교")]
@@ -666,9 +676,15 @@ class TestFoldEnabledTypedParseIsDisclosed:
     contradictions" where it used to delete ``facts/accepted.dl``.
 
     The engine makes it worse, not better: ``common._project_typed_relations``
-    hands ``normalize`` the raw object, so it cannot reproduce the merge and loads
-    both literals untyped. The checker is entitled to be more willing to merge
-    than the engine only while it says so.
+    hands ``normalize`` the object as written, so it cannot reproduce the merge
+    and loads both literals untyped. The checker is entitled to be more willing to
+    merge than the engine only while it says so.
+
+    #342 does not touch this. It folds engine-atom identity on canonical
+    equivalence, and ``NFD('제3호')`` and ``'3위'`` are not canonically equivalent —
+    two atoms before, two atoms after. Only the wording moved: the message names
+    the *typed projection* as the half that does not fold, because engine atoms
+    now do.
     """
 
     def test_nfd_typed_literal_merged_with_its_notation_twin_is_disclosed(
@@ -683,10 +699,15 @@ class TestFoldEnabledTypedParseIsDisclosed:
 
     def test_disclosure_names_the_engine_divergence(self, monkeypatch, capsys):
         # The actionable half: the reader must not conclude the engine agrees.
+        # Named as the TYPED PROJECTION since #342: engine atoms do fold now, so
+        # a flat "the engine does not fold" would be false in general — and the
+        # divergence this message is about survives it, because a parse merge is
+        # not canonical equivalence and the atom fold never reaches it.
         facts = [_fact("갑", "순위", _nfd("제3호")), _fact("갑", "순위", "3위")]
         _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL)
         out = capsys.readouterr().out
-        assert "The engine does not fold" in out
+        assert "typed projection does not fold" in out
+        assert "they stay two separate atoms" in out
         assert "Unify the spelling in sources/" in out
 
     def test_engine_claim_is_narrowed_to_the_decomposed_literal(self, monkeypatch, capsys):

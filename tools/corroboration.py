@@ -33,6 +33,7 @@ os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 
 from common import (  # noqa: E402
     composed_spelling,
+    engine_atom_key,
     engine_facts,
     ensure_dirs,
     fold_relation_name,
@@ -51,10 +52,10 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_dirs()
     facts = load_facts()
-    # Folded FOR DISPLAY, here rather than in `common.corroboration_counts`:
-    # `factlog/compile_facts.py` reads that helper too, and the raw triple is the
-    # right key there (engine atoms are the raw triple). Folding in `common`
-    # would change engine output; only this report needs the human-facing view.
+    # `common.engine_atom_key` — the same fold `common.corroboration_counts` now
+    # uses, since #342 made engine atoms fold too and the raw triple stopped
+    # being the right key anywhere. The loop stays here rather than calling that
+    # helper only because it collects the per-axis spellings in the same pass.
     #
     # The competing-values clause below folds the subject and object axes; the
     # head line and this list used the raw triple, so one report answered "how
@@ -68,11 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     backing: dict[tuple[str, str, str], set[str]] = {}
     triple_spellings: dict[tuple[str, str, str], tuple[set[str], set[str]]] = {}
     for row in engine_facts(facts):
-        key = (
-            unicodedata.normalize("NFC", row["subject"]),
-            row["relation"],
-            unicodedata.normalize("NFC", row["object"]),
-        )
+        key = engine_atom_key(row)
         backing.setdefault(key, set()).add(row["source"])
         subjects, objects = triple_spellings.setdefault(key, (set(), set()))
         subjects.add(row["subject"])
