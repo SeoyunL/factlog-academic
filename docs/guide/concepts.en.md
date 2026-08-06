@@ -42,9 +42,10 @@ This tool follows one rule.
 
 ## KB folder layout — where do my files go
 
-`/factlog setup` (or `factlog init`) creates **one KB folder**. The default
-location is `~/wiki` under your home directory (`~` is the home directory —
-macOS `/Users/<name>`, Windows `C:\Users\<name>`), and `--target <path>` lets you
+`/factlog setup` (or `factlog init`) creates **one KB folder**. On a first run the
+default location is `~/wiki` under your home directory (`~` is the home directory —
+macOS `/Users/<name>`, Windows `C:\Users\<name>`); if you already have an active KB
+or `$FACTLOG_ROOT` set, that is the target instead. `--target <path>` lets you
 choose where it goes (e.g. `/factlog setup --target ~/my-report`). setup
 **prints the absolute path** of the KB it created in its summary, so you can open
 that path in File Explorer (Windows) or Finder (macOS).
