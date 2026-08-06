@@ -4,6 +4,8 @@
 # Pins (XDG_CONFIG_HOME isolated so a developer's real config never interferes):
 #   - resolve_root precedence: --flag > $FACTLOG_ROOT > config > cwd
 #   - `factlog init`/`use` record the active KB; `factlog where` reports it
+#   - a later `init` does NOT re-point an already-configured active KB (#356);
+#     `init --activate` does
 #   - `factlog ingest` with no --target uses the active KB (from any cwd)
 #   - a tool (coverage) with no --wiki uses the active KB
 #   - `factlog use <missing>` errors; no config -> cwd fallback (backward compat)
@@ -86,8 +88,15 @@ printf '%s' "$out" | grep -qF "target KB $(cd "$KB" && pwd -P) (from config)" &&
 out="$(cd /tmp && "$PYTHON" "$PLUGIN_ROOT/tools/coverage.py" 2>&1 || true)"
 printf '%s' "$out" | grep -qF "sources/c.bin.docx" && ok "coverage (no --wiki) uses active KB" || bad "coverage did not use active KB: $out"
 
+# --- init does NOT re-point an already-configured active KB (#356) -----------
+# $KB is active from the first-run init above. Creating a second KB must leave
+# that alone; switching is what `use` (or an explicit --activate) is for.
+"$PYTHON" -m factlog init --target "$KB2" >/dev/null
+"$PYTHON" -m factlog where --porcelain | grep -qx "$(cd "$KB" && pwd -P)" && ok "init leaves an already-configured active KB alone" || bad "init re-pointed the active KB at the newly created KB"
+"$PYTHON" -m factlog init --target "$KB2" --activate >/dev/null
+"$PYTHON" -m factlog where --porcelain | grep -qx "$(cd "$KB2" && pwd -P)" && ok "init --activate re-points the active KB" || bad "init --activate did not switch the active KB"
+
 # --- factlog use switches active KB ------------------------------------------
-"$PYTHON" -m factlog init --target "$KB2" >/dev/null   # also records KB2
 "$PYTHON" -m factlog use "$KB" >/dev/null
 "$PYTHON" -m factlog where | grep -qF "active KB: $(cd "$KB" && pwd -P)" && ok "factlog use switches active KB" || bad "use did not switch active KB"
 
