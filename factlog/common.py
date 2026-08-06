@@ -1284,15 +1284,10 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
     # Strip EVERY directive, not just `.decl`. A paren-less one — `.output p2` —
     # carries no terminator either, so it merges with the fact after it exactly as
     # `.decl` does; the merged statement then begins with `.`, the head tokenizer
-    # finds nothing, and the fact rode in unexamined (#329 round 4).
-    #
-    # Consumed: the keyword, the relation it names, and its parenthesised
-    # parameters — and no further. NOT to end of line: `.output p2 attr_rel("참조").`
-    # on ONE line is a program pyrewire compiles, so eating the rest of the line
-    # would delete a real reserved fact and manufacture the bypass it is meant to
-    # close. A space replaces the directive so stripping cannot glue two tokens
-    # into one name.
-    bare = _DIRECTIVE_STRIP_RE.sub(" ", bare)
+    # finds nothing, and the fact rode in unexamined (#329 round 4). See
+    # `_strip_directives` for how much a directive is allowed to own, which is
+    # where the bypasses have been rather than in the stripping itself.
+    bare = _strip_directives(bare)
 
     for statement in _split_policy_statements(bare):
         # Tokenize the HEAD (the predicate name left of ':-', or the whole clause for
@@ -1372,22 +1367,58 @@ _DL_DIRECTIVES = frozenset(
 _DIRECTIVE_RE = re.compile(
     r"\.(?:" + "|".join(sorted(_DL_DIRECTIVES)) + r")(?![A-Za-z0-9_])"
 )
-# The same directives plus what belongs to them: the relation they name and its
-# parenthesised parameters. `_assert_no_reserved_head` removes these before
-# tokenizing heads, because a directive carries no clause-terminating '.' and
-# would otherwise merge with — and hide the head of — the statement after it.
-# Deliberately stops at the parameters: a directive and a clause can share a
-# physical line, and eating the remainder would delete the clause.
+# What a directive may own: the relation it names and that relation's
+# parenthesised parameters, on the directive's own line.
+#
 # `[^\S\n]` — same-line whitespace only. A directive's operand is on the
 # directive's own line, and `\s` would let the strip cross the newline and eat the
 # head of the NEXT statement: `.pragma "x" "y"` loses its quoted operands to the
 # literal strip that runs first, leaving a bare `.pragma`, and `\s+\w+` then
 # reached the `canonical(` on the following line and deleted it.
-_DIRECTIVE_STRIP_RE = re.compile(
-    _DIRECTIVE_RE.pattern
-    + r"(?:[^\S\n]+[A-Za-z_][A-Za-z0-9_]*)?"
-    + r"(?:[^\S\n]*\([^)]*\))?"
+_DIRECTIVE_OPERAND_RE = re.compile(
+    r"[^\S\n]+[A-Za-z_][A-Za-z0-9_]*(?:[^\S\n]*\([^)]*\))?"
 )
+# What follows an atom that proves the atom was a CLAUSE, not an operand: a
+# clause-terminating '.', or a neck.
+_CLAUSE_TAIL_RE = re.compile(r"[^\S\n]*(?:\.|:-)")
+
+
+def _strip_directives(text: str) -> str:
+    """Remove Datalog directives so the head tokenizer sees only clauses.
+
+    A directive carries no clause-terminating '.', so it merges with the statement
+    after it and would hide that statement's head. Stripping it is what stops
+    `.output p2` above a bare `attr_rel("참조").` from riding in unexamined.
+
+    OVER-consuming is its own bypass, and this has bitten twice. The strip stops
+    at the parameters rather than at end of line, because
+    `.output p2 attr_rel("참조").` on ONE line is a program pyrewire compiles and
+    eating the remainder would delete a real reserved fact. It stops at the
+    newline for the same reason.
+
+    The third case is this function rather than the pattern: an operand that is
+    ITSELF a terminated clause is not an operand. `.plan attr_rel("참조").` read
+    `attr_rel` as the operand and `("참조")` as its parameters and deleted the
+    whole fact — five characters, `.plan `, and the report's path answer flipped
+    silently. pyrewire does the opposite: it takes the fact. So whenever the text
+    that would be consumed is followed by `.` or `:-`, it is given back and only
+    the keyword is removed. That covers every directive, including any this
+    engine does not implement today, without depending on which ones it does.
+    """
+    out: list[str] = []
+    pos = 0
+    for keyword in _DIRECTIVE_RE.finditer(text):
+        if keyword.start() < pos:
+            continue  # already inside text consumed by an earlier directive
+        out.append(text[pos : keyword.start()])
+        end = keyword.end()
+        operand = _DIRECTIVE_OPERAND_RE.match(text, end)
+        if operand and not _CLAUSE_TAIL_RE.match(text, operand.end()):
+            end = operand.end()
+        out.append(" ")  # never glue the neighbours into one name
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _split_policy_statements(text: str) -> list[str]:

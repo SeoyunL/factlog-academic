@@ -775,3 +775,84 @@ class TestTheHeadIsTheLastAtomBeforeANeck:
         policy = f'foo(X,a) :- bar(X,"z")\n{name}(Y,"r",O) :- relation(Y,"r",O).\n'
         with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
             fcommon._assert_no_reserved_head(policy)
+
+
+# ---------------------------------------------------------------------------
+# #329 round 5 — a directive must not swallow a clause as its operand
+# ---------------------------------------------------------------------------
+
+# Every directive, including the ones this engine does not implement. The
+# consumption rule is about what a directive may OWN, which is a property of the
+# grammar rather than of which directives pyrewire supports today.
+_ALL_DIRECTIVES = [
+    ".plan", ".output", ".printsize", ".input", ".limitsize", ".override",
+    ".type", ".comp", ".init", ".functor", ".pragma", ".decl",
+    ".symbol_type", ".number_type",
+]
+
+
+class TestADirectiveCannotSwallowAClause:
+    """`.plan attr_rel("참조").` deleted the fact instead of exposing it.
+
+    The strip consumed keyword + name + parenthesised args, so it read `attr_rel`
+    as `.plan`'s operand and `("참조")` as that operand's parameters, and removed
+    the whole thing — leaving nothing for the head tokenizer to find. pyrewire
+    does the opposite: it skips the keyword and takes the fact. Measured::
+
+        clean                                  rc=0  - path 갑봇 -> 병문서: 갑봇 -> 병문서
+        p(X) :- … .  /  .plan attr_rel("참조").  rc=0  - path 갑봇 -> 병문서: (not found)
+                                                     errors: 0     <- wrong, silent
+        same fact with the `.plan ` removed     rc=1  refused
+
+    Five characters flip the answer. This is the third over-consumption bug in
+    the same strip — end-of-line, then across-newline, now same-line — so the
+    rule is stated once and generally: an operand that is ITSELF a terminated
+    clause is not an operand. Whatever would be consumed is given back when what
+    follows it is `.` or `:-`.
+
+    On the real assembled program only `.plan` is silent; the other directives
+    leave text pyrewire refuses. All 14 are pinned anyway, for the reason the
+    round-4 set is: which directive lands in which column is a property of the
+    parser, and a version that implements `.plan` would move it.
+    """
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("directive", _ALL_DIRECTIVES)
+    def test_a_directive_does_not_swallow_a_following_fact(self, name, directive):
+        policy = f'p(X) :- relation(X,_,_).\n{directive} {_FUSED_FACT[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("directive", _ALL_DIRECTIVES)
+    def test_a_directive_does_not_swallow_a_following_rule_head(self, name, directive):
+        # The neck is the other proof that what follows is a clause.
+        policy = f'p(X) :- relation(X,_,_).\n{directive} {_HEADS[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_the_same_fact_without_the_directive_is_refused(self, name):
+        # CONTROL — refused before and after; the directive is the entire
+        # difference between this row and the one above.
+        policy = f'p(X) :- relation(X,_,_).\n{_FUSED_FACT[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_genuine_operand_is_still_consumed(self, name):
+        """CONTROL for the other side: an operand NOT followed by `.` or `:-` is
+        the directive's own, so a legal directive naming a reserved relation must
+        still load. Losing this would turn the fix into a false-rejection."""
+        fcommon._assert_no_reserved_head(
+            f'.limitsize {name}(n=10)\nfoo2(X, "a") :- relation(X, _, _).\n'
+        )
+        fcommon._assert_no_reserved_head(
+            f'.output {name}\nfoo2(X, "a") :- relation(X, _, _).\n'
+        )
+
+    def test_a_trailing_directive_is_still_consumed(self):
+        # CONTROL — nothing follows it at all, so there is no clause to give back.
+        fcommon._assert_no_reserved_head(
+            'foo2(X, "a") :- relation(X, _, _).\n.limitsize entity_node(n=10)\n'
+        )
