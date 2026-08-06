@@ -64,6 +64,12 @@ out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
 printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "conflict counted for single-valued relation" || bad "conflict not counted: $(printf '%s' "$out" | grep conflicts)"
 
 # --- uniformly-NFD KB still reaches the conflict count (#325) -----------------
+# The #331 block further down declares a typed relation in this same $KB. These
+# cases are untyped by construction, and they only stay untyped because they run
+# first — stated here rather than relied on, so reordering the two blocks cannot
+# silently change what they exercise. (Measured: both orders pass today, because
+# the two blocks happen to use different relation names.)
+rm -f "$KB/policy/typed-relations.md"
 # policy/single-valued.md holds the composed name, the rows the decomposed one:
 # no mixed spelling anywhere, just one consistently decomposed KB (the macOS
 # default for Hangul). A raw membership test matches nothing, so status printed
