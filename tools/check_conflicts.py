@@ -678,6 +678,18 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     checker exits 0 and ``finalize`` goes on to compile a KB the raw spellings
     would have blocked.
 
+    **The two message classes below have different scopes, deliberately.** The
+    equivalence message covers only the conflict-free pairs, because ``main``
+    already prints ``value … spellings:`` under every CONFLICT it reports, and
+    repeating it here would say each merge twice. The parse message covers
+    **every** pair with a merge, conflict-free or not: a pair can merge two
+    notations under the fold and still contradict on a third value, and nothing
+    on the exit-1 path names the merged notation — the CONFLICT line lists the
+    survivors, and the spelling lines under it come from ``_fold_classes``, which
+    is silent about a merge that is not canonical equivalence. Restricting this
+    loop to the conflict-free pairs made a row the previous release listed by
+    name vanish from the output in any form.
+
     Scope is deliberately the **object** axis, the one where folding *resolves* a
     contradiction. Mixed spellings also cost duplicate atoms downstream
     (``common.dedup_engine_atoms`` dedups on the raw triple, so both spellings
