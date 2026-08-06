@@ -588,6 +588,42 @@ def _init_kb(target) -> bool:
     return False
 
 
+_DEFAULT_KB = "~/wiki"
+
+
+def _resolve_kb_target(cli_value: str | None, command: str):
+    """Resolve the KB root `init`/`setup` will scaffold, announcing an implicit one.
+
+    ``--target`` defaulted to the literal string ``"~/wiki"`` in the parser, which
+    made these the only two commands that ignored factlog's documented root
+    precedence: with ``$FACTLOG_ROOT`` exported, or a KB already active, a bare
+    ``factlog init`` still scaffolded a stray ``~/wiki`` — and then, before the
+    activation rule above, made that invented directory the global default (#356).
+
+    Same order as every other command, minus the cwd fallback: a bare ``init``
+    scattering a KB layout across whatever directory the user happens to stand in
+    would be a worse default than the one it replaces, so ``~/wiki`` stays the
+    last resort. A target that was not spelled out is printed with its source —
+    an implicit target is only safe if the user can see which one it was.
+    """
+    import os
+    from pathlib import Path
+
+    if cli_value:
+        return Path(cli_value).expanduser().resolve()
+
+    env = os.environ.get("FACTLOG_ROOT")
+    configured = factlog_config.read_root()
+    if env:
+        target, source = Path(env).expanduser().resolve(), "$FACTLOG_ROOT"
+    elif configured:
+        target, source = Path(configured), "the active KB config"
+    else:
+        target, source = Path(_DEFAULT_KB).expanduser().resolve(), f"the default {_DEFAULT_KB}"
+    print(f"{command}: no --target given; using {target} (from {source})")
+    return target
+
+
 def _activated_line(target) -> str:
     return f"active KB set to {target} (ingest/ask/sync default here from any directory)"
 
@@ -655,9 +691,7 @@ def _apply_activation(command: str, target, activate: bool | None) -> str:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
-    target = Path(args.target).expanduser().resolve()
+    target = _resolve_kb_target(getattr(args, "target", None), "factlog init")
     _init_kb(target)
     _apply_activation("factlog init", target, getattr(args, "activate", None))
     return 0
@@ -2115,8 +2149,6 @@ def cmd_setup(args: argparse.Namespace) -> int:
     Idempotent and safe to re-run: deps are only installed when pyrewire is
     missing/too old, and `cmd_init` skips files/dirs that already exist.
     """
-    from pathlib import Path
-
     actions: list[str] = []
 
     # Validate --lang up front (same contract/rc as `factlog lang`) so an invalid
@@ -2153,7 +2185,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         install_attempted = True
 
     print("\n=== factlog setup: initialise knowledge base ===")
-    target = Path(args.target).expanduser().resolve()
+    target = _resolve_kb_target(getattr(args, "target", None), "factlog setup")
     kb_created = _init_kb(target)
     if kb_created:
         actions.append(f"created KB layout at {target}")
@@ -3133,6 +3165,12 @@ def cmd_eject(args: argparse.Namespace) -> int:
     return 1 if recompile_failed else 0
 
 
+_TARGET_HELP = (
+    "knowledge base root to create "
+    f"(default: $FACTLOG_ROOT, else the active KB, else {_DEFAULT_KB})"
+)
+
+
 def _add_activation_flags(parser: argparse.ArgumentParser) -> None:
     """Attach the tri-state active-KB flags shared by `init` and `setup`.
 
@@ -3165,7 +3203,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
 
     init = sub.add_parser("init", help="scaffold an empty knowledge base layout")
-    init.add_argument("--target", default="~/wiki", help="knowledge base root to create")
+    init.add_argument("--target", default=None, help=_TARGET_HELP)
     _add_activation_flags(init)
     init.set_defaults(func=cmd_init)
 
@@ -3173,7 +3211,7 @@ def build_parser() -> argparse.ArgumentParser:
         "setup",
         help="one-shot bootstrap: doctor, ensure deps, init KB, re-check",
     )
-    setup.add_argument("--target", default="~/wiki", help="knowledge base root to create")
+    setup.add_argument("--target", default=None, help=_TARGET_HELP)
     _add_activation_flags(setup)
     setup.add_argument(
         "--lang",
