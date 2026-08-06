@@ -121,3 +121,94 @@ def _rule_heads(program: str) -> set[str]:
             r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*:-", program
         )
     }
+
+
+def engine_inferred(policy_text, monkeypatch, tmp_path):
+    """The whole inferred dict, for policy predicates as well as path/2."""
+    accepted = tmp_path / "accepted.dl"
+    accepted.write_text(
+        "\n".join(common.dl_atom(row) for row in FACTS) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(fl_common, "ACCEPTED_DL", accepted)
+    monkeypatch.setattr(fl_common, "load_accepted_facts", lambda: list(FACTS))
+    monkeypatch.setattr(fl_common, "load_logic_policy", lambda: policy_text)
+    monkeypatch.setattr(fl_common, "typed_relations", lambda: {})
+    monkeypatch.setattr(fl_common, "relation_aliases", lambda: {})
+    monkeypatch.setattr(fl_common, "attribute_relations", lambda: {"정식_운영"})
+    return fl_common.run_wirelog()
+
+
+# A policy that READS canonical/3, so an injected canonical fact has somewhere to
+# land. Without a consumer the injection is invisible and the probe says nothing —
+# the trap that produced the first "no consequence" reading.
+_CANON_CONSUMER = (
+    '.decl requires_review(entity: symbol, reason: symbol)\n'
+    'requires_review(X, "canon_check") :- canonical(X, "참조", _).\n'
+)
+# The two directives whose merged text the engine COMPILES (measured); the other
+# six paren-less directives leave a program pyrewire refuses with ParseError.
+_SILENT_DIRECTIVES = [".output p2", ".printsize p2"]
+
+
+class TestAParenlessDirectiveReachesTheEngine:
+    """The end-to-end half of the round-4 regression, for the cells that move an
+    answer.
+
+    Of the 24 guard cells, 6 are silent — `.output` and `.printsize` × the three
+    reserved names — because those two leave a program the engine compiles. Of
+    those 6, four change what the report says and two do not::
+
+        .output/.printsize + attr_rel     path 갑봇 -> 병문서 -> (not found)
+        .output/.printsize + canonical    policy findings 0 -> 1
+        .output/.printsize + entity_node  report unchanged
+
+    `entity_node` is inert here for the reason pinned in
+    :class:`TestEdbAndIdbBareFactsDiffer`: it is derived, so an in-program bare
+    fact adds nothing. That is a property of the current WIRELOG_PROGRAM and of
+    this KB, not a guarantee, and the guard refuses all 24 either way.
+    """
+
+    @pytest.mark.parametrize("directive", _SILENT_DIRECTIVES)
+    def test_an_attr_rel_fact_behind_a_directive_removes_the_path(
+        self, directive, monkeypatch, tmp_path
+    ):
+        policy = f'{directive}\nattr_rel("참조").\n'
+        assert ("갑봇", "병문서") in engine_paths("", monkeypatch, tmp_path)
+        assert ("갑봇", "병문서") not in engine_paths(policy, monkeypatch, tmp_path)
+
+    @pytest.mark.parametrize("directive", _SILENT_DIRECTIVES)
+    def test_a_canonical_fact_behind_a_directive_invents_a_finding(
+        self, directive, monkeypatch, tmp_path
+    ):
+        clean = engine_inferred(_CANON_CONSUMER, monkeypatch, tmp_path)
+        assert clean["requires_review"] == set()
+        injected = engine_inferred(
+            _CANON_CONSUMER + f'{directive}\ncanonical("갑봇","참조","유령").\n',
+            monkeypatch,
+            tmp_path,
+        )
+        # 유령 is in no fact in this KB.
+        assert ("갑봇", "canon_check") in {tuple(r) for r in injected["requires_review"]}
+
+    @pytest.mark.parametrize("directive", _SILENT_DIRECTIVES)
+    def test_an_entity_node_fact_behind_a_directive_is_inert(
+        self, directive, monkeypatch, tmp_path
+    ):
+        # Measured, and recorded so the asymmetry is not re-derived: this cell is
+        # silent at the guard but changes no answer, because entity_node is IDB.
+        before = engine_paths("", monkeypatch, tmp_path)
+        after = engine_paths(f'{directive}\nentity_node("유령").\n', monkeypatch, tmp_path)
+        assert before == after
+
+    @pytest.mark.parametrize("directive", _SILENT_DIRECTIVES)
+    @pytest.mark.parametrize("name", ["attr_rel", "entity_node", "canonical"])
+    def test_the_guard_refuses_every_one_of_these(self, directive, name):
+        # Ties the file back to the guard: none of the states above is reachable
+        # through load_logic_policy.
+        fact = {
+            "attr_rel": 'attr_rel("참조").',
+            "entity_node": 'entity_node("유령").',
+            "canonical": 'canonical("갑봇","참조","유령").',
+        }[name]
+        with pytest.raises(fl_common.FactlogError, match=f"{name} is a reserved engine"):
+            fl_common._assert_no_reserved_head(f"{directive}\n{fact}\n")

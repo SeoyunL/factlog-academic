@@ -618,7 +618,16 @@ class TestAFusedBareFactIsNotHonoured:
 # Directives that name a relation without parenthesising anything, plus `.plan`,
 # whose argument is a number. Each carries no clause-terminating '.', so the
 # statement after it merges in.
-_PARENLESS_DIRECTIVES = [".output p2", ".input p2", ".printsize p2", ".plan 0"]
+_PARENLESS_DIRECTIVES = [
+    ".output p2",
+    ".printsize p2",
+    ".input p2",
+    ".limitsize p2",
+    ".override p2",
+    ".plan 0",
+    '.pragma "x" "y"',
+    ".type T",
+]
 
 
 class TestAParenlessDirectiveDoesNotHideTheNextStatement:
@@ -639,6 +648,21 @@ class TestAParenlessDirectiveDoesNotHideTheNextStatement:
     The mechanism differs from the round-3 one and keyword narrowing cannot reach
     it: `.output p2` IS a directive, so merging it is *correct* parsing. What was
     missing is that the merged text still has to be examined.
+
+    All 8 paren-less directives × 3 reserved names are pinned here: 24 cells, all
+    24 rejected before this round and all 24 passing after it. Only 6 of them are
+    SILENT — measured, guard PASS **and** the engine compiles the program::
+
+        .output    × attr_rel / entity_node / canonical
+        .printsize × attr_rel / entity_node / canonical
+
+    The other 18 (`.input`, `.limitsize`, `.override`, `.plan`, `.pragma`,
+    `.type`) leave text pyrewire refuses with ParseError, so a regression there
+    would be loud. They are pinned at this level anyway because the fix is one
+    rule — the neckless statement gets scanned — rather than a list of directives
+    to watch, and which column a directive falls in is a property of the parser,
+    not of this guard. `TestAParenlessDirectiveReachesTheEngine` carries the
+    end-to-end half for the cells that actually move an answer.
     """
 
     @pytest.mark.parametrize("name", _RESERVED)
