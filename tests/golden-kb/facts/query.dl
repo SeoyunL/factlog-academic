@@ -1,0 +1,15 @@
+// q1: does Orbit depend, directly or transitively, on Vault?
+path("Orbit", "Vault")?
+
+// q2: is a declared literal reachable as a path endpoint? (it must not be)
+path("Orbit", "2031-02-01")?
+
+// q3: how many distinct things does Orbit depend on?
+count("Orbit", "depends_on")?
+
+// q4: who owns Beacon? relation/3 holds the surface form the fact was stated
+// with, so the query names owned_by, not the canonical maintained_by.
+relation("Beacon", "owned_by", "Cyra")?
+
+// q5: which entities did the policy flag?
+conflict(X, Y)?

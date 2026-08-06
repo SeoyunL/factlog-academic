@@ -1,0 +1,19 @@
+// generated from facts/candidates.csv
+// only confirmed/accepted facts become engine input
+
+relation("Orbit", "depends_on", "Beacon").
+relation("Beacon", "depends_on", "Ledger").
+relation("Ledger", "depends_on", "Vault").
+relation("Orbit", "released_on", "2031-02-01").
+relation("Beacon", "released_on", "2030-05-14").
+relation("Orbit", "headcount", "120").
+relation("Orbit", "league_rank", "3rd").
+relation("Orbit", "valuation", "100억").
+relation("Orbit", "maintained_by", "Aria").
+relation("Orbit", "maintained_by", "Bran").
+relation("Beacon", "owned_by", "Cyra").
+
+// canonical/3 EDB atoms — engine-only; never parsed by Python readers
+canonical("Orbit", "maintained_by", "Aria").
+canonical("Orbit", "maintained_by", "Bran").
+canonical("Beacon", "maintained_by", "Cyra").

@@ -1,14 +1,36 @@
 #!/usr/bin/env bash
-# tests/golden.sh — deterministic golden regression bound to examples/sample-kb (T12 / u13)
+# tests/golden.sh — deterministic golden regression over two KBs (T12 / u13)
 #
-# Re-runs the deterministic engine steps against examples/sample-kb and diffs
-# each output byte-for-byte against the committed golden files in tests/golden/.
-# Protects AC4 determinism: any engine change that alters accepted.dl or
-# logic_report.txt is caught immediately.
+# Re-runs the deterministic engine steps and diffs each output byte-for-byte
+# against the committed golden files in tests/golden/. Protects AC4 determinism:
+# any engine change that alters accepted.dl or logic_report.txt is caught
+# immediately.
 #
 # Also exercises generate_logic_policy.py --check (deterministic re-derivation)
 # to confirm the committed logic-policy.dl matches what the fixture compiler
 # would produce from logic-policy.md.
+#
+# WHAT THE GOLDEN KBs COVER — read this before citing a green run as evidence.
+# Byte-identity is evidence only for the code paths the KB actually walks.
+#
+#   KB 1, the caller's FACTLOG_ROOT (examples/sample-kb), goldens in
+#   tests/golden/: plain relation/3 facts, a requires_review policy rule
+#   compiled from logic-policy.md, relation and review_required queries. Its
+#   policy/ holds NO single-valued.md, typed-relations.md,
+#   attribute-relations.md or relation-aliases.md, so every policy gate below is
+#   inert on it — check_conflicts returns early, typed projection never runs,
+#   no canonical/3 atom is emitted, and its query.dl has no count or path line.
+#
+#   KB 2, tests/golden-kb, goldens in tests/golden/policy-kb/: exists precisely
+#   to walk those gates. It declares all four policy files and pins
+#   single-valued contradiction detection (Step 4), typed projection of all four
+#   literal types with thresholds tight against the one fact that satisfies
+#   each, attribute-relation exclusion of a literal from the entity graph (the
+#   refused path endpoint), alias canonicalisation (a rule written over the
+#   canonical name firing on a fact stated with the surface form), and count/
+#   path query rendering.
+#
+# A change to a path NEITHER KB walks is not covered by a green run here (#354).
 #
 # Usage:
 #   FACTLOG_ROOT=examples/sample-kb bash tests/golden.sh
@@ -28,6 +50,12 @@ export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB conf
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GOLDEN_DIR="$SCRIPT_DIR/golden"
+
+# The policy-gate KB is harness-owned, not caller-supplied: it is the half of
+# the coverage that FACTLOG_ROOT cannot provide, so it runs on every invocation
+# regardless of where the caller points KB 1.
+POLICY_KB="$SCRIPT_DIR/golden-kb"
+POLICY_GOLDEN_DIR="$GOLDEN_DIR/policy-kb"
 
 # FACTLOG_ROOT must be set by the caller; resolve to absolute path.
 if [ -z "${FACTLOG_ROOT:-}" ]; then
@@ -120,44 +148,79 @@ assert_golden() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: compile_facts.py → facts/accepted.dl
+# One pass = the three deterministic steps over one KB, each diffed against that
+# KB's golden directory.
+#   Step 1: compile_facts.py          → facts/accepted.dl
+#   Step 2: run_logic_check.py        → facts/logic_report.txt
+#   Step 3: generate_logic_policy.py --check (deterministic re-derivation)
 # ---------------------------------------------------------------------------
-echo "=== Step 1: compile_facts.py ==="
-stash_artifact "$KB_ROOT/facts/accepted.dl"
-if "$PYTHON" "$PLUGIN_ROOT/tools/compile_facts.py" 2>&1; then
-  ok "compile_facts.py exit 0"
-else
-  fail_msg "compile_facts.py exited non-zero"
-fi
-assert_golden "facts/accepted.dl" \
-  "$KB_ROOT/facts/accepted.dl" \
-  "$GOLDEN_DIR/accepted.dl"
+run_pass() {
+  local kb="$1"
+  local golden="$2"
+
+  echo "=== Step 1: compile_facts.py ==="
+  stash_artifact "$kb/facts/accepted.dl"
+  if FACTLOG_ROOT="$kb" "$PYTHON" "$PLUGIN_ROOT/tools/compile_facts.py" 2>&1; then
+    ok "compile_facts.py exit 0"
+  else
+    fail_msg "compile_facts.py exited non-zero"
+  fi
+  assert_golden "facts/accepted.dl" \
+    "$kb/facts/accepted.dl" \
+    "$golden/accepted.dl"
+
+  echo ""
+  echo "=== Step 2: run_logic_check.py ==="
+  stash_artifact "$kb/facts/logic_report.txt"
+  if FACTLOG_ROOT="$kb" "$PYTHON" "$PLUGIN_ROOT/tools/run_logic_check.py" 2>&1; then
+    ok "run_logic_check.py exit 0"
+  else
+    fail_msg "run_logic_check.py exited non-zero"
+  fi
+  assert_golden "facts/logic_report.txt" \
+    "$kb/facts/logic_report.txt" \
+    "$golden/logic_report.txt"
+
+  echo ""
+  echo "=== Step 3: generate_logic_policy.py --check ==="
+  if FACTLOG_ROOT="$kb" "$PYTHON" "$PLUGIN_ROOT/tools/generate_logic_policy.py" --check 2>&1; then
+    ok "generate_logic_policy.py --check exit 0"
+  else
+    fail_msg "generate_logic_policy.py --check exited non-zero (policy/logic-policy.dl is stale)"
+  fi
+}
+
+echo "### KB 1/2: $KB_ROOT"
+run_pass "$KB_ROOT" "$GOLDEN_DIR"
+
+echo ""
+echo "### KB 2/2: $POLICY_KB"
+run_pass "$POLICY_KB" "$POLICY_GOLDEN_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 2: run_logic_check.py → facts/logic_report.txt
+# Step 4 (policy KB only): check_conflicts.py → single-valued contradictions
+#
+# The other steps never reach this gate: run_logic_check.py does not read
+# policy/single-valued.md at all, so conflict detection has no golden coverage
+# except here. The fixture KB asserts two maintainers for one subject, so the
+# tool is EXPECTED to exit 1 — exit 0 would mean the contradiction went
+# undetected, which is the regression this pins.
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Step 2: run_logic_check.py ==="
-stash_artifact "$KB_ROOT/facts/logic_report.txt"
-if "$PYTHON" "$PLUGIN_ROOT/tools/run_logic_check.py" 2>&1; then
-  ok "run_logic_check.py exit 0"
+echo "=== Step 4: check_conflicts.py (policy KB) ==="
+conflicts_out="$STASH_DIR/conflicts.txt"
+conflicts_rc=0
+FACTLOG_ROOT="$POLICY_KB" "$PYTHON" "$PLUGIN_ROOT/tools/check_conflicts.py" \
+  > "$conflicts_out" 2>&1 || conflicts_rc=$?
+cat "$conflicts_out"
+if [ "$conflicts_rc" -eq 1 ]; then
+  ok "check_conflicts.py exit 1 (the declared contradiction is detected)"
 else
-  fail_msg "run_logic_check.py exited non-zero"
+  fail_msg "check_conflicts.py exited $conflicts_rc, expected 1 (single-valued contradiction not detected)"
 fi
-assert_golden "facts/logic_report.txt" \
-  "$KB_ROOT/facts/logic_report.txt" \
-  "$GOLDEN_DIR/logic_report.txt"
-
-# ---------------------------------------------------------------------------
-# Step 3: generate_logic_policy.py --check (deterministic re-derivation)
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== Step 3: generate_logic_policy.py --check ==="
-if "$PYTHON" "$PLUGIN_ROOT/tools/generate_logic_policy.py" --check 2>&1; then
-  ok "generate_logic_policy.py --check exit 0"
-else
-  fail_msg "generate_logic_policy.py --check exited non-zero (policy/logic-policy.dl is stale)"
-fi
+assert_golden "check_conflicts.py output" \
+  "$conflicts_out" \
+  "$POLICY_GOLDEN_DIR/conflicts.txt"
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -1,0 +1,12 @@
+subject,relation,object,source,status,confidence,note
+Orbit,depends_on,Beacon,sources/stack.md#deps,confirmed,0.99,direct dependency
+Beacon,depends_on,Ledger,sources/stack.md#deps,confirmed,0.99,direct dependency
+Ledger,depends_on,Vault,sources/stack.md#deps,confirmed,0.99,tail of the chain
+Orbit,released_on,2031-02-01,sources/stack.md#dates,confirmed,0.99,typed date
+Beacon,released_on,2030-05-14,sources/stack.md#dates,confirmed,0.99,typed date
+Orbit,headcount,120,sources/stack.md#team,confirmed,0.95,typed number
+Orbit,league_rank,3rd,sources/stack.md#rank,confirmed,0.90,typed ordinal
+Orbit,valuation,100억,sources/stack.md#funding,confirmed,0.90,typed amount
+Orbit,maintained_by,Aria,sources/stack.md#owners,confirmed,0.95,single-valued
+Orbit,maintained_by,Bran,sources/stack.md#owners,confirmed,0.90,contradicts the row above
+Beacon,owned_by,Cyra,sources/stack.md#owners,confirmed,0.95,alias surface form
