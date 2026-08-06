@@ -12,6 +12,7 @@
 #
 # Usage:
 #   FACTLOG_ROOT=examples/sample-kb bash tests/golden.sh
+#   PYTHON=<interpreter> FACTLOG_ROOT=examples/sample-kb bash tests/golden.sh
 #
 # Returns 0 if all golden diffs pass and --check passes, 1 on first failure.
 #
@@ -40,11 +41,18 @@ case "$FACTLOG_ROOT" in
 esac
 export FACTLOG_ROOT="$KB_ROOT"
 
-# Python interpreter: prefer factlog-venv if available, fall back to python3.
-if [ -x "/tmp/factlog-venv/bin/python" ]; then
-  PYTHON="/tmp/factlog-venv/bin/python"
-else
-  PYTHON="python3"
+# Python interpreter: the caller's PYTHON wins, then factlog-venv, then python3.
+# The caller's value used to be overwritten unconditionally, so the
+# `PYTHON=<interpreter> bash tests/x.sh` convention every other harness in this
+# directory follows was silently discarded here — a run asked to use an
+# interpreter with pyrewire fell through to a bare python3 without it, and Step 2
+# died for a reason that had nothing to do with the branch under test (#354).
+if [ -z "${PYTHON:-}" ]; then
+  if [ -x "/tmp/factlog-venv/bin/python" ]; then
+    PYTHON="/tmp/factlog-venv/bin/python"
+  else
+    PYTHON="python3"
+  fi
 fi
 
 pass=0
