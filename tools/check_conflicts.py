@@ -465,44 +465,55 @@ def collect_conflicts(
     collide, and how far #210's "no silent NFC coercion for non-participating
     relations" was meant to reach is a maintainer's call. Raised as a follow-up.
 
-    **Engine divergence:** ``common.dedup_engine_atoms`` dedups on the **raw**
-    ``(subject, relation, object)`` triple, so the engine writes an NFC-spelled
-    and an NFD-spelled string into ``accepted.dl`` as two distinct entities. The
-    two folded axes diverge from that in *opposite* directions, and only one of
-    them is safe:
+    **Engine agreement on the folded axes (#342).**
+    ``common.dedup_engine_atoms`` keys on ``common.engine_atom_key``, which folds
+    the subject and the object to NFC exactly as ``_fold`` does here, so what the
+    engine reads from ``accepted.dl`` now carries the same identity on those two
+    axes as what this module grouped. Until that fix the dedup key was the raw
+    triple, and the two folded axes diverged from it in *opposite* directions:
 
-    * **subject axis — checker stricter.** It reports a contradiction the engine
-      cannot see from ``accepted.dl`` alone. The gate closes on a KB the engine
-      would have accepted, so nothing slips through.
+    * **subject axis — checker stricter.** It reported a contradiction the engine
+      could not see from ``accepted.dl`` alone. The gate closed on a KB the engine
+      would have accepted, so nothing slipped through.
     * **object axis — checker more permissive.** Two objects the raw grouping
       called a contradiction now agree, so the gate *opens* where it used to
-      close, ``finalize`` compiles, and both spellings reach ``accepted.dl`` as
-      separate atoms — the inflated duplicate count ``dedup_engine_atoms`` exists
-      to prevent, arrived at through the normal path.
+      close, ``finalize`` compiles — and both spellings then reached
+      ``accepted.dl`` as separate atoms, the inflated duplicate count
+      ``dedup_engine_atoms`` exists to prevent, arrived at through the normal
+      path. That is what #342 closed.
 
     The permissive direction is semantically right: ``common._canonical_value``
     (#213) already fixed NFC as value equality. What is not acceptable is doing
     it silently, so the object channel below survives for a pair folding
-    resolved, and ``_report_resolved_merges`` discloses it at exit 0. The
-    engine-side raw-triple dedup itself is a follow-up.
+    resolved, and ``_report_resolved_merges`` discloses it at exit 0 — the merge
+    is still a merge the author did not ask for, even now that the engine
+    reproduces it.
 
-    **The engine does not fold at all (#325 follow-up).** ``_group_key`` folds
-    *before* ``literal_types.normalize``; the engine's counterpart,
-    ``common._project_typed_relations``, hands ``normalize`` the raw object (and
-    looks its spec up under the raw relation name). So an NFD-authored typed
-    literal parses here and nowhere else, and this module can declare two values
-    equal on grounds the engine cannot reproduce.
+    The relation axis is the one that stays divergent from nothing: grouping here
+    is verbatim and ``engine_atom_key`` leaves the relation raw too, so both
+    sides split two spellings of one relation the same way. Folding it is still
+    the deferred #210 call, on both sides at once.
 
-    What the engine actually does depends on the relation name, and it never
-    reproduces the merge either way. The projection runs **per row**: with an NFC
-    relation name ``specs.get(row["relation"])`` hits, so the composed literal is
-    inserted typed and only the decomposed one warns and degrades — the two end up
-    on opposite sides of the typed table. With the relation name decomposed too,
-    the spec lookup misses every row and none of them load typed at all. Either
-    way both spellings still reach ``accepted.dl`` as separate atoms, since
-    ``dedup_engine_atoms`` keys on the raw triple.
+    **The typed projection still does not fold (#325 follow-up).** ``_group_key``
+    folds *before* ``literal_types.normalize``; the engine's counterpart,
+    ``common._project_typed_relations``, hands ``normalize`` the object of the
+    atom as written (and looks its spec up under the raw relation name). So an
+    NFD-authored typed literal can still parse here and nowhere else, and this
+    module can declare two values equal on grounds the engine cannot reproduce.
 
-    Aligning the engine is the root fix and a follow-up of its
+    #342 narrows this without closing it. Two *canonically equivalent* spellings
+    are now one atom, written in the composed spelling wherever the KB authored
+    one, so they no longer land on opposite sides of the typed table — the case
+    that used to insert the composed literal typed and degrade the decomposed one
+    with a warning. What survives is everything the atom fold does not reach: a
+    uniformly decomposed KB keeps its decomposed spelling (there is no composed
+    member to prefer), so ``normalize`` still fails on it, and with the relation
+    name decomposed the spec lookup still misses every row and none load typed at
+    all. A *parse* merge is untouched by construction — ``NFD('제3호')`` and
+    ``'3위'`` are not canonically equivalent, so they are two atoms here and two
+    atoms in the engine, and only this module ever calls them one value.
+
+    Aligning the typed projection too is the root fix and a follow-up of its
     own: it changes which rows enter the typed side-relations, hence what
     ``factlog ask`` answers, and it needs the deferred #210 relation-axis call
     decided first. What belongs *here* is that the checker never merges on that
@@ -693,11 +704,13 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     name vanish from the output in any form.
 
     Scope is deliberately the **object** axis, the one where folding *resolves* a
-    contradiction. Mixed spellings also cost duplicate atoms downstream
-    (``common.dedup_engine_atoms`` dedups on the raw triple, so both spellings
-    enter ``accepted.dl``), but that harm is not specific to a resolved conflict
-    and is equally silent before this change — reporting it wherever it occurs is
-    a separate, wider job than this advisory, and a follow-up.
+    contradiction. Mixed spellings used to cost duplicate atoms downstream as
+    well — ``common.dedup_engine_atoms`` keyed on the raw triple, so both
+    spellings entered ``accepted.dl`` — and #342 closed that separately, on every
+    axis it folds and not only under a resolved conflict. What is left for this
+    advisory is the merge itself: the author wrote two strings and the gate
+    treated them as one, which is worth saying whether or not anything
+    downstream still doubles.
 
     **Two message classes, because folding merges values two ways.** Canonical
     equivalence is one; making a typed literal parse is the other, and calling
@@ -734,9 +747,11 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
         for line in lines:
             print(line)
         print(
-            "  These spellings are canonically equivalent, but they differ byte-wise and "
-            "engine atoms dedup on the raw triple, so each one still enters "
-            "facts/accepted.dl as a separate atom. Unify them at the source and re-collect."
+            "  These spellings are canonically equivalent, so they collapse into a single "
+            "facts/accepted.dl atom, written in the composed spelling where the group has "
+            "one. They still differ "
+            "byte-wise in sources/ and facts/candidates.csv, where each one is its own row. "
+            "Unify them at the source and re-collect."
         )
     # Every pair with a parse merge, not just the ones that ended up conflict-free.
     # A pair can merge two notations under the fold and still contradict on a
@@ -766,7 +781,8 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     print(
         "  These notations are NOT canonically equivalent: a decomposed literal does not "
         "parse as its declared type, and folding is what let it reach the scalar its "
-        "counterpart already had. The engine does not fold — it hands the raw object to "
+        "counterpart already had. So they stay two separate atoms, and the engine's typed "
+        "projection does not fold either — it hands the object as written to "
         "literal_types.normalize — so it loads the decomposed literal untyped (and, when "
         "the relation name is decomposed too, every one of them), and the notations never "
         "meet there. Unify the spelling in sources/ and re-collect, then re-run to see "
