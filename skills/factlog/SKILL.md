@@ -232,6 +232,47 @@ re-`merge` preserves rows you marked `superseded` in `candidates.csv` even when
 a run re-asserts the retired fact. This keeps the KB free of the silently-
 accumulated contradictions a plain notes wiki cannot prevent.
 
+Subjects and values are compared under Unicode NFC, so a fact written `한국대학교`
+in one row and the decomposed spelling of the same name in another counts as one
+string (macOS filesystems and IMEs routinely emit Hangul decomposed).
+
+**Relation names in `policy/single-valued.md` are compared under NFC too**, and
+that is the part with upgrade impact. Previously the comparison was byte-for-byte
+between two hand-written files, so a KB written uniformly in the decomposed form
+— no mixed spelling anywhere, just one KB authored on macOS — matched no policy
+name and skipped the check entirely. Such a KB now reports its contradictions for
+the first time, and `finalize` refuses to compile until they are resolved: it
+**deletes** `facts/accepted.dl` when the check fails, so `ask` returns nothing
+until you supersede the outdated rows. `status`, `vocab`, and `corroboration` use
+the same folded comparison, so all four agree on which relations are functional.
+
+Three things follow from folding, and the report states all three:
+
+- When a conflict's strings were merged that way, the run lists the spellings
+  escaped and labelled (`'한...' (NFC), 'ᄒ...' (NFD)`), because they are
+  indistinguishable on screen. Unifying the spelling is a **second repair**, not
+  a substitute for superseding — a real contradiction that a mixed spelling
+  merely joined is still a contradiction.
+- When the merge *resolved* the contradiction, the run exits 0 and says so on
+  stdout. That is the only signal you get: `finalize` proceeds, and engine atoms
+  dedup on the raw triple, so both spellings still reach `accepted.dl` as
+  separate atoms of one visible fact.
+- A typed literal (`policy/typed-relations.md`) only parses in its composed form,
+  so folding can make a decomposed literal reach the same scalar as a differently
+  written twin — `제3호` and `3위` are both ordinal rank 3 once folded. The run
+  names those separately, because they are **not** the same string written two
+  ways, and because the engine does not fold at all: it loads the decomposed
+  literal untyped (and every one of them when the relation name is decomposed
+  too), so the notations never meet there and the merge is the checker's alone.
+  Unify the spelling in `sources/`.
+
+Repair the spelling **in `sources/` and re-collect**, not in `candidates.csv`:
+`merge` rebuilds those rows from `runs/*.json` and matches everything it carries
+back — statuses and superseded rows alike — on the
+(subject, relation, object, source-without-anchor) key, so a hand-edited spelling
+is discarded on the next run and stops matching the key that preserves its
+`superseded` mark.
+
 **Entity vs literal typing.** Relations you list in `policy/attribute-relations.md`
 (same one-name-per-line format as `single-valued.md`) are treated as
 *literal-valued*: their object is a value (a date, number, ordinal, ...), not a

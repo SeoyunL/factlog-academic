@@ -10,7 +10,7 @@ import re
 import sys
 import unicodedata
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -702,6 +702,88 @@ def load_questions() -> list[dict[str, str]]:
     return rows
 
 
+def fold_relation_name(name: str) -> str:
+    """Return *name* under Unicode canonical composition, for membership tests.
+
+    NFC only — never NFKC, never casefold. Fullwidth ``ＡＢＣ`` and ``ABC`` are
+    different relations, not two spellings of one, and must stay distinct.
+    """
+    return unicodedata.normalize("NFC", name)
+
+
+def folded_relation_names(names: Iterable[str]) -> set[str]:
+    """NFC-fold a set of policy relation names once, for O(1) membership tests.
+
+    ``_relation_names_from`` returns policy names verbatim, so comparing a row's
+    relation against them raw is a byte comparison between two hand-written
+    files: policy/single-valued.md and the extracted facts. A KB written
+    uniformly in NFD — the macOS default for Hangul — then matches nothing, and
+    every consumer that tests membership silently reports it as clean.
+
+    ``check_conflicts`` folds both sides for exactly this reason. Readers that
+    display conflict counts must use the same predicate, or ``factlog status``
+    reports 0 on a KB ``finalize`` then refuses to compile — and unlike the
+    remaining checker/status divergences, this one needs no mixed spellings at
+    all, just one consistently decomposed KB.
+    """
+    return {fold_relation_name(name) for name in names}
+
+
+def normalization_form(value: str) -> str:
+    """Name the Unicode normalization form *value* is written in.
+
+    Only NFC and NFD are named: they are the two forms this codebase folds
+    between, and telling them apart is what a reader needs in order to know which
+    row to edit. A pure-ASCII string is identical under both and is reported
+    ``"NFC"``.
+
+    ``"mixed"`` is the honest answer for everything else, and "everything else"
+    is wider than the obvious case. It covers composed and decomposed syllables
+    mixed inside one string, but also every string that is neither wholly
+    composed nor wholly decomposed: a canonical-order violation (``'q̧́'`` — the
+    combining marks in the wrong order, so it equals neither form), a composition
+    exclusion (``'ä́'`` — NFC cannot recompose it), and a canonical singleton
+    (``'Ω'`` U+2126, which NFC replaces with U+03A9 and NFD leaves alone). The
+    label does not claim to explain which of those it is; it says only "not one
+    of the two forms named above", which is what the reader needs.
+
+    Shared so that ``check_conflicts`` and ``factlog vocab`` label a form the
+    same way — two reports that disagree about which form a string is in are
+    worse than one that says nothing.
+    """
+    if value == unicodedata.normalize("NFC", value):
+        return "NFC"
+    if value == unicodedata.normalize("NFD", value):
+        return "NFD"
+    return "mixed"
+
+
+def composed_spelling(spellings: Iterable[str]) -> str:
+    """Return the spelling to display on behalf of a Unicode-folded group.
+
+    Deterministic, and always one of the strings as written (provenance). Where
+    the group holds several normalization forms the **composed (NFC)** spelling
+    wins; ties break lexicographically.
+
+    Plain ``min`` would be deterministic too, but it picks the wrong member in
+    practice: Hangul conjoining jamo (U+1100…) sort below precomposed syllables
+    (U+AC00…), so ``min`` on a mixed group *always* returns the decomposed form —
+    the one that will not match if the reader types or pastes the name into a
+    search from an NFC editor. Preferring NFC makes the reported string the one
+    most likely to grep.
+
+    The grep argument only holds where the group *has* a composed member. On a
+    uniformly decomposed KB every candidate is NFD and this returns NFD — still
+    deterministic and still a spelling actually written, which is the guarantee
+    that matters.
+
+    The fold is the same NFC as ``fold_relation_name``; the separate name is
+    because this one is applied to subjects and values, not to policy relation
+    names, and only the latter is a membership test.
+    """
+    return min(spellings, key=lambda s: (s != unicodedata.normalize("NFC", s), s))
+
+
 def _relation_names_from(path: Path) -> set[str]:
     """Parse a policy file that lists relation names, one per line.
 
@@ -1032,7 +1114,18 @@ def _parse_amount_units(body: str) -> dict[str, int]:
     Comma-separated ``unit=number`` pairs; the value may be written ``1e8`` or
     ``100000000`` but MUST resolve to a **positive integer** (the engine projects
     amounts into an int64 column). A non-positive / non-integer / non-numeric
-    value, or a malformed pair, → FactlogError (fail loudly)."""
+    value, or a malformed pair, → FactlogError (fail loudly).
+
+    Unit names are stored **NFC-folded** (``fold_relation_name``), and the
+    duplicate check runs on the folded key. The lookup side folds too
+    (``literal_types.parse_amount``), so a units clause written in NFD — the
+    macOS default for Hangul — resolves the same objects as an NFC one. Without
+    the fold the two sides are a raw byte comparison between a policy file and
+    an extracted object: on an NFD KB every amount would fail to parse, and two
+    spellings of one value (``5400억`` / ``0.54조``) would split into a CONFLICT
+    that no normalization message explains. NFC only, never NFKC — same rule as
+    ``fold_relation_name``. An all-ASCII / all-NFC clause folds to itself, so
+    this is byte-identical for KBs that were already composed."""
     units: dict[str, int] = {}
     for pair in body.split(","):
         pair = pair.strip()
@@ -1041,7 +1134,7 @@ def _parse_amount_units(body: str) -> dict[str, int]:
         if "=" not in pair:
             raise FactlogError(f"typed-relations: malformed unit pair {pair!r} (expected unit=number)")
         unit, _, value = pair.partition("=")
-        unit = unit.strip()
+        unit = fold_relation_name(unit.strip())
         value = value.strip()
         if not unit:
             raise FactlogError(f"typed-relations: empty unit name in {pair!r}")

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import unicodedata
 from pathlib import Path
 
 _TOOLS_DIR = Path(__file__).parent
@@ -31,9 +32,11 @@ import factlog_config  # noqa: E402
 os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 
 from common import (  # noqa: E402
-    corroboration_counts,
+    composed_spelling,
     engine_facts,
     ensure_dirs,
+    fold_relation_name,
+    folded_relation_names,
     load_facts,
     single_valued_relations,
 )
@@ -48,34 +51,104 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_dirs()
     facts = load_facts()
-    counts = corroboration_counts(facts)
+    # Folded FOR DISPLAY, here rather than in `common.corroboration_counts`:
+    # `factlog/compile_facts.py` reads that helper too, and the raw triple is the
+    # right key there (engine atoms are the raw triple). Folding in `common`
+    # would change engine output; only this report needs the human-facing view.
+    #
+    # The competing-values clause below folds the subject and object axes; the
+    # head line and this list used the raw triple, so one report answered "how
+    # many facts, how many corroborated" on one equivalence and "which values
+    # compete" on another. Two spellings of one fact backed by two different
+    # sources were counted as two facts with one source each — the corroboration
+    # signal this tool exists to give, under-reported in exactly the mixed KB
+    # #325 is about. Sources are counted per folded fact, so a source backing
+    # both spellings counts once (summing the raw counts would double it). The
+    # relation axis stays raw, matching the gate's deferred #210 decision.
+    backing: dict[tuple[str, str, str], set[str]] = {}
+    triple_spellings: dict[tuple[str, str, str], tuple[set[str], set[str]]] = {}
+    for row in engine_facts(facts):
+        key = (
+            unicodedata.normalize("NFC", row["subject"]),
+            row["relation"],
+            unicodedata.normalize("NFC", row["object"]),
+        )
+        backing.setdefault(key, set()).add(row["source"])
+        subjects, objects = triple_spellings.setdefault(key, (set(), set()))
+        subjects.add(row["subject"])
+        objects.add(row["object"])
+    counts = {key: len(srcs) for key, srcs in backing.items()}
     if not counts:
         print("corroboration: no engine-input facts")
         return 0
 
     multi = sum(1 for n in counts.values() if n > 1)
     print(f"corroboration: {len(counts)} fact(s); {multi} backed by >1 source")
-    for (subject, relation, object_), n in sorted(counts.items()):
-        print(f"  {n} source(s): {subject}, {relation}, {object_}")
+    for key, n in sorted(counts.items()):
+        # Report spellings that were actually written, the same provenance rule
+        # the competing-values clause follows.
+        subjects, objects = triple_spellings[key]
+        print(
+            f"  {n} source(s): {composed_spelling(subjects)}, {key[1]}, "
+            f"{composed_spelling(objects)}"
+        )
 
     # Source-level view of single-valued competition: same (subject, relation)
     # given different objects (each with its own source support).
     single_valued = single_valued_relations()
     if single_valued:
-        competing: dict[tuple[str, str], dict[str, int]] = {}
+        # (folded subject, relation) -> folded object -> distinct backing sources,
+        # plus the raw spellings folded into each, so the report can name a row
+        # that was actually written.
+        competing: dict[tuple[str, str], dict[str, set[str]]] = {}
+        subject_spellings: dict[tuple[str, str], set[str]] = {}
+        object_spellings: dict[tuple[str, str], dict[str, set[str]]] = {}
+        # Membership folded, matching the gate (check_conflicts): policy names are
+        # stored verbatim, so a uniformly-NFD KB matches nothing raw and its
+        # competing values are silently never surfaced. The subject and untyped
+        # object axes fold too, for the same reason the gate folds them — left
+        # raw, two spellings of one value are listed as two competing values
+        # ("한국대 (1 src); 한국대 (1 src)", indistinguishable on screen), which
+        # invites superseding a row that says the same thing as its twin. The
+        # relation axis stays raw, matching the gate's deferred #210 decision.
+        #
+        # This is a source-level view, not the gate: like `factlog status` it does
+        # not parse typed literals, so a #116 cross-notation pair
+        # (`amount(5400,"억")` and `amount(0.54,"조")`, one value to
+        # check_conflicts) is still listed here as two competing values while the
+        # gate exits 0. Closing that needs the checker's grouping shared rather
+        # than reimplemented — a follow-up, since `tools/` is not importable from
+        # the installed package (pyproject packages = ["factlog"]).
+        #
+        # That follow-up owns an input #325 WIDENED, not only inherited: an
+        # NFD-authored typed literal, where the gate folds the object before
+        # parsing and this view does not. See the same note in
+        # `factlog/cli.py`'s status block for the measured case.
+        sv_folded = folded_relation_names(single_valued)
         for row in engine_facts(facts):
-            if row["relation"] in single_valued:
-                competing.setdefault((row["subject"], row["relation"]), {})
-                key = row["object"]
-                competing[(row["subject"], row["relation"])][key] = counts.get(
-                    (row["subject"], row["relation"], key), 0
-                )
+            if fold_relation_name(row["relation"]) not in sv_folded:
+                continue
+            # NFC, the same fold the gate applies to these two axes. Not
+            # `common._canonical_value`, which layers amount-quote normalization on
+            # top and would diverge from check_conflicts._fold.
+            pair = (unicodedata.normalize("NFC", row["subject"]), row["relation"])
+            obj = unicodedata.normalize("NFC", row["object"])
+            # Sources are re-counted here rather than read out of `counts`, which
+            # is keyed on the raw triple: summing two spellings' counts would
+            # double-count a source that backs both.
+            competing.setdefault(pair, {}).setdefault(obj, set()).add(row["source"])
+            subject_spellings.setdefault(pair, set()).add(row["subject"])
+            object_spellings.setdefault(pair, {}).setdefault(obj, set()).add(row["object"])
         contested = {k: v for k, v in competing.items() if len(v) > 1}
         if contested:
             print(f"\ncorroboration: {len(contested)} single-valued relation(s) with competing values")
-            for (subject, relation), objs in sorted(contested.items()):
-                detail = "; ".join(f"{obj} ({src} src)" for obj, src in sorted(objs.items()))
-                print(f"  {subject} / {relation}: {detail}")
+            for pair, objs in sorted(contested.items()):
+                subject = composed_spelling(subject_spellings[pair])
+                detail = "; ".join(
+                    f"{composed_spelling(object_spellings[pair][obj])} ({len(srcs)} src)"
+                    for obj, srcs in sorted(objs.items())
+                )
+                print(f"  {subject} / {pair[1]}: {detail}")
     return 0
 
 

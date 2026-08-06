@@ -63,6 +63,113 @@ printf '%s\n%s\n%s\n' "$H" \
 out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
 printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" && ok "conflict counted for single-valued relation" || bad "conflict not counted: $(printf '%s' "$out" | grep conflicts)"
 
+# --- uniformly-NFD KB still reaches the conflict count (#325) -----------------
+# The #331 block further down declares a typed relation in this same $KB. These
+# cases are untyped by construction, and they only stay untyped because they run
+# first — stated here rather than relied on, so reordering the two blocks cannot
+# silently change what they exercise. (Measured: both orders pass today, because
+# the two blocks happen to use different relation names.)
+rm -f "$KB/policy/typed-relations.md"
+# policy/single-valued.md holds the composed name, the rows the decomposed one:
+# no mixed spelling anywhere, just one consistently decomposed KB (the macOS
+# default for Hangul). A raw membership test matches nothing, so status printed
+# 0 conflicts on a KB finalize then refused to compile. This exercises the
+# consumer end-to-end — folding only the helper leaves the call site free to
+# regress. Written from Python so the two forms survive editor normalization.
+"$PYTHON" - "$KB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfd('김철수')},{nfd('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfd('김철수')},{nfd('소속')},BBB,sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" \
+  && ok "uniformly-NFD KB reaches the conflict count (membership folded)" \
+  || bad "NFD KB not counted: $(printf '%s' "$out" | grep conflicts)"
+
+# --- the POLICY file is the decomposed side (#325) ----------------------------
+# The case above folds only the row side: with the policy name already composed,
+# `folded_relation_names(sv)` is the identity there and dropping it changes
+# nothing. Membership is a comparison between two hand-written files and either
+# one can be the decomposed one — a policy file edited on macOS against rows a
+# script emitted composed. Both halves have to fold, so this pins the half the
+# rows-NFD case cannot reach.
+"$PYTHON" - "$KB" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb = Path(sys.argv[1])
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(
+    f"# single-valued\n- {nfd('소속')}\n", encoding="utf-8"
+)
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('김철수')},{nfc('소속')},AAA,sources/a.md,confirmed,0.9,\n"
+    f"{nfc('김철수')},{nfc('소속')},BBB,sources/a.md,confirmed,0.9,\n",
+    encoding="utf-8",
+)
+PY
+out="$("$PYTHON" -m factlog status --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qE "conflicts: +1 \(over 1 single-valued" \
+  && ok "NFD policy file with composed rows reaches the conflict count" \
+  || bad "NFD policy not folded: $(printf '%s' "$out" | grep conflicts)"
+
+# --- status agrees with the gate on both mixed-spelling axes (#325) -----------
+# The gate folds the subject and the untyped object for grouping. A raw grouping
+# here disagreed in both directions: 0 on a KB finalize refuses to compile, and
+# 1 with "resolve via superseded" on a KB whose only defect is two spellings of
+# one value — where superseding is the WRONG repair and drops a source's
+# corroboration. Written from Python so the forms survive editor normalization.
+divergence_case() {  # $1 = which axis is mixed; sets $KBX
+  KBX="$(mktemp -d)/wiki"
+  "$PYTHON" -m factlog init --target "$KBX" >/dev/null
+  printf 'x\n' > "$KBX/sources/a.md"
+  "$PYTHON" - "$KBX" "$1" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+kb, axis = Path(sys.argv[1]), sys.argv[2]
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+(kb / "policy" / "single-valued.md").write_text(f"# single-valued\n- {nfc('소속')}\n", encoding="utf-8")
+if axis == "subject":     # a REAL contradiction, hidden by a mixed subject
+    rows = [(nfc("김철수"), nfc("소속"), "AAA"), (nfd("김철수"), nfc("소속"), "BBB")]
+else:                     # NOT a contradiction: one value, two spellings
+    rows = [(nfc("김철수"), nfc("소속"), nfc("한국대")), (nfc("김철수"), nfc("소속"), nfd("한국대"))]
+(kb / "facts" / "candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    + "".join(f"{s},{r},{o},sources/a.md,confirmed,0.9,\n" for s, r, o in rows),
+    encoding="utf-8",
+)
+PY
+}
+CHK="$PLUGIN_ROOT/tools/check_conflicts.py"
+divergence_case subject
+set +e; "$PYTHON" "$CHK" --wiki "$KBX" >/dev/null 2>&1; grc=$?; set -e
+out="$("$PYTHON" -m factlog status --target "$KBX" 2>&1)"
+[ "$grc" -eq 1 ] && printf '%s' "$out" | grep -qE "conflicts: +1 " \
+  && ok "mixed-subject KB: status agrees with the gate (both see the contradiction)" \
+  || bad "mixed-subject divergence: gate rc=$grc, $(printf '%s' "$out" | grep conflicts)"
+divergence_case object
+set +e; "$PYTHON" "$CHK" --wiki "$KBX" >/dev/null 2>&1; grc=$?; set -e
+out="$("$PYTHON" -m factlog status --target "$KBX" 2>&1)"
+[ "$grc" -eq 0 ] && printf '%s' "$out" | grep -qE "conflicts: +0 " \
+  && ok "mixed-object KB: status agrees with the gate (no contradiction, no superseded advice)" \
+  || bad "mixed-object divergence: gate rc=$grc, $(printf '%s' "$out" | grep conflicts)"
+printf '%s' "$out" | grep -qF "resolve via superseded" \
+  && bad "status advises superseding a row whose only defect is its spelling" \
+  || ok "no superseded advice when folding resolves the pair"
+
 # --- #331: a conflicting value with non-ASCII digits is named -----------------
 # This path counts distinct RAW object strings, so it already saw the pair as two
 # values; what it never did was show WHICH one the engine cannot read. repr()

@@ -1646,6 +1646,7 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     scope_label = "all candidate" if args.all else "engine"
     attr = ctx.attribute_relations()
     sv = ctx.single_valued_relations()
+    sv_folded = common.folded_relation_names(sv)
     typed = ctx.typed_relations()  # {name: TypedRelSpec}; {} when no typed-relations.md
 
     show_e = args.entities or not args.relations
@@ -1671,14 +1672,46 @@ def cmd_vocab(args: argparse.Namespace) -> int:
             print("    (none)")
     if show_r:
         print(f"  relations ({len(rel_counts)}):")
+        # Counting is on the raw name (the fold is a membership predicate, not a
+        # grouping key — see check_conflicts), so two spellings of one relation
+        # are two lines that render identically. Tagging membership made the pair
+        # indistinguishable: both lines now say [single-valued], where before one
+        # of them was at least untagged. Name the normalization form on exactly
+        # the names that share a folded spelling with another. A KB with no such
+        # pair prints byte-identically to before.
+        #
+        # Scope, stated exactly: this separates **NFC from NFD**, which is the
+        # pair that actually occurs (a composed name beside its macOS-decomposed
+        # twin). It does NOT make every pair distinguishable, because the label
+        # is three-valued: two names that are each neither wholly composed nor
+        # wholly decomposed — NFC('소속')+NFD('기관') beside NFD('소속')+NFC('기관')
+        # — both render as `소속기관  (mixed)` and stay identical on screen.
+        # ``check_conflicts._spellings`` does not have that gap because it
+        # escapes the string *and* labels it; this prints the name as written and
+        # labels it, so the label is carrying the whole distinction. Escaping
+        # here would close it, at the cost of making every such line unreadable
+        # for the common case — deliberately not done; see the follow-up.
+        folded_rel = Counter(common.fold_relation_name(name) for name in rel_counts)
         for name, n in sorted(rel_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            tags = [t for t, on in (("attribute", name in attr), ("single-valued", name in sv)) if on]
-            # typed_relations() keys are NFC-normalized; the CSV-sourced name may be NFD.
+            # Membership folded, matching the gate (check_conflicts) and the two
+            # other consumers. Without it a uniformly-NFD KB gets `conflicts: 1
+            # (over 1 single-valued relation(s))` out of `status` and no
+            # [single-valued] tag here, so the reader is told a conflict exists
+            # and not which relation is functional. The typed lookup two lines
+            # down already folds; leaving this one raw made the same loop
+            # asymmetric.
             tname = unicodedata.normalize("NFC", name)
+            tags = [
+                t
+                for t, on in (("attribute", name in attr), ("single-valued", tname in sv_folded))
+                if on
+            ]
+            # typed_relations() keys are NFC-normalized; the CSV-sourced name may be NFD.
             if tname in typed:
                 tags.append(f"typed:{typed[tname].type}")
             tagstr = f"  [{', '.join(tags)}]" if tags else ""
-            print(f"    [{n:>3}] {name}{tagstr}")
+            form = f"  ({common.normalization_form(name)})" if folded_rel[tname] > 1 else ""
+            print(f"    [{n:>3}] {name}{form}{tagstr}")
         if not rel_counts:
             print("    (none)")
     return 0
@@ -1801,9 +1834,38 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Conflicts (single-valued relations with >1 distinct object)
     if sv:
         by_key: dict[tuple, set] = {}
+        # Membership folded, matching the gate (check_conflicts), and so are the
+        # two axes the gate folds for grouping: the subject and the untyped
+        # object. Leaving the grouping raw made this count disagree with the gate
+        # in BOTH directions once the gate started folding — it printed 0 on a
+        # mixed-subject KB finalize refuses to compile, and 1 with
+        # "⚠ resolve via superseded" on a KB whose only defect is two spellings
+        # of one value, where superseding is the wrong repair and would drop a
+        # source's corroboration. The relation axis stays raw, matching the gate,
+        # which defers that decision (#210).
+        #
+        # This is still a count, not the gate: it does not parse typed literals,
+        # so a #116 cross-notation pair (5400억 / 0.54조) is two values here and
+        # one to check_conflicts. Closing that needs the checker's grouping
+        # shared rather than reimplemented — a follow-up, since `tools/` is not
+        # importable from the installed package (pyproject packages = ["factlog"]).
+        #
+        # FOLLOW-UP, and note that #325 WIDENED this divergence rather than only
+        # inheriting it. An NFD-authored typed literal (`매출` ordinal, Acme =
+        # NFD('제3호') and '3위') agreed on main — status 1, gate 1 — and now
+        # reads status 1, gate 0, because the gate folds the object before
+        # parsing and this count does not. The two then give OPPOSITE repairs:
+        # "resolve via superseded" here, "unify the spelling in sources/ and
+        # re-collect" from the gate's disclosure. The gate is the authority
+        # (`finalize` calls it) and this message points the reader at it, and the
+        # divergence direction is over-reporting here, which is why it is not
+        # treated as a release blocker — but the follow-up that shares the
+        # grouping owns this input specifically.
+        sv_folded = common.folded_relation_names(sv)
         for r in engine_rows:
-            if r["relation"] in sv:
-                by_key.setdefault((r["subject"], r["relation"]), set()).add(r["object"])
+            if common.fold_relation_name(r["relation"]) in sv_folded:
+                key = (unicodedata.normalize("NFC", r["subject"]), r["relation"])
+                by_key.setdefault(key, set()).add(unicodedata.normalize("NFC", r["object"]))
         conflicts = {k: v for k, v in by_key.items() if len(v) > 1}
         msg = f"  conflicts:  {len(conflicts)} (over {len(sv)} single-valued relation(s))"
         if conflicts:

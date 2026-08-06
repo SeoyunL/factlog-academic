@@ -17,6 +17,7 @@ engine inference; this file owns the pure projection logic.
 from __future__ import annotations
 
 import random
+import unicodedata
 
 import common
 
@@ -125,3 +126,51 @@ def test_shuffled_accepted_inserts_in_sorted_key_order():
         ("launch_date", "갑서비스", 20300101),
         ("launch_date", "을서비스", 20290601),
     ]
+
+
+# --- The engine folds nowhere (#325) -----------------------------------------
+# check_conflicts folds the object to NFC *before* literal_types.normalize, so a
+# decomposed typed literal parses there and not here. Its exit-0 advisory makes a
+# claim about this function, and the earlier wording ("loads every one of them
+# untyped") was true of only one of the two branches below.
+#
+# CONTROLS: both pass before that wording was corrected — they pin the engine
+# behaviour the message describes, which is unchanged. Their job is to make the
+# next edit to that sentence fail here if it drifts from what the loop does.
+
+
+def _nfd(value: str) -> str:
+    return unicodedata.normalize("NFD", value)
+
+
+_ORDINAL = {"순위": common.TypedRelSpec("ordinal", "rank")}
+
+
+def test_composed_literal_still_loads_typed_when_the_relation_is_composed(capsys):
+    # The projection runs per row and the spec lookup hits, so '3위' IS inserted
+    # as rank 3; only the decomposed twin degrades. The two notations land on
+    # opposite sides of the typed table, which is why the checker's merge is not
+    # reproducible here — not because nothing loads.
+    accepted = [_row("갑", "순위", _nfd("제3호")), _row("갑", "순위", "3위")]
+    fake = FakeSession()
+    common._project_typed_relations(fake, _ORDINAL, accepted)
+    id_to_value = {v: k for k, v in fake._ids.items()}
+    assert [(a, id_to_value[p[0]], p[1]) for a, p in fake.inserts] == [("rank", "갑", 3)]
+    err = capsys.readouterr().err
+    assert "does not parse as ordinal" in err
+    assert err.count("does not parse") == 1  # the composed row did not warn
+
+
+def test_nothing_loads_typed_when_the_relation_name_is_decomposed(capsys):
+    # specs.get(row["relation"]) is a raw lookup, so a decomposed relation name
+    # misses its spec on EVERY row — including the composed literal's. This is the
+    # branch where "every one of them untyped" holds, and it warns about none of
+    # them because the spec is never found.
+    accepted = [
+        _row("갑", _nfd("순위"), _nfd("제3호")),
+        _row("갑", _nfd("순위"), "3위"),
+    ]
+    fake = FakeSession()
+    common._project_typed_relations(fake, _ORDINAL, accepted)
+    assert fake.inserts == []
+    assert capsys.readouterr().err == ""
