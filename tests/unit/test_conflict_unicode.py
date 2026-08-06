@@ -724,6 +724,22 @@ class TestFoldEnabledTypedParseIsDisclosed:
         assert "made a typed literal parse" in out
         assert ascii(raws[0]) in out and ascii(raws[1]) in out
 
+    def test_one_representative_per_component_not_every_member(self):
+        # `_parse_merge` reports ONE representative per component: the members
+        # inside a component are canonically equivalent, so `_fold_classes`
+        # already lists them and repeating them here says "the fold enabled a
+        # parse" about a plain Unicode merge. NFD('제3호') is its own component;
+        # NFD('3위') and NFC('3위') are one, and only its composed spelling is
+        # named. Listing all members gives three notations instead of two, which
+        # the whole test suite otherwise accepts.
+        raws = [_nfd("제3호"), _nfd("3위"), _nfc("3위")]
+        facts = [_fact("갑", "순위", raw) for raw in raws]
+        scan = check_conflicts.collect_conflicts(facts, {"순위"}, _TYPED_ORDINAL)
+        assert scan.conflicts == {}
+        notations = scan.parse_merges[("갑", "순위")]["3위"]
+        assert notations == sorted([_nfd("제3호"), _nfc("3위")])
+        assert _nfd("3위") not in notations
+
     def test_parse_merge_is_disclosed_when_a_contradiction_also_remains(
         self, monkeypatch, capsys
     ):

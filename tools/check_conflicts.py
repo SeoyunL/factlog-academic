@@ -44,6 +44,7 @@ from common import (  # noqa: E402
     composed_spelling,
     engine_facts,
     ensure_dirs,
+    fold_relation_name,
     folded_relation_names,
     load_facts,
     relation_aliases,
@@ -545,7 +546,11 @@ def collect_conflicts(
     for row in engine_facts(facts):
         relation = row["relation"]
         canon = _canonicalize(relation, aliases)
-        if _fold(canon) not in sv:
+        # `fold_relation_name`, not the local `_fold`: this is the membership
+        # test, and the rule stated in `_fold`'s docstring is that every one of
+        # those goes through the shared helper. Same operation today — the point
+        # is that the two folds stay one decision if either ever moves.
+        if fold_relation_name(canon) not in sv:
             continue
         obj = row["object"]
         # Typed-spec lookup (#210), NOT a fold of the relation axis: the spec dict
