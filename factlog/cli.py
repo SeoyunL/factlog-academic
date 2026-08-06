@@ -588,13 +588,78 @@ def _init_kb(target) -> bool:
     return False
 
 
+def _activated_line(target) -> str:
+    return f"active KB set to {target} (ingest/ask/sync default here from any directory)"
+
+
+def _not_active_lines(current: str | None, target) -> tuple[str, str]:
+    """The summary + hint printed when the KB is created but not activated.
+
+    The old value is always named, because the failure mode this replaces was
+    losing it with nothing on screen to restore it from.
+    """
+    if current:
+        summary = f"active KB unchanged: {current} — {target} was created but is NOT active"
+    else:
+        summary = f"no active KB configured — {target} was created but is NOT active"
+    return summary, f"to work in it: factlog use {target}   (or re-run with --activate)"
+
+
+def _plan_activation(target, activate: bool | None) -> tuple[bool, str, str | None]:
+    """Decide whether creating *target* also moves the global active-KB pointer.
+
+    ``init``/``setup`` used to call ``write_root`` unconditionally, so creating
+    one throwaway KB silently replaced whichever KB the user had been working in
+    — with no confirmation and no surviving record of the old value (#356).
+    Creating a KB and choosing which KB is active are separate intents, so the
+    pointer only moves when nothing holds it yet (the first-run experience
+    ``setup`` exists for), when the target already is the active KB, or when the
+    user asks with ``--activate``.
+
+    *activate* is the tri-state ``--activate``/``--no-activate`` flag: True to
+    always claim the pointer, False to never claim it (scratch KBs, scripts),
+    None for the default above.
+
+    A configured root that does not currently exist still counts as held: a KB
+    on an unmounted volume must not hand the pointer back to ``init``. The
+    printed hint is how the user moves it deliberately.
+
+    Returns (write_pointer, summary_line, hint_line_or_None).
+    """
+    current = factlog_config.read_root()
+    already_active = current is not None and current == str(target)
+
+    if already_active and activate is not True:
+        return False, f"active KB unchanged: {target} (already active)", None
+    if activate is False:
+        return (False, *_not_active_lines(current, target))
+    if activate is True:
+        if current and not already_active:
+            return True, f"active KB: {current} → {target}", None
+        return True, _activated_line(target), None
+    if current is None:
+        return True, _activated_line(target), None
+    return (False, *_not_active_lines(current, target))
+
+
+def _apply_activation(command: str, target, activate: bool | None) -> str:
+    """Run ``_plan_activation``'s decision and print it. Returns the summary line
+    so ``setup`` can also repeat it in its own end-of-run summary."""
+    write, summary, hint = _plan_activation(target, activate)
+    if write:
+        factlog_config.write_root(target)
+    print(f"{command}: {summary}")
+    if hint:
+        print(f"  {hint}")
+    return summary
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     target = Path(args.target).expanduser().resolve()
     _init_kb(target)
-    factlog_config.write_root(target)
-    print(f"factlog init: active KB set to {target} (ingest/ask/sync default here from any directory)")
+    _apply_activation("factlog init", target, getattr(args, "activate", None))
     return 0
 
 
@@ -2090,16 +2155,17 @@ def cmd_setup(args: argparse.Namespace) -> int:
     print("\n=== factlog setup: initialise knowledge base ===")
     target = Path(args.target).expanduser().resolve()
     kb_created = _init_kb(target)
-    factlog_config.write_root(target)
     if kb_created:
         actions.append(f"created KB layout at {target}")
     else:
         actions.append(f"KB already present at {target}")
-    actions.append(f"set active KB to {target} (ingest/ask/sync default here from any directory)")
+    # Shared with `init`: a first-time setup activates the KB it just made, but a
+    # setup run beside an existing active KB creates without re-pointing it (#356).
+    actions.append(_apply_activation("factlog setup", target, getattr(args, "activate", None)))
     # Optional narration language: applied only when --lang is given, so an existing
-    # language survives a re-run of setup that omits the flag (write_root above
-    # already preserves it). Uses the shared validate/apply path, so an empty value
-    # clears the setting with the same wording as `factlog lang`.
+    # language survives a re-run of setup that omits the flag (the root write above,
+    # when it happens, preserves it). Uses the shared validate/apply path, so an
+    # empty value clears the setting with the same wording as `factlog lang`.
     if lang_normalized is not None:
         phrase = _apply_lang(lang_normalized)
         actions.append(f"{phrase} (assistant prose only)")
@@ -3067,6 +3133,29 @@ def cmd_eject(args: argparse.Namespace) -> int:
     return 1 if recompile_failed else 0
 
 
+def _add_activation_flags(parser: argparse.ArgumentParser) -> None:
+    """Attach the tri-state active-KB flags shared by `init` and `setup`.
+
+    Default (neither flag) is None, which ``_plan_activation`` reads as "activate
+    only if no KB is active yet". Mutually exclusive, so asking for both is a
+    usage error (rc 2) rather than a silent last-flag-wins.
+    """
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--activate",
+        dest="activate",
+        action="store_true",
+        help="also make this KB the active one, replacing the current active KB",
+    )
+    group.add_argument(
+        "--no-activate",
+        dest="activate",
+        action="store_false",
+        help="never touch the active-KB setting, not even when none is set yet",
+    )
+    parser.set_defaults(activate=None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="factlog", description="factlog environment and KB helpers")
     parser.add_argument("--version", action="version", version=f"factlog {__version__}")
@@ -3077,6 +3166,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="scaffold an empty knowledge base layout")
     init.add_argument("--target", default="~/wiki", help="knowledge base root to create")
+    _add_activation_flags(init)
     init.set_defaults(func=cmd_init)
 
     setup = sub.add_parser(
@@ -3084,6 +3174,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="one-shot bootstrap: doctor, ensure deps, init KB, re-check",
     )
     setup.add_argument("--target", default="~/wiki", help="knowledge base root to create")
+    _add_activation_flags(setup)
     setup.add_argument(
         "--lang",
         default=None,
