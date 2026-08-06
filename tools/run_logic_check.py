@@ -9,6 +9,7 @@ from common import (
     KNOWN_STATUSES,
     QUERY_PREDICATES,
     allowed_relations,
+    attribute_relations,
     dependency_path,
     entity_set,
     value_set,
@@ -36,6 +37,23 @@ def query_lines() -> list[str]:
         for line in query_file.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("//")
     ]
+
+
+def path_endpoints(line: str) -> list[str]:
+    """The quoted endpoints of a path query, INCLUDING an empty literal.
+
+    `quoted_constants` matches `"([^"]+)"`, so it drops `""` entirely: with it,
+    `path("갑봇", "")?` yielded one constant, failed the `len(constants) >= 2`
+    gate, and vanished from the report — no result line, no warning — while
+    `ask`'s router answers the same query with a reason. #329 is what made `""`
+    a graph node that is NOT an accepted entity, so the report has to say so."""
+    return [arg_value(arg) for arg in query_args(line) if is_quoted_string(arg)]
+
+
+def display_value(value: str) -> str:
+    """A value as it should read in the report. The empty string is rendered
+    `""` so `path 갑봇 -> "" ` does not print as a dangling arrow."""
+    return value if value else '""'
 
 
 # Query parsing is delegated to common's string-aware parsers
@@ -109,13 +127,41 @@ def validate_query(
         # the same query outright — say why here too, rather than letting the
         # result line answer "(not found)", which reads as "the facts do not
         # connect them" (#329).
-        for constant in quoted_constants(line):
-            if constant in entities and constant not in path_nodes:
-                warnings.append(f"query path argument is not an accepted entity: {constant}")
+        for constant in path_endpoints(line):
+            # `not constant` covers the empty string, which value_set drops, so the
+            # generic unknown-constant check below is silent on it as well — without
+            # it that endpoint drew no diagnostic anywhere.
+            if constant not in path_nodes and (constant in entities or not constant):
+                warnings.append(
+                    f"query path argument is not an accepted entity: {display_value(constant)}"
+                )
     for constant in quoted_constants(line):
         if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
             warnings.append(f"query references non-engine entity or relation: {constant}")
     return errors, warnings
+
+
+# The two validate_query warnings that fire on a constant absent from the KB
+# vocabulary. A relation NAME is legitimate vocabulary, so a warning about one is
+# dropped by the caller.
+_UNKNOWN_CONSTANT_PREFIXES = (
+    "query references non-engine entity or relation: ",
+    "query references non-engine entity: ",
+)
+
+
+def names_a_relation(warning: str, relations: set[str]) -> bool:
+    """True when *warning* is an unknown-constant warning about a relation NAME.
+
+    Matching the prefix matters: filtering on `rsplit(": ", 1)[-1]` tested the
+    tail of EVERY warning, so an unrelated warning whose value happened to equal
+    a relation name — `query path argument is not an accepted entity: <name>` —
+    was silently dropped. Stripping the known prefix instead also keeps a value
+    that itself contains ": " intact."""
+    for prefix in _UNKNOWN_CONSTANT_PREFIXES:
+        if warning.startswith(prefix):
+            return warning[len(prefix):] in relations
+    return False
 
 
 def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> bool:
@@ -220,6 +266,11 @@ def evaluate_queries(
     callers; ``main`` always passes it.
     """
     results: list[str] = []
+    # Read policy/attribute-relations.md at most once for the whole run, not once
+    # per path query — dependency_path falls back to reading it when the argument
+    # is None. classify_query hoists it the same way. Stays lazy so a KB with no
+    # path query does not touch the file at all.
+    attribute_rels: set[str] | None = None
     for line in query_lines():
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
@@ -227,7 +278,7 @@ def evaluate_queries(
             if result_line is not None:
                 results.append(result_line)
         elif predicate == "path":
-            constants = quoted_constants(line)
+            constants = path_endpoints(line)
             if len(constants) >= 2:
                 # An endpoint that is a literal (object of a declared attribute
                 # relation) is not a path node at all. Name the reason instead of
@@ -239,16 +290,24 @@ def evaluate_queries(
                     [value for value in constants[:2] if value not in path_nodes]
                     if path_nodes is not None else []
                 )
+                head = (
+                    f"path {display_value(constants[0])} -> {display_value(constants[1])}"
+                )
                 if not_nodes:
+                    reason = ", ".join(display_value(node) for node in not_nodes)
                     results.append(
-                        f"path {constants[0]} -> {constants[1]}: "
-                        f"(not evaluated — not an accepted entity: {', '.join(not_nodes)})"
+                        f"{head}: (not evaluated — not an accepted entity: {reason})"
                     )
                     continue
                 is_reachable = (constants[0], constants[1]) in inferred["path"]
-                trace = dependency_path(facts, constants[0], constants[1]) if is_reachable else []
+                if is_reachable:
+                    if attribute_rels is None:
+                        attribute_rels = attribute_relations()
+                    trace = dependency_path(facts, constants[0], constants[1], attribute_rels)
+                else:
+                    trace = []
                 value = " -> ".join(trace) if trace else "(not found)"
-                results.append(f"path {constants[0]} -> {constants[1]}: {value}")
+                results.append(f"{head}: {value}")
         elif predicate == "relation":
             rows = relation_results(line, facts)
             args = query_args(line)
@@ -317,7 +376,9 @@ def main() -> None:
     for line in query_lines():
         query_errors, query_warnings = validate_query(line, entities, policy_query_predicates, path_nodes)
         errors.extend(query_errors)
-        warnings.extend([item for item in query_warnings if item.rsplit(": ", 1)[-1] not in relations])
+        warnings.extend(
+            [item for item in query_warnings if not names_a_relation(item, relations)]
+        )
 
     report = [
         "Logic Check Report",
@@ -346,7 +407,18 @@ def main() -> None:
     report.extend([f"- {item}" for item in policy_items] or ["- no generated policy predicates"])
     report.append("")
     report.append("Query evaluation:")
-    report.extend([f"- {item}" for item in evaluate_queries(facts, inferred, policy_query_predicates, path_nodes)] or ["- no facts/query.dl found"])
+    query_results = evaluate_queries(facts, inferred, policy_query_predicates, path_nodes)
+    if query_results:
+        report.extend([f"- {item}" for item in query_results])
+    elif not (FACTS_DIR / "query.dl").is_file():
+        report.append("- no facts/query.dl found")
+    else:
+        # The file is there. Saying "not found" was simply false: a query.dl
+        # holding only variable-form path queries (`path(X, Y)?`) renders no
+        # result line, because a path result names its two endpoints.
+        report.append(
+            f"- facts/query.dl: {len(query_lines())} queries, none produced a result line"
+        )
 
     text = "\n".join(report) + "\n"
     out = FACTS_DIR / "logic_report.txt"
