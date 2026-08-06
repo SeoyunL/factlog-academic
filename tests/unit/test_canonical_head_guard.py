@@ -387,6 +387,44 @@ class TestInlineCommentsDoNotDisableTheGuard:
         with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
             fcommon._assert_no_reserved_head(policy)
 
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize(
+        "opener",
+        [
+            "foo(X, a#b).",
+            "foo(X, a//b).",
+            "foo(X, # y).",
+            "foo(X, a",
+            "foo(X, a) :- bar(X",
+        ],
+        ids=[
+            "mid-hash",
+            "mid-slash",
+            "hash-swallows-terminator",
+            "unterminated",
+            "unterminated-past-the-neck",
+        ],
+    )
+    def test_an_unterminated_statement_cannot_hide_the_next_head(self, name, opener):
+        """`re.match` reads only the FIRST atom of a head, so a clause that never
+        terminated absorbs the next one and that head goes unexamined.
+
+        Cutting comments to end of line is what makes it reachable: `foo(X, a#b).`
+        is not valid Datalog, but removing `#b).` leaves `foo(X, a` unterminated.
+        The bare `foo(X, a` case shows the hole is not specific to comments — it
+        passed on the previous head too, with no comment anywhere in the text.
+        `foo(X, a) :- bar(X` is the same absorption PAST a neck, which lands the
+        swallowed head in the first clause's body; it passed on main as well."""
+        policy = f"{opener}\n{_HEADS[name]}\n"
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    def test_a_reserved_name_used_as_a_symbol_in_a_head_is_allowed(self):
+        # CONTROL — the head-position search requires a following '(', so a
+        # reserved name appearing as a plain term is not a head.
+        fcommon._assert_no_reserved_head('foo(X, attr_rel) :- relation(X, R, O).\n')
+        fcommon._assert_no_reserved_head('foo(X, "entity_node").\n')
+
     def test_inline_comment_does_not_reject_a_legitimate_policy(self, tmp_path):
         # CONTROL through the loader: ordinary commented policy still loads.
         dl = _make_kb(

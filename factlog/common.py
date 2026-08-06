@@ -1190,7 +1190,10 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
     end of their line — an END-of-line comment left standing disabled this check
     outright (see the ordering note below).  Then tokenize each
     statement's HEAD — the predicate name left of ``:-``, or the whole clause for a
-    bare fact — and reject it only when that name is exactly a reserved one.  A
+    bare fact — and reject it only when that name is exactly a reserved one.  Text
+    that is not a clause at all (an unterminated statement, which absorbs the next
+    one and would hide ITS head) is caught by a second pass that rejects a reserved
+    name standing in call position anywhere a head can stand.  A
     substring search was wrong in BOTH directions and this replaces it: ``canonical
     (X, ...)`` with a space before the paren slipped past ``find("canonical(")`` (a
     head evaded the guard, rc=0), while ``not_canonical(X, ...)`` — a user predicate
@@ -1250,7 +1253,30 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
         if m and m.group(1) in names:
             # A reserved head or bare fact → reject.
             raise _reserved_head_error(m.group(1))
-        # A reserved name to the right of the neck → body reference → allowed.
+        # `re.match` sees only the FIRST atom of the head, and a statement that
+        # never terminated absorbs the clause that follows it — whose own head is
+        # then never examined. Comment cutting makes that reachable: `foo(X, a#b).`
+        # is not valid Datalog, but stripping `#b).` leaves `foo(X, a` unterminated,
+        # so `attr_rel(R) :- …` on the next line merged into this head and passed.
+        # A well-formed clause head is ONE atom, so a reserved name standing
+        # anywhere left of the neck in call position is a head — reject it and let
+        # the author see the name rather than a parse error from the engine later.
+        #
+        # A well-formed clause also has exactly ONE neck. Two necks in one
+        # statement mean the same absorption happened past a neck, which puts the
+        # swallowed head in the BODY of the first clause where it is
+        # indistinguishable from a legal reference: `foo(X) :- bar(X` followed by
+        # `canonical(...) :- ...` passed here and on main. Every part but the last
+        # then holds a head, so scan them all. Only text that is already not a
+        # clause reaches this, so no legal policy changes verdict — but a body
+        # reference inside such a statement is reported as a head, which is the
+        # right call when the alternative is vouching for text nobody can parse.
+        segments = statement.split(":-")
+        for segment in segments[:1] if len(segments) <= 2 else segments[:-1]:
+            for name in sorted(names):
+                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}\s*\(", segment):
+                    raise _reserved_head_error(name)
+        # A reserved name to the right of the single neck → body reference → allowed.
 
 
 def _split_policy_statements(text: str) -> list[str]:
