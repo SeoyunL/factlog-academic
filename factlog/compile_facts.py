@@ -12,6 +12,7 @@ from factlog.common import (
     dedup_engine_atoms,
     dl_string,
     dl_atom,
+    engine_atom_key,
     engine_facts,
     ensure_dirs,
     load_facts,
@@ -22,11 +23,12 @@ from factlog.common import (
 def main() -> None:
     ensure_dirs()
     facts = load_facts()
-    # Collapse the same (subject, relation, object) accepted from several sources
-    # to a single engine atom so accepted.dl / ask / run_logic_check use set
-    # semantics. Source aggregation (sources: N, provenance) stays on the
-    # candidates path and is unaffected. First-occurrence keeps accepted.dl
-    # byte-identical when there are no duplicate triples.
+    # Collapse rows that are the same engine atom (common.engine_atom_key:
+    # subject and object folded to NFC, relation verbatim) to one, so
+    # accepted.dl / ask / run_logic_check use set semantics. Source aggregation
+    # (sources: N, provenance) stays on the candidates path and is unaffected.
+    # A group written one way keeps its first row verbatim, so accepted.dl is
+    # byte-identical whenever the KB has no canonically equivalent duplicates.
     accepted = dedup_engine_atoms(engine_facts(facts))
     lines = [
         "// generated from facts/candidates.csv",
@@ -52,14 +54,17 @@ def main() -> None:
     # truncated accepted.dl, which parses cleanly yet drops confirmed facts from the
     # engine input.
     _atomic_write_text(out, "\n".join(lines) + "\n")
-    # Distinct-source count per collapsed triple, so the compile log surfaces the
+    # Distinct-source count per collapsed atom, so the compile log surfaces the
     # multi-source provenance of a deduped atom (observability only — accepted.dl,
-    # render's `sources: N`, and provenance are unchanged). Computed on the
-    # candidates path (corroboration_counts), which is untouched by the dedup.
+    # render's `sources: N`, and provenance are unchanged). Keyed by
+    # engine_atom_key on BOTH sides: corroboration_counts aggregates under the
+    # atom's identity, and the row here is the group's representative, so looking
+    # it up by its raw triple would report only the sources of the spelling that
+    # won.
     source_counts = corroboration_counts(facts)
     print(f"engine facts: {len(accepted)} / {len(facts)}")
     for row in accepted:
-        key = (row["subject"], row["relation"], row["object"])
+        key = engine_atom_key(row)
         n_sources = source_counts.get(key, 1)
         print(
             "  - "
