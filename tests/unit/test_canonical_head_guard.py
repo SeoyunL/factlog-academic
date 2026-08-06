@@ -470,6 +470,39 @@ class TestInlineCommentsDoNotDisableTheGuard:
         policy = f'lit(R, "a") :- foo(R), {name}(R, _, _), bar(R).\n'
         fcommon._assert_no_reserved_head(policy)
 
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_an_escaped_quote_cannot_blank_out_a_reserved_head(self, name):
+        r"""`"[^"]*"` stopped inside `"q\""`, so the leftover `"` paired with the
+        NEXT literal's opening quote and deleted every line in between — including
+        a reserved head. pyrewire compiles that literal, so this is policy someone
+        can legitimately write, and the guard passed it silently."""
+        policy = (
+            'a(X, "q\\"") :- relation(X, _, _).\n'
+            f"{_HEADS[name]}\n"
+            'b(X, "z") :- relation(X, _, _).\n'
+        )
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    def test_an_escaped_quote_alone_does_not_reject_legitimate_policy(self):
+        # CONTROL — the same literal with no reserved head must still load.
+        fcommon._assert_no_reserved_head(
+            'a(X, "q\\"") :- relation(X, _, _).\nb(X, "z") :- relation(X, _, _).\n'
+        )
+
+    def test_an_escaped_backslash_does_not_swallow_the_closing_quote(self):
+        # `\\` ends the escape, so the quote after it closes the literal rather
+        # than being consumed by it.
+        policy = 'a(X, "c:\\\\tmp") :- relation(X, _, _).\nattr_rel(R) :- relation(R, R, R).\n'
+        with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    def test_a_reserved_name_inside_an_escaped_literal_is_not_a_head(self):
+        # CONTROL the other way: the literal is still a literal.
+        fcommon._assert_no_reserved_head(
+            'a(X, "he said \\"attr_rel(R)\\" once") :- relation(X, _, _).\n'
+        )
+
     def test_inline_comment_does_not_reject_a_legitimate_policy(self, tmp_path):
         # CONTROL through the loader: ordinary commented policy still loads.
         dl = _make_kb(

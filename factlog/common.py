@@ -1262,7 +1262,13 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
     # whole so `"http://x"` is not read as a comment, and a comment is consumed to
     # end of line so a lone `"` in prose cannot pair with a quote further down and
     # delete the policy in between.
-    bare = re.sub(r'"[^"]*"|(?://|#)[^\n]*', "", policy_text)
+    # `[^"\\]|\\.` consumes an ESCAPED quote as part of the literal. `"[^"]*"`
+    # stopped at the backslash's quote, so the leftover `"` paired with the next
+    # literal's opening quote and everything between them was deleted — measured,
+    # `a(X,"q\"") :- …` two lines above `attr_rel(R) :- …` erased the reserved head
+    # outright and the guard passed. pyrewire compiles that literal, so it is
+    # policy a person can legitimately write, not garbage input.
+    bare = re.sub(r'"(?:[^"\\]|\\.)*"|(?://|#)[^\n]*', "", policy_text)
     # A `.decl <name>(...)` directive has no clause-terminating '.', so it merges into
     # the statement that follows it and would hide that statement's real head from the
     # tokenizer below. Reject a reserved re-declaration first, then strip every
