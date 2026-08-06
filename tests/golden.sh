@@ -96,40 +96,15 @@ fail_msg() {
   fail=$((fail + 1))
 }
 
-# --- artifact freshness -----------------------------------------------------
-# Every golden diff below must compare bytes THIS run produced. The committed
-# copy of each artifact is identical to its golden file (that is what a green
-# main means), so leaving it in place made the diff pass whenever the step that
-# should have rewritten it died — a `PASS: facts/logic_report.txt matches golden`
-# that held no matter what the branch changed, and that was cited as evidence
-# (#354). So each artifact is moved out of the KB before its step runs: the step
-# must recreate it, or the diff has nothing to compare and fails.
-#
-# A step that dies would then leave the KB missing a committed file, so the EXIT
-# trap puts back anything that was not rewritten.
-STASH_DIR="$(mktemp -d)"
-STASH_COUNT=0
-
-stash_artifact() {
-  local path="$1"
-  [ -f "$path" ] || return 0
-  mv "$path" "$STASH_DIR/$STASH_COUNT"
-  printf '%s\t%s\n' "$STASH_COUNT" "$path" >> "$STASH_DIR/manifest"
-  STASH_COUNT=$((STASH_COUNT + 1))
-}
-
-restore_stashed() {
-  if [ -f "$STASH_DIR/manifest" ]; then
-    local idx path
-    while IFS=$'\t' read -r idx path; do
-      if [ ! -e "$path" ] && [ -e "$STASH_DIR/$idx" ]; then
-        mv "$STASH_DIR/$idx" "$path"
-      fi
-    done < "$STASH_DIR/manifest"
-  fi
-  rm -rf "$STASH_DIR"
-}
-trap restore_stashed EXIT
+# --- scratch space ----------------------------------------------------------
+# Every KB is copied here and run from the copy. Nothing under the checkout is
+# written, so a run cannot rewrite a tracked fixture, cannot leave one deleted if
+# it is killed, and two runs cannot collide on the fixed in-repo path of KB 2.
+# Cleanup is best-effort: a SIGKILL leaks a temp directory, which is the failure
+# mode we want, because SIGKILL cannot be trapped and anything that relies on a
+# trap to put a repo file back is one kill away from deleting tracked data.
+WORK_ROOT="$(mktemp -d)"
+trap 'rm -rf "$WORK_ROOT"' EXIT
 
 assert_golden() {
   local label="$1"
@@ -154,36 +129,66 @@ assert_golden() {
 #   Step 2: run_logic_check.py        → facts/logic_report.txt
 #   Step 3: generate_logic_policy.py --check (deterministic re-derivation)
 # ---------------------------------------------------------------------------
+#
+# The KB is copied into $WORK_ROOT and every step runs against the copy, so the
+# source KB is read-only for the whole run. Two consequences worth stating:
+#
+#   - The step that regenerates an artifact is the only thing that can create it
+#     in the copy, so each artifact is deleted from the copy first. A step that
+#     dies leaves nothing to diff and the comparison fails loudly, instead of
+#     silently comparing the committed file against the golden copy and passing
+#     no matter what the branch changed (#354). Deleting inside a throwaway copy
+#     needs no trap to undo it.
+#   - Nothing verifies the committed artifacts any more, since they are no longer
+#     overwritten — so each pass checks them against the golden separately. That
+#     is a different claim from the regeneration diff and is labelled as one.
+#
 run_pass() {
   local kb="$1"
   local golden="$2"
+  local work="$WORK_ROOT/$3"
 
+  cp -R "$kb" "$work"
+
+  # Labels deliberately unlike the Step 1/2 ones: "committed <file>" is a claim
+  # about what is checked in, "<file>" is a claim about what this run produced.
+  # A reader — or a test grepping this output — must not be able to take one for
+  # the other, which is how a vacuous comparison got cited in the first place.
+  echo "=== Step 0: committed artifacts in sync with golden ==="
+  assert_golden "committed facts/accepted.dl" \
+    "$kb/facts/accepted.dl" \
+    "$golden/accepted.dl"
+  assert_golden "committed facts/logic_report.txt" \
+    "$kb/facts/logic_report.txt" \
+    "$golden/logic_report.txt"
+
+  echo ""
   echo "=== Step 1: compile_facts.py ==="
-  stash_artifact "$kb/facts/accepted.dl"
-  if FACTLOG_ROOT="$kb" "$PYTHON" "$PLUGIN_ROOT/tools/compile_facts.py" 2>&1; then
+  rm -f "$work/facts/accepted.dl"
+  if FACTLOG_ROOT="$work" "$PYTHON" "$PLUGIN_ROOT/tools/compile_facts.py" 2>&1; then
     ok "compile_facts.py exit 0"
   else
     fail_msg "compile_facts.py exited non-zero"
   fi
   assert_golden "facts/accepted.dl" \
-    "$kb/facts/accepted.dl" \
+    "$work/facts/accepted.dl" \
     "$golden/accepted.dl"
 
   echo ""
   echo "=== Step 2: run_logic_check.py ==="
-  stash_artifact "$kb/facts/logic_report.txt"
-  if FACTLOG_ROOT="$kb" "$PYTHON" "$PLUGIN_ROOT/tools/run_logic_check.py" 2>&1; then
+  rm -f "$work/facts/logic_report.txt"
+  if FACTLOG_ROOT="$work" "$PYTHON" "$PLUGIN_ROOT/tools/run_logic_check.py" 2>&1; then
     ok "run_logic_check.py exit 0"
   else
     fail_msg "run_logic_check.py exited non-zero"
   fi
   assert_golden "facts/logic_report.txt" \
-    "$kb/facts/logic_report.txt" \
+    "$work/facts/logic_report.txt" \
     "$golden/logic_report.txt"
 
   echo ""
   echo "=== Step 3: generate_logic_policy.py --check ==="
-  if FACTLOG_ROOT="$kb" "$PYTHON" "$PLUGIN_ROOT/tools/generate_logic_policy.py" --check 2>&1; then
+  if FACTLOG_ROOT="$work" "$PYTHON" "$PLUGIN_ROOT/tools/generate_logic_policy.py" --check 2>&1; then
     ok "generate_logic_policy.py --check exit 0"
   else
     fail_msg "generate_logic_policy.py --check exited non-zero (policy/logic-policy.dl is stale)"
@@ -191,11 +196,11 @@ run_pass() {
 }
 
 echo "### KB 1/2: $KB_ROOT"
-run_pass "$KB_ROOT" "$GOLDEN_DIR"
+run_pass "$KB_ROOT" "$GOLDEN_DIR" kb1
 
 echo ""
 echo "### KB 2/2: $POLICY_KB"
-run_pass "$POLICY_KB" "$POLICY_GOLDEN_DIR"
+run_pass "$POLICY_KB" "$POLICY_GOLDEN_DIR" kb2
 
 # ---------------------------------------------------------------------------
 # Step 4 (policy KB only): check_conflicts.py → single-valued contradictions
@@ -208,9 +213,9 @@ run_pass "$POLICY_KB" "$POLICY_GOLDEN_DIR"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Step 4: check_conflicts.py (policy KB) ==="
-conflicts_out="$STASH_DIR/conflicts.txt"
+conflicts_out="$WORK_ROOT/conflicts.txt"
 conflicts_rc=0
-FACTLOG_ROOT="$POLICY_KB" "$PYTHON" "$PLUGIN_ROOT/tools/check_conflicts.py" \
+FACTLOG_ROOT="$WORK_ROOT/kb2" "$PYTHON" "$PLUGIN_ROOT/tools/check_conflicts.py" \
   > "$conflicts_out" 2>&1 || conflicts_rc=$?
 cat "$conflicts_out"
 if [ "$conflicts_rc" -eq 1 ]; then

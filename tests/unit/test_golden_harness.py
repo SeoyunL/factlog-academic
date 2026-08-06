@@ -30,6 +30,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_SH = REPO_ROOT / "tests" / "golden.sh"
 SAMPLE_KB = REPO_ROOT / "examples" / "sample-kb"
+POLICY_KB = REPO_ROOT / "tests" / "golden-kb"
+
+# The artifacts the harness regenerates, in both KBs. Tracked files: running a
+# test must not write to any of them.
+TRACKED_ARTIFACTS = [
+    SAMPLE_KB / "facts" / "accepted.dl",
+    SAMPLE_KB / "facts" / "logic_report.txt",
+    POLICY_KB / "facts" / "accepted.dl",
+    POLICY_KB / "facts" / "logic_report.txt",
+]
 
 
 def _write_shim(path: Path, body: str) -> Path:
@@ -44,9 +54,9 @@ def _write_shim(path: Path, body: str) -> Path:
     return path
 
 
-def _run_golden(tmp_path: Path, python: Path) -> subprocess.CompletedProcess[str]:
-    kb = tmp_path / "kb"
-    shutil.copytree(SAMPLE_KB, kb)
+def _run_golden_at(
+    kb: Path, tmp_path: Path, python: Path
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["FACTLOG_ROOT"] = str(kb)
     env["PYTHON"] = str(python)
@@ -60,6 +70,20 @@ def _run_golden(tmp_path: Path, python: Path) -> subprocess.CompletedProcess[str
         capture_output=True,
         text=True,
     )
+
+
+def _run_golden(tmp_path: Path, python: Path) -> subprocess.CompletedProcess[str]:
+    kb = tmp_path / "kb"
+    shutil.copytree(SAMPLE_KB, kb)
+    return _run_golden_at(kb, tmp_path, python)
+
+
+def _fingerprint(path: Path) -> tuple[int, int, bytes]:
+    """Identity, write time and contents — enough to see a rewrite that happens
+    to reproduce the same bytes. ``_atomic_write_text`` is temp-file + os.replace,
+    so a rewrite always lands a new inode even when the contents are unchanged."""
+    stat = path.stat()
+    return (stat.st_ino, stat.st_mtime_ns, path.read_bytes())
 
 
 def test_honours_python_from_environment(tmp_path: Path) -> None:
@@ -111,8 +135,44 @@ def test_dead_step_cannot_produce_a_vacuous_pass(tmp_path: Path) -> None:
     # Step 1 still runs for real: the case must isolate step 2, not break
     # everything, or the absent PASS below would be uninformative.
     assert "PASS: facts/accepted.dl matches golden" in result.stdout, combined
-    assert not re.search(r"^PASS: facts/logic_report\.txt", result.stdout, re.M), (
+    # Anchored at both ends: the harness also reports on the COMMITTED copy of
+    # this file, which is a different and legitimately-true claim. Matching it
+    # here would make this case fail for the wrong reason.
+    assert not re.search(
+        r"^PASS: facts/logic_report\.txt matches golden$", result.stdout, re.M
+    ), (
         "the logic_report comparison passed while step 2 was dead — it "
         f"compared the committed file, not this run's output\n{combined}"
     )
     assert result.returncode != 0
+
+
+def test_run_writes_nothing_inside_the_checkout(tmp_path: Path) -> None:
+    """A green run must leave every tracked KB artifact byte- AND inode-identical.
+
+    The harness regenerates ``facts/accepted.dl`` and ``facts/logic_report.txt``
+    for each KB. It used to do that in place: KB 1 wherever the caller pointed —
+    ``examples/sample-kb`` for the documented local invocation — and KB 2 at the
+    fixed in-repo path ``tests/golden-kb``, which no caller can redirect. So the
+    "pure-function unit layer" rewrote tracked fixtures, and a tool that emitted
+    different bytes left a mutated fixture staged by the next ``git add -A``.
+
+    Contents alone would not see this: a green run reproduces the same bytes. The
+    inode does move, because the writer is temp-file + ``os.replace``.
+    """
+    before = {path: _fingerprint(path) for path in TRACKED_ARTIFACTS}
+
+    result = _run_golden_at(SAMPLE_KB, tmp_path, Path(sys.executable))
+
+    assert result.returncode == 0, (
+        "this case pins where a GREEN run writes; it did not go green\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    changed = [
+        str(path.relative_to(REPO_ROOT))
+        for path in TRACKED_ARTIFACTS
+        if _fingerprint(path) != before[path]
+    ]
+    assert not changed, (
+        "the harness wrote to tracked files in the checkout: " + ", ".join(changed)
+    )
