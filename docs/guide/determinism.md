@@ -14,7 +14,7 @@ factlog는 두 가지 서로 다른 메커니즘으로 신선도(freshness)를 �
 
 | 단계 | 메커니즘 | 보장하는 것 |
 |-------|-----------|-------------------|
-| **훅으로 강제** | `facts/logic_report.txt` 가 없거나 대상 파일보다 오래되었을 때, `PreToolUse` 훅이 `facts/accepted.dl` 또는 `facts/query.dl` 로의 모든 `Write`/`Edit` 를 거부합니다(`/factlog check` → `run_logic_check.py` 로 갱신) | 로직 리포트가 오래된 상태에서는 엔진의 컴파일된 입력을 덮어쓸 수 없습니다 — 훅이 파일에 손대기 전에 도구 호출을 차단합니다 |
+| **훅으로 강제** | `facts/logic_report.txt` 가 없거나, 대상 파일보다 오래되었거나, 엔진이 돌지 못한 실행을 기록하고 있을 때, `PreToolUse` 훅이 `facts/accepted.dl` 또는 `facts/query.dl` 로의 모든 `Write`/`Edit` 를 거부합니다(`/factlog check` → `run_logic_check.py` 로 갱신) | 로직 리포트가 오래된 상태에서는 엔진의 컴파일된 입력을 덮어쓸 수 없습니다 — 훅이 파일에 손대기 전에 도구 호출을 차단합니다 |
 | **SKILL 규율 (최선 노력)** | `SKILL.md` 는 어떤 결론을 말하기 전에 Claude가 `run_logic_check.py` 를 실행하고 `facts/logic_report.txt` 를 그대로 보여 주도록 지시합니다 | 모델은 엔진 리포트를 드러내도록 *유도*되지만 *강제*될 수는 없습니다(R10: "완전히 보장할 수 없음") — 원시 리포트에 대한 사람의 검토가 최종 검증 단계입니다 |
 
 이 두 단계는 상호 보완적입니다. 훅은 결정론적 빈틈을 메우고, SKILL 규율은
@@ -49,10 +49,32 @@ factlog는 두 가지 서로 다른 메커니즘으로 신선도(freshness)를 �
 ### 리포트를 만들 수 없는 KB 에서 거부가 풀리지 않을 때
 
 신선도 거부 메시지는 `/factlog check` 를 안내하지만, `/factlog check` 자체가
-실패하는 KB 에서는 리포트가 아예 생성되지 않습니다. 예를 들어
-`facts/query.dl` 은 있는데 `facts/accepted.dl` 이 없으면 로직 체크가 엔진을
-띄우기 전에 멈추고, `facts/logic_report.txt` 를 쓰지 못한 채 끝납니다. 그러면
-게이트는 계속 거부하고 안내는 계속 같은 곳을 가리킵니다.
+실패하는 KB 가 있습니다. 예를 들어 `facts/query.dl` 은 있는데
+`facts/accepted.dl` 이 없으면 로직 체크가 엔진을 띄우기 전에 멈춥니다. 엔진
+`pyrewire` 가 없거나 버전이 낮을 때도 마찬가지입니다.
+
+이때에도 `facts/logic_report.txt` 는 쓰이며, 그 리포트는 실패를 기록합니다.
+
+```
+Logic Check Report
+==================
+status: engine-did-not-run
+engine: wirelog / pyrewire
+input: facts/accepted.dl
+reason: missing facts/accepted.dl; run tools/compile_facts.py first
+```
+
+`status:` 줄은 "이 리포트는 KB 에 대해 아무것도 말하지 않는다" 는 뜻입니다.
+숫자는 하나도 싣지 않습니다 — `engine facts: 0` 은 엔진이 돌았는데 아무것도
+못 찾았다는 뜻이 되므로 쓰지 않습니다. 직전 성공 실행의 리포트를 덮어쓰므로,
+예전 결과를 이번 실행의 결과로 잘못 읽을 일도 없습니다.
+
+**이 리포트로는 거부가 풀리지 않습니다.** 엔진까지 가지 못한 실행은 엔진 입력을
+편집해도 된다는 근거가 아니므로, `status:` 줄이 있는 동안 게이트는 계속
+거부합니다. 달라지는 것은 거부 메시지가 방금 실패한 명령을 다시 가리키는 대신
+원인을 그대로 알려 준다는 점입니다. 하나는 그대로입니다. 그 KB 에서
+`facts/query.dl` 이나 `facts/accepted.dl` 을 **처음** 만드는 쓰기는 리포트가
+없을 때와 똑같이 허용됩니다.
 
 훅은 `Write` 와 `Edit` 에만 걸리므로 복구는 **Bash 로** 합니다. 컴파일을 먼저
 돌려 `facts/accepted.dl` 을 만들면 풀립니다. 단 `facts/candidates.csv` 가 없으면

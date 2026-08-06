@@ -10,7 +10,7 @@ factlog enforces freshness through two distinct mechanisms:
 
 | Level | Mechanism | What it guarantees |
 |-------|-----------|-------------------|
-| **Hook-enforced** | `PreToolUse` hook denies any `Write`/`Edit` to `facts/accepted.dl` or `facts/query.dl` when `facts/logic_report.txt` is missing or older than those files (run `/factlog check` → `run_logic_check.py` to refresh) | The engine's compiled inputs cannot be overwritten when the logic report is stale — the hook blocks the tool call before the file is touched |
+| **Hook-enforced** | `PreToolUse` hook denies any `Write`/`Edit` to `facts/accepted.dl` or `facts/query.dl` when `facts/logic_report.txt` is missing, older than those files, or records a run in which the engine never ran (run `/factlog check` → `run_logic_check.py` to refresh) | The engine's compiled inputs cannot be overwritten when the logic report is stale — the hook blocks the tool call before the file is touched |
 | **SKILL discipline (best-effort)** | `SKILL.md` instructs Claude to run `run_logic_check.py` and show `facts/logic_report.txt` verbatim before stating any conclusion | The model is *guided* to surface the engine report; it cannot be *forced* (R10: "cannot fully guarantee") — human review of the raw report is the final verification step |
 
 These two levels are complementary: the hook closes the deterministic gap; the SKILL discipline covers the narration layer where engineering enforcement is not possible.
@@ -44,11 +44,34 @@ also report the payload shape upstream.
 
 ### When the deny will not lift because the KB cannot produce a report
 
-The staleness deny points at `/factlog check`, but in a KB where `/factlog
-check` itself fails, no report is ever written. For example, if `facts/query.dl`
-exists but `facts/accepted.dl` does not, the logic check stops before it can
-start the engine and exits without writing `facts/logic_report.txt`. The gate
-keeps denying and the message keeps pointing at the same place.
+The staleness deny points at `/factlog check`, but `/factlog check` itself fails
+in some KBs. For example, if `facts/query.dl` exists but `facts/accepted.dl` does
+not, the logic check stops before it can start the engine — as it also does when
+the `pyrewire` engine is missing or too old.
+
+The check still writes `facts/logic_report.txt` in that case, and the report
+records the failure:
+
+```
+Logic Check Report
+==================
+status: engine-did-not-run
+engine: wirelog / pyrewire
+input: facts/accepted.dl
+reason: missing facts/accepted.dl; run tools/compile_facts.py first
+```
+
+Read the `status:` line as "this report says nothing about the KB". It carries
+no counts at all — not `engine facts: 0`, which would mean the engine ran and
+found nothing. It also replaces the report from the last successful run, so an
+older result cannot be mistaken for this one.
+
+**That report does not lift the deny.** A run that never reached the engine is
+not evidence that editing engine inputs is safe, so the gate keeps denying while
+the `status:` line is there — it just names the cause instead of pointing back at
+the command that failed. One thing it does not change: creating `facts/query.dl`
+or `facts/accepted.dl` for the first time in a KB stays allowed, exactly as when
+no report exists.
 
 The hook only matches `Write` and `Edit`, so recovery runs through **Bash**.
 Compiling first — which produces `facts/accepted.dl` — is what clears it. Note
