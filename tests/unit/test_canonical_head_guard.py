@@ -609,3 +609,115 @@ class TestAFusedBareFactIsNotHonoured:
         policy = f'p(X) :- relation(X,_,_) .{_HEADS[name]}\n'
         with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
             fcommon._assert_no_reserved_head(policy)
+
+
+# ---------------------------------------------------------------------------
+# #329 round 4 — a directive with no parens merges the same way `.decl` does
+# ---------------------------------------------------------------------------
+
+# Directives that name a relation without parenthesising anything, plus `.plan`,
+# whose argument is a number. Each carries no clause-terminating '.', so the
+# statement after it merges in.
+_PARENLESS_DIRECTIVES = [".output p2", ".input p2", ".printsize p2", ".plan 0"]
+
+
+class TestAParenlessDirectiveDoesNotHideTheNextStatement:
+    """`.output p2` above a bare reserved fact let the fact through.
+
+    ``.decl`` was stripped before tokenizing, so its merge was already handled;
+    no other directive was, and a paren-less one leaves the merged statement
+    starting with `.` — the head `re.match` finds nothing, there is no neck, and
+    the segment scan had nothing to scan. Measured end to end on the previous
+    head, KB as in :class:`TestAFusedBareFactIsNotHonoured`::
+
+        clean                             rc=0  - path 갑봇 -> 병문서: 갑봇 -> 병문서
+        .output p2 / attr_rel("참조").      rc=0  - path 갑봇 -> 병문서: (not found)
+                                                errors: 0        <- wrong, silent
+        p(X) :- … .attr_rel("참조").        rc=1  refused (closed in round 3)
+        attr_rel("참조").                   rc=1  refused
+
+    The mechanism differs from the round-3 one and keyword narrowing cannot reach
+    it: `.output p2` IS a directive, so merging it is *correct* parsing. What was
+    missing is that the merged text still has to be examined.
+    """
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("directive", _PARENLESS_DIRECTIVES)
+    def test_a_bare_reserved_fact_after_a_directive_is_refused(self, name, directive):
+        policy = f"{directive}\n{_FUSED_FACT[name]}\n"
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("directive", _PARENLESS_DIRECTIVES)
+    def test_a_reserved_rule_head_after_a_directive_is_refused(self, name, directive):
+        policy = f"{directive}\n{_HEADS[name]}\n"
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_directive_and_a_fact_on_one_line_are_both_seen(self, name):
+        """`.output p2 attr_rel("참조").` on ONE line is a program pyrewire
+        compiles (measured), so the directive strip may consume the directive's
+        own tokens and no more. Eating to end of line would delete this fact and
+        manufacture the very bypass being closed."""
+        policy = f'.output p2 {_FUSED_FACT[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_directive_may_name_a_reserved_relation(self, name):
+        """CONTROL, and a program pyrewire compiles: `.output entity_node` asks
+        the engine to print an engine-owned relation. It neither heads nor
+        re-declares it, so it is legal and must load."""
+        fcommon._assert_no_reserved_head(f'.output {name}\nfoo2(X, "a") :- relation(X, _, _).\n')
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_parenthesised_directive_naming_a_reserved_relation_is_allowed(self, name):
+        # CONTROL — the parenthesised form is consumed with its parameters, so it
+        # cannot be mistaken for a head either.
+        fcommon._assert_no_reserved_head(
+            f'.limitsize {name}(n=10)\nfoo2(X, "a") :- relation(X, _, _).\n'
+        )
+
+    def test_a_directive_is_still_not_a_clause_terminator(self):
+        # CONTROL — a trailing directive must not become a statement whose only
+        # atom is a reserved name.
+        fcommon._assert_no_reserved_head(
+            'foo2(X, "a") :- relation(X, _, _).\n.limitsize entity_node(n=10)\n'
+        )
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize(
+        "directive",
+        ['.pragma "x" "y"', '.pragma "x"', ".comp C", ".override q", ".functor f"],
+        ids=["pragma-two", "pragma-one", "comp", "override", "functor"],
+    )
+    def test_the_strip_does_not_cross_a_newline(self, name, directive):
+        """A directive's operand lives on the directive's own line.
+
+        `.pragma "x" "y"` loses its quoted operands to the literal strip that runs
+        first, leaving a bare `.pragma`; if the directive strip then matched
+        `\\s+<name>` it would cross the newline and delete the head of the NEXT
+        statement. Found by fuzzing the directive axis, which is also what the two
+        earlier fuzzers were missing."""
+        policy = f"{directive}\n{_HEADS[name]}\n"
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_directive_operand_on_its_own_line_is_still_stripped(self, name):
+        # CONTROL for the other side of that boundary: the operand IS consumed
+        # when it sits on the directive's line, so a legal directive naming a
+        # reserved relation still loads.
+        fcommon._assert_no_reserved_head(f'.output {name}\nfoo2(X, "a") :- relation(X, _, _).\n')
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_the_loader_refuses_it_too(self, name, tmp_path):
+        dl = _make_kb(
+            tmp_path,
+            dl_text="// generated\n.decl requires_review(entity: symbol, reason: symbol)\n",
+            extra_text=f".output p2\n{_FUSED_FACT[name]}\n",
+        )
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._load_logic_policy_from(dl)

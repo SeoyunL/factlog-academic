@@ -1281,7 +1281,18 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
     for name in re.findall(r"\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", bare):
         if name in names:
             raise _reserved_head_error(name)
-    bare = re.sub(r"\.decl\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", bare)
+    # Strip EVERY directive, not just `.decl`. A paren-less one — `.output p2` —
+    # carries no terminator either, so it merges with the fact after it exactly as
+    # `.decl` does; the merged statement then begins with `.`, the head tokenizer
+    # finds nothing, and the fact rode in unexamined (#329 round 4).
+    #
+    # Consumed: the keyword, the relation it names, and its parenthesised
+    # parameters — and no further. NOT to end of line: `.output p2 attr_rel("참조").`
+    # on ONE line is a program pyrewire compiles, so eating the rest of the line
+    # would delete a real reserved fact and manufacture the bypass it is meant to
+    # close. A space replaces the directive so stripping cannot glue two tokens
+    # into one name.
+    bare = _DIRECTIVE_STRIP_RE.sub(" ", bare)
 
     for statement in _split_policy_statements(bare):
         # Tokenize the HEAD (the predicate name left of ':-', or the whole clause for
@@ -1311,13 +1322,24 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
         # two: a body reference reaches that position only when another atom does
         # not stand between it and the neck.
         #
-        # A statement with no neck at all is a bare fact, handled by the
-        # `re.match` above, and contributes no segment here — which is why a bare
-        # reserved fact absorbed into a preceding statement was invisible until
-        # `_split_policy_statements` stopped absorbing it (#358). This scan is not
-        # the thing that catches that shape; correct splitting is.
+        # That distinction narrowed once directives started being stripped above.
+        # A program the engine COMPILES gives every clause one neck and a
+        # terminator, so it no longer reaches a two-neck segment at all, and on
+        # such input this rule and the older whole-segment scan agree. What it
+        # still buys is on text the engine rejects: a legal #227 body reference is
+        # not reported as a head merely because the clause above it lost its dot.
+        #
+        # A statement with NO neck is a bare fact, and the same positional reading
+        # applies to it whole: the clause is its own head. `re.match` above covers
+        # it only when the fact starts the statement, which a merged directive
+        # remnant breaks — `.plan 0` leaves ` 0` in front, the match fails on the
+        # digit, and the fact behind it was never looked at. Scanning the neckless
+        # statement here is what closes that, so the two shapes #358 and round 4
+        # found are handled by one rule rather than by where the text happened to
+        # begin.
         segments = statement.split(":-")
-        for segment in segments[:-1]:
+        head_bearing = segments[:-1] if len(segments) > 1 else segments
+        for segment in head_bearing:
             atoms = re.findall(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", segment)
             if atoms and atoms[-1] in names:
                 raise _reserved_head_error(atoms[-1])
@@ -1350,6 +1372,22 @@ _DL_DIRECTIVES = frozenset(
 _DIRECTIVE_RE = re.compile(
     r"\.(?:" + "|".join(sorted(_DL_DIRECTIVES)) + r")(?![A-Za-z0-9_])"
 )
+# The same directives plus what belongs to them: the relation they name and its
+# parenthesised parameters. `_assert_no_reserved_head` removes these before
+# tokenizing heads, because a directive carries no clause-terminating '.' and
+# would otherwise merge with — and hide the head of — the statement after it.
+# Deliberately stops at the parameters: a directive and a clause can share a
+# physical line, and eating the remainder would delete the clause.
+# `[^\S\n]` — same-line whitespace only. A directive's operand is on the
+# directive's own line, and `\s` would let the strip cross the newline and eat the
+# head of the NEXT statement: `.pragma "x" "y"` loses its quoted operands to the
+# literal strip that runs first, leaving a bare `.pragma`, and `\s+\w+` then
+# reached the `canonical(` on the following line and deleted it.
+_DIRECTIVE_STRIP_RE = re.compile(
+    _DIRECTIVE_RE.pattern
+    + r"(?:[^\S\n]+[A-Za-z_][A-Za-z0-9_]*)?"
+    + r"(?:[^\S\n]*\([^)]*\))?"
+)
 
 
 def _split_policy_statements(text: str) -> list[str]:
@@ -1378,7 +1416,13 @@ def _split_policy_statements(text: str) -> list[str]:
 
     The adjacency is not always as authored: stripping a quoted literal makes it,
     ``O = "v1.0".canonical(`` becoming ``O = .canonical(``, so this cannot be
-    handled by looking at the source text alone."""
+    handled by looking at the source text alone.
+
+    This covers only dots MISREAD as directives. A GENUINE directive still merges
+    with the statement after it, correctly — it has no terminator — and a
+    paren-less one (`.output p2`) leaves that statement starting with `.` where
+    the head tokenizer finds nothing. Nothing here catches that; the directive
+    strip in `_assert_no_reserved_head` does (#329 round 4)."""
     statements: list[str] = []
     buf: list[str] = []
     for i, ch in enumerate(text):
