@@ -332,7 +332,27 @@ def _group_key(obj: str, spec: TypedRelSpec | None) -> tuple:
     collapse onto one scalar. That is not a regression — it is #116's cross-
     notation equivalence (억↔조) starting to work on that KB for the first time.
     The invariant held here is the one the issue asks for: an **NFC-only** KB is
-    byte-identical."""
+    byte-identical.
+
+    That the change is merge-only is **not** free, and it is worth naming the way
+    it was nearly lost. Folding here also folds the string handed to
+    ``parse_amount``, which resolves a Hangul unit (억/조/원) against a table
+    ``policy/typed-relations.md`` supplies. While that table kept the policy
+    file's own spelling, an NFD units clause plus a folded object was a *miss*:
+    the amount degraded to ``("raw", …)``, and ``5400억`` and ``0.54조`` — one
+    value, 5.4e11, which parsed and merged **unfolded** — split into a CONFLICT
+    this checker did not previously report, on the very macOS-decomposed KB
+    #325 exists for. Folding can add a conflict as easily as it removes one when
+    only one end of a lookup folds.
+
+    So the merge-only direction rests on a stated dependency: every table this
+    key parses against is composed on both ends (``common._parse_amount_units``
+    stores NFC keys, ``parse_amount`` composes the lookup key). Given that, no
+    parser matches a decomposed string its composed form fails — the ordinal and
+    amount markers are all spelled composed in their regexes — so folding can
+    only join groups, never split one. A future typed parser that resolves a
+    non-ASCII token against a table has to fold that table too, or it reopens
+    exactly this hole."""
     return _typed_key(_fold(obj), spec)
 
 
