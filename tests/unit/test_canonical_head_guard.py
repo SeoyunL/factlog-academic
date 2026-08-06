@@ -1023,3 +1023,89 @@ class TestTheOneShapeWhereTheTwoCandidateRulesDisagree:
         fcommon._assert_no_reserved_head(
             f'.limitsize {name}(n=10)\nfoo2(X, "a") :- relation(X, _, _).\n'
         )
+
+
+# Where the proof-of-clause sits relative to the atom. A separate axis from
+# _NO_OPERAND_DIRECTIVES (which varies what precedes the atom) and from the
+# placement axis above (which varies where the atom itself sits).
+_CLAUSE_TAILS = [
+    ("same-line", "{atom}.\n"),
+    ("next-line", "{atom}\n.\n"),
+    ("comment-then-terminator", "{atom} // c\n.\n"),
+    ("blank-lines-then-terminator", "{atom}\n\n\n.\n"),
+]
+
+
+class TestGiveBackIsNotLineLocal:
+    """The give-back test must look past the end of the line.
+
+    Requiring the OPERAND to be on the directive's line is right — that is where
+    an operand lives, and widening it reintroduces the `\\s+` bug where a bare
+    `.pragma` reached across the newline. Requiring the PROOF that the atom was a
+    clause to be on that line is a different question and the answer is no: a
+    clause may put its terminator or its neck on the next line and pyrewire
+    compiles it. The two regexes therefore carry deliberately different
+    whitespace policies.
+
+    Measured on the previous head, which had them the same::
+
+        guard   engine
+        REJECT  ACCEPTS   .plan attr_rel("v0").              [round-5, closed]
+        PASS    ACCEPTS   .plan attr_rel("v0")<nl>.
+        PASS    ACCEPTS   .plan attr_rel("v0") // c<nl>.
+        PASS    ACCEPTS   .plan attr_rel(R)<nl>:- relation(S,R,O).
+        REJECT  ACCEPTS   attr_rel("v0").                    [control]
+
+    End to end the second row answered `- path 갑봇 -> 병문서: (not found)` at
+    rc=0 with errors: 0, against `갑봇 -> 병문서` clean — the same silent wrong
+    answer as rounds 3 and 5, at a third location.
+
+    The comment-then-terminator row is here because it only works if comment
+    stripping runs before this function, which a reader should not have to infer.
+    """
+
+    LEAD = "p(X) :- relation(X,_,_).\n"
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("directive", _NO_OPERAND_DIRECTIVES)
+    @pytest.mark.parametrize("tail_id,tail", _CLAUSE_TAILS, ids=[t[0] for t in _CLAUSE_TAILS])
+    def test_a_terminator_off_the_line_still_proves_a_clause(
+        self, name, directive, tail_id, tail
+    ):
+        atom = _FUSED_FACT[name].rstrip(".")
+        policy = self.LEAD + f"{directive} " + tail.format(atom=atom)
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("directive", _NO_OPERAND_DIRECTIVES)
+    def test_a_neck_on_the_next_line_still_proves_a_clause(self, name, directive):
+        atom = _HEADS[name].split(":-")[0].strip()
+        policy = self.LEAD + f"{directive} {atom}\n:- relation(S,R,O).\n"
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_the_operand_side_stays_line_local(self, name):
+        """CONTROL for the asymmetry, and the reason it is an asymmetry.
+
+        `.pragma "x" "y"` loses its operands to the literal strip, leaving a bare
+        keyword. If the OPERAND pattern also crossed newlines it would take the
+        head of the next statement — the bug fixed in round 4. Widening only the
+        tail side must not bring it back."""
+        fcommon._assert_no_reserved_head  # noqa: B018 - referenced for clarity
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(f'.pragma "x" "y"\n{_HEADS[name]}\n')
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(f'.pragma\n{_FUSED_FACT[name]}\n')
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_genuine_operand_is_still_consumed(self, name):
+        # CONTROL — nothing after the operand proves a clause, so it stays the
+        # directive's own and a legal directive naming a reserved relation loads.
+        fcommon._assert_no_reserved_head(
+            f'.limitsize {name}(n=10)\nfoo2(X, "a") :- relation(X, _, _).\n'
+        )
+        fcommon._assert_no_reserved_head(
+            f'.output {name}\nfoo2(X, "a") :- relation(X, _, _).\n'
+        )

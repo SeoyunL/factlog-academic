@@ -1380,7 +1380,16 @@ _DIRECTIVE_OPERAND_RE = re.compile(
 )
 # What follows an atom that proves the atom was a CLAUSE, not an operand: a
 # clause-terminating '.', or a neck.
-_CLAUSE_TAIL_RE = re.compile(r"[^\S\n]*(?:\.|:-)")
+#
+# `\s*`, NOT the `[^\S\n]*` the operand pattern uses — the two sides answer
+# different questions and must not share a whitespace policy. Where the operand
+# CAN be is line-local, because a directive's operand sits on the directive's
+# line. Where the proof-of-clause can be is not: a clause may put its terminator
+# or its neck on the next line, and pyrewire compiles that. Inheriting the
+# line-local constraint here meant give-back never fired for
+# `.plan attr_rel("v0")\n.` and the reserved clause was eaten as an operand —
+# the same silent wrong answer at a third location (#329 round 6).
+_CLAUSE_TAIL_RE = re.compile(r"\s*(?:\.|:-)")
 
 
 def _strip_directives(text: str) -> str:
