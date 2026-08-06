@@ -721,3 +721,33 @@ class TestAParenlessDirectiveDoesNotHideTheNextStatement:
         )
         with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
             fcommon._load_logic_policy_from(dl)
+
+
+class TestTheHeadIsTheLastAtomBeforeANeck:
+    """The positional rule, pinned by the one input that still distinguishes it.
+
+    Reverting it to the earlier "any reserved name anywhere in a head-bearing
+    segment" scan leaves the whole suite green, so it needs its own pin.
+
+    Scope, stated because it narrowed: once directives are stripped, a program
+    pyrewire COMPILES cannot reach a statement with two necks — every clause has
+    one neck and terminates — so on compiling input the two scans now agree. The
+    row below is malformed (pyrewire ParseErrors it), and what the positional
+    rule buys there is that a legal `#227` body reference is not reported as a
+    head merely because the clause above it lost its terminator.
+    """
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_body_reference_left_of_a_second_neck_is_not_a_head(self, name):
+        # segments: ['foo(X,a) ', ' <name>(X,_,_)\nbar(Y,"z") ', ' relation(...).']
+        # The middle segment holds clause 1's BODY and clause 2's head; only the
+        # latter is a head, and it is the last atom.
+        policy = f'foo(X,a) :- {name}(X,_,_)\nbar(Y,"z") :- relation(Y,_,_).\n'
+        fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_the_same_shape_with_a_reserved_head_is_still_refused(self, name):
+        # CONTROL — the reserved name IS the last atom before the second neck.
+        policy = f'foo(X,a) :- bar(X,"z")\n{name}(Y,"r",O) :- relation(Y,"r",O).\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
