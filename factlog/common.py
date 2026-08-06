@@ -1286,39 +1286,73 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
         if m and m.group(1) in names:
             # A reserved head or bare fact → reject.
             raise _reserved_head_error(m.group(1))
-        # `re.match` sees only the FIRST atom of the head, and a statement that
-        # never terminated absorbs the clause that follows it — whose own head is
-        # then never examined. Comment cutting makes that reachable: `foo(X, a#b).`
-        # is not valid Datalog, but stripping `#b).` leaves `foo(X, a` unterminated,
-        # so `attr_rel(R) :- …` on the next line merged into this head and passed.
-        # A well-formed clause head is ONE atom, so a reserved name standing
-        # anywhere left of the neck in call position is a head — reject it and let
-        # the author see the name rather than a parse error from the engine later.
+        # `re.match` sees only the FIRST atom, and a statement whose clause never
+        # terminated absorbs the one after it — whose own head is then never
+        # examined. `foo(X, a` followed by `attr_rel(R) :- …` passed here and on
+        # main, and comment cutting widened the ways to get there: `foo(X, a#b).`
+        # is not valid Datalog, but stripping `#b).` leaves exactly that shape.
         #
-        # A well-formed clause also has exactly ONE neck. Two necks in one
-        # statement mean the same absorption happened past a neck, which puts the
-        # swallowed head in the BODY of the first clause where it is
-        # indistinguishable from a legal reference: `foo(X) :- bar(X` followed by
-        # `canonical(...) :- ...` passed here and on main. Every part but the last
-        # then holds a head, so scan them all. Only text that is already not a
-        # clause reaches this, so no legal policy changes verdict — but a body
-        # reference inside such a statement is reported as a head, which is the
-        # right call when the alternative is vouching for text nobody can parse.
+        # The rule is positional, not "a reserved name appears somewhere left of a
+        # neck": THE ATOM IMMEDIATELY LEFT OF A NECK IS THAT CLAUSE'S HEAD. So for
+        # every segment that has a neck after it, check its LAST atom and nothing
+        # else. Scanning the whole segment instead rejected legal policy — the
+        # body reference in `p(X) :- canonical(X,_,_).` sits left of a neck too,
+        # once a mis-split has glued the next clause on, and #227 exists precisely
+        # to allow that position. This formulation cannot make that mistake: a
+        # body reference is never the last atom before a neck unless it really is
+        # a head.
+        #
+        # A statement with no neck at all is a bare fact, already covered by the
+        # `re.match` above, and contributes no segment here.
         segments = statement.split(":-")
-        for segment in segments[:1] if len(segments) <= 2 else segments[:-1]:
-            for name in sorted(names):
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}\s*\(", segment):
-                    raise _reserved_head_error(name)
-        # A reserved name to the right of the single neck → body reference → allowed.
+        for segment in segments[:-1]:
+            atoms = re.findall(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", segment)
+            if atoms and atoms[-1] in names:
+                raise _reserved_head_error(atoms[-1])
+        # A reserved name anywhere else in a body → reference → allowed.
+
+
+# Datalog directives, whose leading '.' does NOT terminate a clause. Spelled out
+# rather than inferred: "dot at a token start followed by a letter" also describes
+# an ordinary terminator with a space before it, which pyrewire accepts —
+# `p(X) :- canonical(X,_,_) .q(Y) :- relation(Y,_,_).` compiles, and reading its
+# ` .q` as a directive fused two legal clauses into one statement.
+_DL_DIRECTIVES = frozenset(
+    {
+        "decl",
+        "type",
+        "symbol_type",
+        "number_type",
+        "input",
+        "output",
+        "printsize",
+        "limitsize",
+        "pragma",
+        "functor",
+        "comp",
+        "init",
+        "override",
+        "plan",
+    }
+)
+_DIRECTIVE_RE = re.compile(
+    r"\.(?:" + "|".join(sorted(_DL_DIRECTIVES)) + r")(?![A-Za-z0-9_])"
+)
 
 
 def _split_policy_statements(text: str) -> list[str]:
     """Split Datalog policy text into logical statements on clause-terminating '.'.
 
-    A '.' ends a clause EXCEPT when it opens a directive (a '.decl'-style dot at a
-    token start: preceded by whitespace/start and followed by a letter) or sits
-    inside a float (a dot between two digits). This lets `_assert_no_reserved_head`
-    see each head/fact/rule as one unit even when several share a physical line."""
+    A '.' ends a clause EXCEPT when it opens one of the directives in
+    :data:`_DL_DIRECTIVES` or sits inside a float (a dot between two digits). This
+    lets `_assert_no_reserved_head` see each head/fact/rule as one unit even when
+    several share a physical line.
+
+    Matching the directive KEYWORD is the whole point. "A dot at a token start
+    followed by a letter" is also what a perfectly ordinary terminator written with
+    a space before it looks like, so that heuristic silently glued the next clause
+    onto the current one — and the absorption scan then read the first clause's
+    BODY reference as a head, rejecting policy the engine compiles (#329 round 3)."""
     statements: list[str] = []
     buf: list[str] = []
     for i, ch in enumerate(text):
@@ -1326,7 +1360,9 @@ def _split_policy_statements(text: str) -> list[str]:
         if ch == ".":
             prev = text[i - 1] if i > 0 else ""
             nxt = text[i + 1] if i + 1 < len(text) else ""
-            is_directive = (prev == "" or prev.isspace()) and nxt.isalpha()
+            is_directive = (prev == "" or prev.isspace()) and _DIRECTIVE_RE.match(
+                text, i
+            )
             is_float = prev.isdigit() and nxt.isdigit()
             if not is_directive and not is_float:
                 statements.append("".join(buf))

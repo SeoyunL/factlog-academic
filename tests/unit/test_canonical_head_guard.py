@@ -425,6 +425,51 @@ class TestInlineCommentsDoNotDisableTheGuard:
         fcommon._assert_no_reserved_head('foo(X, attr_rel) :- relation(X, R, O).\n')
         fcommon._assert_no_reserved_head('foo(X, "entity_node").\n')
 
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize(
+        "gap", [" ", "  ", "\t", "\n"], ids=["space", "spaces", "tab", "newline"]
+    )
+    def test_whitespace_before_a_terminator_does_not_fuse_two_clauses(self, name, gap):
+        """`p(X) :- canonical(X,_,_) .q(Y) :- relation(Y,_,_).` is TWO clauses and
+        pyrewire compiles it (measured, alongside the plain two-line form).
+
+        `is_directive = prev.isspace() and nxt.isalpha()` read that ` .q` as a
+        directive, so the terminator did not terminate, the next clause was glued
+        on, and the absorption scan then reported the FIRST clause's body
+        reference as a head:
+
+            FactlogError: canonical is a reserved engine EDB predicate ...
+                          it may appear only in rule bodies
+
+        — about a `canonical` that is in a rule body. #227 allows exactly that.
+        """
+        policy = f'p2(X) :- {name}(X,_,_){gap}.q2(Y) :- relation(Y,_,_).\n'
+        fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize(
+        "directive",
+        [".decl", ".type", ".output", ".input", ".printsize", ".pragma"],
+    )
+    def test_a_real_directive_still_does_not_terminate_a_clause(self, directive):
+        """CONTROL for the narrowed rule: a directive's dot must still be inert, or
+        the directive splits into its own statement and the clause after it loses
+        its head to the tokenizer."""
+        policy = f'{directive} foo\nattr_rel(R) :- relation(S, R, O).\n'
+        with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    def test_a_float_literal_still_does_not_terminate_a_clause(self):
+        # CONTROL — the other exception the splitter carries.
+        fcommon._assert_no_reserved_head('v(X) :- relation(X, "r", "2.5").\n')
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_body_reference_is_never_read_as_a_head(self, name):
+        # The positional rule: only the atom immediately LEFT of a neck is a head.
+        # A reserved name deeper in the body stays legal however the statement was
+        # split.
+        policy = f'lit(R, "a") :- foo(R), {name}(R, _, _), bar(R).\n'
+        fcommon._assert_no_reserved_head(policy)
+
     def test_inline_comment_does_not_reject_a_legitimate_policy(self, tmp_path):
         # CONTROL through the loader: ordinary commented policy still loads.
         dl = _make_kb(
