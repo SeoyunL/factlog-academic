@@ -844,11 +844,20 @@ def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[
 
     **Carrying non-ASCII digits is not the same as failing to parse**, so the
     normalizer decides, not the digit predicate alone. The unit group is outside
-    the digit policy on purpose and ``_parse_amount_units`` does not validate a
+    the digit policy on purpose and ``_parse_amount_units`` does not *validate* a
     unit NAME, so a declared unit may carry them: ``amount(100,"억１")`` under a
     declared ``억１`` unit normalizes to a scalar and ``_group_key`` keys it
     ``("scalar", …)``. Both leading clauses of the note would be false there.
     Asking ``normalize`` converges this note and ``_group_key`` on one predicate.
+
+    ``_parse_amount_units`` does now **NFC-fold** a unit name (#325), which is a
+    normalization and not a validation, so the example above is unaffected: NFC
+    leaves every non-ASCII digit alone — fullwidth ``１`` U+FF11 is untouched
+    (only NFKC would map it), as are Arabic-Indic, Devanagari and Thai digits.
+    The fold therefore cannot make a value the digit policy rejects start
+    parsing, nor the reverse. It also runs strictly *after* the numeric group has
+    already matched ``[0-9]``, so it is downstream of the digit gate in the one
+    direction that matters.
 
     Two things the wording deliberately does NOT claim:
 

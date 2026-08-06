@@ -31,12 +31,18 @@ What these tests hold down is the *shape* of the note, not its prose:
 """
 from __future__ import annotations
 
+import unicodedata
+
 import check_conflicts
 import common
 import literal_types
 
 # A typed single-valued amount relation — the only shape the note applies to.
 _AMOUNT_SPEC = common.TypedRelSpec("amount", "revenue")
+
+
+def _nfd(value: str) -> str:
+    return unicodedata.normalize("NFD", value)
 
 
 class TestUntypedRelationsNeverGetTheNote:
@@ -158,3 +164,75 @@ class TestTypedNonAsciiDigitGroupsGetTheNote:
         # main() prints these one per call; embedded newlines would double-space.
         for line in check_conflicts.non_ascii_digit_note(["100억", "１００억"], _AMOUNT_SPEC):
             assert "\n" not in line
+
+
+class TestUnitNameFoldDoesNotDisturbTheDigitPolicy:
+    """#325 folds unit names; #331/#336 rejects non-ASCII digits in values.
+
+    Both touch ``parse_amount``, so the two policies have to be shown not to
+    interfere. They cannot, for a reason worth stating once: the fold is **NFC**,
+    and NFC leaves every non-ASCII digit alone — only NFKC maps fullwidth ``１``
+    U+FF11 onto ``1``. The fold also runs strictly after the numeric group has
+    matched ``[0-9]``, so it is downstream of the digit gate in the direction
+    that matters.
+
+    **Every test in this class is a CONTROL**: each one passes both with and
+    without the #325 fold, verified by reverting both fold sites on the merged
+    tree (24/24 still green). That is the point — the claim being held down is
+    "#325 changed nothing here", and a test that only passed after the fold would
+    be evidence of exactly the interference this class denies. The pins that do
+    fail pre-fix live in tests/unit/test_amount_units_unicode.py.
+    """
+
+    def test_nfc_never_changes_a_non_ascii_digit(self):
+        # The property the safety argument rests on. If NFC ever folded a digit
+        # system onto ASCII, the fold would silently reopen the digit policy.
+        for digits in ("１２３", "١٢٣", "१२३", "๑๒๓"):
+            assert unicodedata.normalize("NFC", digits) == digits
+
+    def test_full_width_value_still_rejected_under_a_folded_table(self):
+        # #336's policy, unchanged: the VALUE's digits are still the gate, and a
+        # units table that went through the fold does not rescue them.
+        units = common._parse_amount_units("억=1e8")
+        assert literal_types.parse_amount("１００억", units) is None
+        assert literal_types.parse_amount('amount(１００,"억")', units) is None
+        assert literal_types.parse_amount("100억", units) == 10000000000  # control
+
+    def test_declared_unit_name_with_a_full_width_digit_survives_the_fold(self):
+        # main's existing pin builds this spec from a literal dict; this is the
+        # other route in — the declaration parser, which is what #325 changed.
+        # Folding must not rename the unit, or the value stops matching it.
+        units = common._parse_amount_units("억１=100000000")
+        assert set(units) == {"억１"}
+        spec = common.TypedRelSpec("amount", "revenue", units)
+        objects = ['amount(200,"억１")', 'amount(300,"억１")']
+        assert literal_types.normalize(spec.type, objects[0], spec.units) == 20000000000
+        assert check_conflicts.non_ascii_digit_note(objects, spec) is None
+
+    def test_unit_value_may_still_be_written_with_full_width_digits(self):
+        # The digit rule does not govern the declaration file: the multiplier is
+        # read with Decimal, which accepts them. Folding the NAME left that alone.
+        assert common._parse_amount_units("억=１００００００００") == {"억": 100000000}
+
+    def test_note_stays_silent_on_an_nfd_table_that_now_parses(self):
+        # The #325 fix's own KB shape, and a control by construction: an NFD
+        # table met an NFD object as raw bytes even before the fold, so these
+        # parsed then too. What the fold changed is the MIXED case, not this one.
+        # Held here because the note's silence must survive either way — the
+        # values carry only ASCII digits.
+        units = common._parse_amount_units(_nfd("억=1e8, 조=1e12"))
+        spec = common.TypedRelSpec("amount", "revenue", units)
+        objects = [_nfd("5400억"), _nfd("1조")]
+        assert all(literal_types.normalize(spec.type, o, spec.units) is not None for o in objects)
+        assert check_conflicts.non_ascii_digit_note(objects, spec) is None
+
+    def test_note_still_fires_on_an_nfd_table_carrying_full_width_digits(self):
+        # The fold must not swallow the note. Control: fullwidth digits fail the
+        # numeric group whatever the table's normalization form, so this held
+        # before #325 too — it is here to prove the fold did not quietly rescue
+        # a value the digit policy rejects.
+        units = common._parse_amount_units(_nfd("억=1e8"))
+        spec = common.TypedRelSpec("amount", "revenue", units)
+        note = check_conflicts.non_ascii_digit_note([_nfd("１００억"), _nfd("200억")], spec)
+        assert note is not None
+        assert "\\uff11\\uff10\\uff10" in "\n".join(note)
