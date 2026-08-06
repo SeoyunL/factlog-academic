@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Run deterministic logic checks over facts and query drafts."""
+"""Run deterministic logic checks over facts and query drafts.
+
+Usage:
+    python3 run_logic_check.py [--wiki <kb>]
+"""
 
 from __future__ import annotations
 
-from common import (
+import argparse
+import os
+import sys
+from pathlib import Path
+
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common, which binds
+# its module-level paths from FACTLOG_ROOT at import time.
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
+
+from common import (  # noqa: E402
     FACTS_DIR,
     KNOWN_STATUSES,
     QUERY_PREDICATES,
@@ -23,7 +43,9 @@ from common import (
     run_wirelog,
     arg_value,
     is_quoted_string,
+    query_arity_error,
     query_args,
+    query_shape_error,
     quoted_constants,
 )
 
@@ -72,12 +94,64 @@ def relation_results(line: str, facts: list[dict[str, str]]) -> list[tuple[str, 
     for row in facts:
         matched = True
         for arg, field in zip(args, fields, strict=True):
-            if arg.startswith('"') and arg.endswith('"') and arg_value(arg) != row[field]:
+            if is_quoted_string(arg) and arg_value(arg) != row[field]:
                 matched = False
                 break
         if matched:
             rows.append((row["subject"], row["relation"], row["object"]))
     return rows
+
+
+def query_error(label: str, line: str) -> str | None:
+    """The report's single verdict on *line*'s SIGNATURE, or None when answerable.
+
+    Neither rule is restated here: ``common.query_arity_error`` and
+    ``common.query_shape_error`` are the same two functions ``classify_query``
+    applies, in the same order, so the gate and the report cannot disagree about
+    which lines are answerable nor word the verdict differently. They used to, on
+    every predicate:
+
+    - ``count`` was checked on ARITY ONLY, so ``count("S", 'r')?`` reached
+      ``evaluate_queries``, where a non-double-quoted argument is treated as a
+      WILDCARD rather than a filter. The count then ranged over every relation of
+      that subject and was printed as an engine-verified aggregate (#328). An
+      aggregate is the output a reader is least able to check by eye, which is
+      why answering it wrongly is worse than not answering it.
+    - a policy query was checked on arity only, so ``stale_entity(Alice, stale)?``
+      had both bare tokens taken for variables and rendered the predicate's WHOLE
+      extent with invented bindings (``Alice=Bob``).
+    - ``relation`` and ``path`` were checked on NEITHER rule — they fell through
+      to the generic warning loop. Same mechanism, wider blast radius:
+      ``relation("Marie Curie", 'born_in', O)?`` reported rows spanning every
+      relation of the subject, each carrying a nonsense binding
+      (``'born_in'=worked_at``), and an arity violation was answered as a
+      confident NEGATIVE about a fact that is in the KB:
+
+          relation("Marie Curie", "born_in", "Warsaw", X)?
+            gate   -> bad_arity
+            report -> relation results: 0 rows
+          path("Marie Curie", "Warsaw", "Poland")?
+            gate   -> bad_arity
+            report -> path Marie Curie -> Warsaw: Marie Curie -> Warsaw
+
+      A dropped extra argument is a plausible typo, and both answers read as
+      engine-verified.
+
+    ARITY IS CHECKED FIRST, which is not interchangeable with the other order:
+    it decides the DIAGNOSIS a line that breaks both rules receives. Shape-first
+    told the author of ``relation()?`` that "arguments must be variables or
+    quoted strings" — advice about the quoting of arguments that are not there.
+
+    One verdict serves both the Errors section (``validate_query``) and the
+    answer renderers (``evaluate_queries``, ``policy_result_line``), so the
+    report cannot call a line an error and answer it in the same run.
+
+    Message wording is the gate's, with the offending line appended — the
+    convention every other error in this module follows.
+    """
+    args = query_args(line)
+    message = query_arity_error(label, args) or query_shape_error(label, args)
+    return f"{message}: {line}" if message else None
 
 
 def validate_query(
@@ -93,6 +167,10 @@ def validate_query(
     entity_set: a path node must be an entity, which is what classify_query
     enforces for `ask`. ``None`` means "do not distinguish the two" and keeps the
     pre-#329 behaviour for the callers that pass three arguments.
+
+    Signature errors come first, from ``query_error``: a line the gate refuses on
+    arity or shape is reported as an error and never also warned about or
+    answered (#328).
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -108,33 +186,50 @@ def validate_query(
             errors.append(f"review_required must include the original question string: {line}")
         return errors, warnings
     if predicate in policy_query_predicates:
-        args = query_args(line)
-        if len(args) != 2:
-            errors.append(f"policy query must have entity and reason arguments: {line}")
+        policy_error = query_error("policy query", line)
+        if policy_error:
+            errors.append(policy_error)
             return errors, warnings
-        if args[0].startswith('"') and args[0].endswith('"') and arg_value(args[0]) not in entities:
+        args = query_args(line)
+        if is_quoted_string(args[0]) and arg_value(args[0]) not in entities:
             warnings.append(f"query references non-engine entity: {arg_value(args[0])}")
         return errors, warnings
     if predicate == "count":
         # count(subject, relation)? — engine-verified aggregate (see evaluate_queries).
-        if len(query_args(line)) != 2:
-            errors.append(f"count query must have subject and relation arguments: {line}")
-        return errors, warnings
-    if predicate == "path" and path_nodes is not None:
-        # A path node must be an ENTITY. The object of a declared attribute
-        # relation is a literal value: it is in the KB (so the generic check
-        # below stays silent) but cannot sit on a path. classify_query refuses
-        # the same query outright — say why here too, rather than letting the
-        # result line answer "(not found)", which reads as "the facts do not
-        # connect them" (#329).
-        for constant in path_endpoints(line):
-            # `not constant` covers the empty string, which value_set drops, so the
-            # generic unknown-constant check below is silent on it as well — without
-            # it that endpoint drew no diagnostic anywhere.
-            if constant not in path_nodes and (constant in entities or not constant):
-                warnings.append(
-                    f"query path argument is not an accepted entity: {display_value(constant)}"
-                )
+        count_error = query_error("count", line)
+        if count_error:
+            errors.append(count_error)
+            return errors, warnings
+        # A well-formed count falls through to the shared warning loop below, so
+        # a subject or relation the engine does not carry gets the same
+        # "non-engine entity or relation" warning relation/path queries get. It
+        # used to return here, which left the report's most misreadable answer —
+        # `0 (distinct objects)`, indistinguishable from a verified zero — as the
+        # only signal that the query named something the KB has never heard of.
+    elif predicate in {"relation", "path"}:
+        signature_error = query_error(predicate, line)
+        if signature_error:
+            errors.append(signature_error)
+            return errors, warnings
+        # SIGNATURE first, then vocabulary: a path query the gate refuses on arity
+        # or shape has already returned, so the endpoint check below never sees a
+        # half-parsed argument and the same line is never both an error and a
+        # warning (#328 + #329).
+        if predicate == "path" and path_nodes is not None:
+            # A path node must be an ENTITY. The object of a declared attribute
+            # relation is a literal value: it is in the KB (so the generic check
+            # below stays silent) but cannot sit on a path. classify_query refuses
+            # the same query outright — say why here too, rather than letting the
+            # result line answer "(not found)", which reads as "the facts do not
+            # connect them" (#329).
+            for constant in path_endpoints(line):
+                # `not constant` covers the empty string, which value_set drops, so
+                # the generic unknown-constant check below is silent on it as well —
+                # without it that endpoint drew no diagnostic anywhere.
+                if constant not in path_nodes and (constant in entities or not constant):
+                    warnings.append(
+                        f"query path argument is not an accepted entity: {display_value(constant)}"
+                    )
     for constant in quoted_constants(line):
         if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
             warnings.append(f"query references non-engine entity or relation: {constant}")
@@ -208,16 +303,20 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
 def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str | None:
     """Render one policy query's result, or None when the query is malformed.
 
-    The arity test is the SAME one validate_query applies to a policy query
-    (entity + reason, i.e. exactly 2 args), so a line the report is rejecting in
-    its Errors section never also receives an answer here. Three shapes reach
-    this function malformed, and each used to be answered:
+    The test is `query_error`, the SAME verdict validate_query puts in the
+    Errors section, so a line the report is rejecting never also receives an
+    answer here. Four shapes reach this function malformed, and each used to be
+    answered:
 
     - unparseable (no trailing '?'): `query_args` returns [], no constant is
       pinned, so the filter passes everything -> the whole extent;
     - `pred()?` -> one empty arg, likewise unfiltered -> the whole extent;
     - `pred("Alice")?` / `pred("Alice", R, "zzz")?` -> wrong arity, filtered by
-      whatever constants happen to line up -> a plausible but meaningless count.
+      whatever constants happen to line up -> a plausible but meaningless count;
+    - `pred(Alice, stale)?` -> right arity, but neither bare token is a variable
+      or a quoted string, so `policy_row_matches` pins nothing and every row is
+      rendered against them: the whole extent again, this time with `Alice=Bob`
+      bindings that name an entity the row is not about (#328).
 
     "No usable args" is not "no constants to honour" — it means the query was
     never understood, so answering it invents an answer for a line the report is
@@ -237,15 +336,18 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
     tests/golden/logic_report.txt, and its section header already says it is the
     policy evaluation rather than the answer to any one query.
     """
-    args = query_args(line)
-    if len(args) != 2:
+    if query_error("policy query", line) is not None:
         return None
+    args = query_args(line)
     rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
     values: list[str] = []
     for row in rows:
         bindings = []
         for arg, value in zip(args, row, strict=False):
-            if not (arg.startswith('"') and arg.endswith('"')):
+            # With the shape guard above, an arg is a variable or a quoted
+            # string, so is_quoted_string is exactly "not a variable" — the
+            # predicate policy_row_matches already uses, said the same way.
+            if not is_quoted_string(arg):
                 bindings.append(f"{arg}={value}")
         values.append(", ".join(bindings) if bindings else ", ".join(row))
     suffix = "; " + "; ".join(values) if values else ""
@@ -278,6 +380,12 @@ def evaluate_queries(
             if result_line is not None:
                 results.append(result_line)
         elif predicate == "path":
+            # Same verdict validate_query put in the Errors section, so a line
+            # reported as malformed is never also answered here (#328). It runs
+            # before the endpoints are read, so a refused line never reaches
+            # path_endpoints at all.
+            if query_error("path", line) is not None:
+                continue
             constants = path_endpoints(line)
             if len(constants) >= 2:
                 # An endpoint that is a literal (object of a declared attribute
@@ -309,13 +417,15 @@ def evaluate_queries(
                 value = " -> ".join(trace) if trace else "(not found)"
                 results.append(f"{head}: {value}")
         elif predicate == "relation":
+            if query_error("relation", line) is not None:
+                continue
             rows = relation_results(line, facts)
             args = query_args(line)
             result_values: list[str] = []
             for subject, relation, object_ in rows:
                 bindings = []
                 for arg, value in zip(args, [subject, relation, object_], strict=True):
-                    if not (arg.startswith('"') and arg.endswith('"')):
+                    if not is_quoted_string(arg):
                         bindings.append(f"{arg}={value}")
                 result_values.append(", ".join(bindings) if bindings else f"{subject}, {relation}, {object_}")
             suffix = "; " + "; ".join(result_values) if result_values else ""
@@ -323,20 +433,31 @@ def evaluate_queries(
         elif predicate == "count":
             # count(subject, relation)? -> number of DISTINCT objects for that
             # (subject, relation) over engine facts (0 is a verified answer).
-            # Same semantics as ask_router.evaluate's count branch.
-            args = query_args(line)
-            if len(args) == 2:
-                subj_q, rel_q = args
-                subj, rel = arg_value(subj_q), arg_value(rel_q)
-                subj_const = subj_q.startswith('"') and subj_q.endswith('"')
-                rel_const = rel_q.startswith('"') and rel_q.endswith('"')
-                objects = {
-                    f["object"]
-                    for f in facts
-                    if (not subj_const or f["subject"] == subj)
-                    and (not rel_const or f["relation"] == rel)
-                }
-                results.append(f"count results: {len(objects)} (distinct objects)")
+            # NOT the same number as ask_router.evaluate's count branch: #227 gave
+            # the router's count surface-variant expansion (a quoted canonical
+            # relation also counts objects stored under its declared variants) and
+            # this branch never got it, so on a KB with relation aliases the two
+            # disagree — the gate passes the query, the router answers 2 and the
+            # report answers 0. Which side is right is #227's question, not this
+            # guard's; what is fixed here is that both refuse the SAME malformed
+            # lines.
+            if query_error("count", line) is not None:
+                continue
+            subj_q, rel_q = query_args(line)
+            subj, rel = arg_value(subj_q), arg_value(rel_q)
+            objects = {
+                f["object"]
+                for f in facts
+                if (not is_quoted_string(subj_q) or f["subject"] == subj)
+                and (not is_quoted_string(rel_q) or f["relation"] == rel)
+            }
+            # Echo the query, as policy_result_line does (17cf7d3): a malformed
+            # line now drops out of this list, so 3 query lines can leave 2 result
+            # lines and positional correspondence silently breaks. Unlike the
+            # policy echo this is unconditional — count has no "Policy evaluation:"
+            # extent line for a variable-only query to be read against, and a
+            # dropped line misaligns every shape equally.
+            results.append(f"count results (query: {line}): {len(objects)} (distinct objects)")
         elif predicate == "review_required":
             constants = quoted_constants(line)
             question = constants[0] if constants else "(missing question)"
@@ -410,15 +531,21 @@ def main() -> None:
     query_results = evaluate_queries(facts, inferred, policy_query_predicates, path_nodes)
     if query_results:
         report.extend([f"- {item}" for item in query_results])
-    elif not (FACTS_DIR / "query.dl").is_file():
+    elif not (FACTS_DIR / "query.dl").is_file() and not query_lines():
         report.append("- no facts/query.dl found")
     else:
-        # The file is there. Saying "not found" was simply false: a query.dl
-        # holding only variable-form path queries (`path(X, Y)?`) renders no
-        # result line, because a path result names its two endpoints.
-        report.append(
-            f"- facts/query.dl: {len(query_lines())} queries, none produced a result line"
-        )
+        # A file whose every line was refused is not a missing file. SKILL.md
+        # reads "no facts/query.dl found" as "the /factlog query step was
+        # skipped", so printing it here would send the reader to re-run a step
+        # they already ran instead of to the Errors section above.
+        #
+        # "Missing" needs BOTH signals absent. Keying on `query_lines()` alone
+        # called a comment-only query.dl missing, which is the same false claim;
+        # keying on the file alone would call a line set supplied by a caller
+        # missing. A query.dl holding only variable-form path queries
+        # (`path(X, Y)?`) lands here too — those are answerable, they just render
+        # no result line, because a path result names its two endpoints.
+        report.append("- no answerable queries in facts/query.dl (see Errors)")
 
     text = "\n".join(report) + "\n"
     out = FACTS_DIR / "logic_report.txt"
@@ -429,4 +556,9 @@ def main() -> None:
 if __name__ == "__main__":
     from common import run_cli
 
+    # main() takes no argv; parse here only so `--wiki` is a documented option
+    # with --help, and a mistyped flag is rejected instead of silently ignored.
+    _parser = argparse.ArgumentParser(description="Run deterministic logic checks over facts and query drafts.")
+    _parser.add_argument("--wiki", default=os.environ["FACTLOG_ROOT"], help="KB root")
+    _parser.parse_args()
     raise SystemExit(run_cli(main))

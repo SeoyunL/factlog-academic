@@ -10,7 +10,9 @@ a plain notes wiki accumulates. This surfaces it deterministically.
 
 Resolution is human-in-the-loop and non-destructive: mark the outdated row's
 status as 'superseded' in facts/candidates.csv (it stays for audit, drops out of
-engine input, and the conflict clears).
+engine input, and the conflict clears). A value carrying non-ASCII digits is the
+exception: it does not parse, so supersession can clear the gate while keeping the
+unreadable value (see non_ascii_digit_note).
 
 Exit code: 0 if no conflicts, 1 if any conflict is found.
 
@@ -186,6 +188,63 @@ def detect_conflicts(
     }
 
 
+def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[str] | None:
+    """Extra guidance lines for a **typed** relation's conflict group when one of
+    its values carries non-ASCII digits; ``None`` otherwise.
+
+    The generic advice printed by ``main`` ("mark the outdated row superseded")
+    assumes one of the values is out of date. Under a typed relation a value
+    carrying non-ASCII digits does not parse as the declared type at all
+    (``_group_key`` degrades it to ``("raw", obj)``), so superseding the OTHER row
+    clears this gate while leaving the KB holding the value the engine cannot
+    read.
+
+    **The ``spec is None`` gate is load-bearing, not defensive.** Under an untyped
+    single-valued relation ``_group_key`` returns a raw key because there is no
+    spec, *not* because of digit width — ``GPT-４`` and ``GPT-5`` key identically,
+    ``GPT-４`` is a perfectly usable ``relation/3`` fact, and superseding the
+    outdated row is exactly the right fix. Every clause of this note would be
+    false there, and it would steer the user away from the one action that works.
+
+    **Carrying non-ASCII digits is not the same as failing to parse**, so the
+    normalizer decides, not the digit predicate alone. The unit group is outside
+    the digit policy on purpose and ``_parse_amount_units`` does not validate a
+    unit NAME, so a declared unit may carry them: ``amount(100,"억１")`` under a
+    declared ``억１`` unit normalizes to a scalar and ``_group_key`` keys it
+    ``("scalar", …)``. Both leading clauses of the note would be false there.
+    Asking ``normalize`` converges this note and ``_group_key`` on one predicate.
+
+    Two things the wording deliberately does NOT claim:
+
+    * that supersession cannot resolve the conflict — superseding the offending
+      row itself resolves it correctly, so the note says supersession *can* leave
+      the bad value behind, never that it is useless;
+    * that re-collection *replaces* supersession — for genuinely different values
+      (``100억`` vs ``２００억``) correcting the source yields ``100억`` vs
+      ``200억``, still a conflict that supersession must settle.
+
+    Pure; never raises."""
+    if spec is None:
+        return None
+    offenders = [
+        o
+        for o in objects
+        if literal_types.has_non_ascii_digits(o)
+        and literal_types.normalize(spec.type, o, spec.units) is None
+    ]
+    if not offenders:
+        return None
+    shown = ", ".join(f"'{literal_types.mark_non_ascii_digits(o)}'" for o in offenders)
+    return [
+        f"    note: {shown} carries non-ASCII digits, so it does not parse as this",
+        f"          relation's declared type ({spec.type}) and is compared here as a raw",
+        "          string. Superseding a row clears this gate but can leave that",
+        "          unreadable value in the KB. Correct the source to ASCII digits and",
+        "          re-collect; if the values still differ afterwards, supersede the",
+        "          outdated one (docs/reference/typed-relations.md).",
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Detect single-valued-relation contradictions.")
     parser.add_argument("--wiki", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
@@ -197,7 +256,8 @@ def main(argv: list[str] | None = None) -> int:
         print("check_conflicts: no single-valued relations declared (policy/single-valued.md); nothing to check")
         return 0
 
-    conflicts = detect_conflicts(load_facts(), single_valued, typed_relations(), relation_aliases())
+    typed = typed_relations()
+    conflicts = detect_conflicts(load_facts(), single_valued, typed, relation_aliases())
     if not conflicts:
         print(f"check_conflicts: 0 conflicts across {len(single_valued)} single-valued relation(s)")
         return 0
@@ -211,6 +271,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(objects)} values: {', '.join(objects)}",
             file=sys.stderr,
         )
+        # The conflict key is the canonical relation, which is already NFC when it
+        # came from the alias map; fall back to the NFC form for an NFD-authored
+        # name. NOT identical to detect_conflicts' lookup: there the second probe
+        # uses the NFC of the ROW's relation, which can differ from the canonical
+        # one when an NFD surface form participates in an alias (#210).
+        spec = typed.get(relation) or typed.get(unicodedata.normalize("NFC", relation))
+        for line in non_ascii_digit_note(objects, spec) or ():
+            print(line, file=sys.stderr)
     print(
         "  Resolve by marking the outdated row(s) status='superseded' in "
         "facts/candidates.csv, then re-run.",

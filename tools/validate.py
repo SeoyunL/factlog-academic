@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Validate factlog KB outputs."""
+"""Validate factlog KB outputs.
+
+Usage:
+    python3 validate.py [<kb>]
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import FACT_HEADER, KNOWN_STATUSES
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common. validate's KB
+# argument is a POSITIONAL, not a flag, so the shared resolver is called without
+# one and the positional keeps precedence via the argparse default in main().
+# Without this the active-KB config (`factlog use`) was skipped and resolution
+# fell straight through to cwd (#330).
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root()[0]
+
+from common import FACT_HEADER, KNOWN_STATUSES, logic_policy_md_has_rules  # noqa: E402
 
 
 
@@ -103,6 +121,36 @@ def validate_questions(text: str) -> list[str]:
     return errors
 
 
+def logic_policy_dl_has_rules(dl_text: str) -> bool:
+    """True iff a compiled ``logic-policy.dl`` body carries anything the engine
+    would run.
+
+    Empty, whitespace-only, and comment-only bodies all mean "no policy" — which
+    covers ``finalize.POLICY_STUB`` (``// no policy rules``), what finalize writes
+    for a ruleless policy.
+
+    Only ``//`` counts as a comment. ``#`` does NOT, even though
+    ``common._load_logic_policy_from`` strips ``#`` lines: it does that for the
+    *sibling* ``logic-policy.extra.dl`` alone. This file is read verbatim
+    (``read_text().strip()``), so its bytes reach the engine program as-is::
+
+        logic-policy.dl       = "# hand note\\n"  ->  '# hand note'
+        logic-policy.extra.dl = "# hand note\\n"  ->  ''
+
+    Calling a ``#``-only body "no policy" therefore hands out rc=0 on a file that
+    is not, to the engine, empty — and ``common`` treats ``#`` reaching the engine
+    as a bug it deliberately prevents on the extra.dl side. (Measured: pyrewire
+    1.0.4 happens to tolerate a stray ``#`` line rather than ParseError on it, so
+    this is a latent mismatch, not a live crash.) Nothing legitimate is lost:
+    ``finalize.POLICY_STUB`` is ``// no policy rules`` and generate_logic_policy
+    never emits ``#`` into a ``.dl``.
+    """
+    return any(
+        stripped and not stripped.startswith("//")
+        for stripped in (line.strip() for line in dl_text.splitlines())
+    )
+
+
 def validate_logic_policy(root: Path) -> list[str]:
     script = Path(__file__).parent / "generate_logic_policy.py"
     if not script.is_file():
@@ -172,9 +220,26 @@ def validate(root: Path) -> list[str]:
         errors.append("policy/prompts/natural_language_to_policy.md must contain {{POLICY_TEXT}} exactly once")
 
     logic_policy = root / "policy" / "logic-policy.dl"
-    if not logic_policy.is_file() or not read(logic_policy).strip():
+    dl_text = read(logic_policy) if logic_policy.is_file() else ""
+    if not logic_policy_md_has_rules(policy_source) and not logic_policy_dl_has_rules(dl_text):
+        # No policy at all: logic-policy.md defines no compilable bullets AND no
+        # compiled rules are on disk. That is a legitimate state, not a defect —
+        # it is exactly what `factlog init` leaves behind, and generate_logic_policy
+        # deliberately refuses to synthesise a .dl for a ruleless .md, so demanding
+        # one made a fresh KB permanently un-validatable (#327). `check`/`ask`
+        # already reached this conclusion in #190 via the SAME shared helper
+        # (common.logic_policy_md_has_rules); validate was simply never updated,
+        # leaving it the odd one out. Accepting an empty/comment-only .dl as well
+        # as an absent one covers finalize's POLICY_STUB, which validate previously
+        # rejected as drift against its own pipeline's output.
+        pass
+    elif not logic_policy.is_file() or not dl_text.strip():
+        # The .md DOES define rules but nothing is compiled — real drift that
+        # would silently drop the author's policy. Unchanged, fail loud (#194).
         errors.append("missing or empty policy/logic-policy.dl")
     elif policy_source.is_file() and policy_prompt.is_file():
+        # Rules on at least one side and a non-empty .dl: byte-compare the two so
+        # a stale compile (either direction) is still caught. Unchanged.
         errors.extend(validate_logic_policy(root))
 
     facts = root / "facts" / "candidates.csv"
@@ -256,7 +321,9 @@ def main() -> int:
             except (AttributeError, ValueError, OSError):
                 pass
     parser = argparse.ArgumentParser(description="Validate factlog KB outputs.")
-    parser.add_argument("root", nargs="?", default=".")
+    # Default is the prepass-resolved root ($FACTLOG_ROOT > active-KB config >
+    # cwd); an explicit positional still wins, keeping flag > env > config > cwd.
+    parser.add_argument("root", nargs="?", default=os.environ["FACTLOG_ROOT"])
     args = parser.parse_args()
     root = Path(args.root).expanduser().resolve()
     errors = validate(root)

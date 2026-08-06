@@ -1,16 +1,40 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Interactively review candidate facts that still need human judgment."""
+"""Interactively review candidate facts that still need human judgment.
+
+Usage:
+    python3 review_candidates.py [--wiki <kb>] [--dry-run] [--yes] [--limit N]
+"""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
-from common import CANDIDATES_CSV, DECISIONS_DIR, FACT_HEADER, ROOT, ensure_dirs, normalize_confidence
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root and export it before importing common, which binds
+# its module-level paths from FACTLOG_ROOT at import time.
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
+
+from common import (  # noqa: E402
+    CANDIDATES_CSV,
+    DECISIONS_DIR,
+    FACT_HEADER,
+    ROOT,
+    ensure_dirs,
+    normalize_confidence,
+)
 
 
 REVIEW_STATUSES = {"needs_review", "candidate"}
@@ -166,6 +190,10 @@ def write_review_log(decisions: list[ReviewDecision]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Review needs_review facts in facts/candidates.csv.")
+    # --wiki is resolved by the import-time prepass (it must set FACTLOG_ROOT
+    # before common binds its paths); declared here so it is documented in --help
+    # and not rejected as an unrecognized argument.
+    parser.add_argument("--wiki", default=os.environ.get("FACTLOG_ROOT", "."), help="KB root")
     parser.add_argument("--dry-run", action="store_true", help="only list facts that need review")
     parser.add_argument("--yes", action="store_true", help="write changes without the final confirmation prompt")
     parser.add_argument("--limit", type=int, help="review only the first N rows")

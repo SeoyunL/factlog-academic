@@ -19,9 +19,9 @@ import sys
 from pathlib import Path as _Path
 from typing import Callable, NamedTuple
 
-from factlog import __version__, ingest
+from factlog import __version__, ingest, literal_types
 from factlog import config as factlog_config
-from factlog.common import _atomic_write_text
+from factlog.common import FACT_HEADER, _atomic_write_text
 
 MIN_PYTHON = (3, 11)
 MIN_PYREWIRE = (1, 0, 3)  # bundles wirelog v0.52.0 with \" escape support (wirelog#924)
@@ -512,6 +512,43 @@ explanation of its purpose.
 
 ## 확인 필요
 {{REVIEW}}
+""",
+    # Empty fact ledger: the header alone IS the schema contract tools/validate.py
+    # checks, so it is built from FACT_HEADER rather than retyped (#327). Without
+    # it a fresh KB failed validate with "missing facts/candidates.csv"; with it the
+    # file loads as zero rows, which is exactly how the absent file was treated.
+    "facts/candidates.csv": ",".join(FACT_HEADER) + "\n",
+    # Human-review ledger. The four section headings are a standing contract that
+    # tools/validate.py requires unconditionally, so `init` must lay them down —
+    # otherwise a KB where no fact of a given class has come up yet can never pass
+    # validate (#327). Headings are byte-identical to what
+    # merge_candidates.decision_section() emits, so `sync` fills these sections
+    # instead of appending duplicates; tests/unit/test_init_validate_clean.py pins
+    # the two together. validate looks for each section by plain substring, so the
+    # prose below must not repeat its own section's keyword (중복/모호/출처/충돌) —
+    # otherwise the prose answers the check and a deleted heading goes unnoticed.
+    "decisions/open-questions.md": """\
+# Open Questions
+
+`/factlog sync` 가 사람의 판단이 필요하다고 표시한 후보 사실(needs_review)을 분류별로
+모아 두는 파일입니다. 아래 네 섹션은 검토 계약이므로 해당 분류의 항목이 아직 하나도
+없더라도 비운 채로 유지합니다(tools/validate.py 가 확인합니다).
+
+## 중복 개념 후보
+
+같은 대상을 다른 이름이나 다른 방향으로 가리키는 것으로 보이는 항목.
+
+## 모호한 관계명
+
+관계명이나 대상이 여러 가지로 읽혀 확정하기 어려운 항목.
+
+## 출처 부족
+
+근거 문서가 없거나, 사라진 문서를 가리키는 항목.
+
+## 기존 내용과 충돌할 수 있는 항목
+
+이미 확정된 사실과 어긋날 수 있어 둘 중 하나를 골라야 하는 항목.
 """,
 }
 
@@ -1686,7 +1723,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         extra = [f"{s}={n}" for s, n in by_status.items() if s not in order]
         print(f"  facts:      {len(facts)} candidate(s) [{', '.join(seen + extra)}]; {len(engine_rows)} engine fact(s)")
     else:
-        print("  facts:      none (no facts/candidates.csv — run /factlog sync)")
+        # Empty row list has two causes and `init` now makes the first one the
+        # normal first-run state, so they must read differently: a scaffolded
+        # ledger holds zero rows, while an absent one is a breakage validate
+        # reports as an error (#327).
+        why = "0 rows" if ctx.candidates_csv.is_file() else "no facts/candidates.csv"
+        print(f"  facts:      none ({why} — run /factlog sync)")
 
     # Vocabulary
     attr = ctx.attribute_relations()
@@ -1767,6 +1809,80 @@ def cmd_status(args: argparse.Namespace) -> int:
         if conflicts:
             msg += "  ⚠ resolve via superseded / see tools/check_conflicts.py"
         print(msg)
+        # Under a TYPED relation, a conflicting value carrying non-ASCII digits
+        # does not parse as the declared type, so the generic "resolve via
+        # superseded" advice above can clear the gate while leaving that value in
+        # the KB (#331). Name it here — this path did not print the values at all,
+        # and repr() would not distinguish '１００억' from '100억' on screen.
+        #
+        # Restricted to typed relations on purpose: under an untyped relation the
+        # two spellings are just two strings, the value is a usable relation/3
+        # fact, and superseding the outdated row IS the fix — warning there would
+        # steer the user away from the one action that works.
+        #
+        # Digit test FIRST, typed lookup only if it can matter. ctx.typed_relations()
+        # is not a pure read: it warns when a typed relation is missing from
+        # attribute-relations.md, and re-reads facts + logic policy to compute
+        # reserved names. Resolving it unconditionally put that warning on every
+        # status run for such a KB — including one with zero conflicts.
+        flagged: dict[str, set[str]] = {}
+        for (_subject, relation), objs in conflicts.items():
+            hits = {o for o in objs if literal_types.has_non_ascii_digits(o)}
+            if hits:
+                flagged.setdefault(relation, set()).update(hits)
+        odd: set[str] = set()
+        if flagged:
+            # typed_relations() FAILS LOUDLY on a broken policy (non-ASCII alias,
+            # alias collision/duplicate, a units clause on a non-amount line). That
+            # is right for the commands that must not run on a bad policy, but
+            # `status` is the command you run to find out WHAT is bad, so it has to
+            # stay total: a policy error costs this supplementary warning only, and
+            # the report (conflicts, logic freshness, engine) still prints in full.
+            # The error itself is not swallowed — every other entry point still
+            # raises it, and status has no output line to attach it to here.
+            # Resolved lazily for the same reason `main` does it (see the comment
+            # there): the class must match the one `common` currently exports.
+            from factlog.common import FactlogError
+
+            # OSError/ValueError too, and not only for tidiness: typed_relations()
+            # reads logic-policy.dl to compute reserved names, so a policy file
+            # that is not UTF-8 (cp949 is realistic here) raises
+            # UnicodeDecodeError — a ValueError, which main()'s handler re-raises
+            # as a raw traceback. This call site is the only thing that made
+            # `status` decode that file at all.
+            #
+            # Widened HERE and not in common._try: every other caller of
+            # typed_relations() (finalize, check_conflicts, vocab) must keep
+            # failing loudly on an unreadable policy. Only `status` trades the
+            # warning for finishing the report.
+            try:
+                typed = ctx.typed_relations()
+            except (FactlogError, OSError, ValueError):
+                typed = {}
+            for relation, hits in flagged.items():
+                # typed_relations() keys are NFC; a CSV-sourced name may be NFD.
+                spec = typed.get(unicodedata.normalize("NFC", relation))
+                if spec is None:
+                    continue
+                # Carrying non-ASCII digits is not the same as failing to parse: a
+                # declared UNIT NAME may carry them (`amount(100,"억１")` under a
+                # declared `억１` unit) and still normalize to a scalar, which the
+                # engine reads fine. Ask the normalizer, so this line and
+                # check_conflicts' note fire on the one predicate that decides
+                # raw-vs-scalar in the first place.
+                odd.update(
+                    literal_types.mark_non_ascii_digits(o)
+                    for o in hits
+                    if literal_types.normalize(spec.type, o, spec.units) is None
+                )
+        if odd:
+            # A set, so one offender shared by several conflict groups is named once.
+            print(
+                "              ⚠ non-ASCII digits in " + ", ".join(f"'{o}'" for o in sorted(odd))
+                + " — superseding a row clears the gate but can keep a value that does"
+                " not parse; correct the source to ASCII and re-collect, then supersede"
+                " the outdated row if the values still differ"
+            )
     else:
         print("  conflicts:  n/a (no single-valued relations declared in policy/single-valued.md)")
 
@@ -2317,6 +2433,11 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     # so a stem guess would let `eject report.docx` wrongly pull report.pptx's
     # conversion; the recorded origin name disambiguates. Falls back to a stem
     # match only when no header is present (a hand-made conversion).
+    #
+    # The stored value is the original's path *relative to sources/* — the
+    # conversion's own mirrored subdir joined with the basename read from the
+    # header (see the loop below). Consumers that only want the basename go
+    # through origin_name().
     conv_origin: dict[str, str] = {}
     for ref, p in disk_refs.items():
         if not ref.startswith("runs/sources/"):
@@ -2325,6 +2446,9 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             head = p.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
         except OSError:
             head = ""
+        # Same header grammar as common.conversion_origin(); kept inline because
+        # that helper returns a basename and this needs the full recorded value,
+        # and because every conversion's header is read here in one pass.
         # Exclude the field delimiters from the capture so an empty/malformed
         # `source:` value (e.g. `... | source:  | converter: ...`) can't let
         # the lazy group swallow the `|`/`-->` and capture a garbage origin.
@@ -2336,28 +2460,201 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
             origin = nfc(m.group(1).strip())
             if origin:
                 # #214: the header may now record a sources/-relative path
-                # (sub_a/data.hwpx) rather than a bare basename. Reduce it to the
-                # basename so the pairing/orphan reconstruction below — which
-                # rebuilds sources/<subdir>/<origin> from the conversion's own
-                # mirrored subdir — stays correct for both header formats and no
-                # legacy basename header regresses.
-                conv_origin[ref] = PurePosixPath(origin).name
+                # (sub_a/data.hwpx) rather than a bare basename. Rebuild the
+                # original's sources-relative path from the conversion's *own*
+                # mirrored subdir plus the header's basename, so both header
+                # formats yield the same value and no legacy basename header
+                # regresses: ingest derives the mirrored subdir and the header
+                # label from one src_rel, so the header's directory component is
+                # never new information (and is the wrong signal to trust when a
+                # hand-edit makes the two disagree — the file's own location is
+                # what the conversion actually mirrors).
+                # Only PurePosixPath joining is used: it folds "//" and "./" but
+                # keeps ".." verbatim, so a stored origin still spells the header
+                # the same way a consumer would.
+                # Dropping the header's directory also narrows one shape that no
+                # released factlog has ever written — a *flat* conversion whose
+                # header carries a path — since mirroring (rel_parent) and the
+                # #214 path header (source_label) were added by the same commit,
+                # 73cc76a. That is defence against a hand-edited KB, not a
+                # migration path.
+                subdir = PurePosixPath(ref[len("runs/sources/"):]).parent
+                base = PurePosixPath(origin).name
+                # A header with no filename component ("source: /") is as
+                # unusable as an empty one; keep the empty-origin sentinel rather
+                # than inventing an original named after the subdir.
+                conv_origin[ref] = (subdir / base).as_posix() if base else ""
 
-    def matches(ref: str, name: str) -> bool:
-        name = nfc(name)
-        rp, np_ = Path(ref), Path(name)
-        if ref == name:  # exact KB-relative ref
+    def origin_name(ref: str) -> str | None:
+        """Basename of the original a conversion was made from — None when the
+        conversion carries no provenance header at all."""
+        origin = conv_origin.get(ref)
+        return PurePosixPath(origin).name if origin is not None else None
+
+    # Every basename claimed by an original under sources/, at any depth. A flat
+    # conversion's header records only a basename, so this set answers "does the
+    # KB hold an original this conversion could have been made from?" — the
+    # question both the --orphans pairing below and the basename fallback in
+    # selector() have to agree on.
+    src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
+
+    # What resolve() does with a symlink loop depends on the interpreter: on
+    # 3.11/3.12 pathlib re-raises ELOOP as RuntimeError (not OSError), while on
+    # 3.13+ it raises nothing and hands back the path unresolved. Both are in
+    # range of requires-python >=3.11, and CI pins 3.11, so RuntimeError is live
+    # rather than defensive. ValueError covers a path with an embedded NUL,
+    # which argv cannot actually carry — that one is pure defence.
+    #
+    # None of them may reach the user as a traceback. Note that swallowing the
+    # error is not by itself enough to make the argument harmless: an
+    # unresolved path is still absolute and still lands outside the KB, so what
+    # keeps it from deleting anything is the sources/<basename> guard below.
+    _RESOLVE_ERRORS = (OSError, RuntimeError, ValueError)
+
+    try:
+        troot = target.resolve()
+    except _RESOLVE_ERRORS:
+        troot = target
+
+    def ident(p: Path) -> tuple[int, int] | None:
+        """The filesystem's own identity for a path, or None when it cannot be
+        stat'd — the file is missing, or it sits behind a symlink loop."""
+        try:
+            st = p.stat()
+        except (OSError, ValueError):
+            return None
+        return (st.st_dev, st.st_ino)
+
+    troot_id, sroot_id = ident(troot), ident(target / "sources")
+
+    def kb_rel_by_identity(p: Path) -> str | None:
+        """Reduce an absolute path to a KB-relative ref by asking the filesystem
+        whether one of its ancestors *is* sources/ or the KB root.
+
+        Comparing resolved strings does not answer this: it misses whenever
+        sources/ is a symlink or --target is spelled in a different case on a
+        case-insensitive filesystem, and both misses fall through to the
+        basename fallback — the deletion #324 is about.
+
+        This is deliberately *stronger* than what ingest uses. ingest reduces
+        with relative_to() on resolved strings (cli.py:2050), so the two
+        commands do not agree: given a case-different --target, ingest treats an
+        in-sources/ file as outside and writes a flat conversion with a
+        bare-basename header, while this resolves the same argument into
+        sources/. A conversion produced that way cannot be paired from here —
+        its header names a basename, which says nothing about which directory it
+        came from — so deleting the original reports the orphan it leaves rather
+        than guessing (see the --delete-original notes below).
+
+        Walks strictly upward, so a symlink loop cannot trap it: the loop makes
+        stat() fail, which only means "not a root" and the walk keeps rising.
+        Returns None at the filesystem root, leaving the string reduction below
+        to handle a KB whose own root cannot be stat'd.
+        """
+        tail: list[str] = []
+        cur = p
+        while True:
+            cur_id = ident(cur)
+            if cur_id is not None:
+                if sroot_id is not None and cur_id == sroot_id:
+                    return "/".join(["sources", *reversed(tail)])
+                if troot_id is not None and cur_id == troot_id:
+                    # "." is what relative_to() spells for the root itself.
+                    return "/".join(reversed(tail)) if tail else "."
+            if cur.parent == cur:
+                return None
+            tail.append(cur.name)
+            cur = cur.parent
+
+    def selector(name: str) -> tuple[set[str], str | None, str]:
+        """Canonicalise one `eject <name>` argument into what the matcher needs:
+
+          refs    — the KB-relative ref(s) the argument names exactly, in both
+                    the raw and the normalised spelling. ingest never writes a
+                    ref containing "./" or "//", but candidates.csv is
+                    hand-editable and a row's source column can carry one, so
+                    the raw form keeps such a row ejectable by the path typed;
+          src_rel — the original's path *relative to sources/*, when a path was
+                    given; compared against conv_origin to reach the conversion
+                    that path produced. None when the argument names no original
+                    under sources/ (a conversion ref, or a bare name);
+          raw     — the argument as written, for the bare filename / stem rules.
+        """
+        raw = nfc(name)
+        p = Path(raw)
+        if p.is_absolute():
+            # Resolve an *absolute* argument, and the root with it: this machine
+            # can reach the KB through a symlink (/tmp -> /private/tmp), and an
+            # unresolved argument would then look like it lies outside the KB.
+            # A relative argument is never resolved — resolving it against the
+            # cwd would turn `sub/report.html`, typed inside the KB, into an
+            # outside-the-KB path and drop it back to basename matching, which
+            # is the deletion #324 is about.
+            try:
+                p = p.resolve()
+            except _RESOLVE_ERRORS:
+                pass
+            # Identity first; the string reduction still covers a KB root that
+            # cannot be stat'd at all.
+            kb_rel = kb_rel_by_identity(p)
+            if kb_rel is None:
+                try:
+                    kb_rel = p.relative_to(troot).as_posix()
+                except ValueError:
+                    kb_rel = None
+            kb_rel = nfc(kb_rel) if kb_rel is not None else None
+            if kb_rel is not None and (kb_rel == "sources" or kb_rel.startswith("sources/")):
+                return {kb_rel}, kb_rel[len("sources/"):] or None, raw
+            # An original outside sources/ — anywhere else in the KB, or outside
+            # it entirely — has no subtree for ingest to mirror, so it always
+            # converts to a *flat* runs/sources/<name> whose rebuilt origin is a
+            # bare basename. Comparing against that basename keeps the legitimate
+            # case working while leaving every mirrored conversion out of reach.
+            #
+            # Only when nothing under sources/ claims that basename, though.
+            # ingest stores just src.name for an original outside sources/
+            # (:2186), so a flat conversion's header cannot say *which* file of
+            # that name it came from; when the KB holds one itself, that file is
+            # the answer and this argument is not. Ejecting is unprompted and
+            # exits 0, so an ambiguous argument must select nothing at all.
+            # The competing original can sit at any depth — src_basenames is the
+            # same set --orphans pairs against, so one command cannot call a
+            # conversion paired there and unpaired here.
+            base = nfc(p.name)
+            fallback = base if base and base not in src_basenames else None
+            return ({kb_rel} if kb_rel is not None else set()), fallback, raw
+        # A relative argument is read KB-relative (`sources/...`, `runs/...`) or
+        # sources-relative (`sub/report.html`). PurePosixPath folds "./" and "//"
+        # but keeps ".." verbatim: no normpath/realpath here, so the comparison
+        # never rewrites a path into something the recorded origin spells
+        # differently.
+        norm = PurePosixPath(raw).as_posix() if "/" in raw else raw
+        if norm.startswith("sources/"):
+            return {raw, norm}, norm[len("sources/"):] or None, raw
+        if norm.startswith("runs/sources/"):
+            return {raw, norm}, None, raw  # names a conversion, not an original
+        return {raw, norm}, norm, raw
+
+    def matches(ref: str, sel: tuple[set[str], str | None, str]) -> bool:
+        refs, src_rel, name = sel
+        if ref in refs:  # exact KB-relative ref
             return True
         is_conv = ref.startswith("runs/sources/")
         if "/" in name:
             # A path was given: the exact original is handled above; for a
-            # binary original also match the conversion it produced (by
-            # recorded origin). Same-basename files elsewhere are NOT matched.
-            return is_conv and conv_origin.get(ref) == np_.name
+            # binary original also match the conversion it produced — the one
+            # whose recorded origin *is* that sources-relative path. #324: a
+            # same-name original in another directory is NOT matched, because
+            # both sides keep their directory instead of collapsing to a
+            # basename. An *empty* src_rel (a root path like "/" names no file)
+            # must not compare equal either: the empty string is also the
+            # no-usable-origin sentinel stored for a header like "source: /".
+            return bool(is_conv and src_rel and conv_origin.get(ref) == src_rel)
+        rp, np_ = Path(ref), Path(name)
         if np_.suffix:  # a bare filename with an extension
             if not is_conv:
                 return rp.name == np_.name  # an original with that filename
-            origin = conv_origin.get(ref)  # the conversion made from this original
+            origin = origin_name(ref)  # the conversion made from this original
             # Provenance is the reliable signal. A headerless conversion falls
             # back to its own name minus the ingest out-suffix: since ingest now
             # keeps the original's extension (report.pptx -> report.pptx.md), the
@@ -2367,11 +2664,15 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         # one (matched via its recorded origin so the source's own extension in
         # the new naming — report.pptx.md — does not defeat the stem compare).
         if is_conv:
-            origin = conv_origin.get(ref)
+            origin = origin_name(ref)
             return Path(origin if origin else rp.name).stem == np_.stem
         return rp.stem == np_.stem
 
     matched: set[str] = set()
+    # Originals that an argument pointed *at* without naming: a sources-relative
+    # path selects the conversion made from a file, not the file. Collected so
+    # --delete-original can say so instead of just reporting 0.
+    pointed_at: list[str] = []
     if args.orphans:
         # Auto-detect orphaned sources — a source whose backing original is
         # gone. For a runs/sources/ conversion the origin is the file named
@@ -2393,21 +2694,17 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         #    a subtree to mirror, so the subdir is unknown) has only the
         #    provenance basename as an origin signal; match by basename and keep
         #    erring toward retention.
-        from pathlib import PurePosixPath
-
-        src_basenames = {Path(r).name for r in disk_refs if not r.startswith("runs/sources/")}
         for ref in all_refs:
             if ref.startswith("runs/sources/"):
                 if ref in disk_refs:
                     origin = conv_origin.get(ref)
                     # origin is not None == has a factlog provenance header
-                    # (hand-placed conversions are kept).
+                    # (hand-placed conversions are kept). It already carries the
+                    # conversion's mirrored subdir, so a "/" in it *is* the
+                    # mirrored case and sources/<origin> is the exact original.
                     if origin is not None:
-                        conv_rel = ref[len("runs/sources/"):]
-                        subdir = PurePosixPath(conv_rel).parent
-                        if subdir.as_posix() != ".":
-                            expected = (PurePosixPath("sources") / subdir / origin).as_posix()
-                            paired = expected in disk_refs
+                        if "/" in origin:
+                            paired = f"sources/{origin}" in disk_refs
                         else:
                             paired = origin in src_basenames
                         if not paired:
@@ -2425,9 +2722,13 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
         print(f"factlog eject (KB: {target}): orphan scan — {len(matched)} orphaned source(s)")
     else:
         for name in args.sources:
-            hits = {ref for ref in all_refs if matches(ref, name)}
+            sel = selector(name)
+            hits = {ref for ref in all_refs if matches(ref, sel)}
             if hits:
                 matched |= hits
+                src_rel = sel[1]
+                if src_rel and f"sources/{src_rel}" in disk_refs:
+                    pointed_at.append(f"sources/{src_rel}")
             else:
                 print(f"factlog eject: no source matches '{name}'", file=sys.stderr)
         if not matched:
@@ -2451,6 +2752,33 @@ def _select_eject_sources(args, rows, disk_refs, all_refs, target, nfc):
     print(f"  runs/sources conversion(s) to delete: {len(conv_to_delete)}")
     if args.delete_original:
         print(f"  original(s) to delete (--delete-original): {len(orig_on_disk)}")
+        # A sources-relative path selects what a file *produced*, not the file,
+        # so --delete-original can legitimately have nothing to do. Say which
+        # spelling would have included it, rather than reporting a bare 0.
+        for ref in dict.fromkeys(r for r in pointed_at if r not in matched):
+            print(f"    note: {ref} is on disk but was not named; pass '{ref}' to delete it too")
+        # Deleting an original can strand a *flat* conversion that no argument
+        # could have selected: a bare-basename header does not say which
+        # directory its original was in, so it is only pairable by name. ingest
+        # writes exactly that shape whenever it could not place the original
+        # under sources/ — including for a --target spelled in a different case,
+        # which this command does resolve into sources/. Name the conversion
+        # instead of leaving it behind with nothing to point at.
+        doomed = {PurePosixPath(r).name for r in orig_on_disk}
+        surviving = {
+            PurePosixPath(r).name
+            for r in disk_refs
+            if not r.startswith("runs/sources/") and r not in matched
+        }
+        for ref in sorted(disk_refs):
+            if not ref.startswith("runs/sources/") or ref in matched:
+                continue
+            origin = conv_origin.get(ref)
+            if origin and "/" not in origin and origin in doomed and origin not in surviving:
+                print(
+                    f"    note: {ref} records 'source: {origin}' and will have no original "
+                    f"left; run 'factlog eject --orphans' to retire it"
+                )
     elif orig_on_disk:
         print(f"  original(s) kept: {len(orig_on_disk)} (pass --delete-original to remove)")
     return _EjectSelection(match_row, conv_to_delete, orig_on_disk, True)
@@ -2469,9 +2797,14 @@ def cmd_eject(args: argparse.Namespace) -> int:
         by default (kept for audit), or removed entirely with --purge;
       - optionally deletes the user's original under sources/ with
         --delete-original (off by default: ingest never created it).
-    A source is named by its filename, stem, or KB-relative path. Naming the
-    binary original (e.g. report.pptx) also matches its runs/sources/<stem>
-    conversion; a bare stem matches every source with that stem. eject also
+    A source is named by its filename, stem, or path. Naming the binary original
+    (e.g. report.pptx) also matches its runs/sources/<stem> conversion; a bare
+    stem matches every source with that stem. A filename is deliberately wide —
+    it matches that name in every directory — while a *path* is narrow: it
+    selects the original at that path and the conversion made from it, never a
+    same-name original elsewhere (#324). Paths are read relative to sources/ (or
+    as a KB-relative ref / absolute path) and compared as written: no ".."
+    folding, no case folding, and only an absolute path is resolved. eject also
     catches a source cited only in candidates.csv (an already-orphaned ref).
 
     Orphan mode (`eject --orphans`) selects every orphaned source automatically

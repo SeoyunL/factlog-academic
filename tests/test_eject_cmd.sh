@@ -12,6 +12,9 @@
 #   - --purge deletes the candidate row instead of superseding it
 #   - --delete-original also removes the user's original under sources/
 #   - a bare stem matches; an unknown name errors (rc != 0); non-KB path errors
+#   - naming a *path* stays inside that path: `eject sub/report.html` never
+#     reaches a same-name original in another directory (#324), while a bare
+#     filename keeps matching every directory
 #
 # Usage: bash tests/test_eject_cmd.sh
 
@@ -110,6 +113,304 @@ printf '%s\n%s\n%s\n' "$H" \
 "$PYTHON" -m factlog eject sources/a/dup.md --target "$KB" --delete-original >/dev/null 2>&1 || true
 [ ! -f "$KB/sources/a/dup.md" ] && [ -f "$KB/sources/b/dup.md" ] && ok "full path ejects only that file, not the same-name sibling" || bad "full path matched across directories"
 grep -q "sources/b/dup.md,confirmed," "$KB/facts/candidates.csv" && ok "sibling's fact preserved" || bad "sibling fact wrongly retired"
+
+# =============================================================================
+# #324: naming a path must not reach a same-name original in another directory
+# =============================================================================
+
+# Two same-name originals (sources/report.html and sources/sub/report.html), each
+# with its mirrored conversion. $1 = KB, $2 = header style (path|legacy): the
+# nested conversion's provenance records either the #214 sources-relative path or
+# a legacy bare basename. Both must select identically — the conversion's own
+# mirrored location is what pairs it with its original.
+seed_dup() {  # $1 = KB path, $2 = path|legacy
+  local kb="$1" nested_src="sub/report.html"
+  [ "$2" = "legacy" ] && nested_src="report.html"
+  "$PYTHON" -m factlog init --target "$kb" >/dev/null
+  mkdir -p "$kb/sources/sub" "$kb/runs/sources/sub"
+  printf '<html>top</html>\n' > "$kb/sources/report.html"
+  printf '<html>nested</html>\n' > "$kb/sources/sub/report.html"
+  printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\ntop\n' \
+    > "$kb/runs/sources/report.html.md"
+  printf '<!-- ingested-by-factlog | source: %s | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nnested\n' \
+    "$nested_src" > "$kb/runs/sources/sub/report.html.md"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$H" \
+    'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' \
+    'C,rel,D,runs/sources/sub/report.html.md,confirmed,0.9,' \
+    'E,rel,F,sources/report.html,confirmed,0.9,' \
+    'G,rel,H,sources/sub/report.html,confirmed,0.9,' > "$kb/facts/candidates.csv"
+}
+
+# A KB whose flat conversion really did come from an original outside sources/:
+# no original *anywhere* under sources/ bears that basename, so the pairing is
+# unambiguous. The mirrored pair deliberately uses a different filename — give
+# it the same one and the flat conversion becomes attributable to it instead,
+# which is the ambiguity the guard refuses.
+seed_outside() {  # $1 = KB path
+  local kb="$1"
+  "$PYTHON" -m factlog init --target "$kb" >/dev/null
+  mkdir -p "$kb/sources/sub" "$kb/runs/sources/sub"
+  printf '<html>nested</html>\n' > "$kb/sources/sub/other.html"
+  printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\noutside\n' \
+    > "$kb/runs/sources/report.html.md"
+  printf '<!-- ingested-by-factlog | source: sub/other.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nnested\n' \
+    > "$kb/runs/sources/sub/other.html.md"
+  printf '%s\n%s\n%s\n' "$H" \
+    'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' \
+    'C,rel,D,runs/sources/sub/other.html.md,confirmed,0.9,' > "$kb/facts/candidates.csv"
+}
+
+# --- a sources-relative path ejects only the conversion made from that path ----
+for style in path legacy; do
+  KB="$(mktemp -d)/wiki"; seed_dup "$KB" "$style"
+  "$PYTHON" -m factlog eject sub/report.html --target "$KB" >/dev/null 2>&1
+  [ ! -f "$KB/runs/sources/sub/report.html.md" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+    && ok "[$style header] 'sub/report.html' ejects the nested conversion only" \
+    || bad "[$style header] path eject hit the same-name conversion in another directory"
+  grep -q "A,rel,B,runs/sources/report.html.md,confirmed," "$KB/facts/candidates.csv" \
+    && ok "[$style header] the top-level conversion's fact is not retired" \
+    || bad "[$style header] unrequested fact retired"
+  [ -f "$KB/sources/report.html" ] && [ -f "$KB/sources/sub/report.html" ] \
+    && ok "[$style header] both originals kept" || bad "[$style header] an original was deleted"
+done
+
+# --- './name' narrows to the root-level original's conversion -----------------
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+"$PYTHON" -m factlog eject ./report.html --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "'./report.html' ejects the root-level conversion only" || bad "'./report.html' reached into sub/"
+
+# --- --delete-original on a sources-relative path says what it would need -----
+# 'sub/report.html' names the original a conversion was made *from*, so it
+# selects the conversion and never the original — deliberate, and documented.
+# But --delete-original then printed 0 with no explanation, leaving no way to
+# tell a deliberate no-op from a missed file. Report the spelling that includes
+# the original instead of widening what this one deletes.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+out="$("$PYTHON" -m factlog eject sub/report.html --target "$KB" --delete-original 2>&1)"
+printf '%s' "$out" | grep -qF "sources/sub/report.html is on disk but was not named" \
+  && ok "--delete-original explains why a sources-relative path deleted no original" \
+  || bad "--delete-original silently reported 0 originals"
+[ -f "$KB/sources/sub/report.html" ] && [ -f "$KB/sources/report.html" ] \
+  && ok "the hint does not widen what a sources-relative path deletes" \
+  || bad "sources-relative --delete-original deleted an original"
+
+# --- a KB-relative 'sources/...' path matches that original + its conversion ---
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+out="$("$PYTHON" -m factlog eject sources/report.html --target "$KB" --delete-original 2>&1)"
+[ ! -f "$KB/sources/report.html" ] && [ ! -f "$KB/runs/sources/report.html.md" ] \
+  && ok "'sources/report.html' ejects that original and its conversion" || bad "KB-relative path eject incomplete"
+[ -f "$KB/sources/sub/report.html" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "'sources/report.html' leaves the sub/ pair untouched" || bad "KB-relative path eject hit sub/"
+
+# --- a bare filename stays deliberately wide (a filename is not a path) -------
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+out="$("$PYTHON" -m factlog eject report.html --target "$KB" --dry-run 2>&1)"
+[ "$(printf '%s' "$out" | grep -c '^  - ')" -eq 4 ] \
+  && ok "a bare filename still matches every source with that name (4 refs)" \
+  || bad "bare filename matching narrowed: $(printf '%s' "$out" | grep -c '^  - ') refs"
+
+# --- an absolute path inside the KB resolves to its KB-relative ref -----------
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+"$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/sub/report.html.md" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "an absolute path under sources/ ejects only its own conversion" || bad "absolute path matched by basename"
+
+# --- an absolute path + --delete-original removes exactly that one original ---
+# Reducing an absolute path to its KB-relative ref makes it match the original
+# itself, so --delete-original now reaches an original that a basename fallback
+# never selected. It must stay at exactly one file: the same-name sibling in the
+# other directory keeps both its original and its conversion.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+"$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$KB" --delete-original >/dev/null 2>&1
+[ ! -f "$KB/sources/sub/report.html" ] && [ ! -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "absolute path + --delete-original removes that original and its conversion" \
+  || bad "absolute path + --delete-original did not remove the named original"
+[ -f "$KB/sources/report.html" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "absolute path + --delete-original leaves the same-name sibling intact" \
+  || bad "--delete-original deleted a file in another directory"
+
+# --- a KB whose sources/ is a symlink is still recognised as inside the KB -----
+# ingest decides containment by filesystem identity ((target / "sources").resolve(),
+# cli.py:2050). A string-prefix test on the resolved path disagrees with that
+# oracle as soon as sources/ is a symlink: the argument looks like it lies
+# outside the KB and drops to the basename fallback, which deletes the same-name
+# conversion in *another* directory while sparing the one that was named.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+LINKED="$(mktemp -d)/docs"; mv "$KB/sources" "$LINKED"; ln -s "$LINKED" "$KB/sources"
+"$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$KB" --delete-original >/dev/null 2>&1
+[ ! -f "$KB/sources/sub/report.html" ] && [ ! -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "a symlinked sources/ still reduces an absolute path to its KB ref" \
+  || bad "symlinked sources/: the named pair survived"
+[ -f "$KB/sources/report.html" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "a symlinked sources/ does not reach the same-name sibling" \
+  || bad "symlinked sources/: deleted a file in another directory"
+
+# --- a --target spelled in a different case on a case-insensitive filesystem ---
+# Path.resolve() does not fold case on macOS/Windows, so a string-prefix test
+# misses and falls back to the basename. Nothing unusual has to be typed: only
+# --target is spelled differently from the argument. Skipped where the
+# filesystem is case-sensitive (Linux CI), because there the two spellings name
+# genuinely different directories.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+if [ -d "$(dirname "$KB")/WIKI" ]; then
+  "$PYTHON" -m factlog eject "$KB/sources/sub/report.html" \
+    --target "$(dirname "$KB")/WIKI" --delete-original >/dev/null 2>&1
+  [ ! -f "$KB/sources/sub/report.html" ] && [ ! -f "$KB/runs/sources/sub/report.html.md" ] \
+    && ok "a case-different --target still reduces the argument to its KB ref" \
+    || bad "case-different --target: the named pair survived"
+  [ -f "$KB/sources/report.html" ] && [ -f "$KB/runs/sources/report.html.md" ] \
+    && ok "a case-different --target does not reach the same-name sibling" \
+    || bad "case-different --target: deleted a file in another directory"
+fi
+
+# --- deleting an original that a flat conversion depends on is announced ------
+# ingest and eject do not agree about containment: ingest reduces with
+# relative_to() on resolved strings, so a --target spelled in a different case
+# makes it treat an in-sources/ file as outside and write a *flat* conversion
+# with a bare-basename header. eject resolves the same argument *into* sources/
+# and cannot pair that conversion. Deleting the original would silently orphan
+# it, so say so.
+BASE="$(mktemp -d)"; KB="$BASE/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+if [ -d "$BASE/Wiki" ]; then    # case-insensitive filesystem only
+  "$PYTHON" -m factlog ingest "$KB/sources/sub/report.html" --target "$BASE/Wiki" >/dev/null 2>&1
+  [ -f "$KB/runs/sources/report.html.md" ] \
+    && ok "ingest with a case-different --target writes a FLAT conversion" \
+    || bad "fixture wrong: expected a flat conversion from ingest"
+  printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+  out="$("$PYTHON" -m factlog eject "$KB/sources/sub/report.html" --target "$BASE/Wiki" --delete-original 2>&1)"
+  printf '%s' "$out" | grep -qF "runs/sources/report.html.md" \
+    && printf '%s' "$out" | grep -qF "will have no original left" \
+    && ok "deleting an original warns about the flat conversion it orphans" \
+    || bad "orphaning a flat conversion was silent"
+fi
+
+# --- an unresolvable path errors like any unknown name (no traceback) ---------
+# On Python 3.11/3.12 resolve() re-raises ELOOP as RuntimeError, not OSError;
+# letting it escape turned an ordinary no-match into a crash. 3.13+ returns the
+# path unresolved instead, so this assertion only bites on the older two — which
+# includes the interpreter CI pins.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+LOOP="$(mktemp -d)"; ln -s "$LOOP/b" "$LOOP/a"; ln -s "$LOOP/a" "$LOOP/b"
+set +e
+err="$("$PYTHON" -m factlog eject "$LOOP/a/absent.html" --target "$KB" --dry-run 2>&1)"; rc=$?
+set -e
+[ "$rc" -ne 0 ] && ! printf '%s' "$err" | grep -qF "Traceback" \
+  && ok "a symlink-loop path reports no match instead of crashing" \
+  || bad "symlink-loop path crashed: $(printf '%s' "$err" | tail -1)"
+
+# --- ...and it deletes nothing, on every interpreter --------------------------
+# The assertion above is silent on 3.13+, where resolve() raises nothing at all.
+# What must hold everywhere is that an unresolvable argument reaches no file: an
+# unresolved path is still absolute, still lands outside the KB, and so still
+# meets the basename fallback. Name the loop after a basename that two live
+# conversions share, so a degraded match has something to destroy.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+LOOP="$(mktemp -d)"; ln -s "$LOOP/b" "$LOOP/a"; ln -s "$LOOP/a" "$LOOP/b"
+set +e
+"$PYTHON" -m factlog eject "$LOOP/a/report.html" --target "$KB" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "a symlink-loop path matching a live basename still deletes nothing" \
+  || bad "symlink-loop path deleted a conversion by basename"
+
+# --- an absolute original outside the KB matches only a FLAT conversion -------
+# ingest gives a path outside sources/ no subtree to mirror, so its conversion is
+# flat; a mirrored conversion can never have come from that path. seed_outside
+# is the honest fixture for this: the KB holds no sources/report.html, so the
+# flat conversion really is the one that argument produced.
+KB="$(mktemp -d)/wiki"; seed_outside "$KB"
+OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
+"$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" >/dev/null 2>&1
+[ ! -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/other.html.md" ] \
+  && ok "an outside-the-KB original matches its flat conversion, not a mirrored one" \
+  || bad "outside-the-KB path reached a mirrored conversion"
+
+# --- ...but not one already paired with an in-KB original of the same name ----
+# ingest stores only src.name for an original outside sources/ (cli.py:2186), so
+# a flat conversion whose header says "report.html" cannot say *which*
+# report.html. When the KB has a sources/report.html of its own, that file — not
+# some path elsewhere on the disk — is what the conversion was made from.
+# Deletion is unprompted and rc=0, so the ambiguous request must select nothing.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
+set +e
+"$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" --purge >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && grep -q "A,rel,B,runs/sources/report.html.md,confirmed," "$KB/facts/candidates.csv" \
+  && ok "an outside path does not claim a flat conversion paired with sources/" \
+  || bad "outside path purged a conversion paired with an in-KB original"
+
+# --- ...including when the in-KB original lives in a subdirectory -------------
+# The original claiming that basename need not sit at the top of sources/. A
+# flat conversion paired with sources/sub/report.html is exactly what --orphans
+# already treats as paired (it compares against every source basename, not just
+# the top-level ones), so the two must not disagree inside one command.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub" "$KB/runs/sources"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nflat\n' \
+  > "$KB/runs/sources/report.html.md"
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+OUTDIR="$(mktemp -d)"; printf '<html>elsewhere</html>\n' > "$OUTDIR/report.html"
+set +e
+"$PYTHON" -m factlog eject "$OUTDIR/report.html" --target "$KB" --purge >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] \
+  && grep -q "A,rel,B,runs/sources/report.html.md,confirmed," "$KB/facts/candidates.csv" \
+  && ok "an outside path does not claim a flat conversion paired with a subdir original" \
+  || bad "outside path purged a conversion paired with sources/sub/"
+
+# --- a leading '//' is absolute, and must not degrade to a basename match -----
+# Path("//sub/report.html").is_absolute() is True on POSIX, so it takes the
+# absolute branch, resolves to /sub/report.html, and reaches nothing in the KB.
+# Before the guard it fell back to the basename and deleted the *top-level*
+# conversion — so 'sub//report.html' and '//sub/report.html' deleted different
+# files.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+set +e
+"$PYTHON" -m factlog eject "//sub/report.html" --target "$KB" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -ne 0 ] && [ -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "'//sub/report.html' selects nothing instead of falling back to the basename" \
+  || bad "'//sub/report.html' deleted a conversion by basename"
+
+# --- a path is compared as written: '..' and case differences do not match ----
+# Deliberate: eject never normalises a path away from the form a provenance
+# header records, and never case-folds. Both now select nothing (rc != 0)
+# instead of falling back to a basename match.
+KB="$(mktemp -d)/wiki"; seed_dup "$KB" path
+set +e
+"$PYTHON" -m factlog eject sub/../report.html --target "$KB" --dry-run >/dev/null 2>&1; rc=$?
+"$PYTHON" -m factlog eject SUB/report.html --target "$KB" --dry-run >/dev/null 2>&1; rc2=$?
+set -e
+[ "$rc" -ne 0 ] && ok "a '..' path selects nothing instead of falling back to the basename" \
+  || bad "'..' path still matched by basename"
+[ "$rc2" -ne 0 ] && ok "a case-different path selects nothing (no case folding)" \
+  || bad "case-different path matched"
+
+# --- a cited ref spelled with './' or '//' stays reachable by that spelling ----
+# candidates.csv is hand-editable, so a row's source column can carry a spelling
+# ingest never emits. Comparing the argument as written keeps such a row
+# ejectable by the path the user actually typed; normalising both sides only
+# would strand it.
+for spelling in "./report.html" "sub//report.html"; do
+  KB="$(mktemp -d)/wiki"
+  "$PYTHON" -m factlog init --target "$KB" >/dev/null
+  mkdir -p "$KB/sources/sub"; printf 'x\n' > "$KB/sources/sub/report.html"
+  printf '%s\n%s\n' "$H" "A,rel,B,$spelling,confirmed,0.9," > "$KB/facts/candidates.csv"
+  set +e
+  "$PYTHON" -m factlog eject "$spelling" --target "$KB" --purge >/dev/null 2>&1
+  set -e
+  grep -q "^A,rel" "$KB/facts/candidates.csv" \
+    && bad "a cited ref spelled '$spelling' is no longer ejectable" \
+    || ok "a cited ref spelled '$spelling' is still ejectable"
+done
 
 # --- a candidates.csv whose header lacks 'status' is not truncated -------------
 KB="$(mktemp -d)/wiki"
@@ -316,6 +617,66 @@ printf '%s\n%s\n%s\n' "$H" \
 "$PYTHON" -m factlog eject --orphans --target "$KB" >/dev/null 2>&1
 [ ! -f "$KB/runs/sources/a/report.md" ] && ok "orphaned subdir conversion (deleted original) is ejected" || bad "same-basename collision masked the orphan"
 [ -f "$KB/runs/sources/b/report.md" ] && ok "surviving subdir sibling's conversion is kept" || bad "surviving sibling wrongly orphaned"
+
+# --- a #214 path-form header pairs with its mirrored original (no orphan) -----
+# ingest records `source: sub/report.html` for sources/sub/report.html, and the
+# conversion sits in the matching mirrored subdir. Both same-name originals are
+# present, so neither conversion may be scanned as an orphan.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub" "$KB/runs/sources/sub"
+printf '<html>top</html>\n' > "$KB/sources/report.html"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+printf '<!-- ingested-by-factlog | source: report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/report.html.md"
+printf '<!-- ingested-by-factlog | source: sub/report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/sub/report.html.md"
+printf '%s\n%s\n%s\n' "$H" \
+  'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' \
+  'C,rel,D,runs/sources/sub/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "no orphaned sources found" \
+  && [ -f "$KB/runs/sources/report.html.md" ] && [ -f "$KB/runs/sources/sub/report.html.md" ] \
+  && ok "path-form provenance header: mirrored conversions are not orphans" \
+  || bad "path-form header wrongly orphaned a live conversion"
+
+# --- a path-form header on a FLAT conversion still pairs by basename ----------
+# An original named by an explicit path converts flat (no subtree to mirror)
+# while its header can still spell a subdir. Reconstructing the original's
+# location from the header instead of the conversion's own path would look for
+# sources/sub/... under a flat conversion and auto-delete every such file.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub"
+printf '<html>nested</html>\n' > "$KB/sources/sub/report.html"
+printf '<!-- ingested-by-factlog | source: sub/report.html | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/report.html.md"
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/report.html.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+out="$("$PYTHON" -m factlog eject --orphans --target "$KB" 2>&1)"
+printf '%s' "$out" | grep -qF "no orphaned sources found" && [ -f "$KB/runs/sources/report.html.md" ] \
+  && ok "path-form header on a flat conversion pairs by basename (not auto-deleted)" \
+  || bad "flat conversion with a path header wrongly ejected"
+
+# --- a header with no filename component is kept, like an empty one -----------
+# `source: /` carries no original name; it must not be reconstructed into an
+# original named after the conversion's subdir.
+KB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB" >/dev/null
+mkdir -p "$KB/sources/sub" "$KB/runs/sources/sub"
+printf 'PK\003\004\000' > "$KB/sources/sub/real.pdf"
+printf '<!-- ingested-by-factlog | source: / | converter: pandoc | date: 2026-01-01T00:00:00Z -->\nx\n' \
+  > "$KB/runs/sources/sub/slash.md"
+printf '%s\n%s\n' "$H" 'A,rel,B,runs/sources/sub/slash.md,confirmed,0.9,' > "$KB/facts/candidates.csv"
+set +e
+"$PYTHON" -m factlog eject sub --target "$KB" --dry-run >/dev/null 2>&1; rc=$?
+# ...and a root path, which names no file either, must not collide with that
+# sentinel and select the conversion.
+"$PYTHON" -m factlog eject / --target "$KB" --dry-run >/dev/null 2>&1; rc2=$?
+set -e
+[ "$rc" -ne 0 ] && ok "a filename-less header ('source: /') names no original" \
+  || bad "a filename-less header matched the subdir name"
+[ "$rc2" -ne 0 ] && ok "a root path selects nothing (no empty-origin collision)" \
+  || bad "'/' matched a conversion through the empty-origin sentinel"
 
 # --- non-KB path errors -------------------------------------------------------
 set +e; "$PYTHON" -m factlog eject anything --target "$(mktemp -d)" >/dev/null 2>&1; rc=$?; set -e

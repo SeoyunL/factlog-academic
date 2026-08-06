@@ -50,6 +50,77 @@ factlog eject report.pdf --delete-original  # also delete the user's original un
 factlog eject report.pdf --dry-run       # show the planned changes, modify nothing
 ```
 
+### How a source is named — filenames are wide, paths are narrow
+
+| What you name | What it matches |
+|---------|---------|
+| stem `report` | **every** source with that stem, and their conversions |
+| filename `report.html` | **every** source with that filename in any directory, and their conversions |
+| path `sub/report.html`, `./report.html` | only the conversion made from the original at that path under `sources/` |
+| KB-relative ref `sources/sub/report.html` | that original + the conversion made from it |
+| absolute path `/kb/sources/sub/report.html` | the same (it reduces to the KB-relative ref) |
+
+**A bare filename is not a path.** `factlog eject report.html` matches widely by
+design, so it also catches `sources/sub/report.html`. To take only the top-level
+one, name a path — `./report.html` for its conversion alone, or the KB-relative
+ref `sources/report.html` to include the original itself (which is what makes
+`--delete-original` actually delete it). The two table rows above are that
+difference.
+
+Given a path, only the conversion made from *that* path matches — conversions
+mirror the original's subdirectory under `runs/sources/`, so
+`factlog eject sub/report.html` deletes `runs/sources/sub/report.html.md` and
+leaves `runs/sources/report.html.md`, made from a same-name original in another
+directory, alone.
+
+A **relative** path is compared **as written**: no `..` folding and no case
+folding, so `sub/../report.html` and `SUB/report.html` match nothing and exit 1 —
+even on a case-insensitive filesystem. A relative path is not resolved through
+symlinks either, so one spelled through a symlinked directory name
+(`link/report.html`) matches nothing — use the real path (`real/report.html`) or
+an absolute path.
+
+An **absolute** path, by contrast, is reduced to a KB-relative ref by asking the
+filesystem directly: it walks up the path's ancestors looking for one that *is*
+the same directory as `sources/` or the KB root. Because this compares
+directories rather than strings, both of these work:
+
+- a KB whose `sources/` is a symlink — naming the file through its real resolved
+  path reduces to the same ref;
+- a `--target` spelled in a different case from the argument on a
+  case-insensitive filesystem. `Path.resolve()` does not canonicalise case, but
+  the filesystem still reports one directory.
+
+This test is **stricter than the one `ingest` uses.** `ingest` compares resolved
+strings with `relative_to()`, so a case-different `--target` makes it treat a
+file inside `sources/` as outside and write a **flat** conversion whose header
+records only a filename. `eject` resolves that same argument into `sources/`, so
+it cannot pair such a conversion — the header says nothing about which directory
+the original was in. Deleting the original with `--delete-original` would orphan
+it, so `eject` names the conversion that will be left behind and points at
+`factlog eject --orphans` instead of guessing.
+
+To delete the original too (`--delete-original`), name it by its KB-relative ref
+(`sources/sub/report.html`) or by absolute path. A sources-relative path
+(`sub/report.html`) names the **conversion** made from it — in that case
+`--delete-original` reports 0 originals *and* prints the spelling that would
+include one.
+
+An original ingested from outside `sources/` (e.g.
+`factlog ingest /elsewhere/report.html`) has no subtree to mirror, so its
+conversion is written flat under `runs/sources/`. Naming that original by path
+matches the flat conversion only: a conversion in a subdirectory cannot have come
+from it.
+
+**Unless `sources/` already holds an original of the same name, at any depth —
+then nothing matches and it exits 1.** `ingest` records only the filename for an
+original outside `sources/`, so a flat conversion cannot say *which* file of that
+name it came from. If the KB holds one itself, that is the answer; `eject`
+deletes files without a confirmation prompt, so it refuses the ambiguous request
+instead. A competing original in a subdirectory (`sources/sub/report.html`)
+counts just as much as a top-level one — this is the same test `--orphans` uses
+to decide whether a flat conversion is paired.
+
 ### Removing a single fact (`--fact`)
 
 When a source is fine but one extracted fact is wrong, retire just that fact —

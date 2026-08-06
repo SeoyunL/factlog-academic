@@ -57,6 +57,8 @@ from common import (  # noqa: E402
 # 100억, 제3호). Advisory only — a human confirms before declaring the relation;
 # a few false positives (e.g. a named concept like '4차 산업혁명') are acceptable
 # in exchange for not missing the motivating value forms.
+# Deliberately looser than literal_types' ASCII-only contract: `\d` still matches
+# full-width digits here, so a rejected value stays visible to the audit (#331).
 _LITERAL_RE = re.compile(
     r"^\d{4}[.\-/]\d{1,2}([.\-/]\d{1,2})?$"                       # date
     r"|^\d[\d,]*(\.\d+)?$"                                        # number / comma / decimal

@@ -19,6 +19,19 @@ The deterministic scripts the skill calls live here (migrated in plan T1).
 The skill invokes these via `${CLAUDE_PLUGIN_ROOT}/tools/<script>.py`. They are the
 verifiable anchor — never replaced by model judgment.
 
+## KB root resolution
+
+Every script here resolves its KB root with the same precedence as the CLI:
+
+```
+--wiki / --target flag  >  $FACTLOG_ROOT  >  active-KB config  >  cwd
+```
+
+`validate.py` takes the root as a positional argument instead of a flag; the
+positional occupies the first slot. The active-KB config is what `factlog use
+<kb>` / `factlog init --target <kb>` records, so with no flag and no
+`$FACTLOG_ROOT` these scripts operate on the active KB from any directory.
+
 ## Intentionally absent scripts
 
 `02_translate_question.py` and `04_self_correct.py` from the workshop source

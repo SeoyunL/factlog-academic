@@ -20,6 +20,64 @@ factlog는 두 가지 서로 다른 메커니즘으로 신선도(freshness)를 �
 이 두 단계는 상호 보완적입니다. 훅은 결정론적 빈틈을 메우고, SKILL 규율은
 엔지니어링적 강제가 불가능한 서술(narration) 계층을 담당합니다.
 
+> **기존 KB 를 쓰고 있었다면 한 번은 `/factlog check` 가 필요합니다.** 이전
+> 버전에서는 훅이 Claude Code 의 실제 페이로드를 읽지 못해 이 거부가 한 번도
+> 발동하지 않았습니다. 이번 수정 이후로는, `facts/accepted.dl` 이나
+> `facts/query.dl` 이 이미 있는데 `facts/logic_report.txt` 가 없거나 낡은 KB
+> 에서는 `/factlog check` 로 리포트를 먼저 갱신해야 엔진 입력을 편집할 수
+> 있습니다.
+
+훅은 신선도 외에 **한 가지 사유로 더** 거부합니다. 훅은 Claude Code 가 보내는
+도구 페이로드에서 대상 경로를 읽어 판정하는데, `Write`/`Edit` 호출이면서
+페이로드의 `tool_input` 이 객체로는 들어왔는데 그 안에서도 최상위에서도 읽을 수
+있는 경로 키가 없으면 — 즉 그 쓰기가 엔진 입력을 겨냥하지 *않는다*는 것을 보일 수
+없으면 — 통과시키지 않고 거부합니다. 빈 문자열 `file_path` 도 여기 해당합니다.
+
+이 조건은 좁습니다. `tool_input` 이라는 봉투 키 **자체가** 없어지거나 이름이
+바뀌는 경우는 여기 들어오지 않고 통과합니다 — 그 형태의 변화는 모든 세션의 모든
+`Write`/`Edit` 를 한꺼번에 때리므로, 거부하면 게이트가 아니라 전역 쓰기 장애가
+되기 때문입니다. 대신 그 갈래는 "검사를 건너뛰었다" 는 알림을 남깁니다.
+
+`FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1` 은 위의 거부 **한 갈래만** 면제합니다.
+이 변수로 **신선도 거부도 Python 부재 거부도 풀리지 않습니다.** 이건 세션 안에서
+모델이 스스로 할 수 있는 일이 아닙니다 — 훅은 Claude Code 프로세스의 환경을
+물려받고 그 환경은 Claude Code 가 시작될 때 고정되므로, **사람이** 설정한 뒤 새
+세션을 시작해야 합니다. `settings.json` 의 `env` 블록에 넣거나 Claude Code 를
+띄우기 전에 export 하세요. 그리고 읽지 못한 페이로드 형태를 업스트림에 알려
+주세요.
+
+### 리포트를 만들 수 없는 KB 에서 거부가 풀리지 않을 때
+
+신선도 거부 메시지는 `/factlog check` 를 안내하지만, `/factlog check` 자체가
+실패하는 KB 에서는 리포트가 아예 생성되지 않습니다. 예를 들어
+`facts/query.dl` 은 있는데 `facts/accepted.dl` 이 없으면 로직 체크가 엔진을
+띄우기 전에 멈추고, `facts/logic_report.txt` 를 쓰지 못한 채 끝납니다. 그러면
+게이트는 계속 거부하고 안내는 계속 같은 곳을 가리킵니다.
+
+훅은 `Write` 와 `Edit` 에만 걸리므로 복구는 **Bash 로** 합니다. 컴파일을 먼저
+돌려 `facts/accepted.dl` 을 만들면 풀립니다. 단 `facts/candidates.csv` 가 없으면
+컴파일 자체가 `missing facts/candidates.csv` 로 멈추므로, 없을 때만 헤더 한 줄을
+먼저 만들어 줍니다. `factlog init` 은 이 파일을 다시 만들어 주지 않습니다.
+
+```bash
+cd <KB 루트>
+[ -f facts/candidates.csv ] || \
+  echo 'subject,relation,object,source,status,confidence,note' > facts/candidates.csv
+"${CLAUDE_PLUGIN_ROOT}"/tools/factlog_python.sh "${CLAUDE_PLUGIN_ROOT}"/tools/compile_facts.py
+"${CLAUDE_PLUGIN_ROOT}"/tools/factlog_python.sh "${CLAUDE_PLUGIN_ROOT}"/tools/run_logic_check.py
+```
+
+빈 `candidates.csv` 로 컴파일하면 사실이 0건인 `accepted.dl` 이 만들어집니다.
+그것으로 로직 체크가 돌고 리포트가 생겨 거부가 풀립니다 — 기존 사실을 지우지
+않습니다. 이미 `candidates.csv` 가 있다면 그대로 컴파일됩니다.
+
+작성 중이던 질의를 버려도 된다면 `facts/query.dl` 을 다른 이름으로 옮기는 것도
+방법입니다. 엔진 입력이 없으면 거부의 전제가 사라집니다.
+
+로직 체크가 다른 이유로 실패한다면 그 오류를 먼저 해결해야 합니다. 게이트를
+우회해 엔진 입력을 고치는 것은 이 거부가 막으려는 바로 그 동작이므로, 탈출구는
+두지 않았습니다.
+
 ### 규모와 성능
 
 **성능 때문에 KB를 비울 필요는 없습니다.** 로직 체크 비용은 총 사실 수보다

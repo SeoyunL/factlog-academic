@@ -115,7 +115,7 @@ class TestQueryFileFallbackText:
         # nothing — which is not the same as the file being absent.
         report = self._report(tmp_path, monkeypatch, "path(X, Y)?\n")
         assert "- no facts/query.dl found" not in report
-        assert "- facts/query.dl: 1 queries, none produced a result line" in report
+        assert "- no answerable queries in facts/query.dl (see Errors)" in report
 
     def test_missing_file_still_says_so(self, tmp_path, monkeypatch, attrs):
         # CONTROL — the original message survives for the case it describes.
@@ -125,9 +125,12 @@ class TestQueryFileFallbackText:
     def test_comment_only_file_is_not_reported_as_missing(
         self, tmp_path, monkeypatch, attrs
     ):
+        # #348 keys the fallback on `query_lines()`, so a comment-only file — which
+        # has no query lines either — was still called missing. The condition is
+        # file existence; the wording is #348's.
         report = self._report(tmp_path, monkeypatch, "// only a comment\n")
         assert "- no facts/query.dl found" not in report
-        assert "- facts/query.dl: 0 queries, none produced a result line" in report
+        assert "- no answerable queries in facts/query.dl (see Errors)" in report
 
 
 class TestWarningFilterTargetsTheRightWarnings:
