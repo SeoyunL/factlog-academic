@@ -236,3 +236,110 @@ class TestUnitNameFoldDoesNotDisturbTheDigitPolicy:
         note = check_conflicts.non_ascii_digit_note([_nfd("１００억"), _nfd("200억")], spec)
         assert note is not None
         assert "\\uff11\\uff10\\uff10" in "\n".join(note)
+
+
+class TestTheNoteSurvivesTheFoldClassRepresentativeList:
+    """``main()`` hands the note **fold-class representatives**, not raw objects.
+
+    On main, ``conflicts[key]`` was the list of distinct raw objects and
+    ``non_ascii_digit_note`` was written against that. #325 changed it: a group
+    is now keyed on the fold, and the CONFLICT line — hence the note's input —
+    carries one *representative* per group. Coverage is unaffected only because
+    NFC never folds fullwidth onto halfwidth (that is NFKC), so a value carrying
+    non-ASCII digits is always alone in its fold class and is therefore always
+    its own representative. That is an argument; these are the measurements.
+
+    These run through ``main()`` rather than calling the note directly, because
+    the substitution being checked happens in ``main()`` and every existing
+    #331/#336 test calls the note with a hand-built list.
+    """
+
+    def _run(self, monkeypatch, capsys, facts, single_valued, typed):
+        monkeypatch.setattr(check_conflicts, "ensure_dirs", lambda: None)
+        monkeypatch.setattr(check_conflicts, "load_facts", lambda: facts)
+        monkeypatch.setattr(check_conflicts, "single_valued_relations", lambda: single_valued)
+        monkeypatch.setattr(check_conflicts, "typed_relations", lambda: typed)
+        monkeypatch.setattr(check_conflicts, "relation_aliases", lambda: {})
+        rc = check_conflicts.main([])
+        return rc, capsys.readouterr().err
+
+    def _fact(self, obj, src):
+        return {
+            "subject": "Acme", "relation": "매출", "object": obj, "source": src,
+            "status": "confirmed", "confidence": "0.9", "note": "",
+        }
+
+    def test_both_notes_fire_together_in_the_fixed_order(self, monkeypatch, capsys):
+        # The case the coverage argument turns on: ONE fold class holding two
+        # spellings of 100억, plus a SEPARATE fullwidth-digit value. The spelling
+        # disclosure describes the grouping, the digit note qualifies the repair
+        # advice, and both must be present.
+        facts = [
+            self._fact("100억", "sources/a.md"),
+            self._fact(_nfd("100억"), "sources/b.md"),
+            self._fact("１００억", "sources/c.md"),
+        ]
+        rc, err = self._run(monkeypatch, capsys, facts, {"매출"},
+                            {"매출": common.TypedRelSpec("amount", "revenue")})
+        assert rc == 1
+        i_spelling = err.find("spellings:")
+        i_digits = err.find("does not parse")
+        i_advice = err.find("Resolve by marking")
+        assert -1 < i_spelling < i_digits < i_advice, err
+
+    def test_the_note_names_the_offender_not_the_representative(self, monkeypatch, capsys):
+        # The substitution risk stated concretely: if the representative stood in
+        # for the offender the escapes would be 100억's, and the reader would be
+        # pointed at a value that is perfectly readable.
+        facts = [
+            self._fact("100억", "sources/a.md"),
+            self._fact(_nfd("100억"), "sources/b.md"),
+            self._fact("１００억", "sources/c.md"),
+        ]
+        _, err = self._run(monkeypatch, capsys, facts, {"매출"},
+                           {"매출": common.TypedRelSpec("amount", "revenue")})
+        assert "\\uff11\\uff10\\uff10억" in err
+
+    def test_a_full_width_value_is_its_own_fold_class(self, monkeypatch, capsys):
+        # The mechanism the argument rests on, asserted directly rather than
+        # inferred from the note's output.
+        facts = [
+            self._fact("100억", "sources/a.md"),
+            self._fact(_nfd("100억"), "sources/b.md"),
+            self._fact("１００억", "sources/c.md"),
+        ]
+        scan = check_conflicts.collect_conflicts(
+            facts, {"매출"}, {"매출": common.TypedRelSpec("amount", "revenue")}
+        )
+        variants = scan.object_variants[("Acme", "매출")]
+        assert variants["１００억"] == ["１００억"]
+        assert scan.conflicts[("Acme", "매출")] == ["100억", "１００억"]
+
+    def test_digit_note_does_not_arm_the_mixed_normalization_summary(self, monkeypatch, capsys):
+        # `any_mixed` must stay driven by the spelling block alone. A plain-NFC KB
+        # with a fullwidth offender has no mixed spellings at all, so the closing
+        # normalization paragraph would be a false statement about the KB.
+        facts = [self._fact("100억", "sources/a.md"), self._fact("１００억", "sources/b.md")]
+        _, err = self._run(monkeypatch, capsys, facts, {"매출"},
+                           {"매출": common.TypedRelSpec("amount", "revenue")})
+        assert "does not parse" in err
+        assert "more than one Unicode normalization form" not in err
+
+    def test_second_spec_probe_is_still_load_bearing(self, monkeypatch, capsys):
+        # main's `typed.get(relation) or typed.get(NFC(relation))`. #325 folded
+        # relation *membership*, not this dict lookup: `typed` is keyed NFC by
+        # _parse_typed_relations while the conflict key keeps the row's verbatim
+        # (NFD) name, so the first probe still misses and the second still hits.
+        # Dropping the second probe leaves spec None, the spec gate suppresses the
+        # note, and the reader loses it entirely — measured, and previously
+        # unpinned: the whole suite stayed green without it.
+        nfd_relation = _nfd("매출")
+        facts = [
+            {"subject": "Acme", "relation": nfd_relation, "object": o,
+             "source": s, "status": "confirmed", "confidence": "0.9", "note": ""}
+            for o, s in (("100억", "sources/a.md"), ("１００억", "sources/b.md"))
+        ]
+        _, err = self._run(monkeypatch, capsys, facts, {nfd_relation},
+                           {"매출": common.TypedRelSpec("amount", "revenue")})
+        assert "does not parse" in err
+        assert "\\uff11\\uff10\\uff10억" in err
