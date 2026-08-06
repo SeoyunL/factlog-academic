@@ -286,3 +286,116 @@ class TestReservedAttributePredicates:
         message = str(excinfo.value)
         assert "entity_node" in message
         assert "my_entity_node" in message  # actionable alternative
+
+
+# ---------------------------------------------------------------------------
+# #329 round 3 — comments are cut to end of line, not dropped whole-line
+# ---------------------------------------------------------------------------
+
+_RESERVED = ["canonical", "attr_rel", "entity_node"]
+_HEADS = {
+    "canonical": 'canonical(X, "결론", O) :- relation(X, "r", O).',
+    "attr_rel": 'attr_rel(R) :- relation(S, R, O), R = "정식_운영".',
+    "entity_node": "entity_node(O) :- relation(S, R, O).",
+}
+
+
+class TestInlineCommentsDoNotDisableTheGuard:
+    """A comment at the END of a line used to survive comment stripping, because
+    the filter dropped only lines that START with `//`/`#`. `_split_policy_statements`
+    then pushed the surviving comment onto the FRONT of the next statement, and the
+    head tokenizer (`\\s*([A-Za-z_]\\w*)\\s*\\(`) failed on the `/` — `m is None`, so
+    the statement passed UNCHECKED. Measured on the previous head, in a KB with
+    `정식_운영` declared an attribute relation:
+
+        attr_rel head, no comment                -> FactlogError, rc=1
+        same, with `// note` ending the line before ->
+            engine   [('갑봇','2030.1'), ('갑봇','을서비스'), ('을서비스','2030.1')]
+            renderer [('갑봇','을서비스')]                          rc=0, silent
+
+    i.e. one end-of-line comment — the most ordinary formatting there is in a
+    Datalog file — silently restored the engine/renderer divergence #329 removes.
+    The flaw predates #329: `canonical` was bypassed the same way on main.
+    """
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("comment", ["//", "#"])
+    def test_reserved_head_after_an_inline_comment_is_still_rejected(self, name, comment):
+        policy = f'u(X, "n") :- relation(X, R, O).  {comment} note\n{_HEADS[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_reserved_head_after_a_tab_indented_comment_is_still_rejected(self, name):
+        policy = f'u(X, "n") :- relation(X, R, O).\t// note\n{_HEADS[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_reserved_head_after_a_comment_containing_a_dot_is_rejected(self, name):
+        # The dot inside the comment is a second evasion route: it terminates a
+        # statement early, so the comment tail is all that reaches the tokenizer.
+        policy = f'u(X, "n") :- relation(X, R, O). // v1.0 note\n{_HEADS[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_reserved_head_on_the_same_line_after_a_comment_start_is_ignored(self, name):
+        # The converse direction: text after `//` is NOT policy, so a reserved head
+        # written inside a comment must NOT be rejected.
+        policy = f'u(X, "n") :- relation(X, R, O).  // {_HEADS[name]}\n'
+        fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    @pytest.mark.parametrize("comment", ["//", "#"])
+    def test_decl_of_a_reserved_name_inside_an_inline_comment_is_allowed(self, name, comment):
+        # The `.decl` scan runs on the whole text, so an inline comment explaining
+        # WHY a name was avoided used to be rejected as a real re-declaration —
+        # something a careful policy author actually writes. The whole-line form
+        # was already accepted; the two must agree.
+        policy = (
+            f'u(X, "n") :- relation(X, R, O).  {comment} .decl {name}(a: symbol) 은 금지\n'
+        )
+        fcommon._assert_no_reserved_head(policy)
+
+    def test_double_slash_inside_a_string_literal_is_not_a_comment(self):
+        # CONTROL for the fix's ordering: quoted strings must be removed BEFORE
+        # comments are cut, or a URL in a reason literal would swallow the rest of
+        # the file and hide every head after it.
+        policy = (
+            'u(X, "http://example.com/a") :- relation(X, R, O).\n'
+            'attr_rel(R) :- relation(S, R, O).\n'
+        )
+        with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    def test_a_hash_inside_a_string_literal_is_not_a_comment(self):
+        policy = (
+            'u(X, "tag#1") :- relation(X, R, O).\n'
+            'entity_node(O) :- relation(S, R, O).\n'
+        )
+        with pytest.raises(fcommon.FactlogError, match="entity_node is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    def test_an_unpaired_quote_inside_a_comment_does_not_hide_a_later_head(self):
+        # The other ordering hazard: a lone `"` in a comment must not pair with a
+        # quote further down and delete the policy in between.
+        policy = (
+            'u(X, "n") :- relation(X, R, O).  // don"t use the reserved names\n'
+            'attr_rel(R) :- relation(S, R, O), R = "정식_운영".\n'
+        )
+        with pytest.raises(fcommon.FactlogError, match="attr_rel is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    def test_inline_comment_does_not_reject_a_legitimate_policy(self, tmp_path):
+        # CONTROL through the loader: ordinary commented policy still loads.
+        dl = _make_kb(
+            tmp_path,
+            dl_text="// generated\n.decl conflict(entity: symbol, reason: symbol)\n",
+            extra_text=(
+                'conflict(X, "r") :- attr_rel(R), relation(X, R, _).  // attr_rel 은 몸통에서만\n'
+                'note(X, "n") :- entity_node(X).  # entity_node 도 마찬가지\n'
+            ),
+        )
+        result = fcommon._load_logic_policy_from(dl)
+        assert "attr_rel" in result

@@ -1186,7 +1186,9 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
 
     Detection strategy: split the policy into logical STATEMENTS (a clause up to its
     terminating ``.``), stripping quoted strings first so ``"canonical("`` inside a
-    reason literal is not mistaken for a predicate call.  Then tokenize each
+    reason literal is not mistaken for a predicate call, and cutting comments to the
+    end of their line — an END-of-line comment left standing disabled this check
+    outright (see the ordering note below).  Then tokenize each
     statement's HEAD — the predicate name left of ``:-``, or the whole clause for a
     bare fact — and reject it only when that name is exactly a reserved one.  A
     substring search was wrong in BOTH directions and this replaces it: ``canonical
@@ -1203,20 +1205,28 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
     Raises :class:`FactlogError` on first offending line with an actionable message.
     """
     names = set(_RESERVED_POLICY_HEADS) if reserved is None else reserved
-    # Drop comment lines, strip quoted literals, then split into logical
-    # STATEMENTS on clause-terminating '.' rather than per physical line. A period
-    # terminates a clause unless it opens a '.decl'-style directive (dot followed
-    # by a letter at a token start) or sits inside a float (dot between digits).
-    # Per-line tracking mis-classified a reserved head/fact that shares a physical
-    # line with a preceding rule's terminator as an in-body reference (#261); a
-    # statement is a full clause, so reserved-name-left-of-neck (or no neck at all)
-    # is unambiguously a head/fact.
-    kept = [
-        line
-        for line in policy_text.splitlines()
-        if line.strip() and not line.strip().startswith(("//", "#"))
-    ]
-    bare = re.sub(r'"[^"]*"', "", "\n".join(kept))
+    # Strip quoted literals and comments, then split into logical STATEMENTS on
+    # clause-terminating '.' rather than per physical line. A period terminates a
+    # clause unless it opens a '.decl'-style directive (dot followed by a letter at
+    # a token start) or sits inside a float (dot between digits). Per-line tracking
+    # mis-classified a reserved head/fact that shares a physical line with a
+    # preceding rule's terminator as an in-body reference (#261); a statement is a
+    # full clause, so reserved-name-left-of-neck (or no neck at all) is
+    # unambiguously a head/fact.
+    #
+    # ONE pass, left to right, alternating literal | comment, so each construct
+    # ends the other. Dropping whole comment LINES instead was wrong in both
+    # directions (#329 round 3): an END-of-line comment survived, `_split_policy_
+    # statements` pushed it onto the front of the NEXT statement, and the head
+    # tokenizer below failed on the '/' — m is None, so a reserved head one line
+    # after `foo(X). // note` passed UNCHECKED with rc=0. Conversely the `.decl`
+    # scan ran on text that still held comments, so `// .decl entity_node(...) 은
+    # 금지` — an author documenting why a name was avoided — was rejected as a real
+    # re-declaration. Ordering is load-bearing on both sides: a literal is consumed
+    # whole so `"http://x"` is not read as a comment, and a comment is consumed to
+    # end of line so a lone `"` in prose cannot pair with a quote further down and
+    # delete the policy in between.
+    bare = re.sub(r'"[^"]*"|(?://|#)[^\n]*', "", policy_text)
     # A `.decl <name>(...)` directive has no clause-terminating '.', so it merges into
     # the statement that follows it and would hide that statement's real head from the
     # tokenizer below. Reject a reserved re-declaration first, then strip every
