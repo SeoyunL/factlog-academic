@@ -1,0 +1,33 @@
+Logic Check Report
+==================
+engine: wirelog / pyrewire
+input: facts/accepted.dl
+policy: policy/logic-policy.dl
+engine facts: 11
+review facts outside engine input: 0
+policy findings: 7
+errors: 0
+warnings: 1
+
+Policy Findings:
+- conflict: Orbit (headcount_at_least_120)
+- conflict: Orbit (launched_after_2031)
+- conflict: Orbit (ranked_top_3)
+- conflict: Orbit (valued_at_100eok)
+- requires_review: Beacon (alias_check)
+- requires_review: Orbit (alias_check)
+- requires_review: Orbit (maintainer_check)
+
+Warnings:
+- query path argument is not an accepted entity: 2031-02-01
+
+Policy evaluation:
+- conflict: 4 rows
+- requires_review: 3 rows
+
+Query evaluation:
+- path Orbit -> Vault: Orbit -> Beacon -> Ledger -> Vault
+- path Orbit -> 2031-02-01: (not evaluated — not an accepted entity: 2031-02-01)
+- count results (query: count("Orbit", "depends_on")?): 1 (distinct objects)
+- relation results: 1 rows; Beacon, owned_by, Cyra
+- conflict results: 4 rows; X=Orbit, Y=headcount_at_least_120; X=Orbit, Y=launched_after_2031; X=Orbit, Y=ranked_top_3; X=Orbit, Y=valued_at_100eok

@@ -1,0 +1,3 @@
+check_conflicts: 1 conflict(s) found
+  CONFLICT: single-valued 'maintained_by' (canonical; incl. surface variants) on 'Orbit' has 2 values: Aria, Bran
+  Resolve by marking the outdated row(s) status='superseded' in facts/candidates.csv, then re-run.

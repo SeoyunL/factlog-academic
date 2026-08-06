@@ -1,0 +1,12 @@
+// generated from policy/logic-policy.md
+// run tools/generate_logic_policy.py to regenerate
+
+.decl requires_review(entity: symbol, reason: symbol)
+
+// alias_check
+requires_review(X, "alias_check") :-
+  canonical(X, "maintained_by", _).
+
+// maintainer_check
+requires_review(X, "maintainer_check") :-
+  relation(X, "maintained_by", _).

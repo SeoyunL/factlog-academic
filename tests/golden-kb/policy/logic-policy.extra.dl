@@ -1,0 +1,21 @@
+.decl conflict(entity: symbol, reason: symbol)
+
+// One rule per declared type. The side-relations (release_date, headcount_value,
+// rank_value, valuation_won) are what policy/typed-relations.md projects; each
+// threshold is tight against the single fact that satisfies it, so a change in
+// how a literal is parsed or scaled moves the finding out of the report.
+conflict(X, "launched_after_2031") :-
+  release_date(X, V),
+  V >= 20310101.
+
+conflict(X, "headcount_at_least_120") :-
+  headcount_value(X, V),
+  V >= 120000.
+
+conflict(X, "ranked_top_3") :-
+  rank_value(X, V),
+  V <= 3.
+
+conflict(X, "valued_at_100eok") :-
+  valuation_won(X, V),
+  V >= 10000000000.
