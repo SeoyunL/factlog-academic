@@ -578,6 +578,19 @@ def main() -> None:
         # FactlogError on stderr and exits 1, anything else keeps its traceback.
         # ensure_dirs is deliberately OUTSIDE this — "not a factlog KB root" has
         # no facts/ to write into, and is not a statement about the engine.
+        #
+        # THE GUARANTEE IS "an exception out of build_report_text", NOT "any run
+        # in which the engine could not start". A run that dies before reaching
+        # this try still leaves the previous report standing, and one such path
+        # is a real engine failure rather than a hypothetical: `common` guards
+        # its `import pyrewire` with `except ImportError` ONLY, so an engine
+        # whose import fails some other way — a broken native extension raising
+        # OSError from dlopen — propagates out of the `from common import ...`
+        # above, at module import time, where no handler here can run. Measured:
+        # no report is written, and the traceback is the only output. Widening
+        # that guard belongs next to it in factlog/common.py, not here; catching
+        # it at this module's import would mean rebuilding FACTS_DIR without the
+        # module that defines it.
         _write_report(engine_failure_report(exc))
         raise
     _write_report(text)
