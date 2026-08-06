@@ -130,9 +130,12 @@ def main(argv: list[str] | None = None) -> int:
             # top and would diverge from check_conflicts._fold.
             pair = (unicodedata.normalize("NFC", row["subject"]), row["relation"])
             obj = unicodedata.normalize("NFC", row["object"])
-            # Sources are re-counted here rather than read out of `counts`, which
-            # is keyed on the raw triple: summing two spellings' counts would
-            # double-count a source that backs both.
+            # Sources are collected here rather than read out of `counts`
+            # because this loop walks only the single-valued rows and wants the
+            # set, not the total. Both partitions agree — `counts` is keyed on
+            # `engine_atom_key`, and (pair, obj) above spells out the same
+            # (NFC subject, raw relation, NFC object) — so a source backing two
+            # spellings of one value counts once on either path.
             competing.setdefault(pair, {}).setdefault(obj, set()).add(row["source"])
             subject_spellings.setdefault(pair, set()).add(row["subject"])
             object_spellings.setdefault(pair, {}).setdefault(obj, set()).add(row["object"])
