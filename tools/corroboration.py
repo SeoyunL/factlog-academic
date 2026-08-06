@@ -119,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
         # gate exits 0. Closing that needs the checker's grouping shared rather
         # than reimplemented — a follow-up, since `tools/` is not importable from
         # the installed package (pyproject packages = ["factlog"]).
+        #
+        # That follow-up owns an input #325 WIDENED, not only inherited: an
+        # NFD-authored typed literal, where the gate folds the object before
+        # parsing and this view does not. See the same note in
+        # `factlog/cli.py`'s status block for the measured case.
         sv_folded = folded_relation_names(single_valued)
         for row in engine_facts(facts):
             if fold_relation_name(row["relation"]) not in sv_folded:

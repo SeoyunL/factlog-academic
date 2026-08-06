@@ -1796,6 +1796,18 @@ def cmd_status(args: argparse.Namespace) -> int:
         # one to check_conflicts. Closing that needs the checker's grouping
         # shared rather than reimplemented — a follow-up, since `tools/` is not
         # importable from the installed package (pyproject packages = ["factlog"]).
+        #
+        # FOLLOW-UP, and note that #325 WIDENED this divergence rather than only
+        # inheriting it. An NFD-authored typed literal (`매출` ordinal, Acme =
+        # NFD('제3호') and '3위') agreed on main — status 1, gate 1 — and now
+        # reads status 1, gate 0, because the gate folds the object before
+        # parsing and this count does not. The two then give OPPOSITE repairs:
+        # "resolve via superseded" here, "unify the spelling in sources/ and
+        # re-collect" from the gate's disclosure. The gate is the authority
+        # (`finalize` calls it) and this message points the reader at it, and the
+        # divergence direction is over-reporting here, which is why it is not
+        # treated as a release blocker — but the follow-up that shares the
+        # grouping owns this input specifically.
         sv_folded = common.folded_relation_names(sv)
         for r in engine_rows:
             if common.fold_relation_name(r["relation"]) in sv_folded:
