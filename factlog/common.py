@@ -1827,7 +1827,7 @@ def run_wirelog() -> dict[str, set[tuple[str, ...]]]:
     specs = typed_relations()
     # attr_rel/1 is EDB, so it must be populated before the engine runs: it is what
     # keeps a declared literal out of entity_node — and therefore out of path (#329).
-    # "" when nothing is declared, leaving the program byte-identical to before.
+    # "" when nothing is declared, leaving the appended block empty.
     base_program = (
         WIRELOG_PROGRAM
         + attribute_relation_program()
