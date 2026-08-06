@@ -1307,12 +1307,15 @@ def _assert_no_reserved_head(policy_text: str, reserved: set[str] | None = None)
         # else. Scanning the whole segment instead rejected legal policy — the
         # body reference in `p(X) :- canonical(X,_,_).` sits left of a neck too,
         # once a mis-split has glued the next clause on, and #227 exists precisely
-        # to allow that position. This formulation cannot make that mistake: a
-        # body reference is never the last atom before a neck unless it really is
-        # a head.
+        # to allow that position. Reading only the last atom is what separates the
+        # two: a body reference reaches that position only when another atom does
+        # not stand between it and the neck.
         #
-        # A statement with no neck at all is a bare fact, already covered by the
-        # `re.match` above, and contributes no segment here.
+        # A statement with no neck at all is a bare fact, handled by the
+        # `re.match` above, and contributes no segment here — which is why a bare
+        # reserved fact absorbed into a preceding statement was invisible until
+        # `_split_policy_statements` stopped absorbing it (#358). This scan is not
+        # the thing that catches that shape; correct splitting is.
         segments = statement.split(":-")
         for segment in segments[:-1]:
             atoms = re.findall(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", segment)
@@ -1360,8 +1363,22 @@ def _split_policy_statements(text: str) -> list[str]:
     Matching the directive KEYWORD is the whole point. "A dot at a token start
     followed by a letter" is also what a perfectly ordinary terminator written with
     a space before it looks like, so that heuristic silently glued the next clause
-    onto the current one — and the absorption scan then read the first clause's
-    BODY reference as a head, rejecting policy the engine compiles (#329 round 3)."""
+    onto the current one. That leaked in BOTH directions, and the keyword match is
+    what closes them together (#329 round 3, #358):
+
+    * the absorption scan read the first clause's BODY reference as a head,
+      rejecting policy the engine compiles;
+    * a bare reserved FACT absorbed into the previous statement was never
+      examined, and the engine HONOURS it. ``p(X) :- relation(X,_,_)
+      .attr_rel("참조").`` loaded clean and moved the report's
+      ``- path 갑봇 -> 병문서`` from a derived path to ``(not found)`` at rc=0 with
+      no error; the identical fact on its own line has always been refused.
+      Measured on `main` for ``canonical`` too, where the same one space turned
+      ``policy findings: 0`` into a finding about an entity in no fact (#358).
+
+    The adjacency is not always as authored: stripping a quoted literal makes it,
+    ``O = "v1.0".canonical(`` becoming ``O = .canonical(``, so this cannot be
+    handled by looking at the source text alone."""
     statements: list[str] = []
     buf: list[str] = []
     for i, ch in enumerate(text):
