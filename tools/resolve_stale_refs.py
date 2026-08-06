@@ -1,14 +1,32 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Remove stale source references from wiki pages after human review."""
+"""Remove stale source references from wiki pages after human review.
+
+Usage:
+    python3 resolve_stale_refs.py [--wiki <kb>] [--apply]
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+
+# Resolve the KB root once, up front, so --wiki's default is the shared
+# resolver's answer ($FACTLOG_ROOT > active-KB config > cwd) rather than the
+# literal "." this script used to hard-code (#330). This module imports no
+# path-binding helpers, so the export is for the --wiki default alone.
+import factlog_config  # noqa: E402
+
+os.environ["FACTLOG_ROOT"] = factlog_config.resolve_root_from_argv("--wiki")
 
 
 # The source group accepts the optional runs/ prefix because validate.py records
@@ -60,7 +78,11 @@ def main() -> int:
             except (AttributeError, ValueError, OSError):
                 pass
     parser = argparse.ArgumentParser(description="Remove stale source references listed in decisions/open-questions.md.")
-    parser.add_argument("--wiki", default=".", help="wiki root, default: current directory")
+    parser.add_argument(
+        "--wiki",
+        default=os.environ.get("FACTLOG_ROOT", "."),
+        help="KB root, default: $FACTLOG_ROOT, else the active KB, else the current directory",
+    )
     parser.add_argument("--apply", action="store_true", help="write changes; default only prints what would change")
     args = parser.parse_args()
 

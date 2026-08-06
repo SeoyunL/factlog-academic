@@ -82,8 +82,21 @@ KB2="$(mktemp -d)/wiki"
 new_conflict_kb "$KB2"
 mkdir -p "$KB2/facts"
 printf 'relation("ProjectX", "owner", "Alice").\nrelation("ProjectX", "owner", "Bob").\n' > "$KB2/facts/accepted.dl"
-rc2=0; "$PYTHON" "$FINALIZE" --target "$KB2" >/dev/null 2>&1 || rc2=$?
+rc2=0; out2="$("$PYTHON" "$FINALIZE" --target "$KB2" 2>&1)" || rc2=$?
 [ "$rc2" -ne 0 ] && ok "poisoned KB: finalize still fails on the conflict" || bad "poisoned KB: finalize exited 0"
+# The removal is not a detail the user can be left to discover, so the message
+# must name it. This is the ONLY branch where accepted.dl actually existed to be
+# removed. docs/reference/typed-relations.md documents the same consequence.
+#
+# Pin the REMOVAL, not how the message describes the consequence for /factlog
+# ask. That command has two routes (docs/reference/slash-commands.md), and with
+# accepted.dl gone the wiki-exploration route still returns an
+# `UNVERIFIED — wiki exploration` block whose excerpts can quote both sides of the
+# unresolved conflict; what is actually lost is the VERIFIED answer. The removal
+# is the invariant this file exists for, so that is what gets pinned.
+printf '%s' "$out2" | grep -qF "accepted.dl was removed" \
+  && ok "poisoned KB: message states the existing accepted.dl was removed" \
+  || bad "poisoned KB: removal message does not state that accepted.dl was removed"
 if accepted_has_both "$KB2"; then
   bad "#212: pre-poisoned accepted.dl was left intact (not healed)"
 else

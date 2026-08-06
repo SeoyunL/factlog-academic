@@ -75,7 +75,9 @@ from common import (  # noqa: E402
     canonical_variants_of,
     is_quoted_string,
     is_variable,
+    query_arity_error,
     query_args,
+    query_shape_error,
     classify_query,
     dependency_graph,
     dependency_path,
@@ -420,6 +422,80 @@ def _reachable_pairs(facts: list[dict[str, str]]) -> set[tuple[str, str]]:
     return pairs
 
 
+def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> bool:
+    """True when *row* satisfies every quoted constant *args* pins, by position.
+
+    A quoted constant is a FILTER, at whatever position it appears. This branch
+    used to test args[0] only, so `pred(E, "stale")?` returned the whole extent
+    and `pred("Carol", "low_conf")?` returned Carol's row under a reason that is
+    not hers — a fabricated positive for the exact pair the user asked about.
+
+    A row shorter than the pinned position cannot satisfy the constant, so the
+    0-arity row an engine may emit is dropped from a constant-pinned query (an
+    all-variable query still returns it).
+
+    Comparison is RAW (`arg_value` only), deliberately not `canonical_value`
+    which the relation branch uses: it mirrors run_logic_check's report path
+    exactly so `ask` and the report cannot diverge, which is the property
+    tests/unit/test_policy_query_filter.py pins. This means the policy path does
+    NOT go through the "#213 single query-value comparison chokepoint"
+    (common.py `_canonical_value`), contrary to what that docstring claims for
+    every query-match path. Measured consequence: an NFD-stored entity queried
+    with an NFC-typed constant now yields 0 rows, which reads as a verified
+    negative. Folding both sides belongs in one place for BOTH paths and is out
+    of scope here; see #213.
+
+    The matching rule is kept identical to run_logic_check's `policy_row_matches`
+    (same body, module-specific docstring). The natural home is common.py
+    alongside the other query-parsing helpers, but hoisting it there is a wider
+    change than this fix needs; the report/router parity test fails if the two
+    copies ever drift. Two of its cases carry that load — the 0-arity row and the
+    NFD-stored/NFC-queried entity. Every other case is a 2-column ASCII row,
+    which a copy that lost the short-row guard, or that folded to NFC on its own,
+    still gets right; do not delete those two.
+    """
+    for index, arg in enumerate(args):
+        if not is_quoted_string(arg):
+            continue
+        if index >= len(row) or arg_value(arg) != row[index]:
+            return False
+    return True
+
+
+def _require_signature(label: str, args: list[str]) -> None:
+    """Raise unless *args* has the right COUNT and every one is a valid argument.
+
+    `classify_query` rejects these lines as QUERY_BAD_ARITY or QUERY_MALFORMED,
+    so the render path (cmd_render -> classify -> route "wiki") never reaches
+    `evaluate` with one. The documented `evaluate` subcommand does: cmd_evaluate
+    calls `evaluate` directly, with no classify in front of it — the asymmetry
+    that made the first arity guards necessary (#257, 1bc172a). The two codes are
+    routed identically (see the "any shape/vocabulary failure" branch in
+    `classify`), so there is no basis for guarding one and not the other.
+
+    Answering anyway is not merely unverified, it is wrong, and each consumer was
+    wrong in its own direction because each used a different predicate to decide
+    "is this argument a constant": `is_variable` here, `is_quoted_string` in the
+    report. `count("Marie Curie", 'born_in')?` returned count 0 — which reads as
+    a verified negative — while `count(Marie Curie, born_in)?` returned 2 by
+    coincidence, the bare token happening to equal the stored value (#328).
+    On arity, relation and path returned 0 rows for a query the gate rejects:
+    `relation("Marie Curie", "born_in", "Warsaw", X)?` denied a fact that IS in
+    the KB, because `evaluate_relation` drops a non-3-arity query to [] and an
+    empty relation result renders as a verified negative.
+
+    Arity is tested before shape, as in classify_query and run_logic_check: a
+    line breaking both rules must get one reason, the same one, from all three.
+
+    NotImplementedError is the same exception the unknown-predicate fallthrough
+    raises, so cmd_evaluate turns it into a clean error JSON (rc 2). The messages
+    are common's, i.e. the gate's wording.
+    """
+    message = query_arity_error(label, args) or query_shape_error(label, args)
+    if message:
+        raise NotImplementedError(message)
+
+
 def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     """Evaluate a validated engine query: relation, path, or a policy predicate.
 
@@ -427,15 +503,18 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     - path: a fully-quoted query returns the dependency path (or none); a query
       with a variable returns the reachable (start, target) pairs.
     - policy predicate: the inferred (entity, reason) rows from the engine,
-      optionally filtered by a quoted entity argument.
+      filtered by every quoted constant the query pins, at whatever argument
+      position it appears (see policy_row_matches).
 
     A truly unknown predicate raises NotImplementedError rather than returning 0
     rows, so a caller never mistakes an unsupported predicate for a verified
-    negative.
+    negative. A query whose argument COUNT or argument SHAPE the gate rejects
+    raises for the same reason, on every predicate (see `_require_signature`).
     """
     predicate = _predicate_of(draft)
     args = query_args(draft)
     if predicate == "relation":
+        _require_signature("relation", args)
         rows = evaluate_relation(draft, facts)
         result: dict[str, object] = {"rows": rows, "count": len(rows)}
         # Optional, additive coverage hint (#189) for a verified-negative relation
@@ -451,13 +530,14 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # When the relation arg is a quoted canonical name (surface_variants
         # non-empty), count DISTINCT objects across the canonical AND all its
         # surface variants — symmetry with the relation branch (#227).
-        # Guard arity BEFORE unpacking: a count with != 2 args is malformed. Match
-        # classify_query (BAD_ARITY) and raise the same NotImplementedError the
-        # unknown-predicate fallthrough uses, so cmd_evaluate turns it into a clean
-        # error JSON instead of an uncaught IndexError (< 2 args) or a silently
-        # accepted, bogus count (> 2 args) (#257).
-        if len(args) != 2:
-            raise NotImplementedError("count query must have subject and relation arguments")
+        # Guard the signature BEFORE unpacking: a count with != 2 args would
+        # raise an uncaught IndexError (< 2) or be silently accepted with the
+        # extra arg ignored (> 2) (#257), and a malformed one would treat a bare
+        # token as a constant and a single-quoted one as a wildcard, so
+        # `count(Marie Curie, born_in)?` answered 2 while
+        # `count("Marie Curie", 'born_in')?` answered 0 — a verified negative for
+        # a query the gate rejects (#328).
+        _require_signature("count", args)
         subject, relation = arg_value(args[0]), arg_value(args[1])
         rel_variants: set[str] = set()
         if is_quoted_string(args[1]):
@@ -471,6 +551,7 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         }
         return {"rows": [[str(len(objects))]], "count": len(objects)}
     if predicate == "path":
+        _require_signature("path", args)
         if len(args) == 2 and all(is_quoted_string(a) for a in args):
             path = dependency_path(facts, arg_value(args[0]), arg_value(args[1]))
             rows = [path] if path else []
@@ -496,15 +577,27 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # verified negative). Catch broad Exception — never BaseException, so
         # KeyboardInterrupt/SystemExit still propagate — because the engine may
         # raise non-FactlogError types.
+        # Guard the signature BEFORE evaluating, like the count branch above
+        # (#257) and for the same reason: with a malformed query no constant lines
+        # up with a column, so the filter passes rows it cannot have checked —
+        # `pred("X")?` returned a filtered-looking count, `pred(E, R, "zzz")?`
+        # returned 0 rows (a verified negative for a query classify_query rejects
+        # as BAD_ARITY), and `pred(Alice, stale)?` pinned nothing at all, so the
+        # whole extent came back bound to an entity it is not about (#328).
+        # classify_query rejects all of these, so the render path never reaches
+        # here; the `evaluate` subcommand does, and cmd_evaluate turns
+        # NotImplementedError into a clean error JSON. run_logic_check drops the
+        # result line on the same lines, so the report and ask agree.
+        _require_signature("policy query", args)
         try:
             inferred = run_wirelog()
         except Exception as exc:  # noqa: BLE001 — engine/loader raise non-FactlogError too
             return {"rows": [], "count": 0, "policy_unevaluable": str(exc)}
-        rows = []
-        for row in sorted(inferred.get(predicate, set())):
-            if args and is_quoted_string(args[0]) and (not row or arg_value(args[0]) != row[0]):
-                continue
-            rows.append(list(row))
+        rows = [
+            list(row)
+            for row in sorted(inferred.get(predicate, set()))
+            if policy_row_matches(args, row)
+        ]
         return {"rows": rows, "count": len(rows)}
     raise NotImplementedError(f"engine evaluation of predicate '{predicate}' is not supported")
 

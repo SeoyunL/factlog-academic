@@ -75,6 +75,6 @@ class TestPredicateExactDispatch:
         ]
         assert self._run(monkeypatch, 'path("A", "B")?', facts, inferred) == ["path A -> B: A -> B"]
         assert self._run(monkeypatch, 'count("A", "knows")?', facts) == [
-            "count results: 1 (distinct objects)"
+            'count results (query: count("A", "knows")?): 1 (distinct objects)'
         ]
         assert self._run(monkeypatch, 'review_required("q")?') == ["review_required: q"]

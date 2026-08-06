@@ -377,3 +377,301 @@ class TestLiteralReConsistency:
         from entity_audit import _LITERAL_RE
         assert _LITERAL_RE.match(raw), f"entity_audit no longer detects {raw!r}"
         assert lt.normalize(type_tag, raw) == expected
+
+    @pytest.mark.parametrize("raw,type_tag", [
+        ("１００억", "amount"),
+        ("２０２６", "number"),
+        ("제３호", "ordinal"),
+        ("２０３０.１", "date"),
+    ])
+    def test_full_width_divergence_is_intended(self, raw, type_tag):
+        """The two must NOT be made consistent for full-width digits (#331).
+
+        entity_audit's detector is a loose smell test; these normalizers are a
+        strict ASCII-only contract. That divergence is load-bearing: a relation
+        that is not declared an attribute puts a matching object into
+        ``literal_suspects``, which is the second user-visible path a rejected
+        full-width value takes. Narrowing ``_LITERAL_RE`` to ``[0-9]`` "for
+        consistency" would silently close it — so pin both halves together.
+        """
+        from entity_audit import _LITERAL_RE
+        assert _LITERAL_RE.match(raw), f"entity_audit must still SEE {raw!r}"
+        assert lt.normalize(type_tag, raw) is None, f"{raw!r} must NOT parse"
+
+    @pytest.mark.parametrize("raw,type_tag,ascii_twin", [
+        ("３rd", "ordinal", "3rd"),
+        ("date(２０２０,１)", "date", "date(2020,1)"),
+        ('amount(１００,"억")', "amount", 'amount(100,"억")'),
+        ("number(１２３)", "number", "number(123)"),
+        ("ordinal(３)", "ordinal", "ordinal(3)"),
+    ])
+    def test_forms_the_audit_cannot_see(self, raw, type_tag, ascii_twin):
+        """The blind spot in the manual path, stated honestly.
+
+        ``_LITERAL_RE`` only recognises bare prose literals, so the English
+        ordinal and every compound term fall outside it. Under a relation that is
+        not declared an attribute, a rejected value in one of these shapes reaches
+        no user-visible path at all — neither the typed-projection warning (the
+        relation has no spec) nor the audit.
+
+        This is NOT a regression: the ``ascii_twin`` assertion proves the detector
+        is equally blind to the ASCII spelling, so #331 did not close a path that
+        used to be open. It narrows the docstring claim in ``literal_types`` from
+        "two user-visible paths" to what actually holds."""
+        from entity_audit import _LITERAL_RE
+        assert _LITERAL_RE.match(raw) is None, f"detector unexpectedly sees {raw!r}"
+        assert _LITERAL_RE.match(ascii_twin) is None, (
+            f"detector sees the ASCII twin {ascii_twin!r} but not {raw!r} — that WOULD "
+            f"be a regression, and this test's premise no longer holds"
+        )
+        assert lt.normalize(type_tag, raw) is None, f"{raw!r} must NOT parse"
+
+
+class TestFullWidthDigitsRejected:
+    """ASCII-only digits (#331). Python's ``\\d`` covers the whole Unicode ``Nd``
+    category, so a full-width ``１００억`` used to normalize to the SAME scalar as
+    ``100억`` while ``relation/3`` stored a different object string — the two
+    spellings merged under a typed relation but stayed separate entities and
+    missed each other in object-match queries. The policy is reject, not fold: a
+    full-width value takes the ordinary "does not parse -> untyped" path.
+
+    Full-width is the common case, not the contract. ``\\d`` is exactly the Unicode
+    ``Nd`` category, so every other decimal system was accepted the same way; the
+    non-full-width cases below are what stop a later "reject ``[０-９]``" rewrite
+    from passing this class while re-opening the hole for ``١٠٠`` and ``१२३``."""
+
+    @pytest.mark.parametrize("type_tag,raw", [
+        # Each of these returned a scalar before the fix (20200101 / 20200101 /
+        # 123000 / 3 / 10000000000 / 10000000000), never None.
+        ("date", "date(２０２０,１)"),
+        ("date", "２０２０.１"),
+        ("number", "number(１２３)"),
+        ("number", "１２３"),
+        ("ordinal", "ordinal(３)"),
+        ("ordinal", "３위"),
+        ("ordinal", "제３호"),
+        ("ordinal", "３rd"),   # the English ordinal form has its own regex
+        ("amount", "１００억"),
+        ("amount", 'amount(１００,"억")'),
+        # Other Nd systems, same contract. These parse to 100 / 100 / 123 on the
+        # pre-#331 tree (int('١٠٠') == 100), so they are regression guards, not
+        # decoration.
+        ("number", "١٠٠"),
+        ("amount", "١٠٠억"),
+        ("number", "१२३"),
+    ])
+    def test_normalize_rejects(self, type_tag, raw):
+        assert lt.normalize(type_tag, raw) is None
+
+    @pytest.mark.parametrize("parser,raw", [
+        (lt.parse_date, "date(２０２０,１)"),
+        (lt.parse_number, "number(１２３)"),
+        (lt.parse_number_scaled, "number(１２３)"),
+        (lt.parse_ordinal, "ordinal(３)"),
+    ])
+    def test_public_parsers_reject(self, parser, raw):
+        assert parser(raw) is None
+
+    def test_parse_amount_rejects(self):
+        assert lt.parse_amount("１００억", lt.DEFAULT_AMOUNT_UNITS) is None
+
+    @pytest.mark.parametrize("type_tag,raw", [
+        # Half-and-half spellings are the realistic accident (an IME left in
+        # full-width mode mid-token), and they must not parse either.
+        ("amount", "1２3억"),
+        ("amount", 'amount(１0,"억")'),
+        ("amount", 'amount("１００","억")'),
+        ("number", 'number("1２3")'),
+        ("number", "1２3"),
+        ("date", "date(20２0,1)"),
+        ("ordinal", "ordinal(1２)"),
+        ("ordinal", "1２th"),
+    ])
+    def test_mixed_width_rejects(self, type_tag, raw):
+        assert lt.normalize(type_tag, raw) is None
+
+    def test_full_width_no_longer_shares_a_scalar_with_ascii(self):
+        # The motivating bug in one line: same scalar, different stored string.
+        assert lt.normalize("amount", "100억") == 10000000000
+        assert lt.normalize("amount", "１００억") is None
+
+    @pytest.mark.parametrize("raw", ['amount(１００,억)', 'amount(１００,"억")'])
+    def test_canonical_amount_rejects(self, raw):
+        # Consequence, by design: merge_candidates' dedup key no longer collapses
+        # the bare and quoted full-width spellings into one row. Folding them is
+        # the silent rewrite this policy refuses.
+        assert lt.canonical_amount(raw) is None
+
+    @pytest.mark.parametrize("raw", ['amount(１００,"억")', "date(２０２０,１)", "number(１２３)"])
+    def test_humanize_returns_full_width_verbatim(self, raw):
+        # Unrecognized -> verbatim, the documented humanize fallback.
+        assert lt.humanize(raw) == raw
+
+
+class TestFullWidthSurfaces:
+    """AC3 (#331): a rejected full-width value must reach a user-visible path at
+    least once. Under a relation declared typed, the projection loop warns on
+    stderr and loads the fact untyped — the same path any malformed literal takes.
+
+    Residual symptom, deliberately NOT covered: a relation declared as an
+    attribute but NOT typed has no spec, so ``_project_typed_relations`` skips it
+    without warning and the full-width value surfaces nowhere."""
+
+    class _FakeSession:
+        """Records inserts; _project_typed_relations touches nothing else."""
+
+        def __init__(self):
+            self.inserts = []
+
+        def intern(self, value):
+            return 1
+
+        def insert(self, alias, payload):
+            self.inserts.append((alias, payload))
+
+    def test_projection_warns_and_loads_untyped(self, capsys):
+        import common
+
+        specs = {"출시일": common.TypedRelSpec("date", "launch_date")}
+        rows = [
+            {"subject": "제품", "relation": "출시일", "object": "date(２０２０,１)"},
+            {"subject": "제품2", "relation": "출시일", "object": "date(2020,1)"},
+        ]
+        session = self._FakeSession()
+        common._project_typed_relations(session, specs, rows)
+        err = capsys.readouterr().err
+        assert "date(２０２０,１)" in err
+        assert "does not parse as date" in err
+        # Only the ASCII row projects; the full-width fact still loads untyped.
+        assert session.inserts == [("launch_date", (1, 20200101))]
+
+    def test_projection_warning_names_the_offending_characters(self, capsys):
+        # This is the one AUTOMATIC surfacing path, and the remedy it points at
+        # (correct the source to ASCII and re-collect) is unusable unless the
+        # reader can tell WHICH character is wrong. repr cannot: '1２3억' and
+        # '123억' are indistinguishable in most fonts.
+        import common
+
+        specs = {"매출": common.TypedRelSpec("amount", "revenue_amt")}
+        rows = [{"subject": "갑사", "relation": "매출", "object": "1２3억"}]
+        common._project_typed_relations(self._FakeSession(), specs, rows)
+        err = capsys.readouterr().err
+        assert "\\uff12" in err
+
+    def test_projection_warning_is_unchanged_for_an_ascii_failure(self, capsys):
+        # Negative control: a value that fails for any other reason must read
+        # byte-identically to before, or the escape clause is unconditional noise.
+        import common
+
+        specs = {"매출": common.TypedRelSpec("amount", "revenue_amt")}
+        rows = [{"subject": "갑사", "relation": "매출", "object": "n/a"}]
+        common._project_typed_relations(self._FakeSession(), specs, rows)
+        err = capsys.readouterr().err.strip()
+        assert err == "typed-relations: 'n/a' for '매출' ('갑사') does not parse as amount; loading untyped"
+
+
+class TestAsciiDigitsUnchanged:
+    """Regression guard for the narrowing in #331: the ASCII forms that already
+    parsed must keep parsing, including the ones a careless narrowing would break
+    (a space-separated unit, a comma inside the number, and — the reason
+    ``re.ASCII`` is NOT used — a U+3000 ideographic space as separator whitespace).
+    These pin existing behaviour; they do not prove the fix."""
+
+    @pytest.mark.parametrize("type_tag,raw,expected", [
+        ("amount", "100 억", 10000000000),
+        ("amount", "100억", 10000000000),
+        ("amount", 'amount(1,000,"억")', 100000000000),
+        ("amount", "1,000원", 1000),
+        ("date", "date(2020)", 20200101),
+        ("date", "date(2020,　1)", 20200101),  # U+3000 stays whitespace
+        ("date", "2030.1", 20300101),
+        ("number", "1,000", 1000000),
+        ("number", "3.14", 3140),
+        ("ordinal", "제3호", 3),
+        ("ordinal", "3rd", 3),
+    ])
+    def test_ascii_forms_still_parse(self, type_tag, raw, expected):
+        assert lt.normalize(type_tag, raw) == expected
+
+    def test_ascii_canonical_amount_unchanged(self):
+        assert lt.canonical_amount("amount(1,000,억)") == 'amount(1000,"억")'
+
+    def test_ascii_humanize_unchanged(self):
+        assert lt.humanize('amount(7,"억")') == "7억"
+        assert lt.humanize("date(2030,1,15)") == "2030-01-15"
+
+    def test_amount_unit_group_is_outside_the_digit_policy(self):
+        """The unit group of ``_AMOUNT_COMPOUND_RE`` is deliberately NOT narrowed:
+        a unit is an opaque label checked against the unit table, not a number.
+        Characterization pin — these three values are byte-identical to the
+        pre-#331 tree, so this test cannot fail on an unfixed tree. It exists so
+        that a later "for consistency" narrowing of the unit group has to be a
+        deliberate act rather than a silent one."""
+        assert lt.canonical_amount("amount(100,１００)") == 'amount(100,"１００")'
+        assert lt.humanize('amount(100,"１００")') == "100１００"
+        # It still never reaches a scalar: '１００' is in no unit table.
+        assert lt.normalize("amount", "amount(100,１００)", lt.DEFAULT_AMOUNT_UNITS) is None
+
+
+class TestNonAsciiDigitDiagnostics:
+    """The diagnostic half of the ASCII-only digit policy (#331).
+
+    ``check_conflicts`` and ``factlog status`` need to say WHY a value was
+    rejected, so the predicate that characterises "would have matched ``\\d`` but
+    not ``[0-9]``" lives here next to the regexes it explains. It is diagnostic
+    only — the regexes remain the single gate; nothing decides parseability from
+    these helpers."""
+
+    @pytest.mark.parametrize("value,expected", [
+        ("100억", False),
+        ("3rd", False),
+        ("date(2020,1)", False),
+        ("", False),
+        ("１００억", True),          # full-width, U+FF10-FF19
+        ("١٠٠", True),              # Arabic-Indic
+        ("१२३", True),              # Devanagari
+        ("๑๒๓", True),              # Thai
+        ("1２3억", True),            # half-and-half
+        # `²` is the case that separates a correct Nd test from `str.isdigit()`:
+        # isdigit() returns True for it, but its category is No and `\d` never
+        # matched it, so it was never accepted and must not be reported as the
+        # cause of a rejection.
+        ("²", False),
+    ])
+    def test_has_non_ascii_digits(self, value, expected):
+        assert lt.has_non_ascii_digits(value) is expected
+
+    def test_superscript_two_is_not_a_decimal_digit(self):
+        # Spelled out because it is the whole reason the implementation cannot be
+        # `str.isdigit()`.
+        assert "²".isdigit() is True
+        assert lt.has_non_ascii_digits("²") is False
+
+    def test_mark_escapes_only_the_offending_digits(self):
+        # Hangul survives so the value stays readable; the digits become visible.
+        assert lt.mark_non_ascii_digits("１００억") == "\\uff11\\uff10\\uff10억"
+
+    def test_mark_leaves_ascii_untouched(self):
+        assert lt.mark_non_ascii_digits("100억") == "100억"
+        assert lt.mark_non_ascii_digits("amount(100,\"억\")") == 'amount(100,"억")'
+
+    def test_mark_handles_mixed_width(self):
+        assert lt.mark_non_ascii_digits("1２3억") == "1\\uff123억"
+
+    def test_mark_is_a_noop_when_the_predicate_is_false(self):
+        for value in ("100억", "3rd", "²", ""):
+            assert lt.mark_non_ascii_digits(value) == value
+
+    def test_mark_escapes_astral_digits_with_the_eight_digit_form(self):
+        # 390 of the 760 Nd codepoints are above the BMP (mathematical
+        # bold/sans/mono digits, Osmanya, ...), and mathematical bold digits do
+        # arrive by copy-pasting styled text. `\\uXXXX` cannot spell them: the
+        # 5-digit overflow decodes as a DIFFERENT character, so the escape must
+        # be the 8-digit `\\UXXXXXXXX` form above 0xFFFF.
+        assert lt.mark_non_ascii_digits("𝟏𝟎𝟎억") == "\\U0001d7cf\\U0001d7ce\\U0001d7ce억"
+
+    def test_every_marked_escape_round_trips_back_to_its_character(self):
+        # The property the escape exists for: what is printed must decode to the
+        # character that was replaced. Sampled across BMP and astral Nd blocks.
+        for ch in ("１", "١", "१", "๑", "𝟏", "𝟶", "\U000104a1"):
+            assert lt.mark_non_ascii_digits(ch).encode().decode("unicode_escape") == ch

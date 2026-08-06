@@ -17,6 +17,76 @@ only in this first cut: ``원/천/만/억/조``). Amounts compare in integer bas
 a sub-base-unit fraction is rounded to the nearest int (ROUND_HALF_UP). The engine
 has no float column, so the base-unit value MUST be an exact integer — see
 ``parse_amount``.
+
+**Digits are ASCII-only.** Python's ``\\d`` matches the whole Unicode ``Nd``
+category, so a full-width ``１００억`` used to parse to the *same scalar* as
+``100억`` while ``relation/3`` kept the differing object string — one value with
+three different answers to "is this the same?" depending on the code path. The
+policy is **reject, not fold**: every numeric group below is spelled ``[0-9]``,
+so a full-width value takes the ordinary "does not parse -> untyped" path and
+surfaces as a typed-projection warning instead of merging silently. Rewriting the
+stored string would have been the silent fold this repo consistently refuses.
+
+This is not only about full-width U+FF10–FF19. ``\\d`` is exactly the Unicode
+``Nd`` category, so Arabic-Indic ``١٠٠``, Devanagari ``१२३`` and Thai ``๑๒๓`` were
+accepted the same way — and ``int``/``Decimal`` still accept all of them
+(``int('١٠٠') == 100``), which is why the regex has to be the gate.
+
+Five call sites outside this module change behaviour as a consequence. All five
+are intended, and none of them rewrites data already stored:
+
+- ``tools/merge_candidates.py`` dedup key — ``canonical_amount`` returns ``None``
+  for a full-width term, so ``amount(１００,억)`` and ``amount(１００,"억")`` stay
+  two rows instead of collapsing into one. Collapsing them is exactly the fold
+  this policy rejects. A newly merged full-width row also keeps its **source
+  string verbatim** instead of being rewritten to the quoted canonical form;
+  rows already in the KB are untouched either way.
+- ``tools/check_conflicts.py`` ``_group_key`` — a full-width object no longer
+  normalizes to a scalar, so it keys as ``("raw", obj)`` while its ASCII twin
+  keys as ``("scalar", …)``. Under a single-valued relation those are **two
+  values**, so a KB that used to pass can now report a conflict and the command
+  exits **1**. This is the one consequence that flips a green gate red — see the
+  migration note in ``docs/reference/typed-relations.md``.
+- ``common._canonical_value`` — a fact already stored as ``amount(１００,"억")``
+  in an existing KB is no longer canonicalised, so a query written as
+  ``amount(１００,억)`` misses it. Intended: under this policy ``amount(１００,억)``
+  is not a valid amount term at all, so there is no canonical form to map it to.
+  The fix is to correct the source to ASCII and re-collect, not to fold here.
+- ``tools/ask_router.py`` answer annotation — ``humanize`` returns a full-width
+  compound term verbatim rather than rendering it as ``１００억``, so the display
+  suffix (``… (= 100억)``) is simply omitted for such a row.
+- ``factlog/cli.py`` ``status`` conflict count — this path never folded typed
+  scalars; it counts distinct **raw object strings**, so it already reported the
+  ASCII/full-width pair as 2 values while ``check_conflicts`` reported 0. The two
+  commands contradicted each other; narrowing here converges ``check_conflicts``
+  onto the count ``status`` was already giving. It is the strongest code-level
+  argument for rejecting rather than folding.
+
+A rejected value surfaces on one automatic warning, one gate, and one manual
+tool — and falls through one hole:
+
+- **automatic** — under a relation declared **typed**,
+  ``common._project_typed_relations`` warns on stderr and loads the fact untyped.
+  The warning names the offending codepoints (``mark_non_ascii_digits``): its
+  ``repr``-rendered value alone cannot tell ``1２3억`` from ``123억``, and the
+  remedy it points at needs the reader to know which character is wrong.
+- **gate** — under a relation declared **single-valued**,
+  ``tools/check_conflicts.py`` sees the ASCII/full-width pair as two values and
+  exits 1, naming the offending value (``non_ascii_digit_note``).
+- **manual** — ``tools/entity_audit.py`` reports a value under a relation not
+  declared an attribute as a *literal suspect*. Nothing in the pipeline runs it
+  (``skills/factlog/SKILL.md`` documents it as a manual command) and its message
+  says nothing about digit width. Its ``_LITERAL_RE`` is deliberately looser than
+  this module and still matches full-width digits, so narrowing that detector
+  would close this path (a pinning test guards the divergence). It only sees bare
+  prose forms: ``１００억``/``２０２６``/``제３호``/``３위`` match, while ``３rd``
+  and every compound term (``date(２０２０,１)``, ``amount(１００,"억")``,
+  ``number(１２３)``, ``ordinal(３)``) do not — the same blind spots it has for the
+  ASCII spellings, so this is not a regression.
+- **hole** — a relation declared as an **attribute but not typed** has no spec, so
+  the projection loop skips it without warning and its objects land in
+  ``entity_audit``'s ``declared_literals``: an unflagged sorted list in which
+  ``100억`` and ``１００억`` sort far apart.
 """
 from __future__ import annotations
 
@@ -42,7 +112,52 @@ DEFAULT_AMOUNT_UNITS: dict[str, int] = {
     "조": 10**12,
 }
 
-_DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
+
+def has_non_ascii_digits(value: str) -> bool:
+    """True when *value* carries a Unicode decimal digit (category ``Nd``) outside
+    ASCII ``0-9`` — exactly the characters the ``[0-9]`` narrowing rejects and the
+    old ``\\d`` accepted (``\\d`` and ``Nd`` coincide). Diagnostic only: callers use
+    it to EXPLAIN a rejection, never to decide one — the regexes stay the single
+    gate. ``str.isdigit`` is deliberately not used: it also matches ``No`` (``²``),
+    which ``\\d`` never did. Total; never raises."""
+    return any(unicodedata.category(ch) == "Nd" and not ch.isascii() for ch in value)
+
+
+def _escape_codepoint(ch: str) -> str:
+    """``ch`` as the Python escape that decodes back to it. ``\\uXXXX`` holds four
+    hex digits, so a codepoint above the BMP needs the eight-digit ``\\UXXXXXXXX``
+    form — ``\\u1d7cf`` is not an overlong ``𝟏`` but ``\\u1d7c`` followed by ``f``,
+    i.e. a different character. This is not a corner case: 390 of the 760 ``Nd``
+    codepoints are astral (mathematical bold/sans/mono digits U+1D7CE–U+1D7FF,
+    Osmanya, …), and mathematical bold digits arrive by copy-pasting styled text."""
+    return f"\\U{ord(ch):08x}" if ord(ch) > 0xFFFF else f"\\u{ord(ch):04x}"
+
+
+def mark_non_ascii_digits(value: str) -> str:
+    """*value* with every non-ASCII decimal digit replaced by its ``\\uXXXX`` /
+    ``\\UXXXXXXXX`` escape, so a message can name the offending characters.
+    ``repr`` cannot: ``repr('１００억')`` is ``'１００억'``, indistinguishable from
+    ``'100억'`` in most fonts. Everything else is left verbatim so the value stays
+    readable."""
+    return "".join(
+        _escape_codepoint(ch) if unicodedata.category(ch) == "Nd" and not ch.isascii() else ch
+        for ch in value
+    )
+
+
+# Every numeric group below is written ``[0-9]``, never ``\d`` — see the ASCII-only
+# paragraph in the module docstring. Do NOT reach for ``re.ASCII`` to get the same
+# effect: the flag also narrows ``\s``, and U+3000 (ideographic space) inside
+# ``date(2020,<U+3000>1)`` would silently stop parsing. The ``\D+`` unit group in
+# ``_AMOUNT_RE`` needs no change: ``\D`` is the complement of ``Nd``, so it already
+# excludes full-width digits (``1２3억`` therefore does not match either half).
+# The asymmetry is deliberate, not an arbitrary line: whitespace is not part of the
+# value (an ideographic space in ``date(2020,<U+3000>1)`` is layout, and dropping it
+# changes nothing about what the value means), whereas a digit IS the value —
+# accepting ``１`` as ``1`` decides that two different stored strings mean the same
+# thing, which is exactly the fold this policy refuses. So narrow digits explicitly
+# and leave ``\s``/``\D`` alone.
+_DATE_RE = re.compile(r"^([0-9]{4})[.\-/]([0-9]{1,2})(?:[.\-/]([0-9]{1,2}))?$")
 # The compound form is year-precision friendly: month AND day are optional, so
 # ``date(2020)`` parses (a bibliographic record normally knows only the year).
 # This mirrors the prose path, where a missing day already defaults to ``01``
@@ -51,29 +166,34 @@ _DATE_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?$")
 # it is indistinguishable from a plain number, so only the explicitly typed
 # compound term opts into year precision.
 _DATE_COMPOUND_RE = re.compile(
-    r"^date\(\s*(\d{4})(?:\s*,\s*(\d{1,2})(?:\s*,\s*(\d{1,2}))?)?\s*\)$",
+    r"^date\(\s*([0-9]{4})(?:\s*,\s*([0-9]{1,2})(?:\s*,\s*([0-9]{1,2}))?)?\s*\)$",
     re.IGNORECASE,
 )
-_NUMBER_RE = re.compile(r"^-?\d[\d,]*(?:\.\d+)?$")
+_NUMBER_RE = re.compile(r"^-?[0-9][0-9,]*(?:\.[0-9]+)?$")
 _NUMBER_COMPOUND_RE = re.compile(
-    r"^number\(\s*\"?(-?\d[\d,]*(?:\.\d+)?)\"?\s*\)$",
+    r"^number\(\s*\"?(-?[0-9][0-9,]*(?:\.[0-9]+)?)\"?\s*\)$",
     re.IGNORECASE,
 )
-_ORDINAL_KO_RE = re.compile(r"^제?(\d+)\s*(?:호|위|번|차|등|째)$")
-_ORDINAL_EN_RE = re.compile(r"^(\d+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
-_ORDINAL_COMPOUND_RE = re.compile(r"^ordinal\(\s*(\d+)\s*\)$", re.IGNORECASE)
+_ORDINAL_KO_RE = re.compile(r"^제?([0-9]+)\s*(?:호|위|번|차|등|째)$")
+_ORDINAL_EN_RE = re.compile(r"^([0-9]+)\s*(?:st|nd|rd|th)$", re.IGNORECASE)
+_ORDINAL_COMPOUND_RE = re.compile(r"^ordinal\(\s*([0-9]+)\s*\)$", re.IGNORECASE)
 # <number><unit>, contiguous OR a single space between them. The number part is a
 # plain/comma/decimal magnitude with an OPTIONAL leading sign (a loss/credit may be
 # negative); the unit is validated against the table by the caller. A leading `제`
 # (ordinal marker) can't match because the `num` group is anchored to an optional
-# sign + leading digit (`^-?\d…`), so `제3호`-style ordinals never match (the first
-# char `제` is neither `-` nor a digit → no match).
-_AMOUNT_RE = re.compile(r"^(?P<num>-?\d[\d,]*(?:\.\d+)?) ?(?P<unit>\D+)$")
+# sign + leading digit (`^-?[0-9]…`), so `제3호`-style ordinals never match (the
+# first char `제` is neither `-` nor a digit → no match).
+_AMOUNT_RE = re.compile(r"^(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?) ?(?P<unit>\D+)$")
 # Compound amount: the unit may be quoted ("...", allowing spaces and commas) or
 # bare (no comma/paren/quote). The number is optionally quoted. Canonicalisation
 # always emits the quoted unit form (see ``canonical_amount``).
+# The unit group is deliberately OUTSIDE the digit policy: a unit is an opaque
+# label validated against the unit table, not a number. ``amount(100,１００)`` still
+# canonicalises to ``amount(100,"１００")`` and humanizes to ``100１００`` —
+# byte-identical to before this narrowing, because ``１００`` is in no unit table and
+# so never normalizes to a scalar. Only the ``num`` groups are ``[0-9]``.
 _AMOUNT_COMPOUND_RE = re.compile(
-    r'^amount\(\s*"?(?P<num>-?\d[\d,]*(?:\.\d+)?)"?\s*,\s*'
+    r'^amount\(\s*"?(?P<num>-?[0-9][0-9,]*(?:\.[0-9]+)?)"?\s*,\s*'
     r'(?:"(?P<qunit>[^"]*)"|(?P<unit>[^,)"]+))\s*\)$',
     re.IGNORECASE,
 )
@@ -263,7 +383,12 @@ def canonical_amount(raw: str) -> str | None:
     reaches ``facts/accepted.dl`` as ``"amount(7,\\"억\\")"`` and loads cleanly.
     Both the bare (``amount(7,억)``) and quoted (``amount(7,"억")``) input forms
     canonicalise to the same quoted output, so a re-merge is idempotent and the
-    dedup key collapses the two."""
+    dedup key collapses the two.
+
+    A full-width number (``amount(１００,억)``) is not an amount compound term, so
+    it returns ``None`` and the two spellings stay separate rows in the
+    ``tools/merge_candidates.py`` dedup key — the intended consequence of the
+    ASCII-only digit policy (see the module docstring)."""
     m = _AMOUNT_COMPOUND_RE.match(raw.strip())
     if not m:
         return None
@@ -311,7 +436,9 @@ def humanize(value: str) -> str:
     ``ordinal(N)`` is intentionally NOT humanized: the source unit (호/위/번) is
     lost at normalization, so a bare rank would be ambiguous. Any non-compound or
     unrecognized string is returned verbatim, so a KB that emits no compound
-    objects is byte-identical."""
+    objects is byte-identical. A full-width term (``amount(１００,"억")``) is not
+    recognized under the ASCII-only digit policy, so it too comes back verbatim
+    rather than rendered."""
     text = value.strip()
     m = _DATE_COMPOUND_RE.match(text)
     if m:

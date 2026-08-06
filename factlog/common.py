@@ -10,7 +10,7 @@ import re
 import sys
 import unicodedata
 from collections import defaultdict, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -310,9 +310,15 @@ def conversion_origin(path: Path) -> str | None:
     The recorded `source:` may be a bare basename (legacy, pre-#214) OR a
     sources/-relative path (#214: `sub_a/data.hwpx` disambiguates same-name
     originals in different subdirs). Either way this returns just the basename,
-    so every basename-keyed consumer (paired_conversion, eject) is unaffected by
-    the header format — the subdir that #214 encodes lives in the conversion's
-    own mirrored path, not in this pairing signal.
+    so paired_conversion — the one caller, which is basename-keyed — is
+    unaffected by the header format: the subdir that #214 encodes lives in the
+    conversion's own mirrored path, not in this pairing signal.
+
+    `eject` reads the header itself rather than calling this, and since #324 it
+    is *not* basename-keyed: it keys on the conversion's own mirrored subdir
+    joined with this basename, so a path argument cannot reach a same-name
+    original in another directory. Widening what this returns would not reach
+    that code, but narrowing the idea it encodes would mislead it.
     """
     try:
         head = path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
@@ -623,7 +629,21 @@ def load_logic_policy() -> str:
 
 def policy_predicates(policy_program: str | None = None) -> set[str]:
     text = policy_program if policy_program is not None else load_logic_policy()
-    built_in = {"relation", "edge", "path"}
+    # The five predicates classify_query gives a dedicated branch, plus `edge`.
+    # A hand-authored `.decl` in logic-policy.extra.dl must not re-route one of
+    # them through the policy branch: the two paths test membership in a different
+    # order — classify_query checks count BEFORE policy, validate_query checks
+    # policy first — so a `.decl count(...)` used to make the report treat a count
+    # query as a policy query while the gate still treated it as a count, which
+    # reproduces #328's report/gate divergence exactly.
+    #
+    # `edge` is here for a different reason and has no branch: it is the engine's
+    # own EDB relation, not a queryable predicate (it is absent from
+    # classify_query's `allowed_predicates`, so a query naming it is rejected as
+    # an unknown predicate). It has been excluded since before that set existed.
+    # `conflict` is deliberately NOT here: it likewise has no branch, but it IS
+    # meant to be policy-declared, and QUERY_PREDICATES lists it.
+    built_in = {"relation", "edge", "path", "count", "review_required"}
     return {
         name
         for name in re.findall(r"^\.decl\s+([A-Za-z_][A-Za-z0-9_]*)\(", text, flags=re.MULTILINE)
@@ -1694,9 +1714,20 @@ def _project_typed_relations(session, specs, accepted) -> None:
             continue
         scalar = literal_types.normalize(spec.type, row["object"], spec.units)
         if scalar is None:
+            # This is the one surfacing path that runs unconditionally, and the
+            # remedy it points at ("correct the source to ASCII and re-collect")
+            # is unusable unless the reader can see WHICH character is wrong.
+            # repr cannot: '1２3억' and '123억' are indistinguishable in most
+            # fonts. Appended, not substituted, so every other not-parsing value
+            # (a typo, an 'n/a') reads byte-identically to before.
+            marked = (
+                f" (non-ASCII digits: {literal_types.mark_non_ascii_digits(row['object'])})"
+                if literal_types.has_non_ascii_digits(row["object"])
+                else ""
+            )
             print(
                 f"typed-relations: {row['object']!r} for {row['relation']!r} "
-                f"({row['subject']!r}) does not parse as {spec.type}; loading untyped",
+                f"({row['subject']!r}) does not parse as {spec.type}{marked}; loading untyped",
                 file=sys.stderr,
             )
             continue
@@ -1853,6 +1884,51 @@ def _is_valid_arg(arg: str) -> bool:
     return _is_variable(arg) or _is_quoted_string(arg)
 
 
+# label -> (expected argument count, the message for a query that misses it).
+# The label is also what _query_shape_error puts in front of its message, so one
+# label selects both of a predicate's signature rules.
+_QUERY_ARITY_RULES: dict[str, tuple[int, str]] = {
+    "relation": (3, "relation query must have subject, relation, and object arguments"),
+    "path": (2, "path query must have start and target arguments"),
+    "count": (2, "count query must have subject and relation arguments"),
+    "policy query": (2, "policy query must have entity and reason arguments"),
+}
+
+
+def _query_arity_error(label: str, args: Sequence[str]) -> str | None:
+    """The bad-arity verdict on *args*, or None when the count is right.
+
+    Paired with `_query_shape_error` and always applied FIRST: a line that
+    violates both rules must get the same reason from the gate, the report and
+    the router, and the gate reports arity first. Checking shape first is not
+    merely a different opinion — it renames the defect. `relation()?` is a
+    zero-argument query, and calling it "arguments must be variables or quoted
+    strings" tells the author to fix the quoting of arguments that are not there.
+    """
+    arity, message = _QUERY_ARITY_RULES[label]
+    return None if len(args) == arity else message
+
+
+def _query_shape_error(label: str, args: Sequence[str]) -> str | None:
+    """The malformed-shape verdict on *args*, or None when every one is valid.
+
+    *label* names the query in the message ("relation", "path", "count",
+    "policy query"), which is the ONLY thing that differs between the four
+    branches — the rule itself is `_is_valid_arg` for every one of them.
+
+    Returning the message rather than a bool is what keeps the three consumers
+    honest. classify_query (the gate), run_logic_check (the report) and
+    ask_router.evaluate (`ask`) must reject the SAME lines with the SAME wording;
+    when each restated the rule, the report's count branch drifted into accepting
+    lines the gate calls malformed and answering them with a wrong aggregate
+    (#328). A caller that phrases its own message can drift again, so callers
+    pass this string through.
+    """
+    if all(_is_valid_arg(arg) for arg in args):
+        return None
+    return f"{label} arguments must be variables or quoted strings"
+
+
 def _quoted_constants(line: str) -> list[str]:
     return re.findall(r'"([^"]+)"', line)
 
@@ -1866,12 +1942,26 @@ def _quoted_constants(line: str) -> list[str]:
 #   arg_value(arg)         -> a quoted literal's value (JSON-decoded) or the bare arg
 #   is_quoted_string(arg)  -> True if arg is a quoted string literal
 #   is_variable(arg)       -> True if arg is a Datalog variable (capitalised)
+#   is_valid_arg(arg)      -> True if arg is a well-formed query argument
+#   query_arity_error(label, args) -> the bad-arity message, or None
+#   query_shape_error(label, args) -> the malformed-shape message, or None
 #   quoted_constants(line) -> every "..." literal in a line
+#
+# `is_valid_arg` is the SINGLE definition of "a query argument is a variable or a
+# double-quoted string", the rule every classify_query branch applies, and
+# `query_shape_error` is the single place that turns it into a verdict + message.
+# Both are exported so the report (tools/run_logic_check.py) and the router
+# (tools/ask_router.py) apply the same predicate instead of restating it: a
+# second copy is exactly how the count branch came to accept lines the gate
+# rejects as malformed (#328).
 query_args = _query_args
 arg_value = _arg_value
 canonical_value = _canonical_value
 is_quoted_string = _is_quoted_string
 is_variable = _is_variable
+is_valid_arg = _is_valid_arg
+query_arity_error = _query_arity_error
+query_shape_error = _query_shape_error
 quoted_constants = _quoted_constants
 
 
@@ -1979,10 +2069,12 @@ def classify_query(
             return False, QUERY_MALFORMED, "review_required must include the original question string"
         return True, QUERY_REVIEW_REQUIRED, "passed"
     if predicate == "relation":
-        if len(args) != 3:
-            return False, QUERY_BAD_ARITY, "relation query must have subject, relation, and object arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "relation arguments must be variables or quoted strings"
+        arity_error = _query_arity_error("relation", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
+        shape_error = _query_shape_error("relation", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         subject, relation, object_ = args
         # Entity membership must fold on both sides too: accepted facts can carry
         # an NFD-authored subject, while an NFC query must still reach the folded
@@ -2023,10 +2115,12 @@ def classify_query(
             return False, QUERY_FACT_ABSENT, "relation query does not match accepted facts"
         return True, QUERY_OK, "passed"
     if predicate == "path":
-        if len(args) != 2:
-            return False, QUERY_BAD_ARITY, "path query must have start and target arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "path arguments must be variables or quoted strings"
+        arity_error = _query_arity_error("path", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
+        shape_error = _query_shape_error("path", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         for arg in args:
             if not _is_variable(arg) and _arg_value(arg) not in entities:
                 return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(arg)}"
@@ -2037,10 +2131,12 @@ def classify_query(
         # count(subject, relation)? — how many objects (subject, relation) has.
         # A valid count always has an answer (0 is a verified zero, never a
         # FACT_ABSENT), so it is QUERY_OK whenever the vocabulary is accepted.
-        if len(args) != 2:
-            return False, QUERY_BAD_ARITY, "count query must have subject and relation arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "count arguments must be variables or quoted strings"
+        arity_error = _query_arity_error("count", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
+        shape_error = _query_shape_error("count", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         subject, relation = args
         # Keep count aligned with relation queries: a subject is accepted across
         # NFC/NFD forms before the relation-name check runs.
@@ -2060,10 +2156,12 @@ def classify_query(
                 return False, QUERY_RELATION_NOT_ACCEPTED, f"count relation is not accepted: {_arg_value(relation)}"
         return True, QUERY_OK, "passed"
     if predicate in policy_query_predicates:
-        if len(args) != 2:
-            return False, QUERY_BAD_ARITY, "policy query must have entity and reason arguments"
-        if not all(_is_valid_arg(arg) for arg in args):
-            return False, QUERY_MALFORMED, "policy query arguments must be variables or quoted strings"
+        arity_error = _query_arity_error("policy query", args)
+        if arity_error:
+            return False, QUERY_BAD_ARITY, arity_error
+        shape_error = _query_shape_error("policy query", args)
+        if shape_error:
+            return False, QUERY_MALFORMED, shape_error
         if not _is_variable(args[0]) and _arg_value(args[0]) not in entities:
             return False, QUERY_ENTITY_NOT_ACCEPTED, f"policy query entity is not accepted: {_arg_value(args[0])}"
         return True, QUERY_OK, "passed"

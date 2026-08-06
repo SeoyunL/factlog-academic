@@ -49,6 +49,70 @@ factlog eject report.pdf --delete-original  # also delete the user's original un
 factlog eject report.pdf --dry-run       # show the planned changes, modify nothing
 ```
 
+### 이름 지정 방식 — 파일명은 넓고, 경로는 좁습니다
+
+| 지정 형태 | 매칭 범위 |
+|---------|---------|
+| 어간 `report` | 그 어간을 가진 **모든** 소스와 그 변환본 |
+| 파일명 `report.html` | 디렉터리를 가리지 않고 그 이름을 가진 **모든** 소스와 그 변환본 |
+| 경로 `sub/report.html`, `./report.html` | `sources/` 기준 그 경로의 원본에서 만들어진 변환본만 |
+| KB 기준 ref `sources/sub/report.html` | 그 원본 + 그 원본에서 만들어진 변환본 |
+| 절대 경로 `/kb/sources/sub/report.html` | 위와 동일(KB 기준 ref 로 환원) |
+
+**파일명은 경로 지정이 아닙니다.** `factlog eject report.html` 은 의도적으로 넓게
+매칭되므로 `sources/sub/report.html` 쪽도 함께 걸립니다. 최상위 것만 빼려면 경로로
+지정하십시오 — 변환본만 지우려면 `./report.html`, 원본까지 대상에 넣으려면(즉
+`--delete-original` 이 실제로 원본을 지우게 하려면) `sources/report.html` 처럼 KB
+기준 ref 로 지정합니다. 위 표의 두 줄이 그 차이입니다.
+
+경로를 주면 그 경로에서 만들어진 변환본만 매칭됩니다 — 변환본은 `runs/sources/`
+아래에 원본의 서브디렉터리를 미러링하므로, `factlog eject sub/report.html` 은
+`runs/sources/sub/report.html.md` 만 지우고 다른 디렉터리의 동명 원본이 만든
+`runs/sources/report.html.md` 는 건드리지 않습니다.
+
+**상대** 경로는 **적힌 그대로** 비교합니다. `..` 를 접거나 대소문자를 무시하지
+않으므로, `sub/../report.html` 과 `SUB/report.html` 은 (파일시스템이 대소문자를
+구분하지 않더라도) 아무것도 매칭하지 않고 종료 코드 1 로 끝납니다. 상대 경로는
+심링크도 풀지 않으므로, 심링크 디렉터리 이름을 거쳐 적은 상대 경로
+(`link/report.html`)는 매칭되지 않습니다. 실제 경로(`real/report.html`)나 절대
+경로로 지정하십시오.
+
+**절대** 경로는 반대로, 파일시스템에게 직접 물어서 KB 기준 ref 로 환원합니다 —
+경로의 조상을 거슬러 올라가며 `sources/` 나 KB 루트와 **같은 디렉터리인 지점**을
+찾습니다. 문자열을 맞춰 보는 것이 아니므로 다음 두 경우가 모두 정상 동작합니다.
+
+- `sources/` 가 심링크인 KB. 심링크를 따라간 실제 경로로 지정해도 같은 ref 로
+  환원됩니다.
+- `--target` 을 원본 경로와 다른 대소문자로 적은 경우(대소문자 비구분
+  파일시스템). `Path.resolve()` 는 대소문자를 정준화하지 않지만 파일시스템은
+  같은 디렉터리로 봅니다.
+
+이 판정은 `ingest` 의 것보다 **엄격합니다.** `ingest` 는 환원한 문자열을
+`relative_to` 로 비교하므로(`cli.py`), 대소문자가 어긋난 `--target` 을 주면
+`sources/` 안의 파일을 밖으로 보고 **평면 변환본**을 파일명만 적힌 헤더와 함께
+만듭니다. `eject` 는 같은 인자를 `sources/` 안으로 환원하므로 그렇게 만들어진
+변환본을 짝지을 수 없습니다 — 헤더가 파일명만 말하고 어느 디렉터리였는지는 말하지
+않기 때문입니다. 이때 `--delete-original` 로 원본을 지우면 그 변환본이 고아가 되므로,
+추측하는 대신 어떤 변환본이 남는지 알려주고 `factlog eject --orphans` 를 안내합니다.
+
+`--delete-original` 로 원본까지 지우려면 원본의 KB 기준 ref(`sources/sub/report.html`)
+나 절대 경로로 지정하십시오. `sources/` 기준 경로(`sub/report.html`)는 그 경로에서
+만들어진 **변환본**을 가리킵니다. 이때 `--delete-original` 은 지울 원본이 0건이라고
+찍으면서, 원본까지 포함시키려면 어떤 철자를 써야 하는지 함께 알려줍니다.
+
+`sources/` 밖의 원본을 적재했다면(예: `factlog ingest /elsewhere/report.html`)
+미러링할 서브트리가 없어 변환본이 `runs/sources/` 바로 아래 평면으로 만들어집니다.
+그 원본을 경로로 지정하면 평면 변환본만 매칭되고, 서브디렉터리의 변환본은 그
+경로에서 만들어졌을 수 없으므로 절대 걸리지 않습니다.
+
+단, **같은 이름의 원본이 `sources/` 아래 어느 디렉터리에든 이미 있으면 아무것도
+매칭하지 않고 종료 코드 1 로 끝납니다.** `ingest` 는 `sources/` 밖 원본의 파일명만
+헤더에 적으므로, 평면 변환본은 그 이름을 가진 파일 중 *어느* 것에서 나왔는지 말할 수
+없습니다. KB 가 그 이름의 원본을 직접 들고 있다면 그쪽이 답이고, `eject` 는 확인
+프롬프트 없이 파일을 지우므로 모호한 지정은 거부합니다. 최상위뿐 아니라
+`sources/sub/report.html` 처럼 하위 디렉터리에 있어도 마찬가지입니다 — `--orphans`
+가 짝을 판정할 때 쓰는 기준과 같습니다.
+
 ### 사실 하나만 제거 (`--fact`)
 
 소스 자체는 멀쩡한데 추출된 사실 하나가 잘못된 경우, 그 사실만 폐기할 수
