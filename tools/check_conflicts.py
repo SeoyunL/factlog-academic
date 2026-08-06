@@ -862,9 +862,10 @@ def non_ascii_digit_note(objects: list[str], spec: TypedRelSpec | None) -> list[
     touched by NFC or NFD, ``has_non_ascii_digits`` is invariant under canonical
     equivalence as a general fact rather than as a claim about fullwidth, and the
     fold can neither make a value the digit policy rejects start parsing nor the
-    reverse. (Measured on unicodedata 16.0.0; the property is a Unicode
-    invariant, not a version accident — a canonical decomposition for a digit
-    would merge two digits into one character.)
+    reverse. The same sweep also finds **0 canonical decompositions whose base
+    character is an ``Nd`` digit**, which extends the invariant from single code
+    points to arbitrary strings: no ``digit + combining mark`` sequence composes
+    into something else either. (All measured on unicodedata 16.0.0.)
 
     Two things the wording deliberately does NOT claim:
 

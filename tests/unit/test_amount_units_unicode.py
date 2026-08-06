@@ -105,8 +105,14 @@ class TestLookupKeyFolded:
         assert lt.parse_amount(_nfc("5400억"), units) == 540_000_000_000
 
     def test_nfd_table_and_nfd_object(self):
-        # CONTROL (passes before and after): matching decomposed forms met as raw
-        # bytes already. It pins that folding both ends preserves that hit.
+        # CONJUNCTION PIN — dies if either fold is reverted alone. Measured:
+        # both folds green, neither fold green, table-fold-only red,
+        # lookup-fold-only red. NOT a control, despite the neighbours here.
+        #
+        # An NFD table met an NFD object as raw bytes before #325, and meets it
+        # again once both ends compose; revert one end and the two stop meeting.
+        # So what this holds down is that the two folds stay a matched pair,
+        # not that this input was unaffected by the change.
         units = common._parse_amount_units(_nfd(_UNITS_CLAUSE))
         assert lt.parse_amount(_nfd("5400억"), units) == 540_000_000_000
 
