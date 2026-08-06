@@ -515,3 +515,97 @@ class TestInlineCommentsDoNotDisableTheGuard:
         )
         result = fcommon._load_logic_policy_from(dl)
         assert "attr_rel" in result
+
+
+# ---------------------------------------------------------------------------
+# #329 round 3 — a bare fact fused onto the previous statement (#358)
+# ---------------------------------------------------------------------------
+
+_FUSED_FACT = {
+    "canonical": 'canonical("갑봇", "참조", "유령").',
+    "attr_rel": 'attr_rel("참조").',
+    "entity_node": 'entity_node("2030.1").',
+}
+
+
+class TestAFusedBareFactIsNotHonoured:
+    """A bare reserved FACT written after ` .` was absorbed into the previous
+    statement and never examined, and the engine HONOURS it.
+
+    The rule-head shape was already caught — two necks send it down the
+    ``segments[:-1]`` scan — but a bare fact has one neck, so only the head
+    segment was scanned and the fact sitting in the body half was invisible. The
+    fix is in ``_split_policy_statements``: once ` .attr_rel(` no longer reads as
+    a directive, the fact stands alone and the head tokenizer refuses it.
+
+    Measured end to end. KB: ``갑봇 -통합-> 을서비스``, ``을서비스 -정식_운영-> 2030.1``,
+    ``갑봇 -참조-> 병문서``, only ``정식_운영`` declared. Query ``path("갑봇","병문서")?``::
+
+        clean                                    rc=0 errors:0
+          - path 갑봇 -> 병문서: 갑봇 -> 병문서
+        p(X) :- relation(X,_,_) .attr_rel("참조").   guard PASSED
+                                                 rc=0 errors:0
+          - path 갑봇 -> 병문서: (not found)        <- wrong, silent
+        attr_rel("참조").          (same fact alone) guard REFUSED, rc=1
+
+    The answer flips with no error and no warning: the engine/renderer divergence
+    #329 exists to remove. `attr_rel` is pure EDB, so the engine honours a bare
+    fact for it — unlike an IDB relation that has rules, whose in-program facts
+    pyrewire ignores. That difference is why probing with an inert predicate
+    reads as "no consequence" when there is one.
+
+    The same root is a live defect on `main` for `canonical` (#358): with a
+    ``requires_review(X, "canon_check") :- canonical(X, "참조", _).`` consumer,
+    ``p(X) :- relation(X,_,_) .canonical("갑봇","참조","유령").`` moved main's report
+    from ``policy findings: 0`` to ``policy findings: 1`` / ``- requires_review: 갑봇
+    (canon_check)`` at rc=0, for a ``유령`` that is in no fact anywhere.
+    """
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_fused_bare_fact_is_refused(self, name, tmp_path):
+        dl = _make_kb(
+            tmp_path,
+            dl_text="// generated\n.decl requires_review(entity: symbol, reason: symbol)\n",
+            extra_text=f'p(X) :- relation(X,_,_) .{_FUSED_FACT[name]}\n',
+        )
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._load_logic_policy_from(dl)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_the_same_fact_standalone_is_refused(self, name, tmp_path):
+        # CONTROL — refused before and after. The whole defect was that one space
+        # separated this row from the one above it.
+        dl = _make_kb(
+            tmp_path,
+            dl_text="// generated\n.decl requires_review(entity: symbol, reason: symbol)\n",
+            extra_text=f"{_FUSED_FACT[name]}\n",
+        )
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._load_logic_policy_from(dl)
+
+    def test_clean_policy_still_loads(self, tmp_path):
+        # CONTROL — the clean row of the measurement above.
+        dl = _make_kb(
+            tmp_path,
+            dl_text="// generated\n.decl requires_review(entity: symbol, reason: symbol)\n",
+            extra_text='p(X) :- relation(X, _, _).\n',
+        )
+        assert "requires_review" in fcommon._load_logic_policy_from(dl)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_literal_stripping_can_manufacture_the_adjacency(self, name):
+        """Different provenance from the authored case: the source text has NO
+        space before the dot. Removing the quoted literal creates one —
+        ``O = "v1.0".canonical(`` becomes ``O = .canonical(`` — so a fix aimed at
+        adjacency as the author typed it would not reach this."""
+        policy = f'p(X) :- relation(X,R,O), O = "v1.0".{_FUSED_FACT[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
+
+    @pytest.mark.parametrize("name", _RESERVED)
+    def test_a_fused_rule_head_is_refused(self, name):
+        # Already caught before this fix (two necks); pinned so the narrowing
+        # cannot regress it.
+        policy = f'p(X) :- relation(X,_,_) .{_HEADS[name]}\n'
+        with pytest.raises(fcommon.FactlogError, match=f"{name} is a reserved engine"):
+            fcommon._assert_no_reserved_head(policy)
