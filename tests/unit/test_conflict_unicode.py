@@ -724,6 +724,59 @@ class TestFoldEnabledTypedParseIsDisclosed:
         assert "made a typed literal parse" in out
         assert ascii(raws[0]) in out and ascii(raws[1]) in out
 
+    def test_parse_merge_is_disclosed_when_a_contradiction_also_remains(
+        self, monkeypatch, capsys
+    ):
+        # A pair can merge two notations under the fold AND still contradict on a
+        # third value. Keying the disclosure on the conflict-free pairs skipped
+        # exactly this shape: the CONFLICT line names the survivors, the
+        # per-object spelling lines under it come from `_fold_classes` (silent
+        # about a merge that is not canonical equivalence), and NFD('제3호')
+        # therefore appeared nowhere in the output in any form — a row the
+        # previous release listed by name. The reader supersedes what is on
+        # screen and never learns a third row is behind it.
+        nfd_ordinal = _nfd("제3호")
+        facts = [
+            _fact("Acme", "순위", nfd_ordinal),
+            _fact("Acme", "순위", "3위"),
+            _fact("Acme", "순위", "5위"),
+        ]
+        assert _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL) == 1
+        captured = capsys.readouterr()
+        assert "has 2 values: 3위, 5위" in captured.err
+        assert "made a typed literal parse" in captured.out
+        assert ascii(nfd_ordinal) in captured.out
+
+    def test_parse_merge_is_recorded_on_a_still_conflicting_pair(self):
+        # The scan half of the above: `collect_conflicts` only filled
+        # `parse_merges` in its single-group branch, so the report had nothing to
+        # print even after it started looking.
+        facts = [
+            _fact("Acme", "순위", _nfd("제3호")),
+            _fact("Acme", "순위", "3위"),
+            _fact("Acme", "순위", "5위"),
+        ]
+        scan = check_conflicts.collect_conflicts(facts, {"순위"}, _TYPED_ORDINAL)
+        assert list(scan.conflicts) == [("Acme", "순위")]
+        assert scan.parse_merges[("Acme", "순위")] == {
+            "3위": sorted([_nfd("제3호"), "3위"])
+        }
+
+    def test_the_headline_does_not_claim_the_pair_is_contradiction_free(
+        self, monkeypatch, capsys
+    ):
+        # The exit-0 wording ("so no contradiction is reported for them") is false
+        # on this path — one IS reported, just not between these two notations.
+        facts = [
+            _fact("Acme", "순위", _nfd("제3호")),
+            _fact("Acme", "순위", "3위"),
+            _fact("Acme", "순위", "5위"),
+        ]
+        _run_main(monkeypatch, facts, {"순위"}, _TYPED_ORDINAL)
+        out = capsys.readouterr().out
+        assert "counted as one value" in out
+        assert "no contradiction is reported for them" not in out
+
     def test_all_nfd_amount_kb_needs_no_disclosure(self, monkeypatch, capsys):
         # The same shape on the `amount` axis is NOT disclosed, and must not be:
         # `parse_amount` composes its unit lookup key, so the engine parses these

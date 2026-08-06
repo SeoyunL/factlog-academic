@@ -596,6 +596,22 @@ def collect_conflicts(
         conflicts[reported] = sorted(objects)
         subject_variants[reported] = sorted(subjects)
         object_variants[reported] = objects
+        # A pair that still contradicts can ALSO hold a fold-enabled parse merge:
+        # three values collapse to two, one of them merged only because folding
+        # let a typed literal parse. The CONFLICT line then names the survivors
+        # and the merged notation appears nowhere in the output — a row the
+        # previous release listed by name simply vanishes, and the reader
+        # supersedes what is on screen without knowing a third row is behind it.
+        # Canonical-equivalence merges are disclosed on this path already (main's
+        # per-object `_fold_classes` loop), so leaving this one to the exit-0
+        # branch made the parse merge the single merge class with a hole.
+        merged = {
+            _representative(raws): names
+            for raws in groups.values()
+            if (names := _parse_merge(raws, unfolded[pair]))
+        }
+        if merged:
+            parse_merges[reported] = merged
     relation_variants = {
         (_representative(relation_subjects[split]), split[1]): sorted(names)
         for split, names in raw_relations.items()
@@ -715,10 +731,18 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
             "engine atoms dedup on the raw triple, so each one still enters "
             "facts/accepted.dl as a separate atom. Unify them at the source and re-collect."
         )
+    # Every pair with a parse merge, not just the ones that ended up conflict-free.
+    # A pair can merge two notations under the fold and still contradict on a
+    # third value; ``resolved`` skips it, and then nothing anywhere names the
+    # merged notation — main's CONFLICT block reports the surviving values and
+    # the object-spelling lines under it come from ``_fold_classes``, which is
+    # silent about a merge that is not canonical equivalence. So the reader was
+    # shown two values where the previous release showed three, with the missing
+    # one absent from the output in any form.
     parsed = []
-    for key in resolved:
+    for key in sorted(scan.parse_merges):
         subject, relation = key
-        for obj, notations in sorted(scan.parse_merges.get(key, {}).items()):
+        for obj, notations in sorted(scan.parse_merges[key].items()):
             parsed.append(
                 f"    '{relation}' on '{subject}' value {obj!r} notations: "
                 f"{_spellings(notations)}"
@@ -727,7 +751,8 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
         return
     print(
         f"check_conflicts: {len(parsed)} value(s) merged only because a Unicode fold made "
-        "a typed literal parse, so no contradiction is reported for them:"
+        "a typed literal parse, so the notations below are counted as one value "
+        "(any CONFLICT above already reflects that):"
     )
     for line in parsed:
         print(line)
