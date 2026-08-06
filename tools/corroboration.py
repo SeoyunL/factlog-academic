@@ -53,8 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     facts = load_facts()
     # Folded FOR DISPLAY, here rather than in `common.corroboration_counts`:
     # `factlog/compile_facts.py` reads that helper too, and the raw triple is the
-    # right key there (engine atoms are the raw triple). This report is the only
-    # caller that has to read.
+    # right key there (engine atoms are the raw triple). Folding in `common`
+    # would change engine output; only this report needs the human-facing view.
     #
     # The competing-values clause below folds the subject and object axes; the
     # head line and this list used the raw triple, so one report answered "how
