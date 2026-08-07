@@ -19,3 +19,18 @@ conflict(X, "ranked_top_3") :-
 conflict(X, "valued_at_100eok") :-
   valuation_won(X, V),
   V >= 10000000000.
+
+// entity_node/1 is the engine's entity graph: WIRELOG_PROGRAM derives it from
+// relation/3 and excludes any object whose relation is declared attr_rel. That
+// exclusion is the #329 invariant, and nothing else in either golden KB pins it
+// — the refused path query below is answered by run_logic_check.py's Python-side
+// accepted-entity precheck, which fires BEFORE the engine is asked, so it proves
+// the declaration was read, not that the engine honours it.
+//
+// Naming the extent puts every entity node in the report, so the golden holds
+// the exact membership: the five declared literals (2031-02-01, 2030-05-14, 120,
+// 3rd, 100억) must be absent and the seven real entities present.
+.decl entity_extent(entity: symbol, reason: symbol)
+
+entity_extent(X, "entity_node") :-
+  entity_node(X).
