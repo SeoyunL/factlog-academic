@@ -241,6 +241,43 @@ class TestKbContentCannotForgeTheMarker:
         # fix does not silently drop the diagnostic the row deserves.
         assert "unknown status treated as non-engine input:" in text
 
+    def test_query_dl_json_escape_cannot_open_a_marker_line(self, tmp_path):
+        """The second carrier, through a different decoder.
+
+        ``arg_value`` is ``json.loads``, so ``"a\\nstatus: engine-did-not-run"``
+        written as ONE physical line — the escape being two ordinary characters
+        on disk — decodes to a value containing a real newline. Splitting
+        facts/query.dl into lines cannot see it, so the csv-side escaping did
+        nothing here and this forged the marker in a report whose engine had run.
+
+        facts/query.dl is the worse carrier of the two: it is an engine input
+        this gate guards, ``/factlog query`` writes it, and it needs one line
+        rather than a hand-crafted multi-line CSV cell.
+
+        Three predicates, because each renders decoded values through a
+        different path — the policy branch's entity warning, ``path``'s endpoint
+        rendering, and the generic constant warning.
+        """
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        forged = "a\\nstatus: engine-did-not-run"
+        (kb / "facts" / "query.dl").write_text(
+            f'requires_review("{forged}", X)?\n'
+            f'path("{forged}", "Anthropic")?\n'
+            f'relation("{forged}", "r", O)?\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        result = _run(kb)
+        text = _report(kb).read_text(encoding="utf-8")
+
+        assert result.returncode == 0, result.stderr
+        assert "engine facts:" in text  # the engine ran; this is a real result
+        assert MARKER not in text.split("\n"), (
+            "a JSON escape in facts/query.dl forged the failure marker"
+        )
+
     def test_ordinary_unknown_status_is_unescaped(self, tmp_path):
         """The escape must fire only on values that would break the line.
 
