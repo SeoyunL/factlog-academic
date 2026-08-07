@@ -2,8 +2,10 @@
 """Contract pins for ``tests/golden.sh`` itself (#354).
 
 The golden harness is cited as evidence ("golden passes, so this change is
-safe"), so its own failure modes matter as much as the engine's. Two of them
-were live:
+safe"), so its own failure modes matter as much as the engine's. Two families
+were live.
+
+Claims the output made but did not hold:
 
 1. ``PYTHON`` was assigned unconditionally, so ``PYTHON=<interpreter> bash
    tests/golden.sh`` — the convention the other 38 harnesses in ``tests/``
@@ -12,11 +14,29 @@ were live:
 2. When a step died, the artifact it should have written stayed on disk as the
    committed copy, and the following diff compared *that* against the golden
    file. It passed no matter what the branch changed.
+3. Step 4 keyed "the declared contradiction is detected" on exit code 1 alone,
+   which a tool that cannot start also returns.
 
-Both are exercised by running the real harness as a subprocess against a
-throwaway copy of ``examples/sample-kb``, with ``PYTHON`` pointed at a shim that
-fails on purpose. Each test also asserts the shim was actually reached, so a
-harness that ignores ``PYTHON`` cannot make the test pass by accident.
+Writes that escaped the scratch copy — running a test must not touch the
+checkout, or anything else the caller owns:
+
+4. Both KBs were regenerated in place, so the unit layer rewrote tracked
+   fixtures.
+5. ``cp -R`` dereferences neither a symlinked source operand nor an inner
+   symlink, so a "copy" of a symlinked KB wrote back into the original — and the
+   ``rm -f`` that makes a dead step fail honestly deleted the caller's real file.
+
+An eighth case guards a mode the remedy for 5 introduces rather than one that
+was live: ``cp -RL`` cannot follow a cyclic symlink, and it skips the subtree and
+carries on, so the copy the run would measure is silently incomplete. The
+harness stops on a failed copy, and that stop is pinned.
+
+Every case runs the real harness as a subprocess, most against a throwaway copy
+of ``examples/sample-kb``, with ``PYTHON`` pointed at a shim that fails on
+purpose. Each shim case asserts the shim was actually reached, so a harness that
+ignores ``PYTHON`` cannot make a case pass by accident; each write case
+fingerprints inodes, because a rewrite that reproduces identical bytes is still
+a write.
 """
 from __future__ import annotations
 
@@ -213,3 +233,129 @@ def test_dead_conflicts_step_is_not_read_as_detection(tmp_path: Path) -> None:
         + combined
     )
     assert result.returncode != 0
+
+
+def _artifacts(root: Path) -> list[Path]:
+    return [root / "facts" / "accepted.dl", root / "facts" / "logic_report.txt"]
+
+
+def _refuse_logic_check_shim(tmp_path: Path) -> Path:
+    return _write_shim(
+        tmp_path / "refuse-logic-check-2",
+        "case \"$*\" in\n"
+        '  *run_logic_check.py*) echo "shim: refused run_logic_check" >&2; exit 1 ;;\n'
+        "esac\n"
+        f'exec "{sys.executable}" "$@"\n',
+    )
+
+
+def test_symlinked_kb_root_is_not_written_through(tmp_path: Path) -> None:
+    """A KB reached through a symlink must be read-only too.
+
+    ``cp -R`` does not dereference a symlinked SOURCE operand — POSIX has ``-R``
+    imply ``-P`` — so copying a symlinked KB root produced a *symlink* pointing
+    back at the caller's real KB, and every step wrote straight through it. The
+    run went green while the caller's KB was rewritten, which is exactly what
+    running on a copy was supposed to stop.
+
+    ``test_run_writes_nothing_inside_the_checkout`` cannot see this: it passes a
+    real directory.
+    """
+    real = tmp_path / "realkb"
+    shutil.copytree(SAMPLE_KB, real)
+    link = tmp_path / "symkb"
+    link.symlink_to(real, target_is_directory=True)
+    before = {path: _fingerprint(path) for path in _artifacts(real)}
+
+    result = _run_golden_at(link, tmp_path, Path(sys.executable))
+
+    assert result.returncode == 0, (
+        "this case pins where a GREEN run writes; it did not go green\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    changed = [
+        path.name for path in _artifacts(real) if _fingerprint(path) != before[path]
+    ]
+    assert not changed, (
+        "the harness wrote through the symlink into the caller's KB: "
+        + ", ".join(changed)
+    )
+
+
+def test_symlinked_kb_root_survives_a_dead_step(tmp_path: Path) -> None:
+    """A dead step must not delete the caller's file through a symlinked root.
+
+    Worse than the write-through above, and worse than what it replaced: the
+    working copy has its artifact removed before each step so a dead step has
+    nothing to compare. Through a symlinked root that ``rm -f`` reached the real
+    file, the step then died, and nothing recreated it — no signal needed, and
+    the EXIT trap only removes the scratch directory.
+    """
+    real = tmp_path / "realkb"
+    shutil.copytree(SAMPLE_KB, real)
+    link = tmp_path / "symkb"
+    link.symlink_to(real, target_is_directory=True)
+    report = real / "facts" / "logic_report.txt"
+    assert report.is_file()
+
+    result = _run_golden_at(link, tmp_path, _refuse_logic_check_shim(tmp_path))
+    combined = result.stdout + result.stderr
+
+    assert "shim: refused run_logic_check" in combined, (
+        "step 2 was not made to fail, so this case proves nothing\n" + combined
+    )
+    assert report.is_file(), (
+        "a dead step deleted the caller's logic_report.txt through the symlink"
+    )
+
+
+def test_symlink_inside_the_kb_is_not_written_through(tmp_path: Path) -> None:
+    """An inner symlink whose target escapes the KB is a second write-back path.
+
+    ``cp -R`` preserves inner symlinks AS symlinks, so a KB whose ``facts/`` is a
+    link to somewhere outside the KB had its steps write to that outside
+    directory. Dereferencing on copy materialises it as a real directory in the
+    scratch copy instead.
+    """
+    kb = tmp_path / "kb"
+    shutil.copytree(SAMPLE_KB, kb)
+    outside = tmp_path / "outside-facts"
+    shutil.move(str(kb / "facts"), str(outside))
+    (kb / "facts").symlink_to(outside, target_is_directory=True)
+    before = {path: _fingerprint(path) for path in _artifacts(kb)}
+
+    result = _run_golden_at(kb, tmp_path, Path(sys.executable))
+
+    assert result.returncode == 0, (
+        "this case pins where a GREEN run writes; it did not go green\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    changed = [
+        path.name for path in _artifacts(kb) if _fingerprint(path) != before[path]
+    ]
+    assert not changed, (
+        "the harness wrote through an inner symlink, outside the KB: "
+        + ", ".join(changed)
+    )
+
+
+def test_symlink_cycle_in_the_kb_fails_loudly(tmp_path: Path) -> None:
+    """Dereferencing on copy cannot follow a cycle, so it must stop and say so.
+
+    ``cp -RL`` exits 1 on a cyclic symlink and copies everything else, so without
+    a check the harness would run on a silently incomplete copy. This pins the
+    loud stop. A KB like this is pathological; the point is that the copy step
+    can fail at all, and that failing is not mistaken for a passing run.
+    """
+    kb = tmp_path / "kb"
+    shutil.copytree(SAMPLE_KB, kb)
+    (kb / "pages" / "loop").symlink_to(kb, target_is_directory=True)
+
+    result = _run_golden_at(kb, tmp_path, Path(sys.executable))
+    combined = result.stdout + result.stderr
+
+    assert result.returncode != 0, combined
+    assert "could not copy" in combined, (
+        "the copy failed without saying so, or did not fail at all\n" + combined
+    )
+    assert "0 failed" not in result.stdout, combined
