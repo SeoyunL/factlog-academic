@@ -227,11 +227,13 @@ fi
 # The suite being green with either line deleted meant the suite had no case,
 # not that no case was possible.
 #
-# Measured: deleting `base="${base##*\\}"` fails all three backslash cases
-# (17, 18 and 19 — every one of them reaches its basename through a backslash).
-# Deleting `pdir="${pdir##*\\}"` fails only case 17, whose PARENT is reached
-# through a backslash; case 18's parent is already reached through a forward
-# slash, and case 19 has no parent separator at all.
+# Measured against the whole suite: deleting `base="${base##*\\}"` fails all six
+# backslash-bearing cases (17, 18, 19 and the normalisation cases 25-27), since
+# every one of them reaches its BASENAME through a backslash. Deleting
+# `pdir="${pdir##*\\}"` fails four — 17 and 25-27, whose PARENT is reached
+# through a backslash — while case 18's parent is already reached through a
+# forward slash and case 19 has no parent separator at all, so those two
+# survive it.
 # ---------------------------------------------------------------------------
 run_case "Git Bash: all-backslash path to the engine input — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\query.dl"}}' fire
@@ -252,11 +254,12 @@ run_case "POSIX file literally named 'facts\\accepted.dl' — fire (known over-f
   '{"tool_name":"Write","tool_input":{"file_path":"facts\\accepted.dl"}}' fire
 
 # ---------------------------------------------------------------------------
-# CASES 20-23: NORMALISATION. "//" and "/./" name exactly the file the collapsed
-# path names, so an engine input written either way is a genuine engine input
-# and must nudge. All four were SILENT before the collapse was added — this is
-# under-firing, the direction that costs a missed signal, and it matters most
-# for candidates.csv and logic-policy.dl, which gate_check.sh does not guard.
+# CASES 20-24: NORMALISATION, forward-slash side. "//" and "/./" name exactly
+# the file the collapsed path names, so an engine input written either way is a
+# genuine engine input and must nudge. All five were SILENT before the collapse
+# was added — this is under-firing, the direction that costs a missed signal,
+# and it matters most for candidates.csv and logic-policy.dl, which
+# gate_check.sh does not guard at all.
 #
 # The loop is pinned by the repeated forms: one pass over "///" leaves a "//"
 # behind, so a non-looping collapse fails cases 21 and 23.
@@ -273,7 +276,23 @@ run_case "double slash in a policy path — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"/kb/policy//logic-policy.dl"}}' fire
 
 # ---------------------------------------------------------------------------
-# CASE 24 (CONTROL): `..` is NOT resolved, deliberately rather than by omission.
+# CASES 25-27: NORMALISATION, backslash side. The same redundant forms a Git
+# Bash payload can carry. These were still SILENT after the forward-slash
+# collapse landed — genuine engine inputs missed on the one platform the
+# backslash splits exist to serve, which is the same "list reads closed but has
+# a member missing" shape as the earlier round's finding.
+#
+# Case 27 pins the loop on this side too: one pass over "\\\\" leaves a "\\".
+# ---------------------------------------------------------------------------
+run_case "Git Bash: doubled backslash before the basename — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\\\accepted.dl"}}' fire
+run_case "Git Bash: backslash dot component — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\.\\accepted.dl"}}' fire
+run_case "Git Bash: tripled backslash (pins the loop) — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\\\\\accepted.dl"}}' fire
+
+# ---------------------------------------------------------------------------
+# CASE 28 (CONTROL): `..` is NOT resolved, deliberately rather than by omission.
 #
 # Labelled CONTROL because it passes pre-fix too — the old payload grep also
 # stayed silent on this path, for its own reason — so passing is not evidence
