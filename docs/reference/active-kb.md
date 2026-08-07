@@ -53,7 +53,7 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 ## KB를 만드는 일과 활성 KB를 고르는 일은 별개입니다
 
 `init`/`setup` 은 KB를 **만드는** 명령이고, 활성 KB를 **고르는** 명령은 `use` 입니다.
-그래서 `init`/`setup` 이 활성 KB 설정을 건드리는 경우는 다음 셋뿐입니다.
+그래서 `init`/`setup` 이 활성 KB 설정을 어떻게 다루는지는 다음 네 경우뿐입니다.
 
 | 상황 | 활성 KB 설정 |
 |------|---------------|
@@ -65,17 +65,32 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 ```text
 factlog init: created /tmp/scratch
 factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT recorded there
-  to work in it: factlog use /tmp/scratch   (or re-run with --activate)
+  to record it in the config: factlog use /tmp/scratch   (or re-run with --activate)
 ```
 
 문구가 "활성 KB" 가 아니라 "활성 KB **설정**" 인 것은 정확성 때문입니다. 이 결정은
 설정 파일에 대한 것이고, 실제로 어느 KB가 대상이 되는지는 `$FACTLOG_ROOT` 까지 함께
-봐야 정해집니다. 그래서 환경 변수가 설정을 앞지르고 있으면 그 사실을 한 줄 더
-출력합니다 — 이 줄이 없으면 같은 세션의 `factlog where --porcelain` 과 어긋나 보입니다.
+봐야 정해집니다. 그래서 두 가지를 따로 알려 줍니다.
+
+`$FACTLOG_ROOT` 가 **설정 파일과 다른 값**을 가리키면(즉 실제로 설정을 앞지르고
+있으면) 그 사실을 적습니다. 비교 대상은 방금 만든 KB가 아니라 **설정 파일** 입니다 —
+환경 변수와 설정이 같은 값이면 앞지르는 것이 없으므로 이 줄은 나오지 않습니다.
 
 ```text
   note: $FACTLOG_ROOT=/tmp/envkb outranks the config in this session (factlog where)
 ```
+
+그리고 플래그 없이 실행한 명령이 방금 만든 KB에 **닿지 않으면**, 실제로 어디로 가는지와
+어디서 온 값인지를 적습니다. 이쪽은 설정이 아니라 `factlog where` 와 같은 해석
+결과(`$FACTLOG_ROOT` > 설정 > 현재 디렉터리)를 봅니다.
+
+```text
+  a flagless command would target /Users/me/wiki (from $FACTLOG_ROOT), not /tmp/scratch
+    — pass --target /tmp/scratch, or point $FACTLOG_ROOT at /tmp/scratch
+```
+
+`setup` 의 마지막 줄도 같은 질문을 씁니다. 설정 파일이 무엇을 기록하고 있든, 다음에
+칠 `/factlog sync` 가 어디로 가는지가 사용자가 실제로 묻는 것이기 때문입니다.
 
 임시 KB 하나를 만들려고 `init` 을 돌렸다가 원래 쓰던 KB를 잃는 일이 없도록 하기
 위해서입니다. 만들면서 바로 활성화하려면 `--activate` 를, 활성 KB가 없는 상태에서도

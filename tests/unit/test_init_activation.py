@@ -335,15 +335,56 @@ class TestEnvOverrideIsDisclosed:
     def test_no_note_when_the_environment_agrees_with_the_target(self, tmp_path, config_home):
         """GUARD: passes before and after — the note must not become noise.
 
-        A flagless run resolves its target *from* `$FACTLOG_ROOT`, so the
-        environment and the target agree and there is nothing to disclose. That
-        is every SKILL.md flow, which is why it is worth holding.
+        A flagless run resolves its target *from* `$FACTLOG_ROOT`, so nothing is
+        being overridden. That is every SKILL.md flow, which is why it is worth
+        holding.
         """
         env_kb = tmp_path / "envkb"
 
         out = self.run_with_env("init", config_home=config_home, env_root=env_kb).stdout
 
         assert "outranks" not in out, out
+
+    def test_silent_when_the_environment_and_the_config_agree(self, tmp_path, config_home):
+        """The predicate is env vs **config**, not env vs target.
+
+        Comparing against the target fired here — env and config both name
+        ``/wiki``, only the target differs — and announced an override that is
+        not happening. `where --porcelain` returns the same ``/wiki`` the config
+        holds, so there is nothing to disclose.
+        """
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        write_pointer(config_home, wiki)
+
+        out = self.run_with_env(
+            "init", "--target", str(tmp_path / "scratch"), config_home=config_home, env_root=wiki
+        ).stdout
+
+        assert "outranks" not in out, f"announced an override while env and config agree: {out}"
+
+    def test_fires_when_the_environment_outranks_a_config_that_equals_the_target(
+        self, tmp_path, config_home
+    ):
+        """The other direction of the same defect, and the worse one.
+
+        env names ``/envkb``, the config names ``/cfgkb``, and the target *is*
+        ``/envkb``. Comparing env against the target found them equal and stayed
+        silent — exactly when the user most needs to know the config is not what
+        is in force. The KB is reachable now only because the environment says
+        so, and that lasts until the shell does.
+        """
+        cfg_kb = tmp_path / "cfgkb"
+        cfg_kb.mkdir()
+        write_pointer(config_home, cfg_kb)
+        env_kb = tmp_path / "envkb"
+
+        out = self.run_with_env(
+            "init", "--target", str(env_kb), config_home=config_home, env_root=env_kb
+        ).stdout
+
+        assert "outranks" in out, f"stayed silent while $FACTLOG_ROOT overrode {cfg_kb}: {out}"
+        assert str(env_kb) in out
 
 
 class TestExplicitFlags:
@@ -464,11 +505,20 @@ class TestSetup:
         closing = capsys.readouterr().out.strip().splitlines()[-1]
 
         assert str(scratch) in closing, f"the closing line does not name the KB just created: {closing}"
-        assert "NOT the active KB" in closing, closing
+        assert str(active) in closing, f"the closing line does not name where a flagless command goes: {closing}"
+        assert "flagless" in closing, closing
         assert f"--target {scratch}" in closing or f"factlog use {scratch}" in closing, closing
 
     def test_summary_block_carries_the_hint(self, tmp_path, config_home, capsys):
-        """The hint was printed twenty-odd lines above the summary, and lost."""
+        """The hint was printed twenty-odd lines above the summary, and lost.
+
+        The block is cut *before* the closing line, and the assertion is on the
+        ``→`` prefix the summary gives its notes. An earlier version sliced to
+        the end of the output and asserted on ``factlog use <target>``, which the
+        closing line also contains — so deleting the hint entirely left it green.
+        It was matching the wrong line and duplicating
+        ``test_closing_line_names_the_target_when_it_is_not_recorded``.
+        """
         active = tmp_path / "wiki"
         active.mkdir()
         write_pointer(config_home, active)
@@ -478,8 +528,9 @@ class TestSetup:
         out = capsys.readouterr().out
 
         summary_block = out.split("=== factlog setup: summary ===", 1)[-1]
-        assert f"factlog use {scratch}" in summary_block, (
-            f"the way to switch never reaches the summary block: {summary_block}"
+        summary_block = summary_block.split("\nfactlog setup complete", 1)[0]
+        assert f"→ to record it in the config: factlog use {scratch}" in summary_block, (
+            f"the way to record it never reaches the summary block: {summary_block}"
         )
 
     def test_closing_line_stays_generic_when_the_target_is_recorded(self, tmp_path, config_home, capsys):
@@ -490,7 +541,54 @@ class TestSetup:
         closing = capsys.readouterr().out.strip().splitlines()[-1]
 
         assert "inside your knowledge base" in closing, closing
-        assert "NOT the active KB" not in closing, closing
+        assert "flagless command would target" not in closing, closing
+
+    def test_closing_line_is_generic_when_factlog_root_names_the_target(
+        self, tmp_path, config_home, monkeypatch, capsys
+    ):
+        """`setup`'s whole environment dimension was untested (the fixture unset it).
+
+        With ``$FACTLOG_ROOT`` naming the new KB and the config naming another,
+        the config-based closing line said the new KB was NOT the active one and
+        that a flagless sync would go elsewhere. Both were false:
+        ``where --porcelain`` returns the target, because the environment
+        outranks the config. The closing line has to ask ``resolve_root``.
+        """
+        other = tmp_path / "wiki"
+        other.mkdir()
+        write_pointer(config_home, other)
+        scratch = tmp_path / "scratch"
+        monkeypatch.setenv("FACTLOG_ROOT", str(scratch))
+
+        assert cli.main(["setup", "--target", str(scratch)]) == 0
+        closing = capsys.readouterr().out.strip().splitlines()[-1]
+
+        assert "inside your knowledge base" in closing, (
+            f"claims the KB is unreachable while $FACTLOG_ROOT names it: {closing}"
+        )
+        assert factlog_config.resolve_root()[0] == resolved(scratch), "precondition"
+
+    def test_closing_line_names_the_target_on_a_damaged_config(self, tmp_path, config_home, capsys):
+        """The UNREADABLE branch reaches the closing line too.
+
+        Nothing pinned it: flipping that branch's decision left the suite green
+        while `setup` closed with the generic "run /factlog sync inside your
+        knowledge base" on a config it had just refused to touch — so a flagless
+        sync would fall through to cwd, not the new KB.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", ', encoding="utf-8")
+        scratch = tmp_path / "scratch"
+
+        assert cli.main(["setup", "--target", str(scratch)]) == 0
+        closing = capsys.readouterr().out.strip().splitlines()[-1]
+
+        assert "inside your knowledge base" not in closing, (
+            f"a damaged config still got the everything-is-fine closing line: {closing}"
+        )
+        assert str(scratch) in closing, closing
+        assert "flagless" in closing, closing
 
     def test_lang_flag_still_applies_without_activating(self, tmp_path, config_home, capsys):
         """``--lang`` edits the same file; declining the root must not decline it."""
