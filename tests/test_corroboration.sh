@@ -162,9 +162,10 @@ printf '%s' "$co" | grep -qF "A사 (1 src); B사 (1 src)" \
   || bad "competing values wrong: $(printf '%s' "$co" | tail -2)"
 
 # --- one source backing two spellings counts once (#325) ---------------------
-# The sources are re-aggregated over the folded key instead of being read out of
-# corroboration_counts, which is keyed on the RAW triple: summing the two
-# spellings' counts would report two sources where there is one file.
+# The report aggregates source SETS per folded value rather than summing counts:
+# both spellings come from one file, and adding two per-spelling counts would
+# report two sources where there is one. corroboration_counts is keyed on
+# common.engine_atom_key (#342), the same fold, so neither path double-counts.
 OKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$OKB" >/dev/null
 printf 'x\n' > "$OKB/sources/a.md"
@@ -268,10 +269,10 @@ printf '%s' "$co" | grep -qF "competing values" \
   || ok "the clause and the head line agree (no competition on one value)"
 
 # --- one file backing two spellings is still one source (#325) ----------------
-# The other edge of the same fold, and the reason sources are re-aggregated over
-# the folded key instead of summing corroboration_counts: both spellings come
-# from ONE file, so the merged fact has one source, not two. Fails before this
-# change for the same reason as the case above (two facts, not one).
+# The other edge of the same fold, and the reason the report aggregates source
+# SETS rather than summing per-spelling counts: both spellings come from ONE
+# file, so the merged fact has one source, not two. Fails before this change for
+# the same reason as the case above (two facts, not one).
 SKB2="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$SKB2" >/dev/null
 printf 'x\n' > "$SKB2/sources/a.md"
