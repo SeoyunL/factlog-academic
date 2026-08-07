@@ -348,8 +348,8 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
             # string, so is_quoted_string is exactly "not a variable" — the
             # predicate policy_row_matches already uses, said the same way.
             if not is_quoted_string(arg):
-                bindings.append(f"{arg}={value}")
-        values.append(", ".join(bindings) if bindings else ", ".join(row))
+                bindings.append(f"{arg}={one_line(value)}")
+        values.append(", ".join(bindings) if bindings else ", ".join(one_line(v) for v in row))
     suffix = "; " + "; ".join(values) if values else ""
     echo = f" (query: {line})" if any(is_quoted_string(arg) for arg in args) else ""
     return f"{predicate} results{echo}: {len(rows)} rows{suffix}"
@@ -414,7 +414,10 @@ def evaluate_queries(
                     trace = dependency_path(facts, constants[0], constants[1], attribute_rels)
                 else:
                     trace = []
-                value = " -> ".join(trace) if trace else "(not found)"
+                # one_line on the engine-derived trace, not on `head` — head is
+                # built from the query line, which query_lines() already split on
+                # newlines, so it cannot carry one.
+                value = " -> ".join(one_line(node) for node in trace) if trace else "(not found)"
                 results.append(f"{head}: {value}")
         elif predicate == "relation":
             if query_error("relation", line) is not None:
@@ -426,8 +429,11 @@ def evaluate_queries(
                 bindings = []
                 for arg, value in zip(args, [subject, relation, object_], strict=True):
                     if not is_quoted_string(arg):
-                        bindings.append(f"{arg}={value}")
-                result_values.append(", ".join(bindings) if bindings else f"{subject}, {relation}, {object_}")
+                        bindings.append(f"{arg}={one_line(value)}")
+                result_values.append(
+                    ", ".join(bindings) if bindings
+                    else f"{one_line(subject)}, {one_line(relation)}, {one_line(object_)}"
+                )
             suffix = "; " + "; ".join(result_values) if result_values else ""
             results.append(f"relation results: {len(rows)} rows{suffix}")
         elif predicate == "count":
@@ -475,14 +481,45 @@ def evaluate_queries(
 # for one reason: the success report's text is a published contract
 # (tests/golden/logic_report.txt, examples/sample-kb/facts/logic_report.txt, and
 # every report already sitting in a user's KB), and a positive `status: ok`
-# marker would make every one of those read as unrecognised. The only writer of
-# facts/logic_report.txt is _write_report below, so "carries no marker" and
-# "written by the success path" are the same set for every report this repo
-# produces. The cost is that a report truncated inside its first three lines
-# would lose the marker and read as a success; _write_report closes that by
-# replacing the file atomically, so a reader sees either the whole failure
-# report or the previous file.
+# marker would make every one of those read as unrecognised.
+#
+# A negative marker only works while "carries the marker" and "written by the
+# failure path" are the same set, and that is NOT free: this report interpolates
+# KB-derived text, a CSV field may legally contain a newline, and a value ending
+# in "\nstatus: engine-did-not-run" therefore used to put the marker into a
+# SUCCESS report as a line of its own. The run succeeded, the report carried real
+# counts, and both readers called it an engine failure with `reason: (not
+# recorded)` — the deadlock #338 removes, re-created out of KB content, and since
+# the status fix it was repeated by two consumers rather than one. What keeps the
+# two sets equal is `one_line` below, applied at EVERY site where KB text enters
+# a report line: no interpolated value can open a line, so only the assembly
+# above can. The cost of the negative marker is also that a report truncated
+# inside its first three lines would lose it and read as a success;
+# _write_report closes that by replacing the file atomically.
 ENGINE_FAILED_STATUS_LINE = "status: engine-did-not-run"
+
+# Every character Python's str.splitlines() treats as a line break. The set is
+# wider than "\n" on purpose: it is what a READER may split on (cli.py's
+# splitlines() did), so a value carrying any of them could open a line for one
+# reader and not for another. U+2028 in particular is routine in text pasted from
+# PDFs — see the note at factlog/common.py's line-break handling.
+_LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def one_line(value: object) -> str:
+    """*value* as report text that cannot become more than one line.
+
+    Values that carry no line break — every ordinary status, entity and literal —
+    are returned UNCHANGED, so the report stays byte-identical to what it has
+    always written (tests/golden/logic_report.txt pins that). Only a value that
+    would break the line is escaped, via ``repr``, which keeps it readable and
+    visible rather than silently dropping the offending part: a hand-edited
+    status of ``odd\\nstatus: engine-did-not-run`` reports as
+    ``'odd\\nstatus: engine-did-not-run'``, on one line, still naming what is
+    wrong with the row.
+    """
+    text = str(value)
+    return repr(text) if any(ch in text for ch in _LINE_BREAKS) else text
 
 
 def _write_report(text: str) -> None:
@@ -626,11 +663,16 @@ def build_report_text() -> str:
         if not row["subject"] or not row["relation"] or not row["object"]:
             errors.append(f"incomplete fact row: {row}")
         if row["status"] not in KNOWN_STATUSES:
-            warnings.append(f"unknown status treated as non-engine input: {row['status']}")
+            # one_line: this is the report's most direct path from a hand-edited
+            # CSV cell to a report line, and a quoted CSV field may contain a
+            # newline. Unescaped, a status of "odd\nstatus: engine-did-not-run"
+            # put ENGINE_FAILED_STATUS_LINE into a SUCCESSFUL report and both
+            # readers then called a completed run an engine failure.
+            warnings.append(f"unknown status treated as non-engine input: {one_line(row['status'])}")
 
     for predicate in sorted(policy_query_predicates):
         for target, reason in sorted(inferred[predicate]):
-            policy_findings.append(f"{predicate}: {target} ({reason})")
+            policy_findings.append(f"{one_line(predicate)}: {one_line(target)} ({one_line(reason)})")
 
     for line in query_lines():
         query_errors, query_warnings = validate_query(line, entities, policy_query_predicates, path_nodes)

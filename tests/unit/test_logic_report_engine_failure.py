@@ -23,6 +23,7 @@ types and only one of them is a FactlogError:
 """
 from __future__ import annotations
 
+import csv
 import os
 import shutil
 import subprocess
@@ -193,6 +194,67 @@ class TestTheFailureReportDoesNotReadAsAResult:
         _run(kb)
 
         assert MARKER in _report(kb).read_text(encoding="utf-8").splitlines()
+
+
+class TestKbContentCannotForgeTheMarker:
+    """A SUCCESSFUL run's report must never carry the marker, whatever the KB says.
+
+    The marker is negative — absence of it means "the engine ran" — so it is only
+    sound while nothing but the failure path can produce that line. The report
+    interpolates KB-derived text, and a quoted CSV field may legally contain a
+    newline, so a hand-edited status of ``odd\\nstatus: engine-did-not-run`` used
+    to open a line of its own inside a report whose engine had run fine. The run
+    exited 0 with real counts, and both readers then called it an engine failure
+    with ``reason: (not recorded)`` — #338's deadlock rebuilt out of KB content,
+    and pointing at a cause that does not exist.
+
+    `finalize` tells users to hand-edit candidates.csv and #332's recovery has
+    them seed it, so an unexpected status column is the ordinary case this
+    warning line exists for, not an attack.
+    """
+
+    def _kb_with_status(self, tmp_path, status: str) -> Path:
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        candidates = kb / "facts" / "candidates.csv"
+        rows = list(csv.DictReader(candidates.open(encoding="utf-8")))
+        rows[0]["status"] = status
+        with candidates.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        return kb
+
+    def test_status_column_cannot_open_a_marker_line(self, tmp_path):
+        kb = self._kb_with_status(tmp_path, "odd\nstatus: engine-did-not-run")
+
+        result = _run(kb)
+        text = _report(kb).read_text(encoding="utf-8")
+
+        assert result.returncode == 0, result.stderr
+        # The engine ran: the report carries counts, which a failure report never does.
+        assert "engine facts:" in text
+        assert MARKER not in text.split("\n"), (
+            "KB content forged the failure marker in a successful report"
+        )
+        # The offending value is still reported, escaped onto one line, so the
+        # fix does not silently drop the diagnostic the row deserves.
+        assert "unknown status treated as non-engine input:" in text
+
+    def test_ordinary_unknown_status_is_unescaped(self, tmp_path):
+        """The escape must fire only on values that would break the line.
+
+        Escaping every value would change the report's text for the ordinary
+        case — the one the golden fixture pins — so this is what keeps the fix
+        from being a format change.
+        """
+        kb = self._kb_with_status(tmp_path, "weird")
+
+        _run(kb)
+
+        assert "unknown status treated as non-engine input: weird" in _report(
+            kb
+        ).read_text(encoding="utf-8")
 
 
 class TestFailingStillFails:
