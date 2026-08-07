@@ -213,6 +213,13 @@ class TestCanonicallyEquivalentSpellingsCollapse:
         # Synthesis is only safe because every atom-keyed map is keyed on
         # engine_atom_key. If one were left raw it would miss this atom outright
         # and drop the sources it is supposed to report.
+        #
+        # NOT a pin, and not a guard either. On origin/main it ERRORS rather
+        # than fails — engine_atom_key does not exist there — so "it fails on
+        # main" is not evidence for anything. Its meaningful baseline is the
+        # round-1 branch, where it passes: the representative was a real row, so
+        # a raw map resolved it. It is a consistency check that synthesis did
+        # not break what round 1 already had.
         facts = [
             _row(_nfc("삼성"), "대표", _nfd("이재용"), source="sources/a.md", status="confirmed"),
             _row(_nfd("삼성"), "대표", _nfc("이재용"), source="sources/b.md", status="confirmed"),

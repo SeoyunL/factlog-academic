@@ -1708,13 +1708,27 @@ def fact_signals(
 
     Keyed on the atom's identity, not the raw triple, and ``ask``'s renderer
     folds the engine row through ``fold_atom_triple`` before looking in here.
-    Both sides move together or neither does: with the atom folded at compile
-    time and this map still raw, a folded group's atom found no entry, so
-    ``ask`` printed ``[no extraction backing]`` and dropped every backing source
-    path and the ``[stale: source missing]`` marker for a fact that had both.
-    Before the atom folded, both key spaces were raw and every atom matched —
-    the duplicate rows were wrong but nothing was missing, and for a provenance
-    tool losing a source is the worse failure."""
+    Both sides move together or neither does. With the atom folded at compile
+    time and this map still raw, the failure took two shapes and the ordinary
+    one is the quieter:
+
+    * a group holding two spellings on ONE axis (same subject, object written
+      both ways — the common shape) writes a representative that IS one of the
+      rows, so the raw lookup **finds** an entry: measured
+      ``(sources: 1, conf 0.90)`` with one backing path, for a fact backed by
+      two sources. Right-looking, silently short.
+    * a CROSS group (subject and object swapping forms) has no row composed on
+      both axes, so the representative is synthesized and the raw lookup
+      **misses**: ``[no extraction backing]``, dropping the source count, every
+      backing path and the ``[stale: source missing]`` marker at once.
+
+    A group written one way is unaffected either way — every row shares the raw
+    triple, so the raw key was already the atom's key.
+
+    Before the atom folded, both key spaces were raw and every atom matched: the
+    duplicate rows were wrong but nothing was missing. For a provenance tool
+    losing a source is the worse failure, which is why this moved rather than
+    the atom moving back."""
     base = ROOT if root is None else Path(root)
     acc: dict[tuple[str, str, str], dict[str, object]] = {}
     for row in engine_facts(facts):
@@ -1779,9 +1793,11 @@ def engine_atom_key(row: dict[str, str]) -> tuple[str, str, str]:
     Every map keyed by this must be *looked up* through it too. ``fact_signals``
     and ``corroboration_counts`` build their keys here; ``ask``'s renderer folds
     the engine row it holds through :func:`fold_atom_triple` before asking them.
-    Half a move — one side folded, the other raw — silently drops the annotation
-    for a folded group instead of merely duplicating it, which is the worse
-    failure for a provenance tool."""
+    Half a move — one side folded, the other raw — is wrong in two different
+    ways depending on the group's shape: it under-counts where the raw lookup
+    still happens to hit, and drops the annotation outright where the
+    representative is synthesized. Neither merely duplicates, which is what the
+    all-raw arrangement did. See ``fact_signals`` for both measured."""
     return fold_atom_triple(row["subject"], row["relation"], row["object"])
 
 
