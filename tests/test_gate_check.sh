@@ -1876,6 +1876,75 @@ run_case "marker with several trailing CRs — deny" \
 rm -rf "$KB_CRCR"
 
 # ---------------------------------------------------------------------------
+# CASES 65-68: A REPORT THE TOOL ACTUALLY WROTE, AND ONE THE GATE CANNOT JUDGE.
+#
+# Every case above builds its report with `echo`, which is why a whole class of
+# defect sailed through at 91/0: the fixtures were all well-formed text, and the
+# predicate's failure mode was on input that is not. These run
+# run_logic_check.py against a KB whose engine cannot start and judge the file it
+# leaves behind, then perturb THAT file.
+#
+# The perturbations attack the reader rather than the marker. The old predicate
+# was `sed | grep` under `set -euo pipefail`: sed aborts on a NUL, and a
+# non-zero pipeline was read as "no marker" EVEN WHEN GREP MATCHED — so one byte
+# flipped a DENY into an ALLOW, and an unreadable file did the same. "Cannot
+# judge" must deny, not allow; that is the direction a guard fails safely in.
+# ---------------------------------------------------------------------------
+REALKB="$(mktemp -d)/kb"
+mkdir -p "$REALKB"
+cp -R "$(cd "$(dirname "$0")/.." && pwd)/examples/sample-kb/." "$REALKB/"
+rm -f "$REALKB/facts/logic_report.txt" "$REALKB/facts/accepted.dl"   # engine cannot start
+bash "$PYTHON_RUNNER" "$(cd "$(dirname "$0")/.." && pwd)/tools/run_logic_check.py" --wiki "$REALKB" >/dev/null 2>&1 || true
+touch_file "$REALKB/facts/query.dl"
+set_mtime_past "$REALKB/facts/query.dl"
+touch "$REALKB/facts/logic_report.txt"
+
+if [ -f "$REALKB/facts/logic_report.txt" ] && grep -q "engine-did-not-run" "$REALKB/facts/logic_report.txt"; then
+  echo "PASS: setup — run_logic_check wrote a real failure report to judge"
+  pass=$((pass + 1))
+else
+  echo "FAIL: setup — no real failure report produced; cases 65-68 would be vacuous"
+  fail=$((fail + 1))
+fi
+
+# CASE 65: the tool's own report, unmodified — DENY.
+run_case "a report run_logic_check actually wrote — deny" \
+  "$REALKB" "$REALKB/facts/query.dl" 2
+
+# CASE 66: the same report with one NUL byte appended — still DENY.
+cp "$REALKB/facts/logic_report.txt" "$REALKB/facts/logic_report.txt.bak"
+printf '\000' >> "$REALKB/facts/logic_report.txt"
+run_case "the same report plus one NUL byte — deny" \
+  "$REALKB" "$REALKB/facts/query.dl" 2
+cp "$REALKB/facts/logic_report.txt.bak" "$REALKB/facts/logic_report.txt"
+
+# CASE 67: unreadable report — CANNOT JUDGE, so DENY. `-f` does not test
+# readability and `stat` still answers, so nothing else in the predicate catches
+# this; it used to allow.
+chmod 000 "$REALKB/facts/logic_report.txt"
+run_case "unreadable report — deny (cannot judge)" \
+  "$REALKB" "$REALKB/facts/query.dl" 2
+chmod 644 "$REALKB/facts/logic_report.txt"
+
+# CASE 68: the cannot-judge deny must say so, rather than blaming the engine —
+# the operator's next step differs (fix the file vs fix the engine).
+cannot_err="$(mktemp)"
+chmod 000 "$REALKB/facts/logic_report.txt"
+cannot_exit=0
+FACTLOG_ROOT="$REALKB" bash "$GATE" <<< "$(envelope Write "$REALKB/facts/query.dl")" \
+  >/dev/null 2>"$cannot_err" || cannot_exit=$?
+chmod 644 "$REALKB/facts/logic_report.txt"
+if [ "$cannot_exit" -eq 2 ] && grep -q "could not be judged" "$cannot_err"; then
+  echo "PASS: unreadable report denies as 'could not be judged' (exit $cannot_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: unreadable report should deny as unjudgeable — exit=$cannot_exit stderr=$(cat "$cannot_err")"
+  fail=$((fail + 1))
+fi
+rm -f "$cannot_err"
+rm -rf "$REALKB"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

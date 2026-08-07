@@ -791,24 +791,74 @@ query="${KB_ROOT}/facts/query.dl"
 # TRAILING only, and identical to cli.py's rule — see _records_engine_failure.
 # The two readers must agree on every report, so "close enough" is the one thing
 # this cannot be.
+# THREE-VALUED, and the third value is the point:
+#   0 — the report records a run in which the engine never ran
+#   1 — it does not
+#   2 — CANNOT JUDGE; every caller must treat this as deny.
+#
+# It used to be two-valued, `sed | grep`, and "cannot judge" collapsed into "no
+# marker" — which is the ALLOW side. One NUL byte anywhere in the report was
+# enough: BSD sed aborts on it, and under `set -euo pipefail` the pipeline is
+# non-zero EVEN WHEN GREP MATCHED, so the gate concluded there was no marker,
+# fell through to the mtime branch, found the report fresh and permitted a write
+# that origin/main refused. An unreadable report (chmod 000) did the same, and
+# the old comment's defence — that such a file was already caught by `-f` or
+# would be caught by the mtime branch — is false when measured: `-f` does not
+# test readability and `stat` still answers. Blocker 2 forged the marker; this
+# erased it. Both end with the gate wrong about the same file.
+#
+# Judged in PYTHON, not sed/grep, for three reasons:
+#   - it is the only way to tell "no marker" from "could not look", which is the
+#     whole fix; grep's exit 2 does not survive a pipeline and `set -o pipefail`
+#     cannot distinguish which stage failed;
+#   - the comparison is then byte-for-byte the same operation factlog/cli.py
+#     performs — same split, same rstrip, same equality — so the two readers
+#     agree by construction rather than by two texts being kept in sync;
+#   - this hook already REQUIRES Python 3.11+ and denies without it (fail-closed
+#     branch 1 above), so it adds no dependency. Nothing here imports factlog:
+#     it is stdlib only, so a broken package cannot turn the judgement into a
+#     crash. (Sharing one predicate with cli.py is #364, deliberately not here.)
+#
+# The verdict is read from STDOUT, not from the exit status, because Python
+# exits 1 on an uncaught traceback and 1 is a verdict — "no marker", the allow
+# side. A token that must be printed cannot be produced by a crash.
 _records_engine_failure() {
-  # Strip TRAILING CRs only, which is what factlog/cli.py's rstrip("\r") does.
-  # `tr -d '\r'` deleted every CR anywhere, and that is not a weaker version of
-  # the same rule but a different one: it MANUFACTURES the marker out of a line
-  # that is not the marker. A report line reading "sta<CR>tus: engine-did-not-run"
-  # became a match here and stayed a non-match in cli.py — the gate denying a
-  # completed run while status called the same file normal, which is the
-  # divergence this pair of readers exists to avoid.
-  #
-  # The CR literal is built with printf rather than written "\r" in the pattern:
-  # whether sed interprets "\r" as a carriage return is implementation-defined
-  # (BSD sed here happens to; not every sed does), and a pattern that silently
-  # meant the letter "r" would strip trailing "r"s off report lines instead.
-  # "*$" strips the whole trailing run, matching rstrip's behaviour on "x\r\r".
-  local cr
-  cr=$(printf '\r')
-  sed "s/${cr}*\$//" < "$1" 2>/dev/null | grep -qxF 'status: engine-did-not-run'
+  local out status=0
+  out=$(FACTLOG_GATE_REPORT="$1" "${PYTHON_RUNNER[@]}" -c '
+import os, sys
+try:
+    raw = open(os.environ["FACTLOG_GATE_REPORT"], "rb").read()
+except Exception:
+    sys.exit(3)
+marker = b"status: engine-did-not-run"
+hit = any(line.rstrip(b"\r") == marker for line in raw.split(b"\n"))
+print("factlog-report-failed" if hit else "factlog-report-ok")
+' 2>/dev/null) || status=$?
+  if [ "$status" -ne 0 ]; then
+    return 2
+  fi
+  case "$out" in
+    factlog-report-failed) return 0 ;;
+    factlog-report-ok)     return 1 ;;
+    *)                     return 2 ;;
+  esac
 }
+
+# Bytes, and TRAILING CRs only — identical to factlog/cli.py's rule.
+# `tr -d '\r'` deleted every CR anywhere, and that is not a weaker version of the
+# same rule but a different one: it MANUFACTURES the marker out of a line that is
+# not the marker. A report line reading "sta<CR>tus: engine-did-not-run" matched
+# here and did not in cli.py — the gate denying a completed run while status
+# called the same file normal.
+#
+# Reading `rb` and comparing bytes also means no decoding step can change the
+# verdict: undecodable bytes are simply unequal to the marker, where a decoder
+# told to ignore errors would delete them and could make a non-marker line into
+# one.
+report_verdict=0
+if [ -f "$report" ]; then
+  _records_engine_failure "$report" || report_verdict=$?
+fi
 
 # BOOTSTRAP (predicate branch B): a fresh KB has no report of a completed engine
 # run, and does not yet have the engine input being created. `factlog init`
@@ -822,7 +872,10 @@ _records_engine_failure() {
 # /factlog check in a fresh KB — which fails, because facts/accepted.dl does not
 # exist yet — would drop a report into facts/ and thereby DENY the very first
 # creation of facts/query.dl, a write this gate has always allowed.
-if { [ ! -f "$report" ] || _records_engine_failure "$report"; } && [ ! -e "$abs_target" ]; then
+# Verdict 2 (cannot judge) deliberately does NOT satisfy this branch: a report we
+# could not read is not evidence that this is a fresh KB, so the call falls
+# through to the deny below rather than being waved past as a first write.
+if { [ ! -f "$report" ] || [ "$report_verdict" -eq 0 ]; } && [ ! -e "$abs_target" ]; then
   _allow
 fi
 
@@ -840,14 +893,36 @@ fi
 # report IS fresh: /factlog check has just written it. Re-running the check
 # cannot produce a fresh one until the cause is fixed, so "stale" would be both
 # untrue and useless advice, and the deny message must carry the cause instead.
-if _records_engine_failure "$report"; then
+if [ "$report_verdict" -eq 0 ]; then
   echo "[factlog GATE] DENIED: the last logic check could not run the engine." >&2
   echo "  facts/logic_report.txt records the failure, not a result — so it does" >&2
   echo "  not supersede facts/accepted.dl or facts/query.dl." >&2
-  sed -n 's/^reason: /  reason: /p' "$report" >&2
+  # 2>/dev/null and `|| true`: this is a courtesy line, and the deny above does
+  # not depend on it. sed aborts on the same NUL-bearing input that used to break
+  # the predicate, and under `set -e` that would take the whole script down
+  # BEFORE the exit 2 below — turning a deny into a crash on exactly the input
+  # this branch was hardened against.
+  # Redirect order matters: `>&2` first duplicates the REAL stderr onto stdout,
+  # then `2>/dev/null` silences sed's own errors. Written the other way round,
+  # `>&2` would inherit the already-silenced fd 2 and the reason would vanish
+  # into /dev/null.
+  sed -n 's/^reason: /  reason: /p' "$report" >&2 2>/dev/null || true
   echo "  Fix that cause and re-run /factlog check; re-running it unchanged will" >&2
   echo "  fail the same way. Recovery for a KB that cannot produce a report at" >&2
   echo "  all is in docs/guide/determinism.md (Bash is not gated)." >&2
+  exit 2
+fi
+
+# CANNOT JUDGE — deny, and say so honestly rather than guessing. Reaching here
+# means the report exists but could not be read or produced no verdict
+# (unreadable, or an interpreter that died). The old code called that "no
+# marker", which is the ALLOW side of a guard whose entire job is to withhold
+# write access when the KB's state is unknown.
+if [ "$report_verdict" -ne 1 ]; then
+  echo "[factlog GATE] DENIED: facts/logic_report.txt could not be judged." >&2
+  echo "  The file exists but the gate could not read a verdict from it, so it" >&2
+  echo "  cannot be treated as a report of a completed run." >&2
+  echo "  Check that it is readable and is text; re-run /factlog check to rewrite it." >&2
   exit 2
 fi
 
