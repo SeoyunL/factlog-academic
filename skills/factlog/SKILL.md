@@ -185,12 +185,17 @@ source ~/.factlog-venv/bin/activate
 ```
 
 After `setup` succeeds, use the four operating commands — `/factlog sync`,
-`/factlog query`, `/factlog check`, `/factlog repair` — in that order, **against
-the KB `setup` reports as recorded**. When `setup` says the new KB is not
-recorded in the active-KB config (step 3 above), a flagless flow resolves to the
-recorded KB instead, so pass `--target <kb>` for the whole flow — or ask the user
-whether to run `factlog use <kb>` first. Do not assume the KB just created is the
-one the next command will reach.
+`/factlog query`, `/factlog check`, `/factlog repair` — in that order. **Do not
+assume the KB just created is the one they will reach.** `setup`'s closing line
+answers that: it either tells you to go ahead, or names the KB a flagless
+command would reach instead and how to redirect. Follow that line.
+
+Resolve the root the usual way (`factlog where --porcelain`, see above) rather
+than reasoning from what `setup` says about the *config* — the config is only
+rank 3, so a KB it does not record is still what every flagless command reaches
+when `$FACTLOG_ROOT` names it. If the target is genuinely unreachable, pass
+`--target <kb>` for the whole flow, or ask the user whether to run
+`factlog use <kb>` first. Do not run `factlog use` on their behalf.
 
 ---
 

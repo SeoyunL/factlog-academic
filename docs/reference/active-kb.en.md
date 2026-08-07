@@ -46,7 +46,7 @@ ultimately to the current directory.
 ## Creating a KB and choosing the active one are separate acts
 
 `init`/`setup` **create** a KB; `use` **chooses** the active one. So there are
-only three cases in which `init`/`setup` touch the active-KB setting:
+only four ways `init`/`setup` treat the active-KB setting:
 
 | Situation | Active-KB config |
 |-----------|------------------|
@@ -58,18 +58,35 @@ only three cases in which `init`/`setup` touch the active-KB setting:
 ```text
 factlog init: created /tmp/scratch
 factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT recorded there
-  to work in it: factlog use /tmp/scratch   (or re-run with --activate)
+  to record it in the config: factlog use /tmp/scratch   (or re-run with --activate)
 ```
 
 The wording says active-KB **config**, not "active KB", for accuracy: this
 decision is about the config file, while which KB is actually in force also
-depends on `$FACTLOG_ROOT`. So when the environment outranks the config, one more
-line says so — without it, the message would contradict
-`factlog where --porcelain` in the same session.
+depends on `$FACTLOG_ROOT`. Two separate lines cover that.
+
+When `$FACTLOG_ROOT` names something **other than what the config records** — i.e.
+it genuinely overrides it — one line says so. The comparison is against the
+**config**, not against the KB just created: if the environment and the config
+agree, nothing is being overridden and no line appears.
 
 ```text
   note: $FACTLOG_ROOT=/tmp/envkb outranks the config in this session (factlog where)
 ```
+
+And when a flagless command would **not reach** the KB just created, another line
+says where it would go instead and where that came from. This one follows the
+same resolution `factlog where` reports (`$FACTLOG_ROOT` > config > cwd), not the
+config alone.
+
+```text
+  a flagless command would target /Users/me/wiki (from $FACTLOG_ROOT), not /tmp/scratch
+    — pass --target /tmp/scratch, or point $FACTLOG_ROOT at /tmp/scratch
+```
+
+`setup`'s closing line asks the same question, because "where does my next
+`/factlog sync` go" is what the user is actually asking — not what the config
+happens to record.
 
 The point is that creating one throwaway KB must not cost you the KB you were
 working in. Pass `--activate` to create and switch in one step, or
