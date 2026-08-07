@@ -1717,6 +1717,16 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     return 0
 
 
+# The whole line run_logic_check.py writes into facts/logic_report.txt when the
+# engine never ran (#338). Matched byte for byte against a whole line, the same
+# way hooks/gate_check.sh matches it (`grep -qxF`); the constant is also spelled
+# out in tools/run_logic_check.py as ENGINE_FAILED_STATUS_LINE. All three are one
+# vocabulary and change together. Its natural home is factlog/common.py, next to
+# the other shared report vocabulary — worth hoisting when something else needs
+# it, and not worth a third reader having to rediscover the coupling meanwhile.
+ENGINE_FAILED_STATUS_LINE = "status: engine-did-not-run"
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Summarise the active KB's state: sources, facts by status, vocabulary,
     conflicts, logic-report freshness, and engine availability."""
@@ -1952,16 +1962,35 @@ def cmd_status(args: argparse.Namespace) -> int:
     report = ctx.facts_dir / "logic_report.txt"
     if report.is_file():
         text = report.read_text(encoding="utf-8", errors="ignore")
-        # Lower-case `errors:`/`warnings:` are the summary lines in
-        # run_logic_check's report (the `Errors:`/`Warnings:` headers are capitalised).
-        errors = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("errors:")), "?")
-        warnings = next((ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("warnings:")), "?")
-        rep_mtime = report.stat().st_mtime
-        # The report is a function of all three run_logic_check inputs.
-        inputs = [p for p in (ctx.accepted_dl, ctx.facts_dir / "query.dl", ctx.logic_policy_dl) if p.is_file()]
-        stale = any(p.stat().st_mtime > rep_mtime for p in inputs)
-        fresh = "STALE (inputs changed since last check — run /factlog check)" if stale else "fresh"
-        print(f"  logic:      report {fresh}; errors={errors}, warnings={warnings}")
+        report_lines = text.splitlines()
+        if ENGINE_FAILED_STATUS_LINE in report_lines:
+            # A report of a run in which THE ENGINE NEVER RAN is not a result, and
+            # freshness is the wrong question to ask of it: /factlog check has just
+            # written it, so it IS fresh by mtime, and reporting that would say a
+            # run that never started the engine is up to date. It also carries no
+            # `errors:`/`warnings:` lines at all — deliberately, since 0 would mean
+            # the engine ran and found nothing — so the `?` fallbacks below would
+            # print two count fields for counts that were never obtained (#338).
+            reason = next(
+                (ln.split(":", 1)[1].strip() for ln in report_lines if ln.startswith("reason: ")),
+                "(not recorded)",
+            )
+            print(f"  logic:      report records a run that never started the engine; reason: {reason}")
+            print(
+                "              ⚠ the counts a completed check reports are absent, not 0"
+                " — fix the cause above, then run /factlog check"
+            )
+        else:
+            # Lower-case `errors:`/`warnings:` are the summary lines in
+            # run_logic_check's report (the `Errors:`/`Warnings:` headers are capitalised).
+            errors = next((ln.split(":", 1)[1].strip() for ln in report_lines if ln.startswith("errors:")), "?")
+            warnings = next((ln.split(":", 1)[1].strip() for ln in report_lines if ln.startswith("warnings:")), "?")
+            rep_mtime = report.stat().st_mtime
+            # The report is a function of all three run_logic_check inputs.
+            inputs = [p for p in (ctx.accepted_dl, ctx.facts_dir / "query.dl", ctx.logic_policy_dl) if p.is_file()]
+            stale = any(p.stat().st_mtime > rep_mtime for p in inputs)
+            fresh = "STALE (inputs changed since last check — run /factlog check)" if stale else "fresh"
+            print(f"  logic:      report {fresh}; errors={errors}, warnings={warnings}")
     else:
         print("  logic:      no logic_report.txt yet (run /factlog check)")
     return 0
