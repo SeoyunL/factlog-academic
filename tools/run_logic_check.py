@@ -74,8 +74,14 @@ def path_endpoints(line: str) -> list[str]:
 
 def display_value(value: str) -> str:
     """A value as it should read in the report. The empty string is rendered
-    `""` so `path 갑봇 -> "" ` does not print as a dangling arrow."""
-    return value if value else '""'
+    `""` so `path 갑봇 -> "" ` does not print as a dangling arrow.
+
+    ``one_line`` because this is the rendering helper for values DECODED out of
+    a query: ``arg_value`` is ``json.loads``, so ``"a\\nstatus: ..."`` in
+    facts/query.dl — one physical line, the escape written as two ordinary
+    characters — decodes to a real newline. Every caller that renders a decoded
+    query value goes through here or is wrapped at its own call site."""
+    return one_line(value) if value else '""'
 
 
 # Query parsing is delegated to common's string-aware parsers
@@ -192,7 +198,9 @@ def validate_query(
             return errors, warnings
         args = query_args(line)
         if is_quoted_string(args[0]) and arg_value(args[0]) not in entities:
-            warnings.append(f"query references non-engine entity: {arg_value(args[0])}")
+            warnings.append(
+                f"query references non-engine entity: {one_line(arg_value(args[0]))}"
+            )
         return errors, warnings
     if predicate == "count":
         # count(subject, relation)? — engine-verified aggregate (see evaluate_queries).
@@ -232,7 +240,9 @@ def validate_query(
                     )
     for constant in quoted_constants(line):
         if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
-            warnings.append(f"query references non-engine entity or relation: {constant}")
+            warnings.append(
+                f"query references non-engine entity or relation: {one_line(constant)}"
+            )
     return errors, warnings
 
 
@@ -466,7 +476,7 @@ def evaluate_queries(
             results.append(f"count results (query: {line}): {len(objects)} (distinct objects)")
         elif predicate == "review_required":
             constants = quoted_constants(line)
-            question = constants[0] if constants else "(missing question)"
+            question = one_line(constants[0]) if constants else "(missing question)"
             results.append(f"review_required: {question}")
     return results
 
@@ -484,18 +494,35 @@ def evaluate_queries(
 # marker would make every one of those read as unrecognised.
 #
 # A negative marker only works while "carries the marker" and "written by the
-# failure path" are the same set, and that is NOT free: this report interpolates
-# KB-derived text, a CSV field may legally contain a newline, and a value ending
-# in "\nstatus: engine-did-not-run" therefore used to put the marker into a
-# SUCCESS report as a line of its own. The run succeeded, the report carried real
-# counts, and both readers called it an engine failure with `reason: (not
-# recorded)` — the deadlock #338 removes, re-created out of KB content, and since
-# the status fix it was repeated by two consumers rather than one. What keeps the
-# two sets equal is `one_line` below, applied at EVERY site where KB text enters
-# a report line: no interpolated value can open a line, so only the assembly
-# above can. The cost of the negative marker is also that a report truncated
-# inside its first three lines would lose it and read as a success;
-# _write_report closes that by replacing the file atomically.
+# failure path" are the same set, and that is NOT free. This report interpolates
+# KB-derived text, and KB text reaches it through TWO decoders, each of which can
+# deliver a newline the file itself does not show:
+#
+#   - facts/candidates.csv — a quoted CSV field may span physical lines, so a
+#     hand-edited status of "odd\nstatus: engine-did-not-run" arrives as a value
+#     containing a real newline;
+#   - facts/query.dl — `arg_value` is `json.loads`, so `"a\nstatus: ..."` written
+#     as ONE physical line, with the escape as two ordinary characters, decodes
+#     to the same thing. Splitting the file into lines cannot see it. This is the
+#     worse carrier of the two: query.dl is an engine input this very gate
+#     guards, and `/factlog query` writes it.
+#
+# Either way the run SUCCEEDS, the report carries real counts, and both readers
+# then call it an engine failure with `reason: (not recorded)` — the deadlock
+# #338 removes, rebuilt out of KB content, and since the status fix repeated by
+# two consumers rather than one.
+#
+# `one_line` is what keeps the two sets equal, and it has to be at every site
+# where a DECODED value reaches a report line — the csv-side sites alone left
+# query.dl wide open. The claim to be careful with is the one this comment used
+# to make: not "no interpolated value can open a line" as a property of the
+# design, but "these call sites are wrapped", which is a property of a list and
+# stays true only while the list is complete. tests/unit pins one carrier per
+# decoder for that reason; a new interpolation site needs its own.
+#
+# The cost of the negative marker is also that a report truncated inside its
+# first three lines would lose it and read as a success; _write_report closes
+# that by replacing the file atomically.
 ENGINE_FAILED_STATUS_LINE = "status: engine-did-not-run"
 
 # Every character Python's str.splitlines() treats as a line break. The set is
