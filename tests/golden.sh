@@ -54,8 +54,11 @@ set -euo pipefail
 
 export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# pwd -P throughout: every path here is either copied from or written next to,
+# and a logical path keeps a symlink in it, which is how a "copy" ended up
+# aliasing its own source.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 GOLDEN_DIR="$SCRIPT_DIR/golden"
 
 # The policy-gate KB is harness-owned, not caller-supplied: it is the half of
@@ -69,11 +72,14 @@ if [ -z "${FACTLOG_ROOT:-}" ]; then
   echo "FATAL: FACTLOG_ROOT is not set. Run as: FACTLOG_ROOT=examples/sample-kb bash tests/golden.sh" >&2
   exit 1
 fi
-# Resolve relative to cwd if not absolute.
-case "$FACTLOG_ROOT" in
-  /*) KB_ROOT="$FACTLOG_ROOT" ;;
-  *)  KB_ROOT="$(pwd)/$FACTLOG_ROOT" ;;
-esac
+# Resolve to a PHYSICAL absolute path. String-concatenating cwd left any symlink
+# in the caller's value intact, and a symlinked root is not a cosmetic
+# difference here: it decides whether the working copy below is a copy or an
+# alias of the caller's own KB.
+if ! KB_ROOT="$(cd "$FACTLOG_ROOT" 2>/dev/null && pwd -P)"; then
+  echo "FATAL: FACTLOG_ROOT is not a readable directory: $FACTLOG_ROOT" >&2
+  exit 1
+fi
 export FACTLOG_ROOT="$KB_ROOT"
 
 # Python interpreter: the caller's PYTHON wins, then factlog-venv, then python3.
@@ -141,8 +147,18 @@ assert_golden() {
 #   Step 3: generate_logic_policy.py --check (deterministic re-derivation)
 # ---------------------------------------------------------------------------
 #
-# The KB is copied into $WORK_ROOT and every step runs against the copy, so the
-# source KB is read-only for the whole run. Two consequences worth stating:
+# The KB is copied into $WORK_ROOT and every step runs against the copy.
+#
+# What that guarantees, precisely: the copy contains no symlink that leaves it,
+# so no write inside $WORK_ROOT can land outside it, and the source KB is
+# therefore read-only for the whole run. That is a property of `cp -RL`, not of
+# copying as such — `cp -R` dereferences neither a symlinked source operand
+# (POSIX: -R implies -P) nor an inner symlink, and both cases produced a "copy"
+# that wrote straight back into the caller's KB while the run went green. The
+# symlinked-root case was worse than the in-place behaviour it replaced: the
+# `rm -f` below reached the real file, and on a dead step nothing put it back.
+#
+# Two consequences worth stating:
 #
 #   - The step that regenerates an artifact is the only thing that can create it
 #     in the copy, so each artifact is deleted from the copy first. A step that
@@ -159,7 +175,16 @@ run_pass() {
   local golden="$2"
   local work="$WORK_ROOT/$3"
 
-  cp -R "$kb" "$work"
+  # -L: dereference on copy, so the result holds real files and directories and
+  # no link back to the source. It cannot resolve a cyclic symlink or a broken
+  # one, and in both cases it skips and carries on, leaving a silently incomplete
+  # copy — so the failure is caught here rather than measured later as a
+  # difference from the golden. cp's own message on the line above names which
+  # path it was; this one must not claim to know.
+  if ! cp -RL "$kb" "$work"; then
+    echo "FATAL: could not copy $kb into the work area (a symlink cycle or a broken link inside the KB will do this)" >&2
+    exit 1
+  fi
 
   # Labels deliberately unlike the Step 1/2 ones: "committed <file>" is a claim
   # about what is checked in, "<file>" is a claim about what this run produced.
