@@ -147,6 +147,24 @@ printf '%s' "$compile3" | grep -qF 'sources=2' \
   && ok "compile stdout reports sources=2 for the folded atom" \
   || bad "compile stdout lost a source of the folded atom: $compile3"
 
+# (f2) ...and so does the ANSWER. The compile log and `ask` read two different
+# maps; folding the atom without folding fact_signals leaves the answer unable to
+# find its own atom, and the row silently loses its sources, its backing paths
+# and its staleness marker to the [no extraction backing] branch. Block (c)
+# checks this for the same-spelling case; the folded case needs it more.
+rn3="$(FACTLOG_ROOT="$KB3" "$PYTHON" "$ROUTER" render 'relation(S, "대표", O)?' --target "$KB3")"
+printf '%s' "$rn3" | grep -qF "sources: 2" \
+  && ok "render keeps (sources: 2) on the folded atom" \
+  || bad "render lost a source of the folded atom: $rn3"
+printf '%s' "$rn3" | grep -qF "no extraction backing" \
+  && bad "folded atom lost its provenance entirely: $rn3" \
+  || ok "folded atom is not reported as unbacked"
+for s in a b; do
+  printf '%s' "$rn3" | grep -qF "sources/$s.md" \
+    && ok "render lists backing source sources/$s.md" \
+    || bad "render dropped backing source sources/$s.md: $rn3"
+done
+
 # the engine, not just the python helper: one row out of pyrewire
 if "$PYTHON" -c "import pyrewire" >/dev/null 2>&1; then
   ev3="$(FACTLOG_ROOT="$KB3" "$PYTHON" "$ROUTER" evaluate 'relation(S, "대표", O)?' --target "$KB3")"
@@ -196,6 +214,109 @@ ok = all(f'"{nfd(v)}"' in lines[0] for v in ("삼성", "이재용"))
 ok = ok and not any(f'"{nfc(v)}"' in lines[0] for v in ("삼성", "이재용"))
 sys.exit(0 if ok else 1)
 PY
+
+# --- (h) a pre-fold accepted.dl must not decode as a bare intern id ---------
+# run_wirelog parses the FILE TEXT but interns from the loader's rows. If the
+# loader folds identity, the losing spelling stays in the program and never
+# reaches session.intern, and decode_wirelog_value returns the raw integer — so
+# facts/logic_report.txt names an entity "3". Any accepted.dl compiled by an
+# earlier release carries both spellings, so this needs no hand-editing to hit;
+# writing the two atoms directly is exactly what that release produced.
+if "$PYTHON" -c "import pyrewire" >/dev/null 2>&1; then
+  KB5="$(mktemp -d)/wiki"
+  "$PYTHON" -m factlog init --target "$KB5" >/dev/null
+  printf 'a\n' > "$KB5/sources/a.md"
+  "$PYTHON" - "$KB5" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+kb = Path(sys.argv[1])
+kb.joinpath("facts/candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('부산항만공사')},관할,부산항,sources/a.md,confirmed,0.90,\n",
+    encoding="utf-8",
+)
+# What a pre-fold release compiled: both spellings, as separate atoms.
+kb.joinpath("facts/accepted.dl").write_text(
+    "// generated from facts/candidates.csv\n\n"
+    f'relation("{nfd("부산항만공사")}", "관할", "부산항").\n'
+    f'relation("{nfc("부산항만공사")}", "관할", "부산항").\n',
+    encoding="utf-8",
+)
+kb.joinpath("policy/logic-policy.md").write_text(
+    "# policy\n## Rules\n- [g] 어떤 항목이 `관할` 관계를 가지면 검토(review)가 필요하다.\n",
+    encoding="utf-8",
+)
+PY
+  ( cd "$PLUGIN_ROOT" && FACTLOG_ROOT="$KB5" "$PYTHON" tools/generate_logic_policy.py >/dev/null 2>&1 )
+  # Checked on the engine's DECODED values, not on the report text: the report
+  # also carries a "- requires_review: N rows" summary whose N is legitimately a
+  # number, and a grep for a digit matches that line on a perfectly healthy run.
+  ( cd "$PLUGIN_ROOT" && FACTLOG_ROOT="$KB5" "$PYTHON" - <<'PY'
+import sys
+sys.path.insert(0, ".")
+from factlog import common
+inferred = common.run_wirelog()
+rows = inferred.get("requires_review", set())
+assert rows, "PROBE FOUND NO requires_review ROWS — refusing to report a clean result"
+digits = [r for r in rows if any(str(v).isdigit() for v in r)]
+if digits:
+    print(f"decoded as bare intern id(s): {digits}", file=sys.stderr)
+    sys.exit(1)
+assert any("부산항만공사" in str(v) for r in rows for v in r), "entity name absent entirely"
+sys.exit(0)
+PY
+  ) 2>/dev/null \
+    && ok "no atom decodes as a bare intern id on a pre-fold accepted.dl" \
+    || bad "engine decoded an entity as a bare intern id on a pre-fold accepted.dl"
+else
+  echo "SKIP: pyrewire unavailable — skipping intern-sync assertions"
+fi
+
+# --- (i) the composed spelling must reach the TYPED table -------------------
+# literal_types.normalize gets the object as written, so a decomposed ordinal
+# returns None and the fact leaves the typed table silently. Picking the
+# representative per axis is what keeps the composed spelling on the object even
+# when no single row is composed on both axes.
+if "$PYTHON" -c "import pyrewire" >/dev/null 2>&1; then
+  KB6="$(mktemp -d)/wiki"
+  "$PYTHON" -m factlog init --target "$KB6" >/dev/null
+  printf 'a\n' > "$KB6/sources/a.md"; printf 'b\n' > "$KB6/sources/b.md"
+  "$PYTHON" - "$KB6" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+kb = Path(sys.argv[1])
+# The cross group: neither row is composed on both axes.
+kb.joinpath("facts/candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfc('현대건설')},순위,{nfd('7위')},sources/a.md,confirmed,0.90,\n"
+    f"{nfd('현대건설')},순위,{nfc('7위')},sources/b.md,confirmed,0.95,\n",
+    encoding="utf-8",
+)
+kb.joinpath("policy/typed-relations.md").write_text(
+    "# typed\n- `순위` : ordinal\n", encoding="utf-8",
+)
+PY
+  FACTLOG_ROOT="$KB6" "$PYTHON" -m factlog.compile_facts >/dev/null
+  "$PYTHON" - "$KB6" <<'PY' && ok "cross group writes the composed spelling on the object (typed literal parses)" || bad "cross group wrote a decomposed object — the typed literal is dropped"
+import sys, unicodedata
+from pathlib import Path
+sys.path.insert(0, ".")
+from factlog import literal_types
+nfc = lambda s: unicodedata.normalize("NFC", s)
+lines = [l for l in Path(sys.argv[1], "facts/accepted.dl").read_text(encoding="utf-8").split("\n")
+         if l.startswith("relation(")]
+assert len(lines) == 1, lines
+obj = lines[0].rsplit('", "', 1)[1].rstrip('").')
+# the written object must be composed AND must actually normalize as an ordinal
+sys.exit(0 if obj == nfc(obj) and literal_types.normalize("ordinal", obj) is not None else 1)
+PY
+else
+  echo "SKIP: pyrewire unavailable — skipping typed-literal assertions"
+fi
 
 echo ""
 echo "========================================"
