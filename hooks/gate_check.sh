@@ -780,14 +780,34 @@ query="${KB_ROOT}/facts/query.dl"
 # merely CONTAINS the marker must not deny — `grep -qF` here would let any KB
 # whose data mentions the marker lock its own engine inputs.
 #
-# `tr -d '\r'` first, because this predicate fails OPEN on a mismatch. A report
-# written with CRLF endings — which is what text-mode writing produces on
-# Windows — did not match, so the gate returned 0 and handed out edit rights on
-# engine inputs at the moment the engine was broken. run_logic_check now pins
-# LF on the writing side; this is the other half, so a report from either side
-# reads the same. Measured: with CRLF, exit 0 before this line and 2 after.
+# Trailing CRs are stripped first, because this predicate fails OPEN on a
+# mismatch. A report written with CRLF endings — which is what text-mode writing
+# produces on Windows — did not match, so the gate returned 0 and handed out
+# edit rights on engine inputs at the moment the engine was broken.
+# run_logic_check now pins LF on the writing side; this is the other half, so a
+# report from either side reads the same. Measured: with CRLF, exit 0 before
+# this line and 2 after.
+#
+# TRAILING only, and identical to cli.py's rule — see _records_engine_failure.
+# The two readers must agree on every report, so "close enough" is the one thing
+# this cannot be.
 _records_engine_failure() {
-  tr -d '\r' < "$1" 2>/dev/null | grep -qxF 'status: engine-did-not-run'
+  # Strip TRAILING CRs only, which is what factlog/cli.py's rstrip("\r") does.
+  # `tr -d '\r'` deleted every CR anywhere, and that is not a weaker version of
+  # the same rule but a different one: it MANUFACTURES the marker out of a line
+  # that is not the marker. A report line reading "sta<CR>tus: engine-did-not-run"
+  # became a match here and stayed a non-match in cli.py — the gate denying a
+  # completed run while status called the same file normal, which is the
+  # divergence this pair of readers exists to avoid.
+  #
+  # The CR literal is built with printf rather than written "\r" in the pattern:
+  # whether sed interprets "\r" as a carriage return is implementation-defined
+  # (BSD sed here happens to; not every sed does), and a pattern that silently
+  # meant the letter "r" would strip trailing "r"s off report lines instead.
+  # "*$" strips the whole trailing run, matching rstrip's behaviour on "x\r\r".
+  local cr
+  cr=$(printf '\r')
+  sed "s/${cr}*\$//" < "$1" 2>/dev/null | grep -qxF 'status: engine-did-not-run'
 }
 
 # BOOTSTRAP (predicate branch B): a fresh KB has no report of a completed engine

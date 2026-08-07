@@ -1825,6 +1825,57 @@ run_case "U+2028 before the marker text is not a marker line — allow" \
 rm -rf "$KB_LSEP"
 
 # ---------------------------------------------------------------------------
+# CASES 62-63: THE CR RULE IS "TRAILING ONLY", AND IT IS SHARED.
+#
+# CASE 60 uses a TRAILING CR, which every CR rule accepts — delete-all and
+# trailing-only both turn it into the marker — so it could not tell the two
+# apart. Delete-all is not a laxer version of the same rule: it MANUFACTURES the
+# marker out of a line that is not the marker, and factlog/cli.py's rstrip does
+# not, so the gate denied a completed run while status called the same file
+# normal. That is the reader divergence this pair exists to prevent, reached
+# through the CR strip that was supposed to prevent it.
+#
+# Both cases must ALLOW, and each has a twin on the same bytes in
+# tests/test_status_cmd.sh.
+# ---------------------------------------------------------------------------
+
+# CASE 62: CR in the MIDDLE of the marker text.
+KB_MIDCR="$(mktemp -d)"
+make_kb "$KB_MIDCR"
+touch_file "$KB_MIDCR/facts/accepted.dl"
+set_mtime_past "$KB_MIDCR/facts/accepted.dl"
+printf 'Logic Check Report\n==================\nengine: wirelog / pyrewire\nengine facts: 7\nsta\rtus: engine-did-not-run\n' \
+  > "$KB_MIDCR/facts/logic_report.txt"
+run_case "CR inside the marker text is not the marker — allow" \
+  "$KB_MIDCR" "$KB_MIDCR/facts/accepted.dl" 0
+rm -rf "$KB_MIDCR"
+
+# CASE 63: CR at the START of the line.
+KB_LEADCR="$(mktemp -d)"
+make_kb "$KB_LEADCR"
+touch_file "$KB_LEADCR/facts/accepted.dl"
+set_mtime_past "$KB_LEADCR/facts/accepted.dl"
+printf 'Logic Check Report\n==================\nengine: wirelog / pyrewire\nengine facts: 7\n\rstatus: engine-did-not-run\n' \
+  > "$KB_LEADCR/facts/logic_report.txt"
+run_case "leading CR before the marker text is not the marker — allow" \
+  "$KB_LEADCR" "$KB_LEADCR/facts/accepted.dl" 0
+rm -rf "$KB_LEADCR"
+
+# CASE 64: several trailing CRs. rstrip("\r") removes the whole run, so a rule
+# written `s/<CR>$//` (one only) would leave a CR behind here and stop matching —
+# denying on cli's side, allowing on the gate's. Pins the quantifier, which is
+# the part of "the same rule" easiest to get almost right.
+KB_CRCR="$(mktemp -d)"
+make_kb "$KB_CRCR"
+touch_file "$KB_CRCR/facts/accepted.dl"
+set_mtime_past "$KB_CRCR/facts/accepted.dl"
+printf 'Logic Check Report\n==================\nstatus: engine-did-not-run\r\r\nreason: pyrewire missing\n' \
+  > "$KB_CRCR/facts/logic_report.txt"
+run_case "marker with several trailing CRs — deny" \
+  "$KB_CRCR" "$KB_CRCR/facts/accepted.dl" 2
+rm -rf "$KB_CRCR"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

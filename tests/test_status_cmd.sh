@@ -435,6 +435,39 @@ printf '%s' "$out" | grep -qF "never started the engine" \
   && bad "#338: a lone CR makes status disagree with the gate (gate exit=$gate_rc): $(printf '%s' "$out"|grep -A1 logic)" \
   || ok "#338: a lone CR before the marker text is not a marker line (gate exit=$gate_rc, agrees)"
 
+# (b3) CR in the MIDDLE of the marker text, and (b4) a LEADING CR. Twins of gate
+#      CASES 62-63 on the same bytes. Neither is the marker: a CR inside a line
+#      is data, not a line ending. The gate used to delete every CR anywhere,
+#      which turned both into the marker there and left them as ordinary text
+#      here — the gate denying a completed run while status called the same file
+#      normal. Both readers now strip trailing CRs only. Each case invokes the
+#      gate on the same file and reports its exit code, so a future divergence
+#      shows up in the failure text instead of having to be inferred.
+for shape in mid lead; do
+  case "$shape" in
+    mid)  printf 'Logic Check Report\n==================\nengine: wirelog / pyrewire\nerrors: 0\nwarnings: 0\nsta\rtus: engine-did-not-run\n' > "$EKB/facts/logic_report.txt" ;;
+    lead) printf 'Logic Check Report\n==================\nengine: wirelog / pyrewire\nerrors: 0\nwarnings: 0\n\rstatus: engine-did-not-run\n' > "$EKB/facts/logic_report.txt" ;;
+  esac
+  touch -t 205001010000 "$EKB/facts/logic_report.txt"
+  out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+  gate_rc=0
+  FACTLOG_ROOT="$EKB" bash "$PLUGIN_ROOT/hooks/gate_check.sh" \
+    <<< "$(printf '{"file_path":"%s"}' "$EKB/facts/accepted.dl")" >/dev/null 2>&1 || gate_rc=$?
+  printf '%s' "$out" | grep -qF "never started the engine" \
+    && bad "#338: $shape-line CR read as an engine failure (gate exit=$gate_rc): $(printf '%s' "$out"|grep -A1 logic)" \
+    || ok "#338: $shape-line CR is not a marker line (gate exit=$gate_rc, agrees)"
+done
+
+# (b5) Several trailing CRs: rstrip removes the whole run, so this IS the marker.
+#      Pins the quantifier against a rule that strips only one CR.
+printf 'Logic Check Report\n==================\nstatus: engine-did-not-run\r\r\nreason: pyrewire missing\n' \
+  > "$EKB/facts/logic_report.txt"
+touch -t 205001010000 "$EKB/facts/logic_report.txt"
+out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+printf '%s' "$out" | grep -qF "never started the engine" \
+  && ok "#338: marker with several trailing CRs is still the marker" \
+  || bad "#338: several trailing CRs lost the marker: $(printf '%s' "$out"|grep -A1 logic)"
+
 # (c) U+2028 before the marker text: `grep` does not break lines there, so the
 #     gate reads a normal report. splitlines() DOES, so status used to call this
 #     same file an engine failure. Pinning the disagreement, not just the rule.
