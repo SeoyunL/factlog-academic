@@ -38,17 +38,48 @@
 # resolves the active KB root, canonicalises the path, and asks the filesystem
 # about hard links and case folding, because it DENIES and a wrong answer costs
 # the user a blocked write. This hook only prints a line, so it matches on the
-# last two components of the target path and stops there. Known consequences,
-# all of them "no nudge" rather than "wrong nudge":
+# last two components of the target path and stops there.
+#
+# UNDER-FIRES (a genuine engine input that gets no nudge). This is the direction
+# that costs something, because the nudge is the only signal for
+# facts/candidates.csv and policy/logic-policy.dl — gate_check.sh does not guard
+# those two at all, so there is no backstop behind them:
 #   - an engine input reached through a symlink or a second hard link is not
-#     recognised (gate_check.sh still guards that write);
+#     recognised (for accepted.dl/query.dl gate_check.sh still guards the write;
+#     for the other two, nothing does);
 #   - on a case-folding filesystem facts/Accepted.dl IS the engine input, and
 #     the match here is case-sensitive, so it is not recognised;
+#   - a path that needs `..` resolution is missed: facts/x/../accepted.dl names
+#     the engine input and gets no nudge. `//` and `/./` ARE handled (see the
+#     matcher), but `..` is not, because collapsing it by string surgery is
+#     WRONG when a component is a symlink — a/b/../c is not a/c if b is a link.
+#     Doing it correctly needs the filesystem, which is the interpreter spawn
+#     this hook exists without.
+# All four were already true of the payload grep this replaces, so none is a
+# regression; they are listed because the list used to read as though it were
+# closed, and a reader was entitled to assume anything absent was handled.
+#
+# OVER-FIRES (a nudge on something that is not an engine input). Deliberate,
+# and cheap — a wrong nudge costs one line of output:
 #   - the match is not KB-root aware: ANY path ending in facts/accepted.dl and
 #     friends nudges, including one in a directory that is not a KB at all.
-# The first two were already true of the payload grep this replaces; the third
-# is the grep's behaviour kept deliberately, since the nudge costs a line and
-# resolving a root costs a second interpreter spawn on every write.
+#     That is the grep's behaviour kept on purpose, since resolving a root costs
+#     an interpreter spawn on every write;
+#   - on POSIX, a single file whose NAME contains a backslash — literally
+#     `facts\accepted.dl`, one directory entry — nudges, because the matcher
+#     splits on backslash for Git Bash's sake. The pre-#337 grep did not fire on
+#     it. Such a filename is vanishingly rare and the cost is one line, which is
+#     why the Windows support is worth it; see the matcher for the trade.
+#
+# COST, both sides of it. The paragraph above declines to resolve a KB root
+# because that costs an interpreter spawn — but reading the target structurally
+# introduces the FIRST spawn this hook ever paid, so the ledger has to be stated
+# whole. Measured on this host, 20 iterations of an unrelated Write payload:
+# 10.9 ms/invocation before #337, 97.4 ms after. That is the price of not
+# nudging on every document that mentions a KB path. It is charged on the same
+# Write/Edit events where gate_check.sh already spawns Python twice, so it adds
+# a third spawn to an event that had two, rather than a spawn to an event that
+# had none. Declining the KB-root resolution keeps it at one rather than two.
 #
 # WHEN THE TARGET CANNOT BE READ (no usable Python, an unparseable payload, or
 # an envelope with no path key at all) it falls back to the payload-wide grep —
@@ -127,24 +158,64 @@ fi
 #
 # Both separators are honoured: under Git Bash a payload carries
 # "C:\kb\facts\query.dl", where `${path##*/}` hands back the whole string.
-# Neither backslash split is pinned by tests/test_gate_reminder.sh, and this is
-# measured, not assumed: deleting either line leaves that file fully green. They
-# cannot be pinned from a POSIX host, where a backslash is an ordinary filename
-# character, so they are asserted by construction — the same standing as the
-# equivalent split in gate_check.sh's prefilter. Losing them costs a nudge on
-# Windows; it cannot cause a false one. The trailing-separator strip below is a
-# different matter and IS pinned (delete it and six cases go red), because
-# without it every parent directory reads as empty and nothing ever matches.
+# BOTH backslash splits are pinned by tests/test_gate_reminder.sh. Measured:
+# deleting `base="${base##*\\}"` turns three cases red, deleting
+# `pdir="${pdir##*\\}"` turns one red.
 #
-# Nothing is stripped from the path before splitting. A trailing separator
-# therefore yields an empty basename and matches nothing, which is the right
-# answer twice over — such a name denotes a directory, which is not a shape
-# Write/Edit can act on. Comparing COMPONENTS rather than searching for a
-# substring is what rules out "…/facts/query.dl.bak" and "…/myfacts/query.dl",
-# both of which the old payload grep nudged on.
+# An earlier version of this comment claimed they "cannot be pinned from a POSIX
+# host". That was false, and the way it was false is worth keeping: the suite
+# WAS green with either line deleted, and I read that as evidence about the host
+# instead of as a gap in the suite. Nothing here touches the filesystem —
+# `_is_engine_input_path` is pure string manipulation — so a payload carrying
+# backslashes behaves identically on any host, and the cases below run anywhere.
+# "Deleting the line leaves the suite green" only ever meant the suite had no
+# case for it.
+#
+# What the split costs on POSIX is one new false positive, not zero: a single
+# file literally named `facts\accepted.dl` now nudges where the pre-#337 grep did
+# not. That is the trade — Windows coverage for one spurious line on a filename
+# almost nobody writes — and it is a wrong-nudge, the cheap direction.
+#
+# The trailing-separator strip below is pinned hardest of all: delete it and 14
+# cases go red, 6 of them CONTROL, because without it every parent directory
+# reads as empty and nothing ever matches.
+#
+# NORMALISATION is deliberately partial. `//` and `/./` are collapsed, because
+# both are pure string rewrites that cannot change which file a path denotes.
+# `..` is NOT, and must not be: a/b/../c is not a/c when b is a symlink, so
+# collapsing it by string surgery would be wrong in exactly the case that
+# matters. Resolving `..` needs the filesystem, and this hook does not touch it.
+# So facts/x/../accepted.dl is a genuine engine input that gets no nudge; that
+# is listed with the other under-fires in the header.
+#
+# Beyond that nothing is stripped. A trailing separator yields an empty basename
+# and matches nothing, which is the right answer twice over — such a name
+# denotes a directory, which is not a shape Write/Edit can act on. Comparing
+# COMPONENTS rather than searching for a substring is what rules out
+# "…/facts/query.dl.bak" and "…/myfacts/query.dl", both of which the old payload
+# grep nudged on.
 _is_engine_input_path() {
   local path="$1"
   local base parent pdir
+  # Collapse "//" and "/./" (see NORMALISATION above). Loop because one pass
+  # leaves "///" and "/././" half-done: each rewrite can create a fresh match.
+  #
+  # The separators go through variables rather than being written inline. In
+  # `${var//pattern/replacement}` the replacement must be UNQUOTED — bash 3.2,
+  # the floor this repo supports, inserts the quote characters literally if you
+  # quote it (`${p//"$a"/"$b"}` yields `"/"`, measured on 3.2.57) — while the
+  # pattern must be QUOTED to stay literal. Writing the slashes inline instead
+  # needs backslash escapes that 3.2 turns into a literal backslash. Both wrong
+  # forms produce a path that still matches nothing, i.e. they fail silently in
+  # the under-fire direction, which is why this is spelled out.
+  local sl="/" dbl="//" dotd="/./"
+  while :; do
+    case "$path" in
+      *"$dbl"*) path="${path//"$dbl"/$sl}" ;;
+      *"$dotd"*) path="${path//"$dotd"/$sl}" ;;
+      *) break ;;
+    esac
+  done
   base="${path##*/}"
   base="${base##*\\}"
   parent="${path%"$base"}"
