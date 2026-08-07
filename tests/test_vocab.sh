@@ -175,6 +175,24 @@ printf '%s' "$out" | grep -qE "\((NFC|NFD|mixed)\)" \
   && bad "form label printed where no two names share a spelling" \
   || ok "single-spelling KB prints no form label"
 
+# --- the ENTITY list needs the same label (#342) ------------------------------
+# The engine folds canonically equivalent entity names into one atom, so this
+# list — which counts raw candidate spellings — no longer matches the engine's
+# entity count. It is allowed to differ, but not to be unreadable: without a
+# label the reader sees two identical-looking lines and counts two entities
+# where accepted.dl has one. $FKB above has 김철수 in both forms.
+out="$("$PYTHON" -m factlog vocab --entities --target "$FKB" 2>&1)"
+n_nfc="$(printf '%s' "$out" | grep -cF "(NFC)" || true)"
+n_nfd="$(printf '%s' "$out" | grep -cF "(NFD)" || true)"
+[ "$n_nfc" -ge 1 ] && [ "$n_nfd" -ge 1 ] \
+  && ok "both spellings of one entity are labelled with their form" \
+  || bad "entity lines are indistinguishable: $(printf '%s' "$out" | tail -4)"
+# control: no folded pair -> byte-identical to before
+out="$("$PYTHON" -m factlog vocab --entities --target "$NKB" 2>&1)"
+printf '%s' "$out" | grep -qE "\((NFC|NFD|mixed)\)" \
+  && bad "entity form label printed where no two names share a spelling" \
+  || ok "single-spelling KB prints no entity form label"
+
 # --- fullwidth relation names are NOT merged by the fold (control) ------------
 # NFC only, never NFKC: ＡＢＣ and ABC are different relations. This passes
 # before the fold too — it is the guard on how far the fold may reach.
