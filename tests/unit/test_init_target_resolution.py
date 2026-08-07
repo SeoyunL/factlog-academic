@@ -101,13 +101,18 @@ class TestBareInitFollowsThePrecedence:
         assert not (home / "wiki").exists(), f"created a stray ~/wiki anyway: {proc.stdout}"
 
     def test_home_wiki_remains_the_last_resort(self, home):
-        """Nothing exported, nothing configured: the documented first-run target."""
+        """GUARD, not evidence: passes before and after.
+
+        Nothing exported, nothing configured — the documented first-run target,
+        which reordering the chain must not have moved.
+        """
         proc = run_init(home=home)
 
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert scaffolded(home / "wiki"), proc.stdout
 
     def test_the_flag_still_wins_over_the_environment(self, tmp_path, home):
+        """GUARD, not evidence: passes before and after (rank 1 was never in doubt)."""
         env_kb = tmp_path / "env-kb"
         flag_kb = tmp_path / "flag-kb"
 
@@ -129,6 +134,8 @@ class TestTheResolvedTargetIsAnnounced:
         assert "FACTLOG_ROOT" in out, f"the target's origin is not reported: {out}"
 
     def test_an_explicit_target_needs_no_such_line(self, tmp_path, home):
+        """GUARD, not evidence: passes before and after — no announcement existed
+        to suppress. It holds the new line to implicit targets only."""
         flag_kb = tmp_path / "flag-kb"
 
         out = run_init("--target", str(flag_kb), home=home).stdout

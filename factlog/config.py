@@ -43,6 +43,37 @@ def _write_config(cfg: Path, data: dict) -> None:
     os.replace(tmp, cfg)
 
 
+MISSING = "missing"
+READABLE = "readable"
+UNREADABLE = "unreadable"
+
+
+def config_status() -> str:
+    """Classify the config file as ``MISSING``, ``READABLE`` or ``UNREADABLE``.
+
+    ``read_root``/``read_lang`` fold every failure into None so *resolution*
+    degrades to cwd instead of crashing. That is right for a reader and wrong for
+    a **writer**: "I could not read it" is not "there is nothing there". The bytes
+    a writer is about to replace may hold the user's KB root and narration
+    language, and once replaced they are unrecoverable — a strictly worse loss
+    than the one #356 is about, because a root that merely points at an unmounted
+    volume at least survives as text.
+
+    So callers that write ask this first, and only ``MISSING`` means "nothing is
+    recorded yet". A file that parses but records no usable ``root`` is
+    ``READABLE``: it is understood, there is no path in it to lose, and
+    ``resolve_root`` already reports such a config as holding nothing.
+    """
+    path = config_path()
+    if not path.is_file():
+        return MISSING
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return UNREADABLE
+    return READABLE if isinstance(data, dict) else UNREADABLE
+
+
 def _read_config() -> dict:
     """Return the parsed config object, or {} for a missing/malformed file.
 
@@ -50,13 +81,18 @@ def _read_config() -> dict:
     way (bad JSON / non-object / unreadable → {}) instead of crashing. Preserving
     the full dict also lets ``write_root``/``write_lang`` keep sibling fields they
     do not own.
+
+    ``ValueError`` rather than ``json.JSONDecodeError`` so a config that is not
+    valid UTF-8 degrades here too: ``read_text`` raises ``UnicodeDecodeError``
+    (a ``ValueError``, not an ``OSError``), which used to escape this handler and
+    crash every command that resolves a root.
     """
     path = config_path()
     if not path.is_file():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, OSError):
         return {}
     return data if isinstance(data, dict) else {}
 

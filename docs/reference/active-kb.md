@@ -55,16 +55,26 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 `init`/`setup` 은 KB를 **만드는** 명령이고, 활성 KB를 **고르는** 명령은 `use` 입니다.
 그래서 `init`/`setup` 이 활성 KB 설정을 건드리는 경우는 다음 셋뿐입니다.
 
-| 상황 | 활성 KB |
-|------|---------|
-| 활성 KB가 아직 없음 | 방금 만든 KB로 설정 (첫 실행 경험 그대로) |
-| 대상이 이미 활성 KB임 | 그대로 (설정 파일을 다시 쓰지도 않음) |
-| 다른 KB가 이미 활성 상태 | **그대로 유지**. 만든 KB는 활성화되지 않고, 바꾸는 방법을 함께 출력 |
+| 상황 | 활성 KB 설정 |
+|------|---------------|
+| 설정 파일이 아직 없음 | 방금 만든 KB로 기록 (첫 실행 경험 그대로) |
+| 대상이 이미 기록돼 있음 | 그대로 (설정 파일을 다시 쓰지도 않음) |
+| 다른 KB가 기록돼 있음 | **그대로 유지**. 만든 KB는 기록되지 않고, 바꾸는 방법을 함께 출력 |
+| 설정 파일을 읽을 수 없음 | **손대지 않음**. 아래 "깨진 설정 파일" 참고 |
 
 ```text
 factlog init: created /tmp/scratch
-factlog init: active KB unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT active
+factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT recorded there
   to work in it: factlog use /tmp/scratch   (or re-run with --activate)
+```
+
+문구가 "활성 KB" 가 아니라 "활성 KB **설정**" 인 것은 정확성 때문입니다. 이 결정은
+설정 파일에 대한 것이고, 실제로 어느 KB가 대상이 되는지는 `$FACTLOG_ROOT` 까지 함께
+봐야 정해집니다. 그래서 환경 변수가 설정을 앞지르고 있으면 그 사실을 한 줄 더
+출력합니다 — 이 줄이 없으면 같은 세션의 `factlog where --porcelain` 과 어긋나 보입니다.
+
+```text
+  note: $FACTLOG_ROOT=/tmp/envkb outranks the config in this session (factlog where)
 ```
 
 임시 KB 하나를 만들려고 `init` 을 돌렸다가 원래 쓰던 KB를 잃는 일이 없도록 하기
@@ -78,6 +88,23 @@ factlog init: active KB unchanged: /Users/me/wiki — /tmp/scratch was created b
 
 설정된 활성 KB의 경로가 지금 존재하지 않더라도(외장 볼륨을 마운트하지 않은 경우 등)
 `init` 은 그 설정을 가져가지 않습니다. 옮기는 것은 언제나 사용자의 명시적인 행동입니다.
+
+### 깨진 설정 파일
+
+설정 파일이 **있는데 읽히지 않으면**(JSON이 잘렸거나, 객체가 아니거나, 권한이 없거나)
+`init`/`setup` 은 그 파일에 쓰지 않습니다. 읽히지 않는 바이트가 바로 사용자의 KB
+경로일 수 있고, 쓰기는 그 경로와 `lang` 까지 함께 지웁니다 — 마운트되지 않은 볼륨을
+가리키는 경우보다 더 되돌리기 어렵습니다.
+
+```text
+factlog init: active-KB config at /Users/me/.config/factlog/config.json could not be read
+  — leaving it untouched; /tmp/scratch was created but is NOT recorded there
+  repair that file, or overwrite it deliberately: factlog use /tmp/scratch
+```
+
+파일을 고쳤거나 버려도 좋다면 `--activate` 로 덮어쓸 수 있고, 그 경우 무엇을 덮어썼는지
+출력합니다. 반면 파일이 **읽히기는 하는데** 기록된 root가 없으면(`{"lang": "ko"}`,
+`{"root": ""}`) 잃을 경로가 없으므로 첫 실행과 똑같이 기록합니다. `lang` 은 보존됩니다.
 
 `--target` 을 생략하면 `init`/`setup` 도 다른 명령과 같은 순서로 대상을 정합니다:
 `$FACTLOG_ROOT` > 활성 KB 설정 > `~/wiki`. 현재 디렉터리는 이 사슬에 없습니다 —

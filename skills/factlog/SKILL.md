@@ -185,7 +185,12 @@ source ~/.factlog-venv/bin/activate
 ```
 
 After `setup` succeeds, use the four operating commands — `/factlog sync`,
-`/factlog query`, `/factlog check`, `/factlog repair` — in that order.
+`/factlog query`, `/factlog check`, `/factlog repair` — in that order, **against
+the KB `setup` reports as recorded**. When `setup` says the new KB is not
+recorded in the active-KB config (step 3 above), a flagless flow resolves to the
+recorded KB instead, so pass `--target <kb>` for the whole flow — or ask the user
+whether to run `factlog use <kb>` first. Do not assume the KB just created is the
+one the next command will reach.
 
 ---
 
