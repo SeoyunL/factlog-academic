@@ -210,6 +210,12 @@ run_pass "$POLICY_KB" "$POLICY_GOLDEN_DIR" kb2
 # except here. The fixture KB asserts two maintainers for one subject, so the
 # tool is EXPECTED to exit 1 — exit 0 would mean the contradiction went
 # undetected, which is the regression this pins.
+#
+# Exit 1 alone does NOT establish that, though: a tool that cannot start exits
+# non-zero too, and reporting "the contradiction is detected" because the
+# interpreter did not exist is the same vacuous-PASS defect this whole issue
+# exists to remove. So the verdict needs the finding line as well — a run that
+# died has no findings to print.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Step 4: check_conflicts.py (policy KB) ==="
@@ -218,8 +224,10 @@ conflicts_rc=0
 FACTLOG_ROOT="$WORK_ROOT/kb2" "$PYTHON" "$PLUGIN_ROOT/tools/check_conflicts.py" \
   > "$conflicts_out" 2>&1 || conflicts_rc=$?
 cat "$conflicts_out"
-if [ "$conflicts_rc" -eq 1 ]; then
-  ok "check_conflicts.py exit 1 (the declared contradiction is detected)"
+if [ "$conflicts_rc" -eq 1 ] && grep -qF 'conflict(s) found' "$conflicts_out"; then
+  ok "check_conflicts.py exit 1 with a conflict report (the declared contradiction is detected)"
+elif [ "$conflicts_rc" -eq 1 ]; then
+  fail_msg "check_conflicts.py exited 1 without reporting any conflict — it died rather than detecting the contradiction"
 else
   fail_msg "check_conflicts.py exited $conflicts_rc, expected 1 (single-valued contradiction not detected)"
 fi
