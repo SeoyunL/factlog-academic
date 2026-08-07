@@ -385,6 +385,67 @@ printf '%s' "$out" | grep -qF "never started the engine" \
   && bad "#338: a completed run's report is being called an engine failure" \
   || ok "#338: a completed run's report is not called an engine failure"
 
+# The three shapes that separate "matches the marker" from "matches something
+# like it". Each is the twin of a case in tests/test_gate_check.sh (59-61), on
+# the same file contents, because the two readers must reach the SAME verdict on
+# the same report — a disagreement is how a completed run gets called an engine
+# failure by one consumer and not the other.
+#
+# (a) MID-LINE: an `in text` substring test passes this; `in report_lines` does
+#     not. The report interpolates KB-derived values, so a warning line quoting
+#     the marker is reachable content.
+printf '%s\n' \
+  'Logic Check Report' '==================' 'engine: wirelog / pyrewire' \
+  'errors: 0' 'warnings: 1' 'Warnings:' \
+  "- unknown status treated as non-engine input: 'odd status: engine-did-not-run'" \
+  > "$EKB/facts/logic_report.txt"
+touch -t 205001010000 "$EKB/facts/logic_report.txt"
+out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+printf '%s' "$out" | grep -qF "never started the engine" \
+  && bad "#338: marker as a substring is being read as an engine failure: $(printf '%s' "$out"|grep -A1 logic)" \
+  || ok "#338: marker only as a substring is not an engine failure"
+
+# (b) CRLF: the report a text-mode write produces on Windows. The gate strips CR
+#     and denies; status must agree rather than call the same file complete.
+printf 'Logic Check Report\r\n==================\r\nstatus: engine-did-not-run\r\nreason: pyrewire missing\r\n' \
+  > "$EKB/facts/logic_report.txt"
+touch -t 205001010000 "$EKB/facts/logic_report.txt"
+out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+printf '%s' "$out" | grep -qF "never started the engine" \
+  && ok "#338: CRLF failure report is still read as an engine failure" \
+  || bad "#338: CRLF failure report misread as a completed run: $(printf '%s' "$out"|grep -A1 logic)"
+printf '%s' "$out" | grep -qF "reason: pyrewire missing" \
+  && ok "#338: the reason survives CRLF" \
+  || bad "#338: reason lost on a CRLF report: $(printf '%s' "$out"|grep -A1 logic)"
+
+# (b2) A LONE CR before the marker text. `grep` does not break a line on "\r",
+#     so the gate reads one physical line and allows. A reader in Python's
+#     default universal-newline mode is translated "\r" -> "\n" by the decoder
+#     before it sees the text, which makes this a marker line for that reader
+#     only — the same divergence as (c), reached through the decoder rather than
+#     through splitlines(). Reading with newline="" is what closes it.
+printf 'Logic Check Report\n==================\nengine: wirelog / pyrewire\nerrors: 0\nwarnings: 1\n- odd\rstatus: engine-did-not-run\n' \
+  > "$EKB/facts/logic_report.txt"
+touch -t 205001010000 "$EKB/facts/logic_report.txt"
+out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+gate_rc=0
+FACTLOG_ROOT="$EKB" bash "$PLUGIN_ROOT/hooks/gate_check.sh" \
+  <<< "$(printf '{"file_path":"%s"}' "$EKB/facts/accepted.dl")" >/dev/null 2>&1 || gate_rc=$?
+printf '%s' "$out" | grep -qF "never started the engine" \
+  && bad "#338: a lone CR makes status disagree with the gate (gate exit=$gate_rc): $(printf '%s' "$out"|grep -A1 logic)" \
+  || ok "#338: a lone CR before the marker text is not a marker line (gate exit=$gate_rc, agrees)"
+
+# (c) U+2028 before the marker text: `grep` does not break lines there, so the
+#     gate reads a normal report. splitlines() DOES, so status used to call this
+#     same file an engine failure. Pinning the disagreement, not just the rule.
+printf 'Logic Check Report\n==================\nengine: wirelog / pyrewire\nerrors: 0\nwarnings: 1\n- odd\xe2\x80\xa8status: engine-did-not-run\n' \
+  > "$EKB/facts/logic_report.txt"
+touch -t 205001010000 "$EKB/facts/logic_report.txt"
+out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+printf '%s' "$out" | grep -qF "never started the engine" \
+  && bad "#338: U+2028 makes status disagree with the gate: $(printf '%s' "$out"|grep -A1 logic)" \
+  || ok "#338: U+2028 before the marker text is not a marker line (agrees with the gate)"
+
 # --- binary original counted as covered via its conversion (like coverage) -----
 PKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$PKB" >/dev/null
