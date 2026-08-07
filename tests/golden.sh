@@ -82,19 +82,20 @@ if ! KB_ROOT="$(cd "$FACTLOG_ROOT" 2>/dev/null && pwd -P)"; then
 fi
 export FACTLOG_ROOT="$KB_ROOT"
 
-# Python interpreter: the caller's PYTHON wins, then factlog-venv, then python3.
-# The caller's value used to be overwritten unconditionally, so the
-# `PYTHON=<interpreter> bash tests/x.sh` convention every other harness in this
-# directory follows was silently discarded here — a run asked to use an
-# interpreter with pyrewire fell through to a bare python3 without it, and Step 2
-# died for a reason that had nothing to do with the branch under test (#354).
-if [ -z "${PYTHON:-}" ]; then
-  if [ -x "/tmp/factlog-venv/bin/python" ]; then
-    PYTHON="/tmp/factlog-venv/bin/python"
-  else
-    PYTHON="python3"
-  fi
-fi
+# Python interpreter: exactly the form the other 39 harnesses in this directory
+# use. The caller's value used to be overwritten unconditionally, so the
+# `PYTHON=<interpreter> bash tests/x.sh` convention was silently discarded here —
+# a run asked to use an interpreter with pyrewire fell through to a bare python3
+# without it, and Step 2 died for a reason that had nothing to do with the branch
+# under test (#354).
+#
+# The interim fix kept an implicit /tmp/factlog-venv branch ahead of python3,
+# which left this harness selecting a different interpreter from every other one
+# on any machine that happens to have that path — the same misattribution this
+# issue exists to remove, one layer down, and invisible because nothing in the
+# output says which interpreter ran. Callers that want that venv pass it, as they
+# already do everywhere else.
+PYTHON="${PYTHON:-python3}"
 
 pass=0
 fail=0
