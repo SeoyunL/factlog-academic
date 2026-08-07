@@ -99,13 +99,20 @@ fi
 pass=0
 fail=0
 
+# Which KB a verdict belongs to. The `### KB n/2` headers go to stdout while
+# FAIL: goes to stderr, so on any consumer that keeps the streams apart the two
+# KBs' failures were character-identical — the same "no reader or grep may take
+# one for the other" problem the Step 0 labels below exist to avoid, unapplied to
+# the KB axis. Every verdict carries its KB.
+CURRENT_KB=""
+
 ok() {
-  echo "PASS: $*"
+  echo "PASS: ${CURRENT_KB:+[$CURRENT_KB] }$*"
   pass=$((pass + 1))
 }
 
 fail_msg() {
-  echo "FAIL: $*" >&2
+  echo "FAIL: ${CURRENT_KB:+[$CURRENT_KB] }$*" >&2
   fail=$((fail + 1))
 }
 
@@ -174,6 +181,7 @@ run_pass() {
   local kb="$1"
   local golden="$2"
   local work="$WORK_ROOT/$3"
+  CURRENT_KB="$3"
 
   # -L: dereference on copy, so the result holds real files and directories and
   # no link back to the source. It cannot resolve a cyclic symlink or a broken
@@ -260,6 +268,7 @@ run_pass "$POLICY_KB" "$POLICY_GOLDEN_DIR" kb2
 # died has no findings to print.
 # ---------------------------------------------------------------------------
 echo ""
+CURRENT_KB="kb2"
 echo "=== Step 4: check_conflicts.py (policy KB) ==="
 conflicts_out="$WORK_ROOT/conflicts.txt"
 conflicts_rc=0
