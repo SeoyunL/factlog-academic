@@ -13,7 +13,13 @@
 
 set -euo pipefail
 
-export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
+# Point the active-KB config at a throwaway dir and remove it on exit.
+# gate_reminder.sh reads no config at all — it only ever looks at the payload
+# — so this is defence against a future edit that gives it one, not something
+# the current hook needs. Without the trap every run leaked a temp dir.
+XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"
+export XDG_CONFIG_HOME
+trap 'rm -rf "${XDG_CONFIG_HOME%/*}"' EXIT
 
 HOOK="$(cd "$(dirname "$0")/.." && pwd)/hooks/gate_reminder.sh"
 
@@ -33,19 +39,25 @@ run_case() {
   local expected="$3"   # fire | silent
 
   local actual_exit=0
-  local err
-  err="$(printf '%s' "$payload" | bash "$HOOK" 2>&1 >/dev/null)" || actual_exit=$?
+  local err out
+  out="$(mktemp)"
+  err="$(printf '%s' "$payload" | bash "$HOOK" 2>&1 >"$out")" || actual_exit=$?
+  local stdout_bytes; stdout_bytes="$(wc -c < "$out" | tr -d ' ')"
+  rm -f "$out"
 
   local actual="silent"
   case "$err" in
     *"An engine input was edited"*) actual="fire" ;;
   esac
 
-  if [ "$actual" = "$expected" ] && [ "$actual_exit" -eq 0 ]; then
+  # stdout must stay EMPTY. The nudge writes to stderr, and a PostToolUse hook
+  # exiting 0 with JSON on stdout would be parsed by Claude Code as hook output
+  # — a stray echo here could start steering the session instead of nudging it.
+  if [ "$actual" = "$expected" ] && [ "$actual_exit" -eq 0 ] && [ "$stdout_bytes" -eq 0 ]; then
     echo "PASS: $desc ($actual, exit $actual_exit)"
     pass=$((pass + 1))
   else
-    echo "FAIL: $desc — expected $expected/exit 0, got $actual/exit $actual_exit"
+    echo "FAIL: $desc — expected $expected/exit 0/empty stdout, got $actual/exit $actual_exit/${stdout_bytes}B stdout"
     fail=$((fail + 1))
   fi
 }
@@ -308,6 +320,125 @@ run_case "Git Bash: tripled backslash (pins the loop) — fire" \
 # ---------------------------------------------------------------------------
 run_case "CONTROL: parent-dir component is not resolved — silent (documented under-fire)" \
   '{"tool_name":"Write","tool_input":{"file_path":"/facts/x/../accepted.dl"}}' silent
+
+# ---------------------------------------------------------------------------
+# CASES 29-32: MIXED SEPARATORS in the redundant forms. Git Bash payloads mix
+# `/` and `\` freely (CASE 18 already relies on that), so the redundant forms
+# come mixed too. All four were SILENT until the matcher stopped enumerating
+# forms and started reading the tail.
+#
+# They need no special code — that is the point. Nothing in the matcher knows
+# which kind of separator it crossed, so these pass for the same reason the
+# single-separator forms do.
+# ---------------------------------------------------------------------------
+run_case "mixed: forward-slash dot component, backslash before basename — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:/kb/facts/.\\accepted.dl"}}' fire
+run_case "mixed: backslash dot component, forward slash before basename — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\./accepted.dl"}}' fire
+run_case "mixed: backslash then forward slash — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\/accepted.dl"}}' fire
+run_case "mixed: forward slash then backslash — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:/kb/facts/\\accepted.dl"}}' fire
+
+# ---------------------------------------------------------------------------
+# CASE 33 (CONTROL): a directory whose NAME ends in a dot is not the engine
+# input. It passes pre-fix and on the previous commit too — both were silent
+# here for their own reasons — so it is not a pin for this change. It guards
+# the NEW tail logic: neutering the tail check makes it red (measured below).
+#
+# `/kb/facts./accepted.dl` sits in a directory called `facts.`, so it must stay
+# silent. This pins the tail check that distinguishes "dots that are their own
+# components" from "dots belonging to the component" — without it the trailing
+# dot is skipped, `facts.` reads as `facts`, and this becomes a false positive.
+# ---------------------------------------------------------------------------
+run_case "CONTROL: directory named 'facts.' is not the engine input — silent" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/kb/facts./accepted.dl"}}' silent
+
+# ---------------------------------------------------------------------------
+# CASE 34 (CONTROL): `..` must be REJECTED, not skipped like `.`. Also passes
+# on the previous commit, for the same reason as CASE 33 — it exists to guard
+# the new tail logic, where skipping `..` like `.` would be a false positive.
+#
+# facts/../accepted.dl does not denote an engine input at all — it resolves to
+# /accepted.dl — so skipping `..` the way `.` is skipped would read the parent
+# as `facts` and fire. Distinct from CASE 28, which is an engine input that goes
+# unnudged; this one is a non-engine-input that must not nudge.
+# ---------------------------------------------------------------------------
+run_case "CONTROL: parent-dir component must not be skipped like a dot — silent" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/facts/../accepted.dl"}}' silent
+
+# ---------------------------------------------------------------------------
+# CASE 35: the loop-free matcher, pinned against hooks.json's OWN timeout.
+#
+# A rewriting collapse was superlinear in the number of repeated separators:
+# measured 3.6s at 4000 and 11.7s at 6000, past hooks.json's `timeout: 10`, so
+# Claude Code kills the hook and NO nudge appears — a silent non-firing, the one
+# direction this hook must not fail in, and the fallback never runs either. The
+# loop-free reader is flat: 0.036s at 6000, 0.046s at 20000.
+#
+# The bound here is not a tuned wall-clock number, it is the timeout the plugin
+# actually ships in hooks.json. That is what makes this robust rather than
+# flaky: the margin is 0.05s against a 10s limit on one side and 11.7s on the
+# other, so a loaded host cannot flip it. The harness does not otherwise impose
+# a timeout, so without this the old loop would simply take 12s and PASS —
+# which is exactly why the case is written this way and not as a plain
+# run_case.
+#
+# `perl -e 'alarm N; exec @ARGV'` is the timeout: /usr/bin/perl is present on
+# macOS and Linux, and `timeout(1)` is not on macOS (measured — it is coreutils,
+# not BSD).
+# ---------------------------------------------------------------------------
+many_slashes="$(printf '%*s' 6000 '' | tr ' ' '/')"
+slow_payload="$(printf '{"tool_name":"Write","tool_input":{"file_path":"/kb%sfacts/accepted.dl"}}' "$many_slashes")"
+slow_exit=0
+slow_err="$(printf '%s' "$slow_payload" \
+  | perl -e 'alarm 10; exec @ARGV' bash "$HOOK" 2>&1 >/dev/null)" || slow_exit=$?
+case "$slow_err" in
+  *"An engine input was edited"*) slow_verdict=fire ;;
+  *) slow_verdict=silent ;;
+esac
+if [ "$slow_verdict" = "fire" ] && [ "$slow_exit" -eq 0 ]; then
+  echo "PASS: 6000 repeated separators nudges within hooks.json's timeout (fire, exit 0)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: 6000 repeated separators — expected fire/exit 0 within 10s, got $slow_verdict/exit $slow_exit"
+  echo "      (exit 142 = SIGALRM, i.e. the hook blew its timeout and produced no nudge)"
+  fail=$((fail + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# CASE 36: a JSON-escaped forward slash. `\/` is a legal JSON escape for `/`,
+# so the decoded target is an ordinary engine-input path — the extractor gets
+# the decoded string and never sees the escape.
+#
+# The pre-#337 grep searched the RAW payload text, where the escape is still
+# there, so `facts\/accepted.dl` did not match `facts/accepted.dl` and it stayed
+# silent. Reading the decoded target is what fixes it.
+# ---------------------------------------------------------------------------
+run_case "JSON-escaped forward slash in the target — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"\/kb\/facts\/accepted.dl"}}' fire
+
+# ---------------------------------------------------------------------------
+# CASES 37-38: the other two PATH_KEYS, pinned the way CASE 12b pins the
+# top-level fallback — by wanting SILENT.
+#
+# The obvious shape (key names an engine input, expect fire) does NOT pin them:
+# delete `path` from PATH_KEYS and no target is read, so the payload-wide grep
+# fires on the same payload for a different reason and the case still passes.
+# Measured — that version left the suite fully green under both deletions,
+# which is the same masking CASE 12 documents.
+#
+# So each case names an UNRELATED target through the key and mentions an engine
+# input only in content. Read the key and the verdict is silent; lose the key
+# and the fallback fires. `file_path` is the only key a real Write/Edit sends,
+# so these two are defensive — but they were unpinned here AND in
+# tests/test_gate_check.sh, and an unpinned key is one nobody notices losing at
+# #359, where the two extractors become one.
+# ---------------------------------------------------------------------------
+run_case "target read from the 'path' key — silent" \
+  '{"tool_name":"Write","tool_input":{"path":"/tmp/notes.md","content":"see facts/accepted.dl"}}' silent
+run_case "target read from the 'notebook_path' key — silent" \
+  '{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/tmp/nb.ipynb","content":"see facts/query.dl"}}' silent
 
 echo "---"
 echo "gate_reminder: $pass passed, $fail failed"
