@@ -176,3 +176,40 @@ def test_run_writes_nothing_inside_the_checkout(tmp_path: Path) -> None:
     assert not changed, (
         "the harness wrote to tracked files in the checkout: " + ", ".join(changed)
     )
+
+
+def test_dead_conflicts_step_is_not_read_as_detection(tmp_path: Path) -> None:
+    """Step 4 must tell "found a contradiction" apart from "could not run".
+
+    ``check_conflicts.py`` exits 1 when it finds a conflict, so the fixture KB —
+    which declares one on purpose — makes exit 1 the expected result. But a tool
+    that cannot start exits non-zero too, and keying the verdict on the code
+    alone reported ``PASS: check_conflicts.py exit 1 (the declared contradiction
+    is detected)`` for an interpreter that did not exist. That is the same
+    vacuous-PASS defect this issue exists to remove, so it gets its own pin.
+
+    The shim runs the real interpreter for every step except ``check_conflicts``,
+    which it refuses with exit 1 and no findings.
+    """
+    shim = _write_shim(
+        tmp_path / "refuse-conflicts",
+        "case \"$*\" in\n"
+        '  *check_conflicts.py*) echo "shim: refused check_conflicts" >&2; exit 1 ;;\n'
+        "esac\n"
+        f'exec "{sys.executable}" "$@"\n',
+    )
+
+    result = _run_golden(tmp_path, shim)
+    combined = result.stdout + result.stderr
+
+    assert "shim: refused check_conflicts" in combined, (
+        "step 4 was not made to fail, so this case proves nothing\n" + combined
+    )
+    # The earlier steps still run for real, so an absent PASS below is about
+    # step 4's verdict and not about a harness that fell over.
+    assert "PASS: facts/logic_report.txt matches golden" in result.stdout, combined
+    assert not re.search(r"^PASS: check_conflicts\.py exit 1", result.stdout, re.M), (
+        "the harness read a dead check_conflicts as a detected contradiction\n"
+        + combined
+    )
+    assert result.returncode != 0
