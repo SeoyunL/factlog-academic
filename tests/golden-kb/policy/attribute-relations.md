@@ -7,3 +7,5 @@ released_on
 headcount
 league_rank
 valuation
+market_cap
+load_factor

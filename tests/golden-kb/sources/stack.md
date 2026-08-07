@@ -17,7 +17,7 @@ the typed comparison has both a hit and a miss.
 
 ## team
 
-Orbit has a headcount of 120.
+Orbit has a headcount of 120. Vault runs at a load factor of 1.0005.
 
 ## rank
 
@@ -25,7 +25,8 @@ Orbit holds league rank 3rd.
 
 ## funding
 
-Orbit carries a valuation of 100억.
+Orbit carries a valuation of 100억. Ledger carries a market cap of 2조 —
+written without an inline unit table so it resolves through the built-in one.
 
 ## owners
 

@@ -9,6 +9,8 @@ relation("Beacon", "released_on", "2030-05-14").
 relation("Orbit", "headcount", "120").
 relation("Orbit", "league_rank", "3rd").
 relation("Orbit", "valuation", "100억").
+relation("Ledger", "market_cap", "2조").
+relation("Vault", "load_factor", "1.0005").
 relation("Orbit", "maintained_by", "Aria").
 relation("Orbit", "maintained_by", "Bran").
 relation("Beacon", "owned_by", "Cyra").

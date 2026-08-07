@@ -1,24 +1,54 @@
 .decl conflict(entity: symbol, reason: symbol)
 
 // One rule per declared type. The side-relations (release_date, headcount_value,
-// rank_value, valuation_won) are what policy/typed-relations.md projects; each
-// threshold is tight against the single fact that satisfies it, so a change in
-// how a literal is parsed or scaled moves the finding out of the report.
-conflict(X, "launched_after_2031") :-
+// rank_value, valuation_won, market_cap_won) are what policy/typed-relations.md
+// projects.
+//
+// Each band is CLOSED — `V >= X, V <= X` — so it pins the projected value, not
+// which side of a boundary it falls on. A one-sided threshold only pins a
+// boolean: with `headcount_value >= 120000`, scaling 120 by 10000 instead of
+// 1000 still satisfies it and the run stayed green, while scaling by 100 went
+// red. Half of every scale mutation was invisible. The same held for ordinal
+// (down survived), amount (up survived), a dropped day term and a changed
+// rounding mode. A closed band has no surviving side.
+conflict(X, "date_band_20310201") :-
   release_date(X, V),
-  V >= 20310101.
+  V >= 20310201,
+  V <= 20310201.
 
-conflict(X, "headcount_at_least_120") :-
+conflict(X, "headcount_band_120k") :-
   headcount_value(X, V),
-  V >= 120000.
+  V >= 120000,
+  V <= 120000.
 
-conflict(X, "ranked_top_3") :-
+conflict(X, "rank_band_3") :-
   rank_value(X, V),
+  V >= 3,
   V <= 3.
 
-conflict(X, "valued_at_100eok") :-
+// Inline unit table (억=1e8) declared in typed-relations.md.
+conflict(X, "valuation_band_100eok") :-
   valuation_won(X, V),
-  V >= 10000000000.
+  V >= 10000000000,
+  V <= 10000000000.
+
+// No inline table, so this one resolves through literal_types.DEFAULT_AMOUNT_UNITS
+// — which the valuation rule above never reads. 조 is in the default table and
+// not in the inline one, so corrupting either table alone moves exactly one of
+// these two findings.
+conflict(X, "market_cap_band_2jo") :-
+  market_cap_won(X, V),
+  V >= 2000000000000,
+  V <= 2000000000000.
+
+// 1.0005 scaled by 1000 is 1000.5 — the only fixture value with a fraction to
+// round. Every other one is integral, so the rounding mode was unexercised and a
+// ROUND_HALF_UP -> ROUND_DOWN swap stayed green even with closed bands. 1001 is
+// the HALF_UP answer; ROUND_DOWN gives 1000.
+conflict(X, "load_factor_band_1001") :-
+  load_factor_value(X, V),
+  V >= 1001,
+  V <= 1001.
 
 // entity_node/1 is the engine's entity graph: WIRELOG_PROGRAM derives it from
 // relation/3 and excludes any object whose relation is declared attr_rel. That
