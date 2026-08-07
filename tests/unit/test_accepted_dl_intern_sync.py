@@ -67,7 +67,10 @@ class TestLoaderKeepsEverySpellingTheEngineCanSee:
         ):
             assert spelling in internable, f"{ascii(spelling)} would decode as a bare intern id"
 
-    def test_byte_identical_duplicates_still_collapse(self, tmp_path):
+    # GUARD, not a pin: passes with the round-2 source reverted. The identity
+    # fold never touched a byte-identical pair, so this cannot fail before the
+    # fix; it exists to catch a later change that stops collapsing them.
+    def test_byte_identical_duplicates_still_collapse_GUARD(self, tmp_path):
         # The loader's actual job — hygiene for a stale or hand-edited file.
         # Equal bytes intern to one symbol, so collapsing them desynchronizes
         # nothing.
@@ -75,7 +78,10 @@ class TestLoaderKeepsEverySpellingTheEngineCanSee:
         rows = common._load_accepted_facts_from(_write(tmp_path, atom, atom))
         assert len(rows) == 1
 
-    def test_loader_does_not_rewrite_a_spelling(self, tmp_path):
+    # GUARD, not a pin: passes with the round-2 source reverted, because a
+    # single-spelling group has nothing to fold. It guards the direction the
+    # fix must never take — rewriting a spelling on the way out.
+    def test_loader_does_not_rewrite_a_spelling_GUARD(self, tmp_path):
         # It must hand back what the file says, not a normalized view of it —
         # otherwise the interned name and the parsed atom differ again.
         adl = _write(tmp_path, f'relation("{_nfd("부산항만공사")}", "관할", "부산항").')
