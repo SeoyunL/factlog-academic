@@ -162,12 +162,15 @@ In order, `setup`:
    `$CLAUDE_PLUGIN_ROOT` if set, else the package root). If pyrewire already
    satisfies the floor, the install is skipped.
 3. Runs the KB `init` for `--target` (scaffolds `sources/`, `facts/`,
-   `policy/`, etc.) and records it as the **active KB** — but only when no
-   active KB is configured yet. If the user already has one, the KB is created
-   and their active KB is left where it is; `setup` prints the untouched value
-   and the command that switches. Do not re-run with `--activate` to "fix" that
-   on the user's behalf: creating a KB is not consent to move the KB they were
-   working in. Surface the printed line and let them choose.
+   `policy/`, etc.) and records it in the **active-KB config** — but only when
+   that config records nothing yet. If the user already has a KB recorded, the
+   KB is created and their recorded one is left where it is; `setup` prints the
+   untouched value and the command that would change it. Note this is about the
+   config file, which is only rank 3 of the precedence — whether a flagless
+   command reaches the new KB is a separate question that `setup`'s closing line
+   answers. Do not re-run with `--activate` to "fix" either one on the user's
+   behalf: creating a KB is not consent to move the KB they were working in.
+   Surface the printed line and let them choose.
 4. Re-runs `doctor` and prints a concise summary of what was done and what (if
    anything) the user must do next.
 

@@ -117,8 +117,12 @@ factlog init: active-KB config at /Users/me/.config/factlog/config.json could no
   repair that file, or overwrite it deliberately: factlog use /tmp/scratch
 ```
 
+`setup --lang` 도 같은 이유로 함께 보류됩니다. 언어를 기록하는 쓰기가 설정 파일 전체를
+다시 세우므로, 읽지 못한 root 바이트를 똑같이 지우기 때문입니다 — 방금 "손대지 않았다" 고
+적어 놓고 손대는 셈이 됩니다.
+
 파일을 고쳤거나 버려도 좋다면 `--activate` 로 덮어쓸 수 있고, 그 경우 무엇을 덮어썼는지
-출력합니다. 반면 파일이 **읽히기는 하는데** 기록된 root가 없으면(`{"lang": "ko"}`,
+출력합니다(이때는 설정이 다시 온전해지므로 같은 실행의 `--lang` 도 정상 적용됩니다). 반면 파일이 **읽히기는 하는데** 기록된 root가 없으면(`{"lang": "ko"}`,
 `{"root": ""}`) 잃을 경로가 없으므로 첫 실행과 똑같이 기록합니다. `lang` 은 보존됩니다.
 
 `--target` 을 생략하면 `init`/`setup` 도 다른 명령과 같은 순서로 대상을 정합니다:

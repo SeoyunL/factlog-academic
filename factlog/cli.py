@@ -718,7 +718,7 @@ def _env_override_note() -> str | None:
     return f"note: $FACTLOG_ROOT={resolved} outranks the config in this session (factlog where)"
 
 
-def _reach_note(target) -> str | None:
+def _reach_note(target, *, quiet_when: str | None = None) -> str | None:
     """Say where a flagless command would actually go, when it is not *target*.
 
     ``setup``'s closing line used to ask the ``Activation`` whether the config
@@ -732,9 +732,17 @@ def _reach_note(target) -> str | None:
     path keeps the plain "next step" wording. Otherwise it names the KB that
     would be reached, where that came from, and both ways to redirect — including
     the fact that ``factlog use`` alone does not help while the environment wins.
+
+    *quiet_when* suppresses the line for one resolution source. Callers that have
+    already printed the same fact pass ``"config"``: beside a summary reading
+    "config unchanged: /wiki — /scratch is NOT recorded there" and a hint reading
+    "factlog use /scratch", a third line saying a flagless command would reach
+    /wiki from the config is pure restatement — and that is #356's own
+    reproduction path, so it is the case most readers meet. The closing line
+    passes nothing, because there the fact has not been said yet.
     """
     effective, source = factlog_config.resolve_root()
-    if effective == str(target):
+    if effective == str(target) or source == quiet_when:
         return None
     label = {"env": "$FACTLOG_ROOT", "config": "the active-KB config", "cwd": "the current directory"}
     origin = label.get(source, source)
@@ -821,7 +829,11 @@ def _apply_activation(command: str, target, activate: bool | None) -> tuple[Acti
     if plan.hint:
         print(f"  {plan.hint}")
     # After the write: the note is about what the config says *now*.
-    notes = [note for note in (_env_override_note(), _reach_note(target)) if note]
+    notes = [
+        note
+        for note in (_env_override_note(), _reach_note(target, quiet_when="config"))
+        if note
+    ]
     for note in notes:
         print(f"  {note}")
     return plan, notes
@@ -2344,9 +2356,23 @@ def cmd_setup(args: argparse.Namespace) -> int:
     # language survives a re-run of setup that omits the flag (the root write above,
     # when it happens, preserves it). Uses the shared validate/apply path, so an
     # empty value clears the setting with the same wording as `factlog lang`.
+    #
+    # Not applied at all to a config that could not be read: `write_lang` rebuilds
+    # the file from `_read_config()`, which is `{}` for a damaged file, so it would
+    # destroy the KB root the activation step above just refused to touch — while
+    # the summary says it left it alone. Guarding only the root write left this
+    # sibling path open. Re-read the status here rather than reusing the plan's,
+    # because `--activate` may have just replaced the damaged file with a valid one.
     if lang_normalized is not None:
-        phrase = _apply_lang(lang_normalized)
-        actions.append(f"{phrase} (assistant prose only)")
+        if factlog_config.config_status() == factlog_config.UNREADABLE:
+            notes.append(
+                f"narration language NOT set: {factlog_config.config_path()} could not be read, "
+                "and writing it would destroy the KB root it may still hold — repair that file, "
+                "then set the language with `factlog lang`"
+            )
+        else:
+            phrase = _apply_lang(lang_normalized)
+            actions.append(f"{phrase} (assistant prose only)")
 
     print("\n=== factlog setup: final environment check ===")
     # gate="setup": a missing git is reported but does not fail setup, whose
