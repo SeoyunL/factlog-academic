@@ -49,8 +49,8 @@ in some KBs. For example, if `facts/query.dl` exists but `facts/accepted.dl` doe
 not, the logic check stops before it can start the engine — as it also does when
 the `pyrewire` engine is missing or too old.
 
-The check still writes `facts/logic_report.txt` in that case, and the report
-records the failure:
+In that case the check usually still writes `facts/logic_report.txt`, and the
+report records the failure. Its first lines look like this:
 
 ```
 Logic Check Report
@@ -59,12 +59,21 @@ status: engine-did-not-run
 engine: wirelog / pyrewire
 input: facts/accepted.dl
 reason: missing facts/accepted.dl; run tools/compile_facts.py first
+reason type: FactlogError
+...
 ```
 
 Read the `status:` line as "this report says nothing about the KB". It carries
 no counts at all — not `engine facts: 0`, which would mean the engine ran and
-found nothing. It also replaces the report from the last successful run, so an
-older result cannot be mistaken for this one.
+found nothing. Where a report from an earlier successful run existed, this
+replaces it, so an older result cannot be mistaken for this one.
+
+"Usually" covers two cases. If the check dies before it starts — failing to load
+the engine package at all, say — it never reaches the code that writes the
+report. And if `facts/` cannot be written, the check gives up on the report and
+shows the original error instead, because the diagnosis matters more than the
+file. In both cases the previous report is still there, so read `/factlog
+check`'s own output alongside it to know whether the report is this run's.
 
 **That report does not lift the deny.** A run that never reached the engine is
 not evidence that editing engine inputs is safe, so the gate keeps denying while

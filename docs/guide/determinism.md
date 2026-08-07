@@ -53,7 +53,8 @@ factlog는 두 가지 서로 다른 메커니즘으로 신선도(freshness)를 �
 `facts/accepted.dl` 이 없으면 로직 체크가 엔진을 띄우기 전에 멈춥니다. 엔진
 `pyrewire` 가 없거나 버전이 낮을 때도 마찬가지입니다.
 
-이때에도 `facts/logic_report.txt` 는 쓰이며, 그 리포트는 실패를 기록합니다.
+이때에도 로직 체크는 대개 `facts/logic_report.txt` 를 쓰며, 그 리포트는 실패를
+기록합니다. 앞부분은 이렇게 생겼습니다.
 
 ```
 Logic Check Report
@@ -62,12 +63,21 @@ status: engine-did-not-run
 engine: wirelog / pyrewire
 input: facts/accepted.dl
 reason: missing facts/accepted.dl; run tools/compile_facts.py first
+reason type: FactlogError
+...
 ```
 
 `status:` 줄은 "이 리포트는 KB 에 대해 아무것도 말하지 않는다" 는 뜻입니다.
 숫자는 하나도 싣지 않습니다 — `engine facts: 0` 은 엔진이 돌았는데 아무것도
-못 찾았다는 뜻이 되므로 쓰지 않습니다. 직전 성공 실행의 리포트를 덮어쓰므로,
-예전 결과를 이번 실행의 결과로 잘못 읽을 일도 없습니다.
+못 찾았다는 뜻이 되므로 쓰지 않습니다. 직전 성공 실행의 리포트가 있었다면
+덮어쓰므로, 예전 결과를 이번 실행의 결과로 잘못 읽을 일도 없습니다.
+
+"대개" 인 이유는 두 가지입니다. 로직 체크가 시작되기도 전에 죽으면 — 예를 들어
+엔진 패키지 자체를 불러오지 못하면 — 리포트를 쓸 코드에 닿지 못합니다. 그리고
+`facts/` 에 쓸 수 없으면 리포트 쓰기는 포기하고 원래 오류를 그대로 보여 줍니다.
+리포트보다 원인 진단이 우선이기 때문입니다. 두 경우 모두 직전 리포트가 그대로
+남으므로, 리포트의 내용이 이번 실행의 것인지 확인하려면 `/factlog check` 의
+출력을 함께 보세요.
 
 **이 리포트로는 거부가 풀리지 않습니다.** 엔진까지 가지 못한 실행은 엔진 입력을
 편집해도 된다는 근거가 아니므로, `status:` 줄이 있는 동안 게이트는 계속
