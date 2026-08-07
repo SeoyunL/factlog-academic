@@ -50,14 +50,17 @@
 #   - on a case-folding filesystem facts/Accepted.dl IS the engine input, and
 #     the match here is case-sensitive, so it is not recognised;
 #   - a path that needs `..` resolution is missed: facts/x/../accepted.dl names
-#     the engine input and gets no nudge. `//` and `/./` ARE handled (see the
-#     matcher), but `..` is not, because collapsing it by string surgery is
-#     WRONG when a component is a symlink — a/b/../c is not a/c if b is a link.
-#     Doing it correctly needs the filesystem, which is the interpreter spawn
-#     this hook exists without.
-# All four were already true of the payload grep this replaces, so none is a
+#     the engine input and gets no nudge. Redundant separators and dot
+#     components ARE handled, on BOTH separators — `//`, `/./`, `\\` and `\.\`
+#     all collapse (see the matcher) — but `..` is not, because collapsing it by
+#     string surgery is WRONG when a component is a symlink: a/b/../c is not a/c
+#     if b is a link. Doing it correctly needs the filesystem, which is the
+#     interpreter spawn this hook exists without.
+# All three were already true of the payload grep this replaces, so none is a
 # regression; they are listed because the list used to read as though it were
 # closed, and a reader was entitled to assume anything absent was handled.
+# The backslash forms are in that list for the same reason: they were silent
+# until this round, on the one platform the backslash splits exist to serve.
 #
 # OVER-FIRES (a nudge on something that is not an engine input). Deliberate,
 # and cheap — a wrong nudge costs one line of output:
@@ -74,12 +77,18 @@
 # COST, both sides of it. The paragraph above declines to resolve a KB root
 # because that costs an interpreter spawn — but reading the target structurally
 # introduces the FIRST spawn this hook ever paid, so the ledger has to be stated
-# whole. Measured on this host, 20 iterations of an unrelated Write payload:
-# 10.9 ms/invocation before #337, 97.4 ms after. That is the price of not
-# nudging on every document that mentions a KB path. It is charged on the same
-# Write/Edit events where gate_check.sh already spawns Python twice, so it adds
-# a third spawn to an event that had two, rather than a spawn to an event that
-# had none. Declining the KB-root resolution keeps it at one rather than two.
+# whole. Roughly 11 ms/invocation before #337, roughly 90 ms after (20
+# iterations of an unrelated Write payload). Only the ~8x ratio is stable: the
+# same code measured 10.9 -> 97.4 in one run and 14.8 -> 110.5 in another, so a
+# third significant figure here would be reporting host load, not cost.
+#
+# That is the price of not nudging on every document that mentions a KB path,
+# and it is charged on Write/Edit events that already spawn Python several
+# times. Counted by wrapping FACTLOG_PYTHON_RUNNER and tallying: gate_check.sh
+# spawns three on an unrelated Write and four on an engine-input one; this hook
+# spawns one. So it is the FOURTH spawn on an unrelated write and the fifth on
+# an engine-input write — not a spawn added to an event that had none.
+# Declining the KB-root resolution is what keeps this hook's own count at one.
 #
 # WHEN THE TARGET CANNOT BE READ (no usable Python, an unparseable payload, or
 # an envelope with no path key at all) it falls back to the payload-wide grep —
@@ -159,8 +168,8 @@ fi
 # Both separators are honoured: under Git Bash a payload carries
 # "C:\kb\facts\query.dl", where `${path##*/}` hands back the whole string.
 # BOTH backslash splits are pinned by tests/test_gate_reminder.sh. Measured:
-# deleting `base="${base##*\\}"` turns three cases red, deleting
-# `pdir="${pdir##*\\}"` turns one red.
+# deleting `base="${base##*\\}"` turns six cases red, deleting
+# `pdir="${pdir##*\\}"` turns four red.
 #
 # An earlier version of this comment claimed they "cannot be pinned from a POSIX
 # host". That was false, and the way it was false is worth keeping: the suite
@@ -176,17 +185,27 @@ fi
 # not. That is the trade — Windows coverage for one spurious line on a filename
 # almost nobody writes — and it is a wrong-nudge, the cheap direction.
 #
-# The trailing-separator strip below is pinned hardest of all: delete it and 14
+# The trailing-separator strip below is pinned hardest of all: delete it and 17
 # cases go red, 6 of them CONTROL, because without it every parent directory
 # reads as empty and nothing ever matches.
 #
-# NORMALISATION is deliberately partial. `//` and `/./` are collapsed, because
-# both are pure string rewrites that cannot change which file a path denotes.
-# `..` is NOT, and must not be: a/b/../c is not a/c when b is a symlink, so
-# collapsing it by string surgery would be wrong in exactly the case that
-# matters. Resolving `..` needs the filesystem, and this hook does not touch it.
-# So facts/x/../accepted.dl is a genuine engine input that gets no nudge; that
-# is listed with the other under-fires in the header.
+# NORMALISATION is deliberately partial. Redundant separators and dot
+# components are collapsed on both separators — `//`, `/./`, `\\` and `\.\` —
+# because none of those rewrites can change THE LAST TWO COMPONENTS of a path,
+# which is all this matcher reads.
+#
+# That is the exact claim, and the broader one would be false: a pathname
+# beginning with exactly two slashes is implementation-defined in POSIX, and
+# MSYS2/Git Bash reads `//server/share` as a UNC path, so collapsing a leading
+# `//` CAN change which file the path denotes. It cannot change the trailing two
+# components, so it cannot change this hook's verdict — verified, and the reason
+# the narrower claim is the one written here.
+#
+# `..` is NOT collapsed, and must not be: a/b/../c is not a/c when b is a
+# symlink, so string surgery would be wrong in exactly the case that matters.
+# Resolving it needs the filesystem, and this hook does not touch it. So
+# facts/x/../accepted.dl is a genuine engine input that gets no nudge; that is
+# listed with the other under-fires in the header.
 #
 # Beyond that nothing is stripped. A trailing separator yields an empty basename
 # and matches nothing, which is the right answer twice over — such a name
@@ -197,22 +216,28 @@ fi
 _is_engine_input_path() {
   local path="$1"
   local base parent pdir
-  # Collapse "//" and "/./" (see NORMALISATION above). Loop because one pass
-  # leaves "///" and "/././" half-done: each rewrite can create a fresh match.
+  # Collapse redundant separators and dot components (see NORMALISATION above),
+  # on both separators. Loop because one pass leaves "///" and "/././"
+  # half-done: each rewrite can create a fresh match.
   #
   # The separators go through variables rather than being written inline. In
   # `${var//pattern/replacement}` the replacement must be UNQUOTED — bash 3.2,
   # the floor this repo supports, inserts the quote characters literally if you
   # quote it (`${p//"$a"/"$b"}` yields `"/"`, measured on 3.2.57) — while the
-  # pattern must be QUOTED to stay literal. Writing the slashes inline instead
-  # needs backslash escapes that 3.2 turns into a literal backslash. Both wrong
+  # pattern must be QUOTED to stay literal. Writing the separators inline
+  # instead needs escapes that 3.2 turns into a literal backslash. Both wrong
   # forms produce a path that still matches nothing, i.e. they fail silently in
-  # the under-fire direction, which is why this is spelled out.
+  # the under-fire direction, which is why this is spelled out. The `${#var}`
+  # lengths of the backslash variables are 1, 2 and 3 respectively — worth
+  # checking if you edit them, since a miscounted backslash also fails silent.
   local sl="/" dbl="//" dotd="/./"
+  local bs="\\" bdbl="\\\\" bdotd="\\.\\"
   while :; do
     case "$path" in
       *"$dbl"*) path="${path//"$dbl"/$sl}" ;;
       *"$dotd"*) path="${path//"$dotd"/$sl}" ;;
+      *"$bdbl"*) path="${path//"$bdbl"/$bs}" ;;
+      *"$bdotd"*) path="${path//"$bdotd"/$bs}" ;;
       *) break ;;
     esac
   done
