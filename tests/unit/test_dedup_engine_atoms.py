@@ -148,9 +148,10 @@ class TestCanonicallyEquivalentSpellingsCollapse:
         assert len(out) == 1
 
     def test_composed_spelling_wins_even_when_decomposed_comes_first(self):
-        # Provenance is preserved by writing a spelling actually authored, and
-        # the composed one is the one a reader greps for from an NFC editor —
-        # so first-occurrence yields to it when the forms differ.
+        # The composed spelling is the one a reader greps for from an NFC editor
+        # and the only one the typed projection can parse, so first-occurrence
+        # does not decide the SPELLING. It still decides everything else: the
+        # non-triple fields come from the group's first row.
         rows = [
             _row("연구소", "소속", _nfd("한국대학교"), source="sources/decomposed.md"),
             _row("연구소", "소속", _nfc("한국대학교"), source="sources/composed.md"),
@@ -158,9 +159,13 @@ class TestCanonicallyEquivalentSpellingsCollapse:
         out = common.dedup_engine_atoms(rows)
         assert len(out) == 1
         assert out[0]["object"] == _nfc("한국대학교")
-        assert out[0]["source"] == "sources/composed.md"
+        assert out[0]["source"] == "sources/decomposed.md"
 
-    def test_uniformly_decomposed_group_keeps_its_decomposed_spelling(self):
+    # GUARD, not a pin: the triples here are byte-identical, so origin/main's
+    # raw-triple dedup collapsed them too and this passes there. It exists to
+    # catch a fix that normalizes on the way OUT, which the mutation check in
+    # the report confirms it does catch.
+    def test_uniformly_decomposed_group_keeps_its_decomposed_spelling_GUARD(self):
         # Fold to decide identity, never to rewrite the output: with no composed
         # member the group has no composed spelling to prefer, and normalizing
         # here would invent a string the KB never wrote.
@@ -174,21 +179,52 @@ class TestCanonicallyEquivalentSpellingsCollapse:
         assert out[0]["object"] == _nfd("한국대학교")
         assert out[0]["source"] == "sources/a.md"  # first-occurrence still breaks the tie
 
-    def test_atom_written_is_always_a_row_that_exists(self):
-        # Per-axis synthesis would emit ('삼성' NFC, '대표', '이재용' NFC) — a
-        # triple no row carries. Raw-triple-keyed maps built from candidates.csv
-        # (fact_signals, hence ask's `sources:`/staleness annotation) would then
-        # miss the very atom that was written.
+    def test_cross_group_gets_the_composed_spelling_on_BOTH_axes(self):
+        # The cross case: no member is composed on both axes. Ranking whole rows
+        # has to pick one of them and therefore writes a decomposed axis while
+        # the group demonstrably holds a composed spelling for it — which makes
+        # check_conflicts' "written in the composed spelling" a false statement
+        # and, on a typed relation, silently drops the fact from the typed table.
+        # The axes are independent and are chosen independently.
         rows = [
             _row(_nfc("삼성"), "대표", _nfd("이재용"), source="sources/a.md"),
             _row(_nfd("삼성"), "대표", _nfc("이재용"), source="sources/b.md"),
         ]
         out = common.dedup_engine_atoms(rows)
         assert len(out) == 1
-        written = (out[0]["subject"], out[0]["relation"], out[0]["object"])
-        assert written in {(r["subject"], r["relation"], r["object"]) for r in rows}
+        assert out[0]["subject"] == _nfc("삼성")
+        assert out[0]["object"] == _nfc("이재용")
 
-    def test_relation_axis_is_deliberately_not_folded(self):
+    def test_each_axis_agrees_with_composed_spelling(self):
+        # The invariant check_conflicts._representative's docstring states: both
+        # stand a representative in front of a folded group and must pick the
+        # same one, or the report and the compiled atom name a value differently.
+        rows = [
+            _row(_nfc("삼성"), "대표", _nfd("이재용"), source="sources/a.md"),
+            _row(_nfd("삼성"), "대표", _nfc("이재용"), source="sources/b.md"),
+            _row(_nfd("삼성"), "대표", _nfd("이재용"), source="sources/c.md"),
+        ]
+        out = common.dedup_engine_atoms(rows)
+        assert len(out) == 1
+        assert out[0]["subject"] == common.composed_spelling({r["subject"] for r in rows})
+        assert out[0]["object"] == common.composed_spelling({r["object"] for r in rows})
+
+    def test_synthesized_atom_still_resolves_its_provenance(self):
+        # Synthesis is only safe because every atom-keyed map is keyed on
+        # engine_atom_key. If one were left raw it would miss this atom outright
+        # and drop the sources it is supposed to report.
+        facts = [
+            _row(_nfc("삼성"), "대표", _nfd("이재용"), source="sources/a.md", status="confirmed"),
+            _row(_nfd("삼성"), "대표", _nfc("이재용"), source="sources/b.md", status="confirmed"),
+        ]
+        atom = common.dedup_engine_atoms(facts)[0]
+        assert common.corroboration_counts(facts)[common.engine_atom_key(atom)] == 2
+
+    # GUARD, not a pin: passes on origin/main too, by construction. It cannot
+    # fail before the fix because before the fix NOTHING folded, so it can only
+    # ever catch a LATER change that over-folds. Kept for that, not offered as
+    # evidence that #342 was fixed.
+    def test_relation_axis_is_deliberately_not_folded_GUARD(self):
         # #210's deferred call: the checker's grouping keeps the relation
         # verbatim and so does this. Both sides raw is agreement, not a gap that
         # this fix opened — but it IS the axis that still costs two atoms.
@@ -198,7 +234,8 @@ class TestCanonicallyEquivalentSpellingsCollapse:
         ]
         assert len(common.dedup_engine_atoms(rows)) == 2
 
-    def test_compatibility_and_case_variants_stay_distinct(self):
+    # GUARD, not a pin: passes on origin/main too (see above).
+    def test_compatibility_and_case_variants_stay_distinct_GUARD(self):
         # NFC, never NFKC and never casefold: these are different values.
         rows = [
             _row("A", "r", "ABC"),
