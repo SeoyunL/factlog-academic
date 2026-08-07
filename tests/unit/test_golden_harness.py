@@ -388,3 +388,30 @@ def test_read_only_source_kb_still_produces_a_verdict(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, combined
     assert "Permission denied" not in combined, combined
+
+
+def test_interpreter_selection_matches_the_other_harnesses(tmp_path: Path) -> None:
+    """golden.sh must pick its interpreter the way every other harness does.
+
+    Behavioural coverage stops at "``PYTHON`` is honoured" (above); what this
+    guards is the *unset* branch, which cannot be tested by running the harness
+    without creating ``/tmp/factlog-venv`` — a path shared with every other
+    checkout on the machine, so a test must not.
+
+    It is still a real pin: the harness carried an implicit
+    ``/tmp/factlog-venv`` branch ahead of ``python3``, so on a machine with that
+    path it silently ran a different interpreter from the other 39 harnesses,
+    and nothing in the output said so.
+    """
+    source = GOLDEN_SH.read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert 'PYTHON="${PYTHON:-python3}"' in code, (
+        "golden.sh no longer selects its interpreter the way tests/*.sh do"
+    )
+    assert "factlog-venv" not in code, (
+        "golden.sh reintroduced a machine-dependent interpreter path; callers "
+        "pass PYTHON explicitly, as they do for every other harness"
+    )
