@@ -807,9 +807,17 @@ def composed_spelling(spellings: Iterable[str]) -> str:
     ``check_conflicts._representative`` for the report, ``corroboration`` for its
     competing-values clause, and ``dedup_engine_atoms`` for the spelling written
     into ``accepted.dl``. Two of them naming one value differently is the bug
-    this centralization exists to prevent, and the atom is now one of the two —
-    it applies this per axis, so a group is answered the same way whether the
-    reader asks the checker or reads the compiled file.
+    this centralization exists to prevent.
+
+    Same function, but only the same ANSWER where the callers are looking at the
+    same group. For a **canonically equivalent** group they are, so the spelling
+    the checker reports is the spelling the compiled file carries. For a typed
+    relation they are not: ``_group_key`` partitions on the parsed scalar, so it
+    holds ``{NFD('제3호'), '3위'}`` as one value, while ``dedup_engine_atoms``
+    keeps two atoms because those strings are not canonically equivalent. Same
+    representative rule applied to different partitions — the user-facing message
+    is right about that, and this docstring should not be read past canonical
+    equivalence.
     """
     return min(spellings, key=lambda s: (s != unicodedata.normalize("NFC", s), s))
 
@@ -1778,14 +1786,27 @@ def engine_atom_key(row: dict[str, str]) -> tuple[str, str, str]:
       byte-different, visually identical ``relation(...)`` lines in
       ``accepted.dl`` — the inflated duplicate count ``dedup_engine_atoms``
       exists to prevent, arriving through the normal ``finalize`` path (#342).
+
+      This fold is per-triple, which is NOT the checker's subject fold:
+      ``_group_key`` folds the subject across rows into a bucket. Two rows with
+      the same folded subject and different objects stay two atoms here and are
+      one group there, so the checker remains stricter on that axis. See
+      ``check_conflicts.collect_conflicts``.
     * *relation* — left verbatim, matching the checker's grouping and
       ``corroboration``. Folding it is the deferred #210 call: it changes which
       rows collide on an axis where "no silent NFC coercion for a
       non-participating relation" was a deliberate promise, and deciding that is
       a maintainer's, not this fix's. So two spellings of one relation still
-      make two atoms. This closes the subject/object divergence with the checker
-      and leaves the relation axis exactly as divergent (or not) as it was: both
-      sides raw.
+      make two ``relation/3`` atoms.
+
+      Read that as "this function does not fold it", never as "the axis is
+      unfolded". ``canonical_atoms`` NFC-folds the relation before its alias
+      lookup, so the SAME ``accepted.dl`` can carry two ``relation/3`` atoms and
+      one ``canonical/3`` atom for one aliased pair; and ``_canonical_value``
+      folds a query's relation argument, so one spelling typed by the user
+      already matches both. The #210/#345 question is therefore not whether to
+      start folding this axis but whether to make the rest agree with the two
+      places that already do.
 
     NFC only — never NFKC, never casefold. Fullwidth ``ＡＢＣ`` and ``ABC``, and
     ``a`` and ``A``, are different values and must stay different atoms.
@@ -1825,13 +1846,19 @@ def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     **Which spelling is written.** Each axis independently: the subject is
     ``composed_spelling`` of every subject in the group, the object likewise.
     That is the *same* choice ``check_conflicts._representative`` makes — it is
-    ``composed_spelling`` — so the checker's report and the compiled atom name
-    a value identically, which is the invariant that docstring states and this
-    must not break. The composed spelling is the one a reader greps for from an
-    NFC editor, and the only one the engine's typed projection can parse
-    (``_project_typed_relations`` hands ``literal_types.normalize`` the object as
-    written, so a decomposed ``NFD('7위')`` normalizes to ``None`` and the fact
-    silently leaves the typed table).
+    ``composed_spelling`` — so for a canonically equivalent group the checker's
+    report and the compiled atom name a value identically, which is the invariant
+    that docstring states and this must not break. The composed spelling is also
+    the one a reader greps for from an NFC editor, and the one the engine's typed
+    projection can parse (``_project_typed_relations`` hands
+    ``literal_types.normalize`` the object as written, so a decomposed
+    ``NFD('7위')`` normalizes to ``None`` and the fact silently leaves the typed
+    table).
+
+    Preferring it therefore only *rescues a group that has one*. Where every
+    member is decomposed there is nothing to prefer, the atom stays decomposed,
+    and the typed literal is dropped exactly as before — see the byte-invariance
+    note below, which is the same fact stated as a guarantee.
 
     Ranking whole rows instead — picking the group member that sorts first — is
     what an earlier revision did, and it is wrong on a *cross* group: one row
