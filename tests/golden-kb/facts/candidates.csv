@@ -7,6 +7,8 @@ Beacon,released_on,2030-05-14,sources/stack.md#dates,confirmed,0.99,typed date
 Orbit,headcount,120,sources/stack.md#team,confirmed,0.95,typed number
 Orbit,league_rank,3rd,sources/stack.md#rank,confirmed,0.90,typed ordinal
 Orbit,valuation,100억,sources/stack.md#funding,confirmed,0.90,typed amount
+Ledger,market_cap,2조,sources/stack.md#funding,confirmed,0.90,typed amount via the default unit table
+Vault,load_factor,1.0005,sources/stack.md#team,confirmed,0.90,typed number whose scaled value needs rounding
 Orbit,maintained_by,Aria,sources/stack.md#owners,confirmed,0.95,single-valued
 Orbit,maintained_by,Bran,sources/stack.md#owners,confirmed,0.90,contradicts the row above
 Beacon,owned_by,Cyra,sources/stack.md#owners,confirmed,0.95,alias surface form
