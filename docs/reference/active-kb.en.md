@@ -115,8 +115,13 @@ factlog init: active-KB config at /Users/me/.config/factlog/config.json could no
   repair that file, or overwrite it deliberately: factlog use /tmp/scratch
 ```
 
+`setup --lang` is withheld for the same reason: recording a language rebuilds the
+whole config file, so it would erase the root bytes that could not be read — the
+command would be touching the file one line after saying it left it alone.
+
 Once you have repaired it — or decided it is expendable — `--activate` overwrites
-it and reports what it replaced. A file that **does** parse but records no usable
+it and reports what it replaced (the config is sound again at that point, so a
+`--lang` in the same run applies normally). A file that **does** parse but records no usable
 root (`{"lang": "ko"}`, `{"root": ""}`) is not damaged: there is no path in it to
 lose, so it is recorded exactly like a first run, and `lang` is preserved.
 

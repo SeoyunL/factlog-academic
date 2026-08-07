@@ -363,6 +363,40 @@ class TestEnvOverrideIsDisclosed:
 
         assert "outranks" not in out, f"announced an override while env and config agree: {out}"
 
+    def test_no_reach_note_when_it_would_only_restate_the_summary(self, tmp_path, config_home):
+        """#356's own reproduction path is the one most readers will meet.
+
+        With no ``$FACTLOG_ROOT``, the summary already says the config records
+        ``/wiki`` and not ``/scratch``, and the hint already gives
+        ``factlog use /scratch``. A third line saying a flagless command reaches
+        ``/wiki`` from the config adds nothing. ``setup``'s closing line still
+        carries it, because there the fact has not been said yet — held by
+        ``TestSetup::test_closing_line_names_the_target_when_it_is_not_recorded``.
+        """
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        write_pointer(config_home, wiki)
+
+        out = run_init("--target", str(tmp_path / "scratch"), config_home=config_home).stdout
+
+        assert "a flagless command" not in out, f"restated the summary a third time: {out}"
+        assert str(wiki) in out, "the untouched value must still be named once"
+
+    def test_reach_note_survives_when_the_source_is_not_the_config(self, tmp_path, config_home):
+        """The suppression is one source wide, not a blanket mute."""
+        cfg_kb = tmp_path / "cfgkb"
+        cfg_kb.mkdir()
+        write_pointer(config_home, cfg_kb)
+        env_kb = tmp_path / "envkb"
+        env_kb.mkdir()
+
+        out = self.run_with_env(
+            "init", "--target", str(tmp_path / "scratch"), config_home=config_home, env_root=env_kb
+        ).stdout
+
+        assert "a flagless command" in out, f"muted a note that names a different KB: {out}"
+        assert str(env_kb) in out
+
     def test_fires_when_the_environment_outranks_a_config_that_equals_the_target(
         self, tmp_path, config_home
     ):
@@ -589,6 +623,52 @@ class TestSetup:
         )
         assert str(scratch) in closing, closing
         assert "flagless" in closing, closing
+
+    def test_lang_is_not_applied_to_a_config_that_could_not_be_read(
+        self, tmp_path, config_home, capsys
+    ):
+        """The refusal has to cover ``--lang``, not just the root.
+
+        ``_plan_activation`` guards the root write, but ``--lang`` reaches the
+        same file by a sibling path: ``write_lang`` rebuilds it from
+        ``_read_config()``, which is ``{}`` for a damaged file. So
+        ``setup --target X --lang ko`` printed "could not be read — leaving it
+        untouched" and then replaced the whole file with ``{"lang": "ko"}``,
+        destroying the root it had just declined to touch. The output lying
+        about it is what makes this worse than the loss it reintroduced.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", ', encoding="utf-8")
+        before = path.read_bytes()
+
+        assert cli.main(["setup", "--target", str(tmp_path / "scratch"), "--lang", "ko"]) == 0
+        out = capsys.readouterr().out
+
+        assert path.read_bytes() == before, f"--lang overwrote an unreadable config: {out}"
+        assert "narration language NOT set" in out, f"dropped the language silently: {out}"
+
+    def test_lang_still_applies_once_activate_has_replaced_the_damaged_config(
+        self, tmp_path, config_home, capsys
+    ):
+        """The skip is conditional on the file *now*, not on how the run started.
+
+        ``--activate`` replaces an unreadable config with a valid one earlier in
+        the same run, so by the time ``--lang`` is applied there is nothing left
+        to protect and refusing would drop a language for no reason.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", ', encoding="utf-8")
+        scratch = tmp_path / "scratch"
+
+        assert cli.main(["setup", "--target", str(scratch), "--activate", "--lang", "ko"]) == 0
+        capsys.readouterr()
+
+        assert json.loads(path.read_text(encoding="utf-8")) == {
+            "root": resolved(scratch),
+            "lang": "ko",
+        }
 
     def test_lang_flag_still_applies_without_activating(self, tmp_path, config_home, capsys):
         """``--lang`` edits the same file; declining the root must not decline it."""
