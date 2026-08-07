@@ -198,7 +198,18 @@ rows = [
 ]
 Path(sys.argv[1], "facts/candidates.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
 PY
-FACTLOG_ROOT="$KB4" "$PYTHON" -m factlog.compile_facts >/dev/null
+compile4="$(FACTLOG_ROOT="$KB4" "$PYTHON" -m factlog.compile_facts)"
+
+# The all-NFD KB is what pins compile_facts' source-count LOOKUP. Both rows are
+# decomposed, so the atom is decomposed too and its RAW triple differs from its
+# folded key — a raw lookup misses and silently falls to the `, 1` default. In
+# block (f) the group has a composed member, so the written atom is NFC and the
+# raw and folded keys coincide by accident; that case cannot see this. Same
+# defect shape as the ask-side one (a source lost), with the compile log as the
+# surface.
+printf '%s' "$compile4" | grep -qF 'sources=2' \
+  && ok "all-NFD atom's source count survives the lookup (sources=2)" \
+  || bad "all-NFD atom lost a source in the compile log: $compile4"
 "$PYTHON" - "$KB4" <<'PY' && ok "uniformly decomposed KB keeps its decomposed spelling" || bad "decomposed KB was normalized on the way out"
 import sys, unicodedata
 from pathlib import Path
@@ -296,12 +307,30 @@ kb.joinpath("facts/candidates.csv").write_text(
     f"{nfd('현대건설')},순위,{nfc('7위')},sources/b.md,confirmed,0.95,\n",
     encoding="utf-8",
 )
+# `as <alias>` is REQUIRED by the parser — without it the line is skipped as
+# malformed, typed_relations() returns {}, and _project_typed_relations never
+# runs at all, so the assertion below would pass without the typed table ever
+# existing.
 kb.joinpath("policy/typed-relations.md").write_text(
-    "# typed\n- `순위` : ordinal\n", encoding="utf-8",
+    "# typed\n- `순위` : ordinal as rank\n", encoding="utf-8",
+)
+# A typed relation's object is a literal, so it must also be declared an
+# attribute relation — otherwise typed_relations() warns and the value stays in
+# the entity graph.
+kb.joinpath("policy/attribute-relations.md").write_text(
+    "# attributes\n- `순위`\n", encoding="utf-8",
 )
 PY
   FACTLOG_ROOT="$KB6" "$PYTHON" -m factlog.compile_facts >/dev/null
-  "$PYTHON" - "$KB6" <<'PY' && ok "cross group writes the composed spelling on the object (typed literal parses)" || bad "cross group wrote a decomposed object — the typed literal is dropped"
+  # Guard the premise first: if the spec does not parse, nothing below is a test
+  # of the typed table.
+  ( cd "$PLUGIN_ROOT" && FACTLOG_ROOT="$KB6" "$PYTHON" -c "
+from factlog.common import typed_relations
+specs = typed_relations()
+assert specs, 'typed-relations.md did not parse — the typed-table assertions below are vacuous'
+" ) && ok "typed spec parses (the typed-table premise holds)" || bad "typed-relations.md did not parse"
+
+  "$PYTHON" - "$KB6" <<'PY' && ok "cross group writes a composed object that normalizes as an ordinal" || bad "cross group wrote a decomposed object — the typed literal is dropped"
 import sys, unicodedata
 from pathlib import Path
 sys.path.insert(0, ".")
@@ -311,9 +340,28 @@ lines = [l for l in Path(sys.argv[1], "facts/accepted.dl").read_text(encoding="u
          if l.startswith("relation(")]
 assert len(lines) == 1, lines
 obj = lines[0].rsplit('", "', 1)[1].rstrip('").')
-# the written object must be composed AND must actually normalize as an ordinal
 sys.exit(0 if obj == nfc(obj) and literal_types.normalize("ordinal", obj) is not None else 1)
 PY
+
+  # ...and the ENGINE really loads it typed. This is what earns the pyrewire
+  # gate. Asserted through a RULE over the projected side-relation, not by
+  # reading `rank` back: typed side-relations are EDB inserts, and run_wirelog
+  # only collects what `session.step()` derives, so an EDB probe reads empty on
+  # a perfectly healthy run. `top_ranked` is IDB, so it fires only if the
+  # ordinal really reached the typed table.
+  printf '.decl top_ranked(entity: symbol, reason: symbol)\ntop_ranked(S, "rank_le_10") :- rank(S, V), V <= 10.\n' \
+    > "$KB6/policy/logic-policy.extra.dl"
+  ( cd "$PLUGIN_ROOT" && FACTLOG_ROOT="$KB6" "$PYTHON" - <<'PY'
+import sys
+sys.path.insert(0, ".")
+from factlog import common
+rows = common.run_wirelog().get("top_ranked", set())
+assert rows, "top_ranked did not fire — the ordinal never reached the typed table"
+assert any("현대건설" in str(v) for r in rows for v in r), f"unexpected rows: {rows}"
+PY
+  ) 2>/dev/null \
+    && ok "a rule over the typed side-relation fires on the folded atom" \
+    || bad "the typed side-relation never received the folded atom"
 else
   echo "SKIP: pyrewire unavailable — skipping typed-literal assertions"
 fi
