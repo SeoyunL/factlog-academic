@@ -483,7 +483,28 @@ def _load_accepted_facts_from(accepted_dl: Path) -> list[dict[str, str]]:
     # Defensive: a stale or hand-edited accepted.dl may still carry duplicate
     # triples; collapse them so evaluate/check stay set-consistent. These rows
     # are bare triples, so no source/provenance is lost here.
-    return dedup_engine_atoms(rows)
+    #
+    # EXACT triples, deliberately NOT dedup_engine_atoms' canonical fold. This
+    # list is what `run_wirelog` interns, while the engine parses the FILE TEXT
+    # (`accepted_program`) — so every spelling present in the file must survive
+    # to here. Folding identity here dropped the losing spelling from the intern
+    # table while leaving its atom in the program, and `decode_wirelog_value`
+    # then fell through to the bare intern id: `requires_review: 3` where the
+    # name belongs, in facts/logic_report.txt. Any accepted.dl compiled by an
+    # earlier release carries both spellings, so this fires on upgrade with no
+    # hand-editing at all. Identity folding belongs at COMPILE time, where the
+    # file is written (compile_facts); this loader's job is byte-duplicate
+    # hygiene, which cannot desynchronize the two because equal bytes intern to
+    # one symbol.
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[dict[str, str]] = []
+    for row in rows:
+        triple = (row["subject"], row["relation"], row["object"])
+        if triple in seen:
+            continue
+        seen.add(triple)
+        unique.append(row)
+    return unique
 
 
 def load_accepted_facts() -> list[dict[str, str]]:
@@ -781,18 +802,16 @@ def composed_spelling(spellings: Iterable[str]) -> str:
     because this one is applied to subjects and values, not to policy relation
     names, and only the latter is a membership test.
 
-    The ordering itself is ``_composed_first``, exposed separately because
-    ``dedup_engine_atoms`` ranks whole ROWS on two axes at once and cannot go
-    through a per-axis ``min``. Both must keep picking the same member.
+    Every caller standing a representative in front of a folded group goes
+    through THIS function, never through a re-derived ordering of its own:
+    ``check_conflicts._representative`` for the report, ``corroboration`` for its
+    competing-values clause, and ``dedup_engine_atoms`` for the spelling written
+    into ``accepted.dl``. Two of them naming one value differently is the bug
+    this centralization exists to prevent, and the atom is now one of the two —
+    it applies this per axis, so a group is answered the same way whether the
+    reader asks the checker or reads the compiled file.
     """
-    return min(spellings, key=_composed_first)
-
-
-def _composed_first(spelling: str) -> tuple[bool, str]:
-    """Sort key behind ``composed_spelling``: composed before decomposed, ties
-    lexicographic. Factored out so a caller ranking on several axes at once can
-    reuse the ordering instead of re-deriving it (see ``dedup_engine_atoms``)."""
-    return (spelling != unicodedata.normalize("NFC", spelling), spelling)
+    return min(spellings, key=lambda s: (s != unicodedata.normalize("NFC", s), s))
 
 
 def _relation_names_from(path: Path) -> set[str]:
@@ -1682,14 +1701,24 @@ def fact_signals(
     facts: list[dict[str, str]],
     root: Path | None = None,
 ) -> dict[tuple[str, str, str], dict[str, object]]:
-    """Per engine fact (subject, relation, object), the answer-quality signals:
+    """Per engine atom (``engine_atom_key``), the answer-quality signals:
     distinct ``sources`` count, max ``confidence``, and ``stale`` (True if any
     backing source file no longer exists under the KB — the fact rests on a
-    vanished/changed source and should be re-verified)."""
+    vanished/changed source and should be re-verified).
+
+    Keyed on the atom's identity, not the raw triple, and ``ask``'s renderer
+    folds the engine row through ``fold_atom_triple`` before looking in here.
+    Both sides move together or neither does: with the atom folded at compile
+    time and this map still raw, a folded group's atom found no entry, so
+    ``ask`` printed ``[no extraction backing]`` and dropped every backing source
+    path and the ``[stale: source missing]`` marker for a fact that had both.
+    Before the atom folded, both key spaces were raw and every atom matched —
+    the duplicate rows were wrong but nothing was missing, and for a provenance
+    tool losing a source is the worse failure."""
     base = ROOT if root is None else Path(root)
     acc: dict[tuple[str, str, str], dict[str, object]] = {}
     for row in engine_facts(facts):
-        key = (row["subject"], row["relation"], row["object"])
+        key = engine_atom_key(row)
         entry = acc.setdefault(key, {"sources": set(), "confidence": 0.0, "stale": False})
         entry["sources"].add(row["source"])
         try:
@@ -1745,11 +1774,24 @@ def engine_atom_key(row: dict[str, str]) -> tuple[str, str, str]:
       sides raw.
 
     NFC only — never NFKC, never casefold. Fullwidth ``ＡＢＣ`` and ``ABC``, and
-    ``a`` and ``A``, are different values and must stay different atoms."""
+    ``a`` and ``A``, are different values and must stay different atoms.
+
+    Every map keyed by this must be *looked up* through it too. ``fact_signals``
+    and ``corroboration_counts`` build their keys here; ``ask``'s renderer folds
+    the engine row it holds through :func:`fold_atom_triple` before asking them.
+    Half a move — one side folded, the other raw — silently drops the annotation
+    for a folded group instead of merely duplicating it, which is the worse
+    failure for a provenance tool."""
+    return fold_atom_triple(row["subject"], row["relation"], row["object"])
+
+
+def fold_atom_triple(subject: str, relation: str, object_: str) -> tuple[str, str, str]:
+    """:func:`engine_atom_key` for a caller holding the three values loose —
+    an engine answer row, say, which is a list and not a candidates dict."""
     return (
-        unicodedata.normalize("NFC", row["subject"]),
-        row["relation"],
-        unicodedata.normalize("NFC", row["object"]),
+        unicodedata.normalize("NFC", subject),
+        relation,
+        unicodedata.normalize("NFC", object_),
     )
 
 
@@ -1764,33 +1806,54 @@ def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     provenance) lives on the separate candidates path (``corroboration_counts``,
     ``fact_signals``) and is untouched by this collapse.
 
-    **Which row survives.** The whole row, never a synthesized triple: the
-    winner is a row that really is in ``candidates.csv``, which is what keeps
-    every raw-triple-keyed map downstream (``fact_signals``, hence ``ask``'s
-    ``sources:``/staleness annotation) resolving against the atom that was
-    written. Among the group it is ranked by ``_composed_first`` on the subject
-    then the object, so the **composed** spelling wins where the group holds
-    one — the spelling a reader greps for from an NFC editor, and the only one
-    the engine's typed projection can parse (``_project_typed_relations`` hands
-    ``literal_types.normalize`` the raw object). ``min`` returns the first
-    minimal element, so rows that tie — every row of a group written one way,
-    which is the #191 multi-source case — keep first-occurrence exactly as
-    before.
+    **Which spelling is written.** Each axis independently: the subject is
+    ``composed_spelling`` of every subject in the group, the object likewise.
+    That is the *same* choice ``check_conflicts._representative`` makes — it is
+    ``composed_spelling`` — so the checker's report and the compiled atom name
+    a value identically, which is the invariant that docstring states and this
+    must not break. The composed spelling is the one a reader greps for from an
+    NFC editor, and the only one the engine's typed projection can parse
+    (``_project_typed_relations`` hands ``literal_types.normalize`` the object as
+    written, so a decomposed ``NFD('7위')`` normalizes to ``None`` and the fact
+    silently leaves the typed table).
 
-    **Byte-invariance.** The bytes of an atom change only for a group that
-    actually holds more than one spelling, and then only to another spelling
-    already written in that KB. A group with one spelling ranks all-ties and
-    yields its first row verbatim, so a KB with no canonically equivalent
+    Ranking whole rows instead — picking the group member that sorts first — is
+    what an earlier revision did, and it is wrong on a *cross* group: one row
+    NFD-subject/NFC-object and another NFC-subject/NFD-object have no member
+    composed on both axes, so whichever row wins writes a decomposed axis while
+    the group demonstrably holds a composed spelling for it. The two axes are
+    independent and are chosen independently.
+
+    So the emitted row can be a triple no single input row carried. That is safe
+    only because every map keyed on an atom is keyed on ``engine_atom_key`` and
+    looked up through it (``fact_signals``, ``corroboration_counts``); a
+    raw-triple map would miss the synthesized atom entirely and drop its
+    provenance. The non-triple fields (source, confidence, status) come from the
+    group's FIRST row, so first-occurrence still decides everything the fold does
+    not.
+
+    **Byte-invariance.** ``composed_spelling`` of a one-element set is that
+    element, so a group written one way yields its first row untouched — the
+    same object, not a copy. The bytes of an atom change only for a group that
+    actually holds more than one spelling on an axis, and then only to a
+    spelling already written in that KB. A KB with no canonically equivalent
     duplicates — every NFC-only KB, and every uniformly-NFD one — compiles to a
     byte-identical ``accepted.dl``. Nothing is normalized on the way out; a
-    uniformly decomposed KB keeps its decomposed spelling."""
+    uniformly decomposed KB keeps its decomposed spelling, because there is no
+    composed member to prefer."""
     groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     for row in rows:
         groups.setdefault(engine_atom_key(row), []).append(row)
-    return [
-        min(members, key=lambda row: (_composed_first(row["subject"]), _composed_first(row["object"])))
-        for members in groups.values()
-    ]
+    unique: list[dict[str, str]] = []
+    for members in groups.values():
+        base = members[0]
+        subject = composed_spelling({row["subject"] for row in members})
+        object_ = composed_spelling({row["object"] for row in members})
+        if subject == base["subject"] and object_ == base["object"]:
+            unique.append(base)
+        else:
+            unique.append({**base, "subject": subject, "object": object_})
+    return unique
 
 
 def canonical_atoms(

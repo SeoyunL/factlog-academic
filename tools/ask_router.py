@@ -83,6 +83,7 @@ from common import (  # noqa: E402
     dependency_path,
     entity_set,
     fact_signals,
+    fold_atom_triple,
     load_accepted_facts,
     load_facts,
     load_logic_policy,
@@ -664,7 +665,15 @@ def render_engine_answer(
                 pretty = literal_types.humanize(row[2])
                 if pretty != row[2]:
                     line += f"  (= {pretty})"
-            sig = signals.get((row[0], row[1], row[2])) if signals is not None and len(row) == 3 else None
+            # Folded on BOTH sides: fact_signals keys on common.engine_atom_key,
+            # so the engine row has to be folded the same way before it can find
+            # its entry. Looked up raw, a folded group's atom missed and the row
+            # lost its sources, source paths and staleness marker to the
+            # [no extraction backing] branch below (#342).
+            sig = (
+                signals.get(fold_atom_triple(row[0], row[1], row[2]))
+                if signals is not None and len(row) == 3 else None
+            )
             if sig:
                 line += f" (sources: {sig['sources']}, extraction conf: {sig['confidence']})"
                 if sig.get("stale"):
