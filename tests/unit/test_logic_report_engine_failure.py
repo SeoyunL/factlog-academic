@@ -278,6 +278,46 @@ class TestKbContentCannotForgeTheMarker:
             "a JSON escape in facts/query.dl forged the failure marker"
         )
 
+    def test_display_value_escape_is_what_stops_the_forgery(self, tmp_path):
+        """The pin for `one_line` INSIDE display_value, at a site where the value
+        ENDS the line.
+
+        test_query_dl_json_escape_cannot_open_a_marker_line above does not hold
+        this: its payloads land mid-line (``path 'x' -> Anthropic: ...``), so a
+        newline inside them splits a line that still does not equal the marker,
+        and stripping the escape from display_value leaves it green. The
+        falsifying site is validate_query's path-endpoint warning, which ends
+        with the value — there a decoded newline opens a line whose whole content
+        is the marker.
+
+        Reaching it needs an endpoint that is a KB VALUE but not an ENTITY, i.e.
+        the object of a declared attribute relation; that is the branch that
+        warns rather than silently answering (#329).
+        """
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        forged = "a\\nstatus: engine-did-not-run"
+        (kb / "policy" / "attribute-relations.md").write_text(
+            "- `spec`\n", encoding="utf-8"
+        )
+        with (kb / "facts" / "accepted.dl").open("a", encoding="utf-8") as fh:
+            fh.write(f'relation("factlog", "spec", "{forged}").\n')
+        (kb / "facts" / "query.dl").write_text(
+            f'path("{forged}", "Anthropic")?\n', encoding="utf-8", newline="\n"
+        )
+
+        result = _run(kb)
+        text = _report(kb).read_text(encoding="utf-8")
+
+        assert result.returncode == 0, result.stderr
+        assert "engine facts:" in text
+        # The warning that ends with the value must have fired — without it the
+        # test would pass for the wrong reason, having never reached the site.
+        assert "query path argument is not an accepted entity:" in text
+        assert MARKER not in text.split("\n"), (
+            "a decoded newline ending a warning line forged the failure marker"
+        )
+
     def test_ordinary_unknown_status_is_unescaped(self, tmp_path):
         """The escape must fire only on values that would break the line.
 
@@ -292,6 +332,93 @@ class TestKbContentCannotForgeTheMarker:
         assert "unknown status treated as non-engine input: weird" in _report(
             kb
         ).read_text(encoding="utf-8")
+
+
+class TestControlCharactersCannotReachAReportLine:
+    """A report line is judged by tools that are not all Python.
+
+    A NUL made BSD sed abort mid-pipeline, and because the gate read the
+    pipeline's status as "no marker", one NUL byte turned a DENY into an ALLOW —
+    the forgery in reverse: not fabricating the marker but erasing the reader's
+    ability to see it. The gate no longer uses sed, and the writer no longer
+    emits the byte; these pin the writer's half.
+    """
+
+    def test_reason_line_carries_no_control_characters(self, tmp_path):
+        """The `reason:` line is the carrier the enumeration missed.
+
+        It is very nearly the only place KB text enters a FAILURE report: a line
+        of facts/accepted.dl the engine refuses goes into the exception message
+        verbatim. `" ".join(str(exc).split())` collapses Python whitespace only,
+        so a NUL rode it into the report intact.
+        """
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        # A line the engine refuses, carrying a NUL, reaches the reason verbatim.
+        with (kb / "facts" / "accepted.dl").open("a", encoding="utf-8") as fh:
+            fh.write('this is not datalog \x00 (((\n')
+
+        result = _run(kb)
+        raw = _report(kb).read_bytes()
+
+        assert result.returncode != 0
+        assert MARKER.encode() in [ln.rstrip(b"\r") for ln in raw.split(b"\n")]
+        assert b"\x00" not in raw, "a NUL reached the report and blinds its readers"
+
+    def test_status_column_control_character_is_escaped(self, tmp_path):
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        candidates = kb / "facts" / "candidates.csv"
+        rows = list(csv.DictReader(candidates.open(encoding="utf-8")))
+        rows[0]["status"] = "odd\x00status"
+        with candidates.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        _run(kb)
+
+        assert b"\x00" not in _report(kb).read_bytes()
+
+    def _report_with_status(self, tmp_path, status: str) -> str:
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        candidates = kb / "facts" / "candidates.csv"
+        rows = list(csv.DictReader(candidates.open(encoding="utf-8")))
+        rows[0]["status"] = status
+        with candidates.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        _run(kb)
+        return _report(kb).read_text(encoding="utf-8")
+
+    def test_ordinary_values_still_unescaped(self, tmp_path):
+        """The widened set must not start escaping ordinary text — that is what
+        keeps the report byte-identical to the golden fixture."""
+        text = self._report_with_status(tmp_path, "갑봇-weird")
+
+        assert "unknown status treated as non-engine input: 갑봇-weird" in text
+
+    def test_tab_is_not_escaped(self, tmp_path):
+        """TAB is the one C0 character deliberately left out of the set.
+
+        It cannot break a line, end a reader, or drive a terminal, and it is the
+        control character people actually type. Escaping it would change the
+        report's text against origin/main for input that threatens nothing —
+        measured, which is why the exclusion is here rather than assumed.
+        """
+        text = self._report_with_status(tmp_path, "od\tstatus")
+
+        assert "unknown status treated as non-engine input: od\tstatus" in text
+
+    def test_escape_sequence_is_escaped(self, tmp_path):
+        """ESC is in the set: this report is printed to a terminal, so a value
+        carrying a CSI sequence could colour or erase what the operator reads."""
+        text = self._report_with_status(tmp_path, "od\x1b[31mstatus")
+
+        assert "\x1b" not in text
+        assert "od\\x1b[31mstatus" in text
 
 
 class TestFailingStillFails:

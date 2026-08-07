@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 _TOOLS_DIR = Path(__file__).resolve().parent
@@ -536,28 +537,54 @@ def evaluate_queries(
 # that by replacing the file atomically.
 ENGINE_FAILED_STATUS_LINE = "status: engine-did-not-run"
 
-# Every character Python's str.splitlines() treats as a line break. The set is
-# wider than "\n" on purpose: it is what a READER may split on (cli.py's
-# splitlines() did), so a value carrying any of them could open a line for one
-# reader and not for another. U+2028 in particular is routine in text pasted from
-# PDFs — see the note at factlog/common.py's line-break handling.
+# Characters that may not appear inside a report line. Two families, and the
+# second was learned the hard way:
+#
+#   - LINE BREAKS: every character str.splitlines() breaks on, which is wider
+#     than "\n" because it is what a READER may split on (cli.py's splitlines()
+#     did). A value carrying one opens a line for one reader and not for another.
+#     U+2028 is routine in text pasted from PDFs — see factlog/common.py's
+#     line-break handling.
+#   - OTHER C0/C1 CONTROLS, above all NUL. A report line is judged by tools that
+#     are not all Python, and a NUL made BSD sed abort mid-pipeline; because the
+#     gate read that pipeline's status as "no marker", ONE NUL byte in the report
+#     turned a DENY into an ALLOW. That is this whole change in reverse — not
+#     forging the marker but erasing the reader's ability to see it — so no value
+#     reaching a report line may carry one. ESC belongs here too: this report is
+#     printed to a terminal.
+#
+# Pinned per family in tests/unit (newline, NUL, U+2028). Narrowing the set to
+# "\n" alone used to leave every suite green.
 _LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+# TAB is deliberately NOT here, and it is the only C0 character excluded. It
+# cannot break a line, cannot end a reader, and cannot drive a terminal — it is
+# the one control character people actually type into a KB — so escaping it would
+# change the report's text for benign input while defending nothing. Measured:
+# with TAB in the set, a tab-bearing status value renders differently from
+# origin/main; without it, the report stays byte-identical.
+_FORBIDDEN_IN_LINE = frozenset(
+    _LINE_BREAKS
+    + "".join(chr(c) for c in range(0x00, 0x20) if c != 0x09)
+    + "\x7f"
+    + "".join(chr(c) for c in range(0x80, 0xA0))
+)
 
 
 def one_line(value: object) -> str:
-    """*value* as report text that cannot become more than one line.
+    """*value* as report text that cannot become more than one line, nor blind a
+    reader of it.
 
-    Values that carry no line break — every ordinary status, entity and literal —
-    are returned UNCHANGED, so the report stays byte-identical to what it has
-    always written (tests/golden/logic_report.txt pins that). Only a value that
-    would break the line is escaped, via ``repr``, which keeps it readable and
-    visible rather than silently dropping the offending part: a hand-edited
-    status of ``odd\\nstatus: engine-did-not-run`` reports as
+    Values carrying none of _FORBIDDEN_IN_LINE — every ordinary status, entity
+    and literal — are returned UNCHANGED, so the report stays byte-identical to
+    what it has always written (tests/golden/logic_report.txt pins that). Only a
+    value that would break or corrupt the line is escaped, via ``repr``, which
+    keeps it readable and visible rather than silently dropping the offending
+    part: a hand-edited status of ``odd\\nstatus: engine-did-not-run`` reports as
     ``'odd\\nstatus: engine-did-not-run'``, on one line, still naming what is
     wrong with the row.
     """
     text = str(value)
-    return repr(text) if any(ch in text for ch in _LINE_BREAKS) else text
+    return repr(text) if any(ch in _FORBIDDEN_IN_LINE for ch in text) else text
 
 
 def _write_report(text: str) -> None:
@@ -582,9 +609,20 @@ def _write_report(text: str) -> None:
     this pins against; the duplication is the difference.
     """
     out = FACTS_DIR / "logic_report.txt"
-    tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
-    os.replace(tmp, out)
+    # A per-run temp name, not a fixed "<name>.tmp": two checks running against
+    # one KB would otherwise write the SAME temp file and each replace it, so a
+    # reader could be handed a file mixing both runs. Atomicity against
+    # truncation held with the fixed name; atomicity against a concurrent run did
+    # not. The finally-unlink keeps a failed replace from leaving the temp behind.
+    fd, tmp_name = tempfile.mkstemp(dir=str(out.parent), prefix=out.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        tmp.write_text(text, encoding="utf-8", newline="\n")
+        os.replace(tmp, out)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def engine_failure_report(exc: BaseException) -> str:
@@ -620,11 +658,19 @@ def engine_failure_report(exc: BaseException) -> str:
       still fails and still prints the error on stderr; this file is a side
       effect of failing, never a sign of success.
 
-    *reason* is collapsed to a single line: the format is line-oriented and read
-    by `grep -qxF` on the other side, and an engine ParseError's message spans
-    several lines.
+    *reason* is collapsed to a single line and then escaped like any other
+    KB-derived value: the format is line-oriented and judged whole-line on the
+    other side, and an engine ParseError's message spans several lines.
+
+    THE REASON LINE IS A CARRIER, and the one the carrier list above did not
+    name — it is very nearly the only place KB text enters a FAILURE report. A
+    line of facts/accepted.dl the engine refuses goes into the exception message
+    verbatim, so whatever that line holds lands here. ``" ".join(split())``
+    collapses Python whitespace only, so a NUL rode it into the report intact and
+    blinded the gate's reader; ``one_line`` is what closes that, and it is the
+    same grade of escaping every other interpolation gets.
     """
-    reason = " ".join(str(exc).split()) or exc.__class__.__name__
+    reason = one_line(" ".join(str(exc).split())) or exc.__class__.__name__
     accepted = FACTS_DIR / "accepted.dl"
     query = FACTS_DIR / "query.dl"
     return "\n".join(
