@@ -465,22 +465,32 @@ def collect_conflicts(
     collide, and how far #210's "no silent NFC coercion for non-participating
     relations" was meant to reach is a maintainer's call. Raised as a follow-up.
 
-    **Engine agreement on the folded axes (#342).**
-    ``common.dedup_engine_atoms`` keys on ``common.engine_atom_key``, which folds
-    the subject and the object to NFC exactly as ``_fold`` does here, so what the
-    engine reads from ``accepted.dl`` now carries the same identity on those two
-    axes as what this module grouped. Until that fix the dedup key was the raw
-    triple, and the two folded axes diverged from it in *opposite* directions:
+    **Engine agreement, and exactly how far it reaches (#342).**
+    ``common.dedup_engine_atoms`` keys on ``common.engine_atom_key``, which
+    applies the same NFC as ``_fold`` to the subject and the object. It is not
+    the same *fold* on the subject, and the difference is the whole of what
+    survives: ``engine_atom_key`` folds each value **inside its own triple**,
+    while ``_group_key`` folds the subject **across rows**, into a
+    ``(folded subject, relation)`` bucket that then collects every value written
+    for it. Two rows agreeing on the folded subject and differing on the object
+    are one group here and two atoms there, by construction.
 
-    * **subject axis — checker stricter.** It reported a contradiction the engine
-      could not see from ``accepted.dl`` alone. The gate closed on a KB the engine
-      would have accepted, so nothing slipped through.
-    * **object axis — checker more permissive.** Two objects the raw grouping
-      called a contradiction now agree, so the gate *opens* where it used to
-      close, ``finalize`` compiles — and both spellings then reached
-      ``accepted.dl`` as separate atoms, the inflated duplicate count
+    So the two axes did not both close:
+
+    * **subject axis — checker still stricter, present tense.** Measured:
+      ``NFC(김철수) 소속 A사`` and ``NFD(김철수) 소속 B사`` give **2** engine atoms
+      with 2 subject spellings, while this module reports **1** conflict on
+      ``('김철수', '소속')``. The gate still closes on a KB the engine would have
+      accepted — nothing slips through, so the direction is the safe one, but the
+      divergence is live and #342 did not touch it. Behaviour here is identical
+      to before #342.
+    * **object axis — checker more permissive, and this one closed.** Two objects
+      the raw grouping called a contradiction now agree, so the gate *opens*
+      where it used to close, ``finalize`` compiles — and both spellings then
+      reached ``accepted.dl`` as separate atoms, the inflated duplicate count
       ``dedup_engine_atoms`` exists to prevent, arrived at through the normal
-      path. That is what #342 closed.
+      path. That is what #342 closed: one atom, so the engine now reproduces the
+      merge the checker made.
 
     The permissive direction is semantically right: ``common._canonical_value``
     (#213) already fixed NFC as value equality. What is not acceptable is doing
@@ -489,10 +499,23 @@ def collect_conflicts(
     is still a merge the author did not ask for, even now that the engine
     reproduces it.
 
-    The relation axis is the one that stays divergent from nothing: grouping here
-    is verbatim and ``engine_atom_key`` leaves the relation raw too, so both
-    sides split two spellings of one relation the same way. Folding it is still
-    the deferred #210 call, on both sides at once.
+    **The relation axis is NOT untouched — do not read #342 as leaving it
+    clean.** Grouping here is verbatim and ``engine_atom_key`` leaves the
+    relation raw, so *those two* split two spellings of one relation the same
+    way. That agreement is only between this module and ``relation/3``. Two
+    places downstream already fold the relation, and they did before #342:
+
+    * ``common.canonical_atoms`` NFC-folds the relation before the alias lookup,
+      so an aliased pair emits **two** ``relation/3`` atoms and **one**
+      ``canonical/3`` atom into the same ``accepted.dl`` — measured.
+    * ``common._canonical_value`` (#213) folds the relation argument of a query,
+      so one spelling typed by the user matches both atoms.
+
+    Whoever judges #210/#345 needs that: the axis is already folded at the query
+    layer and in the canonical block, and the choice is not "start folding" but
+    "make the rest agree with what those two already do". Folding it in
+    ``engine_atom_key`` remains deferred, and deliberately so — it changes which
+    rows collide — but the premise "both sides raw, nothing diverges" is false.
 
     **The typed projection still does not fold (#325 follow-up).** ``_group_key``
     folds *before* ``literal_types.normalize``; the engine's counterpart,
