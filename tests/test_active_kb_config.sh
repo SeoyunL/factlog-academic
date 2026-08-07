@@ -3,8 +3,9 @@
 #
 # Pins (XDG_CONFIG_HOME isolated so a developer's real config never interferes):
 #   - resolve_root precedence: --flag > $FACTLOG_ROOT > config > cwd
-#   - `factlog init`/`use` record the active KB; `factlog where` reports it
-#   - a later `init` does NOT re-point an already-configured active KB (#356);
+#   - a FIRST `factlog init` (nothing recorded yet) and `factlog use` record the
+#     active KB; `factlog where` reports it
+#   - a later `init` does NOT re-point an already-recorded active KB (#356);
 #     `init --activate` does
 #   - `factlog ingest` with no --target uses the active KB (from any cwd)
 #   - a tool (coverage) with no --wiki uses the active KB

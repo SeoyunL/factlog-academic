@@ -97,6 +97,12 @@ If you relied on `init`/`setup` moving the active KB for you, add `--activate` o
 follow with `factlog use <path>`. The changed behaviour is printed where it
 happens, so it never changes silently.
 
+The target of a bare `init`/`setup` changed too. It used to be `~/wiki` always;
+now `$FACTLOG_ROOT` and the active-KB config come first. A script that ran a
+flagless `init`/`setup` in an environment where either is set now targets that,
+not `~/wiki`. Pass `--target ~/wiki` for the old destination. Either way, the
+chosen target and where it came from are printed on the first line of every run.
+
 A configured active KB whose path does not currently exist (an unmounted volume,
 say) is still your choice: `init` will not take the setting over. Moving it is
 always something you do on purpose.
@@ -130,6 +136,15 @@ other command uses: `$FACTLOG_ROOT` > active-KB config > `~/wiki`. The current
 directory is deliberately not in that chain — an `init` run from anywhere
 scattering a KB layout into that spot would be the worse default. A target you
 did not spell out is printed with where it came from.
+
+Leaving it out of the chain is not enough on its own. `factlog where --porcelain`
+prints the current directory when nothing is configured, and the skill exports
+that value as `$FACTLOG_ROOT` — so cwd can come back in through rank 2. When the
+target was **not** named on the command line, resolves to the current directory,
+that directory already holds something, and it is not already a factlog KB,
+`init` stops instead of creating anything. Name it with `--target <path>` if that
+really is what you want. An empty directory and an existing KB have nothing to
+lose, so both proceed.
 
 ```text
 factlog init: no --target given; using /Users/me/wiki (from the active KB config)

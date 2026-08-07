@@ -132,7 +132,7 @@ class TestInitDoesNotHijackAnExistingActiveKb:
         out = run_init("--target", str(scratch), config_home=config_home).stdout
 
         assert str(active) in out, f"the KB that stayed active is not named: {out}"
-        assert "NOT recorded there" in out, f"nothing says the new KB is not the recorded one: {out}"
+        assert "is not recorded in the config" in out, f"nothing says the new KB is not the recorded one: {out}"
         assert f"factlog use {scratch}" in out, f"no command to switch: {out}"
 
     def test_dangling_pointer_is_not_silently_replaced(self, tmp_path, config_home):
@@ -152,14 +152,30 @@ class TestInitDoesNotHijackAnExistingActiveKb:
 
 class TestReInitOfTheActiveKb:
     def test_is_a_no_op_that_says_so(self, tmp_path, config_home):
+        """Seeded in a format ``_write_config`` would not produce, plus mtime.
+
+        The first version wrote the seed with the same serialiser the product
+        uses — two-space indent, trailing newline — so a rewrite reproduced the
+        file byte for byte and ``read_bytes()`` could not see it. Flipping this
+        branch to write left the whole suite green. Compact JSON makes a rewrite
+        visible in the bytes, and ``st_mtime_ns`` catches it even if a future
+        serialiser change happens to match the seed again.
+        """
         active = tmp_path / "wiki"
         active.mkdir()
-        before = write_pointer(config_home, active)
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Deliberately NOT write_pointer(): compact, no trailing newline, keys in
+        # an order the writer would not emit.
+        path.write_text('{"lang":"ko","root":"%s"}' % active, encoding="utf-8")
+        before = path.read_bytes()
+        before_mtime = path.stat().st_mtime_ns
 
         proc = run_init("--target", str(active), config_home=config_home)
 
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert config_file(config_home).read_bytes() == before
+        assert path.read_bytes() == before, f"the no-op rewrote the file: {proc.stdout}"
+        assert path.stat().st_mtime_ns == before_mtime, "the file was rewritten with identical bytes"
         assert "already recorded" in proc.stdout, proc.stdout
 
 
@@ -421,6 +437,226 @@ class TestEnvOverrideIsDisclosed:
         assert str(env_kb) in out
 
 
+class TestUseOwnsTheSameDisclosures:
+    """`use` is where our own hint sends people, so it owes what `init` says.
+
+    ``init`` printed "NOT recorded there / to record it: factlog use <kb>" plus
+    the note that ``$FACTLOG_ROOT`` outranks the config — and then ``use`` said
+    "active KB set to <kb>" with nothing, while ``where --porcelain`` still
+    printed the environment's KB. The contradiction we fixed twice survived at
+    the destination of the fix.
+    """
+
+    def run_use(self, *args: str, config_home: Path, env_root: Path | None = None):
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env.pop("FACTLOG_ROOT", None)
+        if env_root is not None:
+            env["FACTLOG_ROOT"] = str(env_root)
+        return subprocess.run(
+            [sys.executable, "-m", "factlog", *args],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, env=env, check=False,
+        )
+
+    def test_use_discloses_that_the_environment_outranks_what_it_just_wrote(
+        self, tmp_path, config_home
+    ):
+        newkb = tmp_path / "newkb"
+        (newkb / "sources").mkdir(parents=True)
+        env_kb = tmp_path / "envkb"
+        env_kb.mkdir()
+
+        proc = self.run_use("use", str(newkb), config_home=config_home, env_root=env_kb)
+        porcelain = self.run_use(
+            "where", "--porcelain", config_home=config_home, env_root=env_kb
+        ).stdout.strip()
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert porcelain == resolved(env_kb), "precondition: the environment should win"
+        assert "$FACTLOG_ROOT" in proc.stdout, (
+            f"`use` claimed the KB was set with nothing to say `where` disagrees: {proc.stdout}"
+        )
+        assert str(env_kb) in proc.stdout
+
+    def test_use_says_nothing_extra_when_it_is_the_whole_story(self, tmp_path, config_home):
+        """GUARD: no environment, so `use` keeps its original two-line output."""
+        newkb = tmp_path / "newkb"
+        (newkb / "sources").mkdir(parents=True)
+
+        proc = self.run_use("use", str(newkb), config_home=config_home)
+
+        assert "$FACTLOG_ROOT" not in proc.stdout, proc.stdout
+        assert "a flagless command" not in proc.stdout, proc.stdout
+
+    def test_use_discloses_the_language_it_destroys(self, tmp_path, config_home):
+        """`init --activate` says it replaced an unreadable config; `use` did not.
+
+        `use` still goes ahead — re-pointing is the command, and it is the way
+        out of a damaged config — but the `lang` in those unreadable bytes is
+        gone, and that was silent.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", "lang": "ko"', encoding="utf-8")
+        newkb = tmp_path / "newkb"
+        (newkb / "sources").mkdir(parents=True)
+
+        proc = self.run_use("use", str(newkb), config_home=config_home)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert pointer(config_home) == resolved(newkb)
+        assert "unreadable" in proc.stdout, f"replaced a damaged config silently: {proc.stdout}"
+
+
+class TestImplicitTargetNeverLandsInTheCurrentDirectory:
+    """The body claims cwd is excluded; `$FACTLOG_ROOT` was a way back in.
+
+    ``where --porcelain`` prints cwd when nothing is configured, and SKILL.md
+    tells every flow to export that value — so a bare ``init`` in a directory of
+    unrelated files scattered a KB layout across it. The hard-coded ``~/wiki``
+    default this branch replaced made that impossible, so the branch introduced
+    it.
+    """
+
+    def run_bare_init(self, cwd: Path, config_home: Path, env_root: Path | None = None):
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env.pop("FACTLOG_ROOT", None)
+        if env_root is not None:
+            env["FACTLOG_ROOT"] = str(env_root)
+        return subprocess.run(
+            [sys.executable, "-m", "factlog", "init"],
+            cwd=str(cwd), capture_output=True, text=True, env=env, check=False,
+        )
+
+    def test_refuses_a_directory_of_unrelated_files(self, tmp_path, config_home):
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "README.md").write_text("mine\n", encoding="utf-8")
+
+        proc = self.run_bare_init(work, config_home, env_root=work)
+
+        assert proc.returncode != 0, proc.stdout
+        assert sorted(p.name for p in work.iterdir()) == ["README.md"], (
+            f"scaffolded into a directory the user never named: {sorted(p.name for p in work.iterdir())}"
+        )
+        assert "--target" in proc.stderr, proc.stderr
+
+    def test_an_explicit_target_is_still_allowed(self, tmp_path, config_home):
+        """Naming it *is* the consent the implicit path lacks."""
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "README.md").write_text("mine\n", encoding="utf-8")
+
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env.pop("FACTLOG_ROOT", None)
+        proc = subprocess.run(
+            [sys.executable, "-m", "factlog", "init", "--target", str(work)],
+            cwd=str(work), capture_output=True, text=True, env=env, check=False,
+        )
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (work / "sources").is_dir()
+
+    def test_an_empty_current_directory_is_fine(self, tmp_path, config_home):
+        """GUARD: nothing to scatter over, so the refusal must not fire."""
+        work = tmp_path / "work"
+        work.mkdir()
+
+        proc = self.run_bare_init(work, config_home, env_root=work)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (work / "sources").is_dir()
+
+    def test_re_running_inside_an_existing_kb_is_fine(self, tmp_path, config_home):
+        """GUARD: an idempotent re-scaffold of a real KB you are standing in."""
+        kb = tmp_path / "kb"
+        (kb / "sources").mkdir(parents=True)
+        (kb / "notes.md").write_text("x\n", encoding="utf-8")
+
+        proc = self.run_bare_init(kb, config_home, env_root=kb)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (kb / "facts").is_dir()
+
+    def test_an_empty_target_is_an_error_not_a_synonym_for_omitted(self, tmp_path, config_home):
+        """``--target ''`` printed "no --target given" and scaffolded elsewhere."""
+        proc = subprocess.run(
+            [sys.executable, "-m", "factlog", "init", "--target", ""],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "XDG_CONFIG_HOME": str(config_home), "PYTHONPATH": str(REPO_ROOT)},
+            check=False,
+        )
+
+        assert proc.returncode != 0, proc.stdout
+        assert "empty" in proc.stderr, proc.stderr
+        assert "no --target given" not in proc.stdout, proc.stdout
+
+
+class TestADirectoryAtTheConfigPath:
+    """Both advertised ways out of a damaged config died on the same exception.
+
+    ``config_status`` asked ``is_file()``, so a directory classified as MISSING —
+    breaking its own invariant that only MISSING means nothing is recorded — and
+    every caller then took the write path, where ``os.replace`` raises
+    ``IsADirectoryError``. The exception predates this branch; both exits failing
+    at once does not, because this branch is what promised a way out.
+    """
+
+    @pytest.fixture()
+    def blocked(self, config_home):
+        path = config_file(config_home)
+        path.mkdir(parents=True)
+        return path
+
+    def test_it_is_classified_unreadable_not_missing(self, blocked, config_home, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        assert factlog_config.config_status() == factlog_config.UNREADABLE
+
+    def test_plain_init_refuses_without_a_traceback(self, tmp_path, blocked, config_home):
+        proc = run_init("--target", str(tmp_path / "kb"), config_home=config_home)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert "could not be read" in proc.stdout, proc.stdout
+
+    @pytest.mark.parametrize("argv", [("init", "--activate"), ("use",)])
+    def test_both_escape_hatches_explain_instead_of_crashing(
+        self, tmp_path, blocked, config_home, argv
+    ):
+        kb = tmp_path / "kb"
+        (kb / "sources").mkdir(parents=True)
+        args = [sys.executable, "-m", "factlog", argv[0]]
+        args += ["--target", str(kb), "--activate"] if argv[0] == "init" else [str(kb)]
+        proc = subprocess.run(
+            args,
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "XDG_CONFIG_HOME": str(config_home), "PYTHONPATH": str(REPO_ROOT)},
+            check=False,
+        )
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert "IsADirectoryError" not in proc.stderr, proc.stderr
+        assert str(factlog_config.config_path().name) in proc.stderr or "in the way" in proc.stderr, (
+            proc.stderr
+        )
+        # The message ends "Nothing was changed", and the atomic writer stages a
+        # `.tmp` sibling before the swap. Without cleanup on the failure path that
+        # sentence was false and a stray config.json.tmp stayed next to the real
+        # config for good.
+        strays = [p.name for p in blocked.parent.iterdir() if p.name.endswith(".tmp")]
+        assert not strays, f"a failed write left {strays} behind while claiming nothing changed"
+
+
 class TestExplicitFlags:
     def test_activate_moves_the_pointer_and_prints_both_ends(self, tmp_path, config_home):
         old = tmp_path / "wiki"
@@ -642,8 +878,11 @@ class TestSetup:
         path.write_text('{"root": "/real/kb", ', encoding="utf-8")
         before = path.read_bytes()
 
-        assert cli.main(["setup", "--target", str(tmp_path / "scratch"), "--lang", "ko"]) == 0
-        out = capsys.readouterr().out
+        rc = cli.main(["setup", "--target", str(tmp_path / "scratch"), "--lang", "ko"])
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+
+        assert rc != 0, f"a declined --lang still exited 0: {out}"
 
         assert path.read_bytes() == before, f"--lang overwrote an unreadable config: {out}"
         assert "narration language NOT set" in out, f"dropped the language silently: {out}"
