@@ -154,12 +154,12 @@ def test_dead_step_cannot_produce_a_vacuous_pass(tmp_path: Path) -> None:
     )
     # Step 1 still runs for real: the case must isolate step 2, not break
     # everything, or the absent PASS below would be uninformative.
-    assert "PASS: facts/accepted.dl matches golden" in result.stdout, combined
-    # Anchored at both ends: the harness also reports on the COMMITTED copy of
-    # this file, which is a different and legitimately-true claim. Matching it
-    # here would make this case fail for the wrong reason.
+    assert "PASS: [kb1] facts/accepted.dl matches golden" in result.stdout, combined
+    # Anchored at both ends, and across every KB: the harness also reports on the
+    # COMMITTED copy of this file, which is a different and legitimately-true
+    # claim, and it runs two KBs whose verdicts differ only by the label.
     assert not re.search(
-        r"^PASS: facts/logic_report\.txt matches golden$", result.stdout, re.M
+        r"^PASS: \[[^]]+\] facts/logic_report\.txt matches golden$", result.stdout, re.M
     ), (
         "the logic_report comparison passed while step 2 was dead — it "
         f"compared the committed file, not this run's output\n{combined}"
@@ -227,8 +227,10 @@ def test_dead_conflicts_step_is_not_read_as_detection(tmp_path: Path) -> None:
     )
     # The earlier steps still run for real, so an absent PASS below is about
     # step 4's verdict and not about a harness that fell over.
-    assert "PASS: facts/logic_report.txt matches golden" in result.stdout, combined
-    assert not re.search(r"^PASS: check_conflicts\.py exit 1", result.stdout, re.M), (
+    assert "PASS: [kb1] facts/logic_report.txt matches golden" in result.stdout, combined
+    assert not re.search(
+        r"^PASS: \[kb2\] check_conflicts\.py exit 1", result.stdout, re.M
+    ), (
         "the harness read a dead check_conflicts as a detected contradiction\n"
         + combined
     )
