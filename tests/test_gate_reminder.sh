@@ -139,11 +139,12 @@ run_case "target myfacts/query.dl is not the engine input — silent" \
 # `tool_input`, `file_path` at the top level — still nudges.
 #
 # It passes pre-fix, and it does NOT pin the top-level fallback in the
-# extractor: deleting `payload` from the extractor's source tuple leaves this
-# whole file green (measured). With no target read, the payload-wide grep
-# fallback fires on the same payload for a different reason, and this case
-# reads exit-equivalent either way. CASE 12b below is the one that pins the
-# fallback; this case is kept only as a plain regression floor for the shape.
+# extractor: deleting `payload` from the extractor's source tuple leaves THIS
+# CASE green (measured — the suite as a whole goes to exactly one FAIL, and that
+# one is CASE 12b). With no target read, the payload-wide grep fallback fires on
+# the same payload for a different reason, so this case reads the same either
+# way. CASE 12b below is the one that pins the fallback; this case is kept only
+# as a plain regression floor for the shape.
 # ---------------------------------------------------------------------------
 run_case "CONTROL: flat fixture, top-level file_path — fire" \
   '{"file_path":"/kb/facts/query.dl"}' fire
@@ -213,6 +214,81 @@ else
   echo "FAIL: no usable Python — expected fire/exit 0, got $broken_fired/exit $broken_exit"
   fail=$((fail + 1))
 fi
+
+# ---------------------------------------------------------------------------
+# CASES 17-18: GIT BASH SEPARATORS. A payload from Git Bash carries backslashes,
+# where `${path##*/}` hands back the whole string, so the matcher splits on both
+# separators.
+#
+# These pin BOTH backslash splits, and they run on any host: the matcher never
+# touches the filesystem, so a backslash payload behaves identically on POSIX.
+# An earlier comment in the hook claimed the opposite — that these "cannot be
+# pinned from a POSIX host" — and justified shipping two untested lines with it.
+# The suite being green with either line deleted meant the suite had no case,
+# not that no case was possible.
+#
+# Measured: deleting `base="${base##*\\}"` fails all three backslash cases
+# (17, 18 and 19 — every one of them reaches its basename through a backslash).
+# Deleting `pdir="${pdir##*\\}"` fails only case 17, whose PARENT is reached
+# through a backslash; case 18's parent is already reached through a forward
+# slash, and case 19 has no parent separator at all.
+# ---------------------------------------------------------------------------
+run_case "Git Bash: all-backslash path to the engine input — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\query.dl"}}' fire
+run_case "Git Bash: mixed separators, backslash on the last component — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"C:/kb/facts\\query.dl"}}' fire
+
+# ---------------------------------------------------------------------------
+# CASE 19: the POSIX cost of that split, asserted rather than left to be
+# discovered. A single file whose NAME contains a backslash — one directory
+# entry called `facts\accepted.dl` — nudges, though it is not an engine input.
+# The pre-#337 grep stayed silent on it (it searches for a forward slash).
+#
+# This case exists to make the trade explicit and to fail loudly if anyone
+# "fixes" it by dropping the split, which would cost Windows coverage. It is a
+# wrong-nudge, the direction that costs one line of output.
+# ---------------------------------------------------------------------------
+run_case "POSIX file literally named 'facts\\accepted.dl' — fire (known over-fire)" \
+  '{"tool_name":"Write","tool_input":{"file_path":"facts\\accepted.dl"}}' fire
+
+# ---------------------------------------------------------------------------
+# CASES 20-23: NORMALISATION. "//" and "/./" name exactly the file the collapsed
+# path names, so an engine input written either way is a genuine engine input
+# and must nudge. All four were SILENT before the collapse was added — this is
+# under-firing, the direction that costs a missed signal, and it matters most
+# for candidates.csv and logic-policy.dl, which gate_check.sh does not guard.
+#
+# The loop is pinned by the repeated forms: one pass over "///" leaves a "//"
+# behind, so a non-looping collapse fails cases 21 and 23.
+# ---------------------------------------------------------------------------
+run_case "double slash before the basename — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/facts//accepted.dl"}}' fire
+run_case "triple slash (pins the loop, not just one pass) — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/facts///accepted.dl"}}' fire
+run_case "dot component before the basename — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/facts/./accepted.dl"}}' fire
+run_case "repeated dot components (pins the loop) — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/facts/././accepted.dl"}}' fire
+run_case "double slash in a policy path — fire" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/kb/policy//logic-policy.dl"}}' fire
+
+# ---------------------------------------------------------------------------
+# CASE 24 (CONTROL): `..` is NOT resolved, deliberately rather than by omission.
+#
+# Labelled CONTROL because it passes pre-fix too — the old payload grep also
+# stayed silent on this path, for its own reason — so passing is not evidence
+# that anything here works. It is a documentation case, not a pin.
+#
+# a/b/../c is not a/c when b is a symlink, so collapsing `..` by string surgery
+# would be wrong in exactly the case that matters; doing it correctly needs the
+# filesystem, which this hook does not touch.
+#
+# So this genuine engine input gets no nudge. Asserted so the limit is visible
+# and so anyone who later adds `..` collapsing has to change this case on
+# purpose and think about the symlink question first.
+# ---------------------------------------------------------------------------
+run_case "CONTROL: parent-dir component is not resolved — silent (documented under-fire)" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/facts/x/../accepted.dl"}}' silent
 
 echo "---"
 echo "gate_reminder: $pass passed, $fail failed"
