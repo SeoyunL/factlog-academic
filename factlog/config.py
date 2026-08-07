@@ -40,7 +40,20 @@ def _write_config(cfg: Path, data: dict) -> None:
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     tmp = cfg.with_name(cfg.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, cfg)
+    try:
+        os.replace(tmp, cfg)
+    except OSError:
+        # The swap can fail for reasons the caller cannot foresee — a directory
+        # sitting at the config path raises IsADirectoryError here. Leaving the
+        # temp file behind turned a failed write into a permanent stray
+        # ``config.json.tmp`` next to the real config, and made "nothing was
+        # changed" untrue for the callers that report it. Best-effort, because
+        # the original error is the one worth propagating.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 MISSING = "missing"
@@ -65,8 +78,12 @@ def config_status() -> str:
     ``resolve_root`` already reports such a config as holding nothing.
     """
     path = config_path()
-    if not path.is_file():
+    if not path.exists():
         return MISSING
+    # ``exists()``, not ``is_file()``: a *directory* at the config path is not
+    # "nothing is recorded yet". Classifying it MISSING broke this function's own
+    # invariant and sent callers down the write path, where every write raises
+    # ``IsADirectoryError``. It is unreadable, which is exactly what it is.
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):

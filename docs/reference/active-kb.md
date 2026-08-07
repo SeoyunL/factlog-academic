@@ -101,6 +101,12 @@ factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was cr
 방식이라면, `--activate` 를 붙이거나 뒤이어 `factlog use <경로>` 를 실행하세요.
 바뀐 동작은 출력에 그대로 적히므로, 조용히 달라지지는 않습니다.
 
+`--target` 을 생략했을 때의 대상도 바뀌었습니다. 예전에는 언제나 `~/wiki` 였고, 지금은
+`$FACTLOG_ROOT` 와 활성 KB 설정을 먼저 봅니다. 그래서 둘 중 하나가 설정된 환경에서
+맨손 `init`/`setup` 을 돌리던 스크립트는 `~/wiki` 가 아니라 그쪽을 대상으로 잡습니다.
+전과 같은 자리를 원하면 `--target ~/wiki` 를 명시하세요. 어느 쪽이든 고른 대상과 그
+출처가 매 실행 첫 줄에 출력됩니다.
+
 설정된 활성 KB의 경로가 지금 존재하지 않더라도(외장 볼륨을 마운트하지 않은 경우 등)
 `init` 은 그 설정을 가져가지 않습니다. 옮기는 것은 언제나 사용자의 명시적인 행동입니다.
 
@@ -129,6 +135,14 @@ factlog init: active-KB config at /Users/me/.config/factlog/config.json could no
 `$FACTLOG_ROOT` > 활성 KB 설정 > `~/wiki`. 현재 디렉터리는 이 사슬에 없습니다 —
 아무 데서나 실행한 `init` 이 그 자리에 KB 뼈대를 흩뿌리는 편이 더 나쁜 기본값이기
 때문입니다. 명시하지 않아 골라진 대상은 어디서 왔는지와 함께 출력됩니다.
+
+사슬에서 빼는 것만으로는 부족합니다. `factlog where --porcelain` 은 아무것도 설정돼
+있지 않으면 현재 디렉터리를 출력하고, 스킬은 그 값을 `$FACTLOG_ROOT` 로 export 하라고
+합니다. 그래서 현재 디렉터리가 환경 변수를 통해 돌아올 수 있습니다. 대상을 **명시하지
+않았고**, 그 대상이 현재 디렉터리이며, 그 디렉터리에 이미 다른 파일이 있고, 아직 factlog
+KB가 아니라면 — `init` 은 만들지 않고 멈춥니다. 정말 그 자리에 만들 생각이라면
+`--target <경로>` 로 이름을 대면 됩니다. 비어 있는 디렉터리나 이미 KB인 디렉터리는
+잃을 것이 없으므로 그대로 진행합니다.
 
 ```text
 factlog init: no --target given; using /Users/me/wiki (from the active KB config)
