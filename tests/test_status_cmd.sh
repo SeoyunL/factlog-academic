@@ -468,6 +468,43 @@ printf '%s' "$out" | grep -qF "never started the engine" \
   && ok "#338: marker with several trailing CRs is still the marker" \
   || bad "#338: several trailing CRs lost the marker: $(printf '%s' "$out"|grep -A1 logic)"
 
+# (b6) A NUL byte in the report, on a report run_logic_check ACTUALLY WROTE.
+#      The gate's old sed|grep predicate aborted on this and read the failure as
+#      "no marker", flipping a DENY into an ALLOW; status must not acquire the
+#      mirror-image defect. Both readers judge bytes now, so the NUL changes
+#      nothing about the verdict. The gate is invoked on the same file and its
+#      exit code reported, so a divergence appears in the text rather than being
+#      inferred.
+NULKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$NULKB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/a.md,confirmed,0.9,' > "$NULKB/facts/candidates.csv"
+printf 'x\n' > "$NULKB/sources/a.md"
+rm -f "$NULKB/facts/logic_report.txt" "$NULKB/facts/accepted.dl"
+set +e; "$PYTHON" "$PLUGIN_ROOT/tools/run_logic_check.py" --wiki "$NULKB" >/dev/null 2>&1; set -e
+if grep -q "engine-did-not-run" "$NULKB/facts/logic_report.txt" 2>/dev/null; then
+  ok "#338: setup — a real failure report to perturb"
+else
+  bad "#338: setup — no real failure report; the NUL case would be vacuous"
+fi
+printf '\000' >> "$NULKB/facts/logic_report.txt"
+touch "$NULKB/facts/logic_report.txt"
+# The engine input must EXIST, or the gate answers from its bootstrap branch
+# (first creation is allowed however the report reads) and its exit code would
+# say nothing about the marker — the two readers would be answering different
+# questions while looking like they agree.
+printf 'review_required("q")?\n' > "$NULKB/facts/query.dl"
+touch -t 200001010000 "$NULKB/facts/query.dl"
+out="$("$PYTHON" -m factlog status --target "$NULKB" 2>&1)"
+gate_rc=0
+FACTLOG_ROOT="$NULKB" bash "$PLUGIN_ROOT/hooks/gate_check.sh" \
+  <<< "$(printf '{"file_path":"%s"}' "$NULKB/facts/query.dl")" >/dev/null 2>&1 || gate_rc=$?
+if printf '%s' "$out" | grep -qF "never started the engine" && [ "$gate_rc" -eq 2 ]; then
+  ok "#338: a NUL byte hides the marker from neither reader (gate exit=$gate_rc)"
+else
+  bad "#338: a NUL byte split the readers (gate exit=$gate_rc, want 2): $(printf '%s' "$out"|grep -A1 logic)"
+fi
+rm -rf "$NULKB"
+
 # (c) U+2028 before the marker text: `grep` does not break lines there, so the
 #     gate reads a normal report. splitlines() DOES, so status used to call this
 #     same file an engine failure. Pinning the disagreement, not just the rule.

@@ -1961,26 +1961,33 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Logic report freshness
     report = ctx.facts_dir / "logic_report.txt"
     if report.is_file():
-        # newline="" so the decoder performs NO line-ending translation, then
-        # split("\n") and strip a trailing CR. That triple is what makes this
-        # reader see exactly the lines hooks/gate_check.sh sees, and each part is
-        # load-bearing for a different reason:
+        # The VERDICT is computed on BYTES, and hooks/gate_check.sh performs the
+        # identical operation on the identical bytes: split on b"\n", rstrip
+        # b"\r", compare to the marker. Every part is load-bearing, and each was
+        # a divergence before it was:
         #
-        #   - splitlines() would also break on U+2028/U+2029/U+0085. `grep` does
+        #   - splitlines() also breaks on U+2028/U+2029/U+0085; the gate does
         #     not. U+2028 is routine in text pasted from PDFs, so a value
-        #     carrying one opened a line here that is not a line there — the gate
-        #     read a normal report while status called the same file an engine
-        #     failure.
-        #   - read_text()'s default universal-newline mode silently turns "\r\n"
-        #     AND a lone "\r" into "\n" before this code sees the text, which
-        #     re-creates the same divergence one layer down: a lone CR is a line
-        #     break to a translating reader and not to grep.
-        #   - the CR strip then matches the gate's `tr -d '\r'`, so a report
-        #     written with CRLF endings reads the same on both sides.
-        with report.open(encoding="utf-8", errors="ignore", newline="") as fh:
-            text = fh.read()
-        report_lines = [ln.rstrip("\r") for ln in text.split("\n")]
-        if ENGINE_FAILED_STATUS_LINE in report_lines:
+        #     carrying one opened a line here that is not a line there.
+        #   - read_text()'s universal-newline mode turns "\r\n" AND a lone "\r"
+        #     into "\n" before this code sees anything, re-creating that
+        #     divergence one layer down.
+        #   - TRAILING CRs only, and all of them, matching the gate.
+        #   - and DECODING cannot be part of the verdict at all: with
+        #     errors="ignore" an undecodable byte is deleted, so a line that is
+        #     not the marker becomes one — the same "manufacture a marker out of
+        #     a non-marker line" defect that `tr -d '\r'` had, with the readers
+        #     swapped. Bytes have no such failure mode; a byte that decodes to
+        #     nothing is simply unequal to the marker.
+        #
+        # Decoding happens only for what is DISPLAYED, with errors="replace" so
+        # an unreadable byte is visible as U+FFFD instead of silently vanishing.
+        raw = report.read_bytes()
+        report_byte_lines = [ln.rstrip(b"\r") for ln in raw.split(b"\n")]
+        report_lines = [
+            ln.decode("utf-8", errors="replace") for ln in report_byte_lines
+        ]
+        if ENGINE_FAILED_STATUS_LINE.encode("utf-8") in report_byte_lines:
             # A report of a run in which THE ENGINE NEVER RAN is not a result, and
             # freshness is the wrong question to ask of it: /factlog check has just
             # written it, so it IS fresh by mtime, and reporting that would say a
