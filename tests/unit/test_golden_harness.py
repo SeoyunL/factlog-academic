@@ -359,3 +359,30 @@ def test_symlink_cycle_in_the_kb_fails_loudly(tmp_path: Path) -> None:
         "the copy failed without saying so, or did not fail at all\n" + combined
     )
     assert "0 failed" not in result.stdout, combined
+
+
+def test_read_only_source_kb_still_produces_a_verdict(tmp_path: Path) -> None:
+    """A KB the caller keeps read-only must run like any other.
+
+    ``cp`` copies modes, so the working copy inherited the source's permissions:
+    the ``rm -f`` that clears an artifact before its step failed, ``set -e``
+    killed the run partway through Step 1 with no ``Golden results:`` line at
+    all, and the EXIT trap could not remove its own scratch directory either.
+    Running on a copy is supposed to mean the source's properties do not reach
+    the run.
+    """
+    kb = tmp_path / "kb"
+    shutil.copytree(SAMPLE_KB, kb)
+    subprocess.run(["chmod", "-R", "a-w", str(kb)], check=True)
+    try:
+        result = _run_golden_at(kb, tmp_path, Path(sys.executable))
+    finally:
+        # Leave tmp_path removable regardless of the outcome.
+        subprocess.run(["chmod", "-R", "u+w", str(kb)], check=True)
+    combined = result.stdout + result.stderr
+
+    assert "Golden results:" in result.stdout, (
+        "the run died without reporting a verdict\n" + combined
+    )
+    assert result.returncode == 0, combined
+    assert "Permission denied" not in combined, combined
