@@ -48,16 +48,27 @@ ultimately to the current directory.
 `init`/`setup` **create** a KB; `use` **chooses** the active one. So there are
 only three cases in which `init`/`setup` touch the active-KB setting:
 
-| Situation | Active KB |
-|-----------|-----------|
-| No active KB set yet | set to the KB just created (the first-run experience, unchanged) |
-| The target already is the active KB | unchanged (the config file is not even rewritten) |
-| Another KB is already active | **left alone**. The new KB is not activated, and the output says how to switch |
+| Situation | Active-KB config |
+|-----------|------------------|
+| No config file yet | records the KB just created (the first-run experience, unchanged) |
+| The target is already recorded | unchanged (the file is not even rewritten) |
+| Another KB is recorded | **left alone**. The new KB is not recorded, and the output says how to switch |
+| The file cannot be read | **not touched**. See "A damaged config file" below |
 
 ```text
 factlog init: created /tmp/scratch
-factlog init: active KB unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT active
+factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT recorded there
   to work in it: factlog use /tmp/scratch   (or re-run with --activate)
+```
+
+The wording says active-KB **config**, not "active KB", for accuracy: this
+decision is about the config file, while which KB is actually in force also
+depends on `$FACTLOG_ROOT`. So when the environment outranks the config, one more
+line says so — without it, the message would contradict
+`factlog where --porcelain` in the same session.
+
+```text
+  note: $FACTLOG_ROOT=/tmp/envkb outranks the config in this session (factlog where)
 ```
 
 The point is that creating one throwaway KB must not cost you the KB you were
@@ -72,6 +83,25 @@ happens, so it never changes silently.
 A configured active KB whose path does not currently exist (an unmounted volume,
 say) is still your choice: `init` will not take the setting over. Moving it is
 always something you do on purpose.
+
+### A damaged config file
+
+If the config file **exists but cannot be read** — truncated JSON, not an object,
+no permission — `init`/`setup` do not write to it. The bytes they cannot read may
+*be* the user's KB root, and a write would replace both that root and any `lang`
+with nothing: a strictly worse loss than a root pointing at an unmounted volume,
+which at least survives as text.
+
+```text
+factlog init: active-KB config at /Users/me/.config/factlog/config.json could not be read
+  — leaving it untouched; /tmp/scratch was created but is NOT recorded there
+  repair that file, or overwrite it deliberately: factlog use /tmp/scratch
+```
+
+Once you have repaired it — or decided it is expendable — `--activate` overwrites
+it and reports what it replaced. A file that **does** parse but records no usable
+root (`{"lang": "ko"}`, `{"root": ""}`) is not damaged: there is no path in it to
+lose, so it is recorded exactly like a first run, and `lang` is preserved.
 
 With `--target` omitted, `init`/`setup` pick their target in the same order every
 other command uses: `$FACTLOG_ROOT` > active-KB config > `~/wiki`. The current

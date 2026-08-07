@@ -2,6 +2,8 @@
 """Unit tests for the shared prepass resolver (#107)."""
 from __future__ import annotations
 
+import pytest
+
 import factlog_config
 
 
@@ -142,3 +144,71 @@ class TestNormalizeLang:
         normalized, error = _normalize_lang("x" * 33)
         assert normalized is None
         assert error is not None and "too long" in error
+
+
+class TestConfigStatus:
+    """Readers may fold every failure into None; a writer may not (#356).
+
+    ``read_root`` returns None for a missing file, bad JSON, a non-object, and an
+    unreadable file alike — right for resolution, which must degrade to cwd, and
+    wrong for ``init``/``setup``, which used to read that None as "nothing is
+    recorded, safe to write" and so destroyed the bytes of a config it could not
+    parse. ``config_status`` is the distinction those callers need.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        # The repo-root conftest pins FACTLOG_ROOT for every test process, and it
+        # outranks the config — leaving it set would make the fallback assertion
+        # below measure the environment instead of the malformed file.
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+
+    def _write(self, text, *, encoding="utf-8"):
+        path = factlog_config.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding=encoding)
+        return path
+
+    def test_missing_file(self):
+        assert factlog_config.config_status() == factlog_config.MISSING
+
+    def test_object_is_readable(self):
+        self._write('{"root": "/kb"}')
+        assert factlog_config.config_status() == factlog_config.READABLE
+
+    def test_object_without_a_root_is_still_readable(self):
+        """Understood, and holding no path to lose — so not "damaged"."""
+        self._write('{"lang": "ko"}')
+        assert factlog_config.config_status() == factlog_config.READABLE
+        self._write('{"root": ""}')
+        assert factlog_config.config_status() == factlog_config.READABLE
+
+    @pytest.mark.parametrize("content", ['{"root": "/kb", ', "", "[1, 2, 3]", "root = /kb"])
+    def test_unparseable_is_unreadable(self, content):
+        self._write(content)
+        assert factlog_config.config_status() == factlog_config.UNREADABLE
+
+    def test_unopenable_is_unreadable(self):
+        path = self._write('{"root": "/kb"}')
+        path.chmod(0o000)
+        try:
+            assert factlog_config.config_status() == factlog_config.UNREADABLE
+        finally:
+            path.chmod(0o644)
+
+    def test_invalid_utf8_does_not_crash_the_readers(self):
+        """``read_text`` raises UnicodeDecodeError — a ValueError, not an OSError.
+
+        It escaped the old ``(json.JSONDecodeError, OSError)`` handler, so a
+        config with a stray byte crashed every command that resolves a root
+        rather than degrading like any other malformed file.
+        """
+        path = factlog_config.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'{"root": "\xff\xfe"}')
+
+        assert factlog_config.config_status() == factlog_config.UNREADABLE
+        assert factlog_config.read_root() is None
+        assert factlog_config.read_lang() is None
+        assert factlog_config.resolve_root()[1] == "cwd"

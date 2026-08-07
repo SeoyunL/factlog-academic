@@ -31,8 +31,9 @@ factlog는 **Claude Code 플러그인**입니다. Claude Code 세션에서 이 �
 을 실행하십시오.
 
 `setup` 은 `doctor` 실행, 엔진 의존성(`pyrewire`) 설치, KB 스캐폴딩, 환경 재점검을
-한 명령으로 수행합니다. KB는 기본적으로 홈 디렉터리 아래 `~/wiki` 에 만들어지며
-(다른 위치는 `/factlog setup --target <경로>`), setup 요약에 그 **절대경로**가
+한 명령으로 수행합니다. 처음 쓴다면 KB는 홈 디렉터리 아래 `~/wiki` 에 만들어지고,
+이미 활성 KB가 있거나 `$FACTLOG_ROOT` 가 설정돼 있으면 그쪽이 대상이 됩니다
+(다른 위치는 `/factlog setup --target <경로>`). setup 요약에 그 **절대경로**가
 출력됩니다. 이후 검증할 문서는 그 폴더의 **`sources/`** 에 넣습니다(위
 [KB 폴더 구조](concepts.md#kb-폴더-구조--내-파일은-어디에-넣나) 참고).
 

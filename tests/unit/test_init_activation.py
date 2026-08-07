@@ -132,7 +132,7 @@ class TestInitDoesNotHijackAnExistingActiveKb:
         out = run_init("--target", str(scratch), config_home=config_home).stdout
 
         assert str(active) in out, f"the KB that stayed active is not named: {out}"
-        assert "NOT active" in out, f"nothing says the new KB is inactive: {out}"
+        assert "NOT recorded there" in out, f"nothing says the new KB is not the recorded one: {out}"
         assert f"factlog use {scratch}" in out, f"no command to switch: {out}"
 
     def test_dangling_pointer_is_not_silently_replaced(self, tmp_path, config_home):
@@ -160,11 +160,15 @@ class TestReInitOfTheActiveKb:
 
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert config_file(config_home).read_bytes() == before
-        assert "already active" in proc.stdout, proc.stdout
+        assert "already recorded" in proc.stdout, proc.stdout
 
 
 class TestFirstRunStillActivates:
-    """The experience `setup` exists for, which the fix must not cost."""
+    """GUARDS, not evidence: every test here passes before and after the fix.
+
+    They hold the experience `setup` exists for, which is what this change could
+    most plausibly have broken. None of them demonstrates the new behaviour.
+    """
 
     def test_no_config_at_all(self, tmp_path, config_home):
         kb = tmp_path / "wiki"
@@ -172,7 +176,7 @@ class TestFirstRunStillActivates:
         proc = run_init("--target", str(kb), config_home=config_home)
 
         assert pointer(config_home) == resolved(kb), proc.stdout + proc.stderr
-        assert "active KB set to" in proc.stdout
+        assert "active-KB config set to" in proc.stdout
 
     def test_config_that_holds_only_a_language(self, tmp_path, config_home):
         """No ``root`` means nothing to lose — and the language must survive."""
@@ -186,6 +190,160 @@ class TestFirstRunStillActivates:
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data.get("root") == resolved(kb)
         assert data.get("lang") == "ko"
+
+
+class TestDamagedConfigIsNotOverwritten:
+    """A config that cannot be parsed is held, not treated as a fresh install.
+
+    ``read_root`` folds bad JSON, a non-object, and an ``OSError`` all into
+    ``None`` — correct for a reader that must degrade to cwd, fatal for a writer:
+    ``None`` used to mean "first run, safe to write", so the #356 hijack survived
+    on exactly the configs where it is *least* recoverable. A root pointing at an
+    unmounted volume at least survives as text; a truncated
+    ``{"root": "/real/kb",`` was rewritten to ``{"root": "/scratch"}`` and the
+    original path was gone. An unreadable file took ``lang`` with it, because
+    ``write_root`` rebuilds the file from a read that returned ``{}``.
+
+    Byte-identity is the assertion, not "root is still X" — with the file
+    unparseable there is no root to compare, and the bytes are the whole point.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            ("truncated json", '{"root": "/real/kb", '),
+            ("empty file", ""),
+            ("not an object", "[1, 2, 3]"),
+            ("not json at all", "root = /real/kb\n"),
+        ],
+    )
+    def test_left_byte_identical(self, tmp_path, config_home, label, content):
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        before = path.read_bytes()
+        scratch = tmp_path / "scratch"
+
+        proc = run_init("--target", str(scratch), config_home=config_home)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert scratch.joinpath("sources").is_dir(), "init must still create the KB"
+        assert path.read_bytes() == before, f"{label}: init overwrote a config it could not read: {proc.stdout}"
+
+    def test_says_it_could_not_read_the_file(self, tmp_path, config_home):
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", ', encoding="utf-8")
+
+        out = run_init("--target", str(tmp_path / "scratch"), config_home=config_home).stdout
+
+        assert "could not be read" in out, f"silently skipped instead of reporting: {out}"
+        assert str(path) in out, f"the file to repair is not named: {out}"
+
+    def test_an_unreadable_file_keeps_its_language(self, tmp_path, config_home):
+        """``chmod 000``: the read fails, so a write would drop ``lang`` too."""
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        before = write_pointer(config_home, tmp_path / "wiki", lang="ko")
+        path.chmod(0o000)
+        try:
+            proc = run_init("--target", str(tmp_path / "scratch"), config_home=config_home)
+        finally:
+            path.chmod(0o644)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert path.read_bytes() == before, proc.stdout
+        assert json.loads(path.read_text(encoding="utf-8"))["lang"] == "ko"
+
+    def test_activate_replaces_it_and_says_what_it_replaced(self, tmp_path, config_home):
+        """The escape hatch out of a corrupt config — explicit, and disclosed."""
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", ', encoding="utf-8")
+        scratch = tmp_path / "scratch"
+
+        proc = run_init("--target", str(scratch), "--activate", config_home=config_home)
+
+        assert pointer(config_home) == resolved(scratch), proc.stdout
+        assert "unreadable" in proc.stdout, f"replaced a corrupt config without saying so: {proc.stdout}"
+
+    def test_a_readable_config_with_no_usable_root_still_activates(self, tmp_path, config_home):
+        """GUARD, not evidence — deliberately on the *write* side of the line.
+
+        It passes before and after, and that is the claim: the narrowing above
+        must not have swept this case up with the damaged ones.
+
+        ``{"root": ""}`` parses: it is understood, it holds no path to lose, and
+        ``resolve_root`` already reports such a config as recording nothing. If
+        this counted as held, anyone who ran ``factlog lang`` before their first
+        ``init`` would be denied the first-run experience, and ``init`` would
+        disagree with the precedence every other command follows. ``lang`` is
+        preserved because the file was read, not because it was skipped.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "", "lang": "ko"}\n', encoding="utf-8")
+        kb = tmp_path / "wiki"
+
+        run_init("--target", str(kb), config_home=config_home)
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data == {"root": resolved(kb), "lang": "ko"}
+
+
+class TestEnvOverrideIsDisclosed:
+    """These commands write the config, which is only rank 3 of the precedence.
+
+    ``SKILL.md`` tells every flow to export ``$FACTLOG_ROOT`` first, so a message
+    phrased as a claim about "the active KB" contradicts
+    ``factlog where --porcelain`` — the one output the skill machine-reads — in
+    the recommended state, not in an edge case.
+    """
+
+    def run_with_env(self, *args: str, config_home: Path, env_root: Path):
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env["FACTLOG_ROOT"] = str(env_root)
+        return subprocess.run(
+            [sys.executable, "-m", "factlog", *args],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, env=env, check=False,
+        )
+
+    def test_init_does_not_contradict_where_porcelain(self, tmp_path, config_home):
+        cfg_kb = tmp_path / "wiki"
+        cfg_kb.mkdir()
+        write_pointer(config_home, cfg_kb)
+        env_kb = tmp_path / "envkb"
+        env_kb.mkdir()
+        scratch = tmp_path / "scratch"
+
+        out = self.run_with_env(
+            "init", "--target", str(scratch), config_home=config_home, env_root=env_kb
+        ).stdout
+        porcelain = self.run_with_env(
+            "where", "--porcelain", config_home=config_home, env_root=env_kb
+        ).stdout.strip()
+
+        assert porcelain == resolved(env_kb), "precondition: $FACTLOG_ROOT should win in `where`"
+        assert "active KB unchanged" not in out, (
+            f"claims the active KB is {cfg_kb} while `where` reports {porcelain}: {out}"
+        )
+        assert "$FACTLOG_ROOT" in out, f"nothing discloses that the environment outranks the config: {out}"
+        assert str(env_kb) in out
+
+    def test_no_note_when_the_environment_agrees_with_the_target(self, tmp_path, config_home):
+        """GUARD: passes before and after — the note must not become noise.
+
+        A flagless run resolves its target *from* `$FACTLOG_ROOT`, so the
+        environment and the target agree and there is nothing to disclose. That
+        is every SKILL.md flow, which is why it is worth holding.
+        """
+        env_kb = tmp_path / "envkb"
+
+        out = self.run_with_env("init", config_home=config_home, env_root=env_kb).stdout
+
+        assert "outranks" not in out, out
 
 
 class TestExplicitFlags:
@@ -251,6 +409,12 @@ class TestSetup:
         monkeypatch.setattr(cli, "_run_doctor_checks", lambda *a, **k: True)
 
     def test_first_run_activates(self, tmp_path, config_home, capsys):
+        """GUARD, not evidence: passes before and after the fix.
+
+        It is here because the first-run experience is the thing `setup` exists
+        for and the thing this change could most easily have cost — not because
+        it demonstrates anything about the change.
+        """
         kb = tmp_path / "wiki"
 
         assert cli.main(["setup", "--target", str(kb)]) == 0
@@ -283,6 +447,50 @@ class TestSetup:
 
         assert pointer(config_home) == resolved(scratch), out
         assert str(active) in out
+
+    def test_closing_line_names_the_target_when_it_is_not_recorded(self, tmp_path, config_home, capsys):
+        """The last line is the one a user (or an LLM) acts on.
+
+        "run /factlog sync inside your knowledge base" reads as the KB setup just
+        made, but a flagless `sync` follows the config — the *other* KB. So the
+        closing line has to name the target and how to reach it.
+        """
+        active = tmp_path / "wiki"
+        active.mkdir()
+        write_pointer(config_home, active)
+        scratch = tmp_path / "scratch"
+
+        assert cli.main(["setup", "--target", str(scratch)]) == 0
+        closing = capsys.readouterr().out.strip().splitlines()[-1]
+
+        assert str(scratch) in closing, f"the closing line does not name the KB just created: {closing}"
+        assert "NOT the active KB" in closing, closing
+        assert f"--target {scratch}" in closing or f"factlog use {scratch}" in closing, closing
+
+    def test_summary_block_carries_the_hint(self, tmp_path, config_home, capsys):
+        """The hint was printed twenty-odd lines above the summary, and lost."""
+        active = tmp_path / "wiki"
+        active.mkdir()
+        write_pointer(config_home, active)
+        scratch = tmp_path / "scratch"
+
+        assert cli.main(["setup", "--target", str(scratch)]) == 0
+        out = capsys.readouterr().out
+
+        summary_block = out.split("=== factlog setup: summary ===", 1)[-1]
+        assert f"factlog use {scratch}" in summary_block, (
+            f"the way to switch never reaches the summary block: {summary_block}"
+        )
+
+    def test_closing_line_stays_generic_when_the_target_is_recorded(self, tmp_path, config_home, capsys):
+        """GUARD: the first-run wording must survive the change above."""
+        kb = tmp_path / "wiki"
+
+        assert cli.main(["setup", "--target", str(kb)]) == 0
+        closing = capsys.readouterr().out.strip().splitlines()[-1]
+
+        assert "inside your knowledge base" in closing, closing
+        assert "NOT the active KB" not in closing, closing
 
     def test_lang_flag_still_applies_without_activating(self, tmp_path, config_home, capsys):
         """``--lang`` edits the same file; declining the root must not decline it."""
