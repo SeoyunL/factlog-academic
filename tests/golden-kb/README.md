@@ -16,7 +16,8 @@ the coverage is verified rather than asserted.
 | --- | --- | --- |
 | `policy/single-valued.md` | `check_conflicts.py` | Orbit has two `maintained_by` values, so the tool exits 1 and names the contradiction (Step 4) |
 | `policy/typed-relations.md` | `common._project_typed_relations` | four `conflict` findings, one per type — date, number, ordinal, amount |
-| `policy/attribute-relations.md` | literal exclusion from the entity graph | `path("Orbit", "2031-02-01")?` is refused as not an accepted entity instead of answered |
+| `policy/attribute-relations.md` | the accepted-entity precheck in `run_logic_check.py` | `path("Orbit", "2031-02-01")?` is refused before the engine is asked |
+| `policy/attribute-relations.md` | the engine's `entity_node/1` extent (#329) | the `entity_extent` findings list exactly the seven real entities; all five declared literals are absent |
 | `policy/relation-aliases.md` | alias canonicalisation | `canonical/3` block in `accepted.dl`; `requires_review: Beacon (alias_check)` reaches Beacon only through `owned_by -> maintained_by` |
 
 `facts/query.dl` additionally carries the `count` and `path` query shapes, which
@@ -28,8 +29,19 @@ form of 120, `valuation_won >= 10000000000` the base-unit form of 100억 — so 
 change in how a literal is parsed or scaled moves the finding out of the report
 instead of leaving it comfortably inside a loose bound.
 
+The two `attribute-relations.md` rows are separate on purpose. The refused path
+query is answered by a Python precheck that runs *before* the engine, so it only
+shows the declaration was read. Dropping `!attr_rel` from the `entity_node` rule
+in `WIRELOG_PROGRAM`, or making `attribute_relation_program` emit nothing, both
+left the run green until the `entity_extent` rule named the extent.
+
 Regenerating after an intended behaviour change: run `tools/compile_facts.py`,
 `tools/run_logic_check.py` and `tools/check_conflicts.py` with
 `FACTLOG_ROOT=tests/golden-kb`, then copy `facts/accepted.dl`,
 `facts/logic_report.txt` and the `check_conflicts` output (stdout **and**
 stderr — the tool writes its findings to stderr) into `tests/golden/policy-kb/`.
+
+Doing that by hand is how `conflicts.txt` first got baked from stdout only,
+which silently produced an empty golden. A `golden.sh --update` mode that writes
+the goldens from the same code path the comparison reads would remove the
+footgun; it is not implemented yet.

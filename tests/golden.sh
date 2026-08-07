@@ -25,10 +25,17 @@
 #   to walk those gates. It declares all four policy files and pins
 #   single-valued contradiction detection (Step 4), typed projection of all four
 #   literal types with thresholds tight against the one fact that satisfies
-#   each, attribute-relation exclusion of a literal from the entity graph (the
-#   refused path endpoint), alias canonicalisation (a rule written over the
-#   canonical name firing on a fact stated with the surface form), and count/
-#   path query rendering.
+#   each, alias canonicalisation (a rule written over the canonical name firing
+#   on a fact stated with the surface form), count/path query rendering, and two
+#   separate things about attribute relations:
+#     - the Python-side accepted-entity precheck in run_logic_check.py, which
+#       refuses `path("Orbit", "2031-02-01")?` before the engine is asked; and
+#     - the engine's own entity_node/1 extent, named by a rule in
+#       logic-policy.extra.dl so the golden holds its exact membership. Without
+#       that rule the !attr_rel exclusion — the #329 invariant — is unpinned:
+#       dropping it from WIRELOG_PROGRAM still left the run green, because the
+#       precheck above had already refused the only query that would have
+#       noticed.
 #
 # A change to a path NEITHER KB walks is not covered by a green run here (#354).
 #
