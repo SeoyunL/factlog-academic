@@ -329,6 +329,62 @@ for inp in "facts/accepted.dl" "facts/query.dl" "policy/logic-policy.dl"; do
   printf '%s' "$out" | grep -qF "report STALE" && ok "STALE when $inp newer than report" || bad "stale not detected for $inp"
 done
 
+# --- report of a run that never started the engine (#338) ---------------------
+#
+# run_logic_check.py now writes facts/logic_report.txt even when it cannot reach
+# the engine, so that the previous run's report is not left on disk to be read as
+# this run's result. That report is FRESH by mtime — the check just wrote it — so
+# a freshness test alone reports `report fresh` for a run in which the engine
+# never started, which is the same quiet lie #338 exists to remove, one layer up.
+#
+# The report here is produced by the REAL tool rather than hand-written, so this
+# case cannot drift from what run_logic_check actually writes. It fails with or
+# without pyrewire installed (missing engine and missing accepted.dl both stop
+# the check before the engine runs); only the reason text differs, which is why
+# nothing below asserts on it.
+EKB="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$EKB" >/dev/null
+printf '%s\n%s\n' "$H" 'A,rel,B,sources/a.md,confirmed,0.9,' > "$EKB/facts/candidates.csv"
+printf 'x\n' > "$EKB/sources/a.md"
+# Delete the report FIRST: a report surviving from an earlier step would be read
+# as this run's, which is the very failure being pinned.
+rm -f "$EKB/facts/logic_report.txt"
+rm -f "$EKB/facts/accepted.dl"                       # the check cannot start the engine
+set +e; "$PYTHON" "$PLUGIN_ROOT/tools/run_logic_check.py" --wiki "$EKB" >/dev/null 2>&1; ck_rc=$?; set -e
+[ "$ck_rc" -ne 0 ] && ok "#338: the logic check fails when the engine cannot start" || bad "#338: expected the logic check to fail, got rc=$ck_rc"
+[ -f "$EKB/facts/logic_report.txt" ] && ok "#338: the failed check still wrote a report" || bad "#338: no report written by the failed check"
+out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+printf '%s' "$out" | grep -qE "logic: +report fresh" \
+  && bad "#338: status calls a run that never started the engine 'fresh': $(printf '%s' "$out"|grep logic)" \
+  || ok "#338: status does not call a failed check fresh"
+printf '%s' "$out" | grep -qF "never started the engine" \
+  && ok "#338: status says the engine never started" \
+  || bad "#338: status does not say the engine never started: $(printf '%s' "$out"|grep -A1 logic)"
+printf '%s' "$out" | grep -qE "errors=\?|warnings=\?" \
+  && bad "#338: status invents count fields the report does not carry: $(printf '%s' "$out"|grep logic)" \
+  || ok "#338: status reports no counts for a run that produced none"
+
+# The pair to the case above, and the one that makes it a DISCRIMINATION rather
+# than a stricter rule: a report of a COMPLETED run, in the real report's shape —
+# same title, same header fields, counts present — and differing only in that it
+# carries no `status: engine-did-not-run` line. It must still read as fresh with
+# its counts parsed. The freshness fixture higher up is a two-line stub
+# (`errors:`/`warnings:` only), so it would keep passing even if the new test
+# matched something every report contains; this one would not.
+printf '%s\n' \
+  'Logic Check Report' '==================' 'engine: wirelog / pyrewire' \
+  'input: facts/accepted.dl' 'policy: policy/logic-policy.dl' 'engine facts: 7' \
+  'review facts outside engine input: 1' 'policy findings: 0' 'errors: 0' 'warnings: 1' \
+  > "$EKB/facts/logic_report.txt"
+touch -t 205001010000 "$EKB/facts/logic_report.txt"
+out="$("$PYTHON" -m factlog status --target "$EKB" 2>&1)"
+printf '%s' "$out" | grep -qE "logic: +report fresh; errors=0, warnings=1" \
+  && ok "#338: a completed run's report still reads as fresh with its counts" \
+  || bad "#338: completed report misread: $(printf '%s' "$out"|grep -A1 logic)"
+printf '%s' "$out" | grep -qF "never started the engine" \
+  && bad "#338: a completed run's report is being called an engine failure" \
+  || ok "#338: a completed run's report is not called an engine failure"
+
 # --- binary original counted as covered via its conversion (like coverage) -----
 PKB="$(mktemp -d)/wiki"
 "$PYTHON" -m factlog init --target "$PKB" >/dev/null
