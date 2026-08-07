@@ -292,6 +292,30 @@ class TestFailingStillFails:
         assert b"\r\n" not in raw
         assert MARKER.encode() + b"\n" in raw
 
+    def test_write_failure_does_not_mask_the_original_error(self, tmp_path):
+        """Reporting the failure must not REPLACE it.
+
+        With facts/ read-only the write raises PermissionError from inside the
+        handler; unguarded, that traceback became the program's output and the
+        operator lost the one clean line naming the actual cause — which is what
+        origin/main gave them. The report is best effort; the diagnosis is not.
+        """
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        (kb / "facts" / "accepted.dl").unlink()
+        facts = kb / "facts"
+        mode = facts.stat().st_mode
+        facts.chmod(0o555)
+        try:
+            result = _run(kb)
+        finally:
+            facts.chmod(mode)
+
+        assert result.returncode == 1
+        assert "missing facts/accepted.dl" in result.stderr
+        assert "PermissionError" not in result.stderr
+        assert "could not write facts/logic_report.txt" in result.stderr
+
     def test_no_report_outside_a_kb_root(self, tmp_path):
         """``ensure_dirs`` fails before the engine is in the picture, and "this
         is not a factlog KB" is not a statement about the engine. Writing a

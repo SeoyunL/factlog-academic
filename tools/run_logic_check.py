@@ -641,7 +641,20 @@ def main() -> None:
         # that guard belongs next to it in factlog/common.py, not here; catching
         # it at this module's import would mean rebuilding FACTS_DIR without the
         # module that defines it.
-        _write_report(engine_failure_report(exc))
+        #
+        # BEST EFFORT, because reporting the failure must not REPLACE it. With
+        # facts/ read-only, writing raised PermissionError from inside this
+        # handler and that became the program's output: the operator got a
+        # traceback about the report instead of the one clean line naming the
+        # actual cause, which origin/main gave them. A report we could not write
+        # is not worth the diagnosis we already have.
+        try:
+            _write_report(engine_failure_report(exc))
+        except Exception as write_exc:  # noqa: BLE001 - never mask *exc*
+            print(
+                f"warning: could not write facts/logic_report.txt: {write_exc}",
+                file=sys.stderr,
+            )
         raise
     _write_report(text)
     print(text)
