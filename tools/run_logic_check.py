@@ -424,9 +424,15 @@ def evaluate_queries(
                     trace = dependency_path(facts, constants[0], constants[1], attribute_rels)
                 else:
                     trace = []
-                # one_line on the engine-derived trace, not on `head` — head is
-                # built from the query line, which query_lines() already split on
-                # newlines, so it cannot carry one.
+                # one_line here because the trace nodes come from
+                # dependency_path over the facts and are rendered directly. `head`
+                # needs no wrapping at THIS site because it is built from
+                # display_value, which applies one_line itself — not because a
+                # query-derived value is safe. It is not: path_endpoints goes
+                # through arg_value, which is json.loads, so an escape in
+                # facts/query.dl decodes to a real newline inside a single
+                # physical line. That is what put the escaping into display_value
+                # in the first place.
                 value = " -> ".join(one_line(node) for node in trace) if trace else "(not found)"
                 results.append(f"{head}: {value}")
         elif predicate == "relation":
@@ -504,13 +510,18 @@ def evaluate_queries(
 #   - facts/query.dl — `arg_value` is `json.loads`, so `"a\nstatus: ..."` written
 #     as ONE physical line, with the escape as two ordinary characters, decodes
 #     to the same thing. Splitting the file into lines cannot see it. This is the
-#     worse carrier of the two: query.dl is an engine input this very gate
-#     guards, and `/factlog query` writes it.
+#     worst carrier of the three: query.dl is an engine input this very gate
+#     guards, and `/factlog query` writes it;
+#   - facts/accepted.dl — `common.parse_relation_fact` is `json.loads` too, so a
+#     compiled fact carries escapes exactly like a query does, and reaches here
+#     through the ordinary pipeline: compile_facts renders a candidates value into
+#     dl_string form and this report decodes it back. Covered by display_value and
+#     the result renderers, which one_line every value they print.
 #
-# Either way the run SUCCEEDS, the report carries real counts, and both readers
-# then call it an engine failure with `reason: (not recorded)` — the deadlock
-# #338 removes, rebuilt out of KB content, and since the status fix repeated by
-# two consumers rather than one.
+# Whichever the carrier, the run SUCCEEDS, the report carries real counts, and
+# both readers then call it an engine failure with `reason: (not recorded)` — the
+# deadlock #338 removes, rebuilt out of KB content, and since the status fix
+# repeated by two consumers rather than one.
 #
 # `one_line` is what keeps the two sets equal, and it has to be at every site
 # where a DECODED value reaches a report line — the csv-side sites alone left
