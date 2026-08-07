@@ -270,6 +270,28 @@ class TestFailingStillFails:
         assert result.returncode == 1
         assert "missing facts/accepted.dl" in result.stderr
 
+    def test_report_is_written_with_lf_endings(self, tmp_path):
+        """The gate matches whole lines split on "\\n".
+
+        Text mode translates "\\n" to os.linesep, so on Windows this report would
+        be CRLF throughout and the gate's match would stop matching — which fails
+        OPEN, handing out edit rights on engine inputs exactly when the engine is
+        broken. This asserts the bytes rather than the platform: on a machine
+        where os.linesep is already "\\n" it cannot fail, so it is a pin against
+        the code changing, not a proof about Windows. Neither this lane nor the
+        review could run Windows; that text mode would produce CRLF there is read
+        off the io.TextIOWrapper contract.
+        """
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        (kb / "facts" / "accepted.dl").unlink()
+
+        _run(kb)
+
+        raw = _report(kb).read_bytes()
+        assert b"\r\n" not in raw
+        assert MARKER.encode() + b"\n" in raw
+
     def test_no_report_outside_a_kb_root(self, tmp_path):
         """``ensure_dirs`` fails before the engine is in the picture, and "this
         is not a factlog KB" is not a statement about the engine. Writing a

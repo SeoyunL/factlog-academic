@@ -523,16 +523,29 @@ def one_line(value: object) -> str:
 
 
 def _write_report(text: str) -> None:
-    """Put *text* in facts/logic_report.txt, atomically.
+    """Put *text* in facts/logic_report.txt, atomically and with LF endings.
 
     temp + os.replace, not write_text: the gate reads this file to decide
     whether editing engine inputs is allowed, and a write interrupted after the
     header but before ENGINE_FAILED_STATUS_LINE would leave a file that is
     neither report yet passes the gate as one.
+
+    ``newline="\\n"`` is load-bearing, not tidiness. Text mode translates "\\n" to
+    os.linesep, so on Windows every line of this report would be written CRLF —
+    and the gate's whole-line match then stops matching, which fails OPEN: it
+    hands out edit rights on engine inputs at the moment the engine is broken.
+    Measured here by writing a CRLF report by hand (gate exit 0 where LF gives
+    2); that Windows *produces* one is read off the io.TextIOWrapper contract,
+    not measured, since neither this lane nor the review could run Windows. The
+    gate strips CR as well, so a report from either side reads correctly.
+
+    NOT common._atomic_write_text: same temp+replace shape, but that one writes
+    in default text mode. Reusing it would reintroduce exactly the translation
+    this pins against; the duplication is the difference.
     """
     out = FACTS_DIR / "logic_report.txt"
     tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
     os.replace(tmp, out)
 
 

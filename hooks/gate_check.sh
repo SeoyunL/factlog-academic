@@ -775,8 +775,19 @@ query="${KB_ROOT}/facts/query.dl"
 # is the permissive answer — but a file that cannot be read has already failed
 # `-f` at the call sites below, or is about to fail the mtime branch, so this
 # opens nothing the freshness predicate does not already close.
+#
+# WHOLE line, not substring: the report interpolates KB text, and a value that
+# merely CONTAINS the marker must not deny — `grep -qF` here would let any KB
+# whose data mentions the marker lock its own engine inputs.
+#
+# `tr -d '\r'` first, because this predicate fails OPEN on a mismatch. A report
+# written with CRLF endings — which is what text-mode writing produces on
+# Windows — did not match, so the gate returned 0 and handed out edit rights on
+# engine inputs at the moment the engine was broken. run_logic_check now pins
+# LF on the writing side; this is the other half, so a report from either side
+# reads the same. Measured: with CRLF, exit 0 before this line and 2 after.
 _records_engine_failure() {
-  grep -qxF 'status: engine-did-not-run' "$1" 2>/dev/null
+  tr -d '\r' < "$1" 2>/dev/null | grep -qxF 'status: engine-did-not-run'
 }
 
 # BOOTSTRAP (predicate branch B): a fresh KB has no report of a completed engine

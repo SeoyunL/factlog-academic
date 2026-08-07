@@ -1762,6 +1762,69 @@ run_case "fresh report of a completed run with 0 facts — allow" \
 rm -rf "$KB_ZERO"
 
 # ---------------------------------------------------------------------------
+# CASES 59-61: HOW THE MARKER IS MATCHED, not just that it is.
+#
+# The predicate's correctness rests on three properties of the match, none of
+# which CASES 54-58 could tell apart from a looser one: they all use a report
+# whose marker is a whole LF-terminated line, which a substring match, a
+# line-break-agnostic match and a CR-sensitive match all accept. Each case here
+# is the report shape that separates one of them, and each is a direction the
+# gate can be wrong in.
+# ---------------------------------------------------------------------------
+
+# CASE 59: the marker appears MID-LINE. `grep -qF` would deny; `-qxF` allows.
+# A KB whose text mentions the marker must not be able to lock its own engine
+# inputs — the report interpolates KB-derived values, so this is reachable
+# content, not a curiosity.
+KB_SUBSTR="$(mktemp -d)"
+make_kb "$KB_SUBSTR"
+touch_file "$KB_SUBSTR/facts/accepted.dl"
+set_mtime_past "$KB_SUBSTR/facts/accepted.dl"
+{
+  echo "Logic Check Report"
+  echo "=================="
+  echo "engine: wirelog / pyrewire"
+  echo "engine facts: 7"
+  echo "Warnings:"
+  echo "- unknown status treated as non-engine input: 'odd status: engine-did-not-run'"
+} > "$KB_SUBSTR/facts/logic_report.txt"
+run_case "marker only as a substring of a warning line — allow" \
+  "$KB_SUBSTR" "$KB_SUBSTR/facts/accepted.dl" 0
+rm -rf "$KB_SUBSTR"
+
+# CASE 60: CRLF line endings. This is the one that fails OPEN: a report written
+# in text mode on Windows is CRLF throughout, the whole-line match stops
+# matching, and the gate hands out edit rights on engine inputs exactly when the
+# engine is broken. The writing side now pins LF; this pins the reading side, so
+# a report produced anywhere is read the same.
+KB_CRLF="$(mktemp -d)"
+make_kb "$KB_CRLF"
+touch_file "$KB_CRLF/facts/accepted.dl"
+set_mtime_past "$KB_CRLF/facts/accepted.dl"
+printf 'Logic Check Report\r\n==================\r\nstatus: engine-did-not-run\r\nreason: pyrewire missing\r\n' \
+  > "$KB_CRLF/facts/logic_report.txt"
+run_case "failure report with CRLF endings — deny" \
+  "$KB_CRLF" "$KB_CRLF/facts/accepted.dl" 2
+rm -rf "$KB_CRLF"
+
+# CASE 61: a U+2028 LINE SEPARATOR immediately before the marker text. `grep`
+# breaks lines on "\n" only, so this is NOT a marker line and the gate must
+# allow — the point being that factlog/cli.py has to reach the same verdict on
+# this same file. Python's str.splitlines() DOES break on U+2028, so a reader
+# using it called this an engine failure while the gate called it a normal
+# report. U+2028 is routine in text pasted from PDFs, so the two readers
+# disagreeing here is reachable from ordinary KB content.
+KB_LSEP="$(mktemp -d)"
+make_kb "$KB_LSEP"
+touch_file "$KB_LSEP/facts/accepted.dl"
+set_mtime_past "$KB_LSEP/facts/accepted.dl"
+printf 'Logic Check Report\n==================\nengine: wirelog / pyrewire\nengine facts: 7\n- odd\xe2\x80\xa8status: engine-did-not-run\n' \
+  > "$KB_LSEP/facts/logic_report.txt"
+run_case "U+2028 before the marker text is not a marker line — allow" \
+  "$KB_LSEP" "$KB_LSEP/facts/accepted.dl" 0
+rm -rf "$KB_LSEP"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
