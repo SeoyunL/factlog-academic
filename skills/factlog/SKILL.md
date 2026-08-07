@@ -555,8 +555,11 @@ one query (or `review_required(...)`) line per source question. Do not write the
 file incrementally line-by-line: a single batched write avoids a second-write
 that the PreToolUse gate would deny once a report exists.
 
-On a freshly initialised KB (no `facts/logic_report.txt` and no pre-existing
-`facts/query.dl`), the PreToolUse gate allows this first creation (bootstrap).
+On a freshly initialised KB the PreToolUse gate allows this first creation
+(bootstrap): no `facts/query.dl` yet, and either no `facts/logic_report.txt` or
+one recording a run in which the engine never ran — a failed `/factlog check`
+leaves such a report behind, and it must not turn the first creation of an
+engine input into a deny it never was.
 After `/factlog check` produces a report, re-running `/factlog query` requires a
 fresh report first — run `/factlog check` to refresh, then re-write.
 
@@ -636,6 +639,12 @@ Surface any `Policy Findings`, `Errors`, and `Warnings` sections under a
 repair` without explicit human instruction. Do not state any conclusion about
 the KB until errors reach 0.
 
+**Gate:** If the report carries the line `status: engine-did-not-run`, stop
+here. That report has **no** `errors:` line at all — the engine never ran, so
+there is no count to compare and "no errors" is not what its absence means. Read
+its `reason:` line, report that as the outcome, and state no conclusion about
+the KB. `/factlog repair` is not the next step; fixing the named cause is.
+
 ### Step 4 — Coverage critic (silent-omission guard)
 
 A free-text wiki cannot tell you what it *failed* to capture. Run the coverage
@@ -684,7 +693,11 @@ before writing it back.
 `/factlog check` must have been run after the last edit to `facts/accepted.dl`
 or `facts/query.dl`). The PreToolUse hook enforces this: it will deny any
 attempt to write or edit `facts/accepted.dl` or `facts/query.dl` when
-`facts/logic_report.txt` is absent or stale.
+`facts/logic_report.txt` is absent, stale, records a run in which the engine
+never ran (`status: engine-did-not-run`), or cannot be read at all. A failing
+`/factlog check` still writes a report, and that report does **not** lift the
+deny — re-running the same check will not either. Fix the cause its `reason:`
+line names.
 
 **Execution order:**
 
