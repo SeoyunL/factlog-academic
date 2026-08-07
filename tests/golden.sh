@@ -185,6 +185,12 @@ run_pass() {
     echo "FATAL: could not copy $kb into the work area (a symlink cycle or a broken link inside the KB will do this)" >&2
     exit 1
   fi
+  # cp copies modes, so a read-only source KB produced a read-only copy: the
+  # `rm -f` below failed, `set -e` killed the run mid-step with no summary line
+  # at all, and the EXIT trap could not remove $WORK_ROOT either. Running on a
+  # copy is supposed to mean the source's properties do not reach the run; its
+  # permissions still did.
+  chmod -R u+w "$work"
 
   # Labels deliberately unlike the Step 1/2 ones: "committed <file>" is a claim
   # about what is checked in, "<file>" is a claim about what this run produced.
