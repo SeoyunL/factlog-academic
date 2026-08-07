@@ -8,9 +8,12 @@ were live.
 Claims the output made but did not hold:
 
 1. ``PYTHON`` was assigned unconditionally, so ``PYTHON=<interpreter> bash
-   tests/golden.sh`` — the convention the other 38 harnesses in ``tests/``
+   tests/golden.sh`` — the convention 39 of the 42 harnesses in ``tests/``
    follow — was silently discarded. On a machine without ``/tmp/factlog-venv``
-   the run fell through to a bare ``python3`` that may not have pyrewire.
+   the run fell through to a bare ``python3`` that may not have pyrewire. The
+   first fix kept that venv as an implicit fallback, which left this harness
+   choosing a different interpreter from every other one on a machine that has
+   the path, so the unset branch is pinned too.
 2. When a step died, the artifact it should have written stayed on disk as the
    committed copy, and the following diff compared *that* against the golden
    file. It passed no matter what the branch changed.
@@ -26,10 +29,12 @@ checkout, or anything else the caller owns:
    symlink, so a "copy" of a symlinked KB wrote back into the original — and the
    ``rm -f`` that makes a dead step fail honestly deleted the caller's real file.
 
-An eighth case guards a mode the remedy for 5 introduces rather than one that
-was live: ``cp -RL`` cannot follow a cyclic symlink, and it skips the subtree and
-carries on, so the copy the run would measure is silently incomplete. The
-harness stops on a failed copy, and that stop is pinned.
+Two further cases guard modes the remedy for 5 introduced rather than ones that
+were live. ``cp -RL`` cannot follow a cyclic symlink: it skips the subtree and
+carries on, so the copy the run would measure is silently incomplete, and the
+harness's stop on a failed copy is pinned. ``cp`` also copies modes, so a
+read-only source KB produced a read-only copy and the run died mid-step with no
+verdict line at all.
 
 Every case runs the real harness as a subprocess, most against a throwaway copy
 of ``examples/sample-kb``, with ``PYTHON`` pointed at a shim that fails on
@@ -37,6 +42,11 @@ purpose. Each shim case asserts the shim was actually reached, so a harness that
 ignores ``PYTHON`` cannot make a case pass by accident; each write case
 fingerprints inodes, because a rewrite that reproduces identical bytes is still
 a write.
+
+One case is a source read rather than a run — the interpreter choice when
+``PYTHON`` is unset. Exercising it would mean creating ``/tmp/factlog-venv``,
+a path shared with every other checkout on the machine, which a test must not
+do. It is noted as the exception rather than left to look like the others.
 """
 from __future__ import annotations
 
@@ -46,6 +56,13 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+# Every case shells out to the real harness, which runs the wirelog engine. CI
+# calls this job the "pure-function unit layer"; this file is not that, and
+# skipping is more honest than failing on an env that simply has no engine.
+pytest.importorskip("pyrewire")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_SH = REPO_ROOT / "tests" / "golden.sh"

@@ -23,11 +23,12 @@
 #
 #   KB 2, tests/golden-kb, goldens in tests/golden/policy-kb/: exists precisely
 #   to walk those gates. It declares all four policy files and pins
-#   single-valued contradiction detection (Step 4), typed projection of all four
-#   literal types with thresholds tight against the one fact that satisfies
-#   each, alias canonicalisation (a rule written over the canonical name firing
-#   on a fact stated with the surface form), count/path query rendering, and two
-#   separate things about attribute relations:
+#   single-valued contradiction detection (Step 4), typed projection of every
+#   literal type by CLOSED band so the projected value is pinned rather than
+#   which side of a threshold it falls on, alias canonicalisation (a rule
+#   written over the canonical name firing on a fact stated with the surface
+#   form), count/path query rendering, and two separate things about attribute
+#   relations:
 #     - the Python-side accepted-entity precheck in run_logic_check.py, which
 #       refuses `path("Orbit", "2031-02-01")?` before the engine is asked; and
 #     - the engine's own entity_node/1 extent, named by a rule in
@@ -38,6 +39,15 @@
 #       noticed.
 #
 # A change to a path NEITHER KB walks is not covered by a green run here (#354).
+#
+# STILL NOT COVERED, named so a reader does not assume otherwise. Both were
+# listed as sample-kb's limits and neither KB closes them:
+#   - Non-NFC text. Every entity, relation and literal in both KBs is ASCII or
+#     already-composed Korean, so no normalisation path is exercised — the unit
+#     layer covers those (test_query_literal_nfc, test_conflict_unicode,
+#     test_normalize_lang), but no golden holds their bytes.
+#   - The finalize step. Both KBs stop at compile / logic-check / policy-check;
+#     nothing here runs finalize.py, so its output has no golden at all.
 #
 # Usage:
 #   FACTLOG_ROOT=examples/sample-kb bash tests/golden.sh
@@ -51,8 +61,6 @@
 #     FACTLOG_ROOT=examples/sample-kb bash tests/golden.sh && echo GOLDEN-STABLE
 
 set -euo pipefail
-
-export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
 
 # pwd -P throughout: every path here is either copied from or written next to,
 # and a logical path keeps a symlink in it, which is how a "copy" ended up
@@ -82,8 +90,11 @@ if ! KB_ROOT="$(cd "$FACTLOG_ROOT" 2>/dev/null && pwd -P)"; then
 fi
 export FACTLOG_ROOT="$KB_ROOT"
 
-# Python interpreter: exactly the form the other 39 harnesses in this directory
-# use. The caller's value used to be overwritten unconditionally, so the
+# Python interpreter: the form 39 of the 42 harnesses in this directory use.
+# (The three exceptions each have a reason: smoke.sh builds its own venv,
+# setup.sh is a dev-environment script (#361), and test_gate_check.sh goes
+# through tools/factlog_python.sh.) The caller's value used to be overwritten
+# unconditionally, so the
 # `PYTHON=<interpreter> bash tests/x.sh` convention was silently discarded here —
 # a run asked to use an interpreter with pyrewire fell through to a bare python3
 # without it, and Step 2 died for a reason that had nothing to do with the branch
@@ -118,14 +129,23 @@ fail_msg() {
 }
 
 # --- scratch space ----------------------------------------------------------
-# Every KB is copied here and run from the copy. Nothing under the checkout is
-# written, so a run cannot rewrite a tracked fixture, cannot leave one deleted if
-# it is killed, and two runs cannot collide on the fixed in-repo path of KB 2.
+# Every KB is copied here and run from the copy. No TRACKED file under the
+# checkout is written, so a run cannot rewrite a fixture, cannot leave one
+# deleted if it is killed, and two runs cannot collide on the fixed in-repo path
+# of KB 2. (Not "nothing under the checkout": importing the tools writes
+# __pycache__. The claim that matters is about tracked files, and that is the one
+# tests/unit/test_golden_harness.py pins.)
+#
 # Cleanup is best-effort: a SIGKILL leaks a temp directory, which is the failure
 # mode we want, because SIGKILL cannot be trapped and anything that relies on a
 # trap to put a repo file back is one kill away from deleting tracked data.
+#
+# The config dir is created here rather than at first use so the same trap owns
+# it; it used to be a separate mktemp -d installed before any trap existed, and
+# every run left one behind.
 WORK_ROOT="$(mktemp -d)"
 trap 'rm -rf "$WORK_ROOT"' EXIT
+export XDG_CONFIG_HOME="$WORK_ROOT/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
 
 assert_golden() {
   local label="$1"
@@ -205,6 +225,12 @@ run_pass() {
   # about what is checked in, "<file>" is a claim about what this run produced.
   # A reader — or a test grepping this output — must not be able to take one for
   # the other, which is how a vacuous comparison got cited in the first place.
+  #
+  # The golden copy is a SEPARATE file from the KB's committed artifact even
+  # though the two are byte-identical on a green branch. That duplication is
+  # what makes this step a comparison at all: point $golden at the KB's own file
+  # and the diff compares a file with itself and can never fail — the vacuous
+  # PASS this whole harness exists to remove. Do not deduplicate them.
   echo "=== Step 0: committed artifacts in sync with golden ==="
   assert_golden "committed facts/accepted.dl" \
     "$kb/facts/accepted.dl" \
