@@ -1666,8 +1666,25 @@ def cmd_vocab(args: argparse.Namespace) -> int:
     print(f"factlog vocab (KB: {target}) — {scope_label} facts")
     if show_e:
         print(f"  entities ({len(ent_counts)}):")
+        # Counting is on the raw name, so two spellings of one entity are two
+        # lines. Since #342 the ENGINE folds them into one atom, so this count
+        # is candidate spellings and is deliberately NOT the engine's entity
+        # count — a KB holding 한라산기지 in both forms lists 4 here where the
+        # engine has 2. Left raw because folding it means folding
+        # ``common.entity_set``, which is also the query-validation vocabulary
+        # (ask_router) and the path-node set; that is #213's chokepoint and a
+        # wider change than this. What is NOT acceptable is leaving the reader
+        # unable to see why: label the normalization form on exactly the names
+        # sharing a folded spelling with another, the same rule (and the same
+        # three-valued-label caveat) the relation list below uses. A KB with no
+        # such pair prints byte-identically to before.
+        folded_ent = Counter(unicodedata.normalize("NFC", name) for name in ent_counts)
         for name, n in sorted(ent_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            print(f"    [{n:>3}] {name}")
+            form = (
+                f"  ({common.normalization_form(name)})"
+                if folded_ent[unicodedata.normalize("NFC", name)] > 1 else ""
+            )
+            print(f"    [{n:>3}] {name}{form}")
         if not ent_counts:
             print("    (none)")
     if show_r:
@@ -1774,8 +1791,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     literals = f"{len(val) - len(ent)} literal(s)" if attr else "0 literal(s) — none declared"
     print(
         f"  vocabulary: {len(ent)} entit(y/ies), {literals}, "
-        # engine-scoped, like entity_set/value_set above — so the counts agree
-        # with `factlog vocab` (which lists the same engine vocabulary).
+        # Scoped to the engine ROWS (engine_facts), like entity_set/value_set
+        # above, so this agrees with `factlog vocab`, which counts the same way.
+        # It is NOT the engine's own entity count: both count raw candidate
+        # spellings, and since #342 the engine folds canonically equivalent ones
+        # into a single atom, so a KB with a name in two forms reads 2 here and 1
+        # in accepted.dl. `vocab` labels the normalization form on such names;
+        # this line is a total and cannot. Closing the gap means folding
+        # entity_set, which is also ask's query-validation vocabulary — #213's
+        # chokepoint, deliberately not touched here.
         f"{len(common.allowed_relations(engine_rows))} relation(s) "
         f"({len(attr)} attribute, {len(sv)} single-valued declared)"
     )
