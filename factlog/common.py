@@ -805,19 +805,29 @@ def composed_spelling(spellings: Iterable[str]) -> str:
     Every caller standing a representative in front of a folded group goes
     through THIS function, never through a re-derived ordering of its own:
     ``check_conflicts._representative`` for the report, ``corroboration`` for its
-    competing-values clause, and ``dedup_engine_atoms`` for the spelling written
-    into ``accepted.dl``. Two of them naming one value differently is the bug
-    this centralization exists to prevent.
+    competing-values clause, and ``kb_spellings`` for the spelling written into
+    ``accepted.dl``. Two of them naming one value differently is the bug this
+    centralization exists to prevent.
 
-    Same function, but only the same ANSWER where the callers are looking at the
-    same group. For a **canonically equivalent** group they are, so the spelling
-    the checker reports is the spelling the compiled file carries. For a typed
-    relation they are not: ``_group_key`` partitions on the parsed scalar, so it
-    holds ``{NFD('제3호'), '3위'}`` as one value, while ``dedup_engine_atoms``
-    keeps two atoms because those strings are not canonically equivalent. Same
-    representative rule applied to different partitions — the user-facing message
-    is right about that, and this docstring should not be read past canonical
-    equivalence.
+    Same function, but only the same ANSWER where the callers pool the same
+    spellings, and they do not always. Two ways they can part:
+
+    * *different partitions.* For a **canonically equivalent** conflict group the
+      checker's pool and the compiled atom's agree. For a typed relation they do
+      not: ``_group_key`` partitions on the parsed scalar, so it holds
+      ``{NFD('제3호'), '3위'}`` as one value, while ``dedup_engine_atoms`` keeps
+      two atoms because those strings are not canonically equivalent. Same
+      representative rule applied to different partitions — the user-facing
+      message is right about that, and this docstring should not be read past
+      canonical equivalence.
+    * *different scope.* ``kb_spellings`` pools a value over the WHOLE KB and
+      over both the subject and the object axis, because ``accepted.dl`` is
+      joined on and one entity must be one symbol there; the checker pools it
+      over the rows of the conflict group it is reporting. Where a value is
+      spelled consistently across positions — the shape the report was written
+      for — the two land on the same string. Where it is composed only as an
+      object and decomposed only as a subject they can differ, and the compiled
+      file is the one that decides, because it is the one the engine reads.
     """
     return min(spellings, key=lambda s: (s != unicodedata.normalize("NFC", s), s))
 
@@ -1832,6 +1842,59 @@ def fold_atom_triple(subject: str, relation: str, object_: str) -> tuple[str, st
     )
 
 
+def kb_spellings(rows: list[dict[str, str]]) -> dict[str, str]:
+    """Map each value's NFC key to the ONE spelling ``accepted.dl`` writes for
+    it, chosen by ``composed_spelling`` over every spelling of that value
+    anywhere in *rows* — both the subject and the object axis, pooled.
+
+    **Why the pool is the whole KB and not the atom's own group.** The spelling
+    in ``accepted.dl`` is not a label; the engine joins on it. Choosing a
+    representative inside one folded group rewrites that group and leaves an
+    untouched neighbour alone, so a KB holding both forms ends up spelling one
+    entity two ways and the collapsed atom stops joining the fact beside it.
+    Measured on three confirmed rows — ``NFD(삼성) 대표 NFD(이재용)``,
+    ``NFC(삼성) 대표 NFC(이재용)``, ``NFD(이재용) 거주 NFD(서울)`` — group-local
+    choice folded the first two to NFC, left the third in NFD, and took
+    ``path/2`` from 4 to 2: ``path(NFD(삼성), NFD(서울))?`` went from
+    ``VERIFIED / rows: 1`` to ``entity_not_accepted``, and asked NFC/NFD it
+    answers ``rows: 0`` — a **verified negative for a path the KB supports**.
+    That is the #342 harm reappearing on the path axis, so identity and spelling
+    must be decided over the same scope.
+
+    **Why the two axes share one pool.** ``entity_node`` admits a value from
+    either position and ``edge(S, O) :- relation(S, R, O), entity_node(O)``
+    chains an object into the next atom's subject, so one value's two positions
+    must agree. Pooling per axis is not enough and the three rows above show it:
+    ``이재용`` is composed only as an object and decomposed only as a subject, so
+    an axis-local pool has no composed member to prefer on either side and the
+    join stays broken.
+
+    **Byte-invariance.** Every pool of a KB written one way is a singleton and
+    ``composed_spelling`` of a singleton is that element, so an NFC-only KB and a
+    uniformly decomposed KB both map every value to itself — verified
+    byte-identical against origin/main. Nothing is normalized on the way out: a
+    pool with no composed member yields the decomposed spelling, which is a
+    spelling the KB actually wrote.
+
+    A widened pool never picks a *less* composed spelling than a group-local one
+    would. At most one member of a pool can itself be in NFC (two NFC strings
+    equal under NFC are the same bytes), so where the group had a composed
+    member the wider pool finds the same one, and where it had none the wider
+    pool may find one — the fix direction only.
+
+    Not shared with ``check_conflicts._representative``, which pools a value over
+    the rows of its own conflict group. For a value spelled consistently across
+    positions the two agree, which is the case the report was written for; where
+    a value is composed only in object position and decomposed only in subject
+    position they can name it differently, and this one wins because it is the
+    one the engine reads."""
+    pools: dict[str, set[str]] = {}
+    for row in rows:
+        for value in (row["subject"], row["object"]):
+            pools.setdefault(unicodedata.normalize("NFC", value), set()).add(value)
+    return {key: composed_spelling(spellings) for key, spellings in pools.items()}
+
+
 def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """Collapse rows that are the same engine atom (``engine_atom_key``) to one
     row, emitted in first-occurrence order.
@@ -1843,28 +1906,28 @@ def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     provenance) lives on the separate candidates path (``corroboration_counts``,
     ``fact_signals``) and is untouched by this collapse.
 
-    **Which spelling is written.** Each axis independently: the subject is
-    ``composed_spelling`` of every subject in the group, the object likewise.
-    That is the *same* choice ``check_conflicts._representative`` makes — it is
-    ``composed_spelling`` — so for a canonically equivalent group the checker's
-    report and the compiled atom name a value identically, which is the invariant
-    that docstring states and this must not break. The composed spelling is also
-    the one a reader greps for from an NFC editor, and the one the engine's typed
-    projection can parse (``_project_typed_relations`` hands
-    ``literal_types.normalize`` the object as written, so a decomposed
-    ``NFD('7위')`` normalizes to ``None`` and the fact silently leaves the typed
-    table).
+    **Which spelling is written.** Per VALUE, not per group: both axes are
+    looked up in :func:`kb_spellings`, which pools every spelling of a value
+    across every engine row and both positions before applying
+    ``composed_spelling``. Choosing inside the group instead breaks the join to
+    the rest of the KB — see that docstring for the measured shape and for why
+    the pool cannot be per-axis either.
 
-    Preferring it therefore only *rescues a group that has one*. Where every
-    member is decomposed there is nothing to prefer, the atom stays decomposed,
-    and the typed literal is dropped exactly as before — see the byte-invariance
-    note below, which is the same fact stated as a guarantee.
+    The composed spelling is the one a reader greps for from an NFC editor, and
+    the one the engine's typed projection can parse
+    (``_project_typed_relations`` hands ``literal_types.normalize`` the object as
+    written, so a decomposed ``NFD('7위')`` normalizes to ``None`` and the fact
+    silently leaves the typed table). Preferring it only *rescues a value the KB
+    spells that way somewhere*. Where every occurrence is decomposed there is
+    nothing to prefer, the atom stays decomposed, and the typed literal is
+    dropped exactly as before — see the byte-invariance note below, which is the
+    same fact stated as a guarantee.
 
     Ranking whole rows instead — picking the group member that sorts first — is
     what an earlier revision did, and it is wrong on a *cross* group: one row
     NFD-subject/NFC-object and another NFC-subject/NFD-object have no member
     composed on both axes, so whichever row wins writes a decomposed axis while
-    the group demonstrably holds a composed spelling for it. The two axes are
+    the KB demonstrably holds a composed spelling for it. The two axes are
     independent and are chosen independently.
 
     So the emitted row can be a triple no single input row carried. That is safe
@@ -1876,22 +1939,28 @@ def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     not.
 
     **Byte-invariance.** ``composed_spelling`` of a one-element set is that
-    element, so a group written one way yields its first row untouched — the
-    same object, not a copy. The bytes of an atom change only for a group that
-    actually holds more than one spelling on an axis, and then only to a
-    spelling already written in that KB. A KB with no canonically equivalent
-    duplicates — every NFC-only KB, and every uniformly-NFD one — compiles to a
-    byte-identical ``accepted.dl``. Nothing is normalized on the way out; a
-    uniformly decomposed KB keeps its decomposed spelling, because there is no
-    composed member to prefer."""
+    element, so a value the KB spells one way maps to itself and its row is
+    yielded untouched — the same object, not a copy. A KB that spells every
+    value one way — every NFC-only KB, and every uniformly-NFD one — therefore
+    compiles to a byte-identical ``accepted.dl``, measured against origin/main.
+    Nothing is normalized on the way out; a uniformly decomposed KB keeps its
+    decomposed spelling, because no pool has a composed member to prefer.
+
+    The bytes of an atom change only where the KB itself holds more than one
+    spelling of a value, and then only to a spelling that KB already wrote. Note
+    the scope: because the pool is KB-wide, an atom can be rewritten even when
+    its own group is a singleton — a value written NFC in one fact and NFD in
+    another is unified in both, which is the whole point. Only a KB already
+    mixing forms for one value sees this, and on such a KB agreeing with itself
+    is the correction, not a regression."""
+    spelling = kb_spellings(rows)
     groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     for row in rows:
         groups.setdefault(engine_atom_key(row), []).append(row)
     unique: list[dict[str, str]] = []
-    for members in groups.values():
+    for key, members in groups.items():
         base = members[0]
-        subject = composed_spelling({row["subject"] for row in members})
-        object_ = composed_spelling({row["object"] for row in members})
+        subject, object_ = spelling[key[0]], spelling[key[2]]
         if subject == base["subject"] and object_ == base["object"]:
             unique.append(base)
         else:
