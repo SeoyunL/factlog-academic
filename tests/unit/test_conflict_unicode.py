@@ -501,6 +501,54 @@ class TestFoldingThatResolvesAConflict:
         assert "single facts/accepted.dl atom" in out
         assert "separate atom" not in out
 
+    def test_alias_merged_rows_keep_the_separate_atom_wording(self, monkeypatch, capsys):
+        # PIN. Grouping canonicalizes the relation through relation-aliases.md;
+        # common.engine_atom_key keeps it verbatim. So these two rows are ONE
+        # group here and TWO atoms in accepted.dl (measured: the compile log
+        # reports `engine facts: 2 / 2` and the file carries both
+        # relation("삼성","CEO",…) and relation("삼성","대표",…)). Claiming a
+        # single atom tells the reader the duplicate is already gone and they
+        # leave the sources unmerged. main's older wording was RIGHT on exactly
+        # this input.
+        facts = [
+            _fact("삼성", "CEO", _nfc("이재용")),
+            _fact("삼성", "대표", _nfd("이재용")),
+        ]
+        rc = _run_main(monkeypatch, facts, {"대표"}, None, {"CEO": "대표"})
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "separate atom" in out
+        assert "single facts/accepted.dl atom" not in out
+        # and it names the cause, so the reader knows what to unify
+        assert "relation spelling" in out
+
+    def test_atom_count_is_the_gate_not_the_presence_of_aliases(self, monkeypatch, capsys):
+        # PIN, the other branch. A relation-aliases.md file exists and this
+        # relation participates in it, but both rows are written under the SAME
+        # relation spelling, so they really are one atom. Gating on "aliases are
+        # configured" instead of on the atom count would downgrade this true
+        # message to the false one.
+        facts = [
+            _fact("삼성", "대표", _nfc("이재용")),
+            _fact("삼성", "대표", _nfd("이재용")),
+        ]
+        rc = _run_main(monkeypatch, facts, {"대표"}, None, {"CEO": "대표"})
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "single facts/accepted.dl atom" in out
+        assert "separate atom" not in out
+
+    def test_object_relations_channel_records_the_raw_relation(self):
+        facts = [
+            _fact("삼성", "CEO", _nfc("이재용")),
+            _fact("삼성", "대표", _nfd("이재용")),
+        ]
+        scan = check_conflicts.collect_conflicts(facts, {"대표"}, {}, {"CEO": "대표"})
+        assert scan.conflicts == {}
+        rels = scan.object_relations[("삼성", "대표")]
+        assert rels[_nfc("이재용")] == ["CEO"]
+        assert rels[_nfd("이재용")] == ["대표"]
+
     def test_collect_records_the_resolved_group_outside_conflicts(self):
         raws = [_nfc("한국대학교"), _nfd("한국대학교")]
         facts = [_fact("연구소", "소속", raws[0]), _fact("연구소", "소속", raws[1])]
