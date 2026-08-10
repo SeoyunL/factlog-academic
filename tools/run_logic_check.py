@@ -154,11 +154,13 @@ def query_error(label: str, line: str) -> str | None:
     report cannot call a line an error and answer it in the same run.
 
     Message wording is the gate's, with the offending line appended — the
-    convention every other error in this module follows.
+    convention every other error in this module follows, ``one_line`` included:
+    the appended text is the RAW query line, not a decoded value, and the raw
+    line is its own carrier (see ENGINE_FAILED_STATUS_LINE).
     """
     args = query_args(line)
     message = query_arity_error(label, args) or query_shape_error(label, args)
-    return f"{message}: {line}" if message else None
+    return f"{message}: {one_line(line)}" if message else None
 
 
 def validate_query(
@@ -183,14 +185,16 @@ def validate_query(
     warnings: list[str] = []
     predicate = line.split("(", 1)[0]
     if predicate not in QUERY_PREDICATES and predicate not in policy_query_predicates:
-        errors.append(f"query unknown predicate: {line}")
+        errors.append(f"query unknown predicate: {one_line(line)}")
         return errors, warnings
     if not line.endswith("?"):
-        errors.append(f"query must end with ?: {line}")
+        errors.append(f"query must end with ?: {one_line(line)}")
     if predicate == "review_required":
         constants = quoted_constants(line)
         if len(constants) != 1:
-            errors.append(f"review_required must include the original question string: {line}")
+            errors.append(
+                f"review_required must include the original question string: {one_line(line)}"
+            )
         return errors, warnings
     if predicate in policy_query_predicates:
         policy_error = query_error("policy query", line)
@@ -362,7 +366,7 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
                 bindings.append(f"{arg}={one_line(value)}")
         values.append(", ".join(bindings) if bindings else ", ".join(one_line(v) for v in row))
     suffix = "; " + "; ".join(values) if values else ""
-    echo = f" (query: {line})" if any(is_quoted_string(arg) for arg in args) else ""
+    echo = f" (query: {one_line(line)})" if any(is_quoted_string(arg) for arg in args) else ""
     return f"{predicate} results{echo}: {len(rows)} rows{suffix}"
 
 
@@ -480,7 +484,9 @@ def evaluate_queries(
             # policy echo this is unconditional — count has no "Policy evaluation:"
             # extent line for a variable-only query to be read against, and a
             # dropped line misaligns every shape equally.
-            results.append(f"count results (query: {line}): {len(objects)} (distinct objects)")
+            results.append(
+                f"count results (query: {one_line(line)}): {len(objects)} (distinct objects)"
+            )
         elif predicate == "review_required":
             constants = quoted_constants(line)
             question = one_line(constants[0]) if constants else "(missing question)"
@@ -502,7 +508,7 @@ def evaluate_queries(
 #
 # A negative marker only works while "carries the marker" and "written by the
 # failure path" are the same set, and that is NOT free. This report interpolates
-# KB-derived text, and KB text reaches it through TWO decoders, each of which can
+# KB-derived text, and KB text reaches it through two decoders, each of which can
 # deliver a newline the file itself does not show:
 #
 #   - facts/candidates.csv — a quoted CSV field may span physical lines, so a
@@ -524,13 +530,34 @@ def evaluate_queries(
 # deadlock #338 removes, rebuilt out of KB content, and since the status fix
 # repeated by two consumers rather than one.
 #
+# There is a THIRD carrier, and it is not a decoder at all: the RAW query line.
+# Every error and echo in this module appends the offending line of
+# facts/query.dl verbatim, and `query_lines` splits that file with
+# `str.splitlines()`, which consumes line breaks and NOTHING else. NUL, ESC, DEL
+# and the C1 range ride through untouched inside one physical line. That cannot
+# forge the marker — a forged line needs a break, and a break is the one thing
+# splitlines already ate — but it is the same defect with a different victim:
+# `zz<ESC>[1A<ESC>[2Kerrors: 0 (all clear)(X)?` in query.dl produces a report
+# whose own header says `errors: 1` and whose Errors section, on the terminal
+# that SKILL.md Step 3 tells an operator to read it on, renders as
+# `errors: 0 (all clear)`. Measured before the wrapping went in. So the raw line
+# is wrapped at every site too, and the invariant below is about the report's
+# reader as much as its parser.
+#
 # `one_line` is what keeps the two sets equal, and it has to be at every site
-# where a DECODED value reaches a report line — the csv-side sites alone left
-# query.dl wide open. The claim to be careful with is the one this comment used
-# to make: not "no interpolated value can open a line" as a property of the
-# design, but "these call sites are wrapped", which is a property of a list and
-# stays true only while the list is complete. tests/unit pins one carrier per
-# decoder for that reason; a new interpolation site needs its own.
+# where a KB-derived value — decoded or raw — reaches a report line; the
+# csv-side sites alone left query.dl wide open. The claim to be careful with is
+# the one this comment used to make: not "no interpolated value can open a line"
+# as a property of the design, but "these call sites are wrapped", which is a
+# property of a list and stays true only while the list is complete. tests/unit
+# pins one carrier per decoder and one for the raw line; a new interpolation
+# site needs its own.
+#
+# Two sites deliberately interpolate WITHOUT `one_line`, and neither is an
+# omission: `policy_result_line` and the relation renderer print a query's
+# argument text (`f"{arg}=..."`) only after `_query_shape_error` has passed it,
+# and an arg that is not a quoted string must match `[A-Z_][A-Za-z0-9_]*` to get
+# there. Wrapping them would be a no-op on every value that can reach them.
 #
 # The cost of the negative marker is also that a report truncated inside its
 # first three lines would lose it and read as a success; _write_report closes
@@ -814,7 +841,11 @@ def build_report_text() -> str:
         report.extend(["Warnings:", *[f"- {item}" for item in warnings], ""])
     report.append("Policy evaluation:")
     policy_items = [
-        f"{predicate}: {len(inferred[predicate])} rows"
+        # one_line for the same reason the Policy Findings line above wraps the
+        # same value: a predicate name is generated from policy/logic-policy.dl,
+        # and leaving the one site unwrapped is the asymmetry that lets the next
+        # reader conclude the list is advisory.
+        f"{one_line(predicate)}: {len(inferred[predicate])} rows"
         for predicate in sorted(policy_query_predicates)
     ]
     report.extend([f"- {item}" for item in policy_items] or ["- no generated policy predicates"])
