@@ -2201,10 +2201,15 @@ def cmd_vocab(args: argparse.Namespace) -> int:
         # lines. Since #342 the ENGINE folds them into one atom, so this count
         # is candidate spellings and is deliberately NOT the engine's entity
         # count — a KB holding 한라산기지 in both forms lists 4 here where the
-        # engine has 2. Left raw because folding it means folding
-        # ``common.entity_set``, which is also the query-validation vocabulary
-        # (ask_router) and the path-node set; that is #213's chokepoint and a
-        # wider change than this. What is NOT acceptable is leaving the reader
+        # engine has 2. Folding this loop alone is trivial — it builds its own
+        # counter and calls nothing shared — and that is exactly why it is not
+        # done: the list would then no longer be the set ``common.entity_set``
+        # returns, which is what ``ask`` validates a query's entity arguments
+        # against and what the path-node set is built from, so this command
+        # would advertise a vocabulary the gate does not honour. Making the two
+        # agree means folding ``entity_set`` itself, which moves ask's query
+        # validation with it — #213's chokepoint, wider than this change. What
+        # is NOT acceptable is leaving the reader
         # unable to see why: label the normalization form on exactly the names
         # sharing a folded spelling with another, the same rule (and the same
         # three-valued-label caveat) the relation list below uses. A KB with no
@@ -2341,8 +2346,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         # into a single atom, so a KB with a name in two forms reads 2 here and 1
         # in accepted.dl. `vocab` labels the normalization form on such names;
         # this line is a total and cannot. Closing the gap means folding
-        # entity_set, which is also ask's query-validation vocabulary — #213's
-        # chokepoint, deliberately not touched here.
+        # `common.entity_set` itself: THIS call hands it explicit candidate rows
+        # and is not ask's vocabulary, but the function is the one ask validates
+        # a query's entity arguments through and the one the path-node set is
+        # built from, so folding it moves those — #213's chokepoint, deliberately
+        # not touched here.
         f"{len(common.allowed_relations(engine_rows))} relation(s) "
         f"({len(attr)} attribute, {len(sv)} single-valued declared)"
     )

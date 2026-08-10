@@ -1938,6 +1938,15 @@ def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     group's FIRST row, so first-occurrence still decides everything the fold does
     not.
 
+    Observability consequence, unchanged in kind and wider in reach now that the
+    pool is KB-wide: ``compile_facts`` prints ``source=`` from that first row
+    beside a triple the row may never have written, and the spelling can come
+    from a row in a different group entirely. The aggregate ``sources=N`` beside
+    it is the honest count (it is keyed on the atom); the single ``source=`` is a
+    sample, not the provenance of those exact bytes. Nothing downstream reads it
+    — ``ask`` renders ``source_paths`` from ``fact_signals`` — so this is a log
+    legibility matter, recorded rather than fixed.
+
     **Byte-invariance.** ``composed_spelling`` of a one-element set is that
     element, so a value the KB spells one way maps to itself and its row is
     yielded untouched — the same object, not a copy. A KB that spells every
