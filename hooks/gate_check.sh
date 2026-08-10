@@ -20,12 +20,25 @@
 #   program the engine refuses). Such a report states the cause and NOTHING
 #   about the KB, so for this predicate it counts as no report at all.
 #
+#   The marker is NEGATIVE, and that leaves ONE fail-open residue this predicate
+#   does not close: a report that CAN be read and carries no marker is treated as
+#   a completed run, whatever else is in it. An empty file, a report truncated by
+#   something other than this writer, or a text file some other tool left at that
+#   path all satisfy "NOT FAILED" and then open the gate on mtime alone
+#   (`touch facts/logic_report.txt` reproduces it, measured exit 0). It is the
+#   price of leaving every EXISTING report valid: a positive `status: ok` marker
+#   would invalidate tests/golden/logic_report.txt, examples/sample-kb, and every
+#   report already in a user's KB. run_logic_check's atomic replace covers
+#   factlog's own writer only. Everything else in this predicate is fail-closed;
+#   this one is not, deliberately, and #364 is where the two readers get one
+#   shared judgement.
+#
 #   ALLOW (exit 0) iff any of:
 #     A. TARGET is not an engine input; OR
 #     B. BOOTSTRAP: facts/logic_report.txt does NOT exist, or exists and is
-#        FAILED, AND TARGET does NOT yet exist on disk (this is the first
-#        creation of an engine input in a fresh KB, where no report of a
-#        completed run can possibly exist yet); OR
+#        FAILED, AND TARGET does NOT yet exist on disk (the first creation of
+#        this engine input, with no report of a completed run standing over it);
+#        OR
 #     C. FRESH: facts/logic_report.txt EXISTS, is NOT FAILED, and is newer than
 #        (>=) the most recently modified existing engine input (accepted.dl /
 #        query.dl).
@@ -769,16 +782,25 @@ query="${KB_ROOT}/facts/query.dl"
 # finding about the KB, so this gate treats it as no report: it neither
 # satisfies freshness nor cancels bootstrap.
 #
-# The match is on the WHOLE line, fixed-string (`-qxF`), against the constant
-# run_logic_check.ENGINE_FAILED_STATUS_LINE. `grep -q` returns 1 for no match
-# and 2 for an unreadable file; both mean "do not treat this as failed", which
-# is the permissive answer — but a file that cannot be read has already failed
-# `-f` at the call sites below, or is about to fail the mtime branch, so this
-# opens nothing the freshness predicate does not already close.
+# The match is a BYTE comparison of a WHOLE line against the constant
+# run_logic_check.ENGINE_FAILED_STATUS_LINE: the report is split on "\n", each
+# line has its trailing CRs removed, and a line is the marker iff it is equal to
+# it. No grep, no sed, no pattern — `_records_engine_failure` below reads the
+# file as bytes in Python and prints one of two tokens.
+#
+# A file that CANNOT BE READ is the third answer, not the permissive one. It
+# returns 2, and 2 denies (see the "CANNOT JUDGE" branch below). The argument
+# that used to stand here — that an unreadable report has already failed `-f` at
+# the call sites, or is about to fail the mtime branch, so nothing is opened — is
+# FALSE when measured: `-f` does not test readability and `stat` still answers,
+# so a chmod-000 report sailed through as "no marker" and the gate handed out
+# edit rights on engine inputs. That argument is what built the fail-open this
+# whole predicate was rewritten to remove; it is recorded here as the refuted
+# claim it is, so nobody restores it as a simplification.
 #
 # WHOLE line, not substring: the report interpolates KB text, and a value that
-# merely CONTAINS the marker must not deny — `grep -qF` here would let any KB
-# whose data mentions the marker lock its own engine inputs.
+# merely CONTAINS the marker must not deny — testing `marker in raw` would let
+# any KB whose data mentions the marker lock its own engine inputs.
 #
 # Trailing CRs are stripped first, because this predicate fails OPEN on a
 # mismatch. A report written with CRLF endings — which is what text-mode writing
@@ -860,10 +882,10 @@ if [ -f "$report" ]; then
   _records_engine_failure "$report" || report_verdict=$?
 fi
 
-# BOOTSTRAP (predicate branch B): a fresh KB has no report of a completed engine
-# run, and does not yet have the engine input being created. `factlog init`
-# seeds neither file, so the FIRST creation of facts/query.dl (or
-# facts/accepted.dl) cannot possibly be preceded by such a report. Allow it; the
+# BOOTSTRAP (predicate branch B): the engine input being created does not exist
+# yet, and no report of a completed run stands over it. `factlog init` seeds
+# neither file, so in a fresh KB the FIRST creation of facts/query.dl (or
+# facts/accepted.dl) cannot be preceded by such a report at all. Allow it; the
 # stale-guard takes over once a real report exists. We test the on-disk
 # existence of the *target* (not the path string) so this only relaxes the
 # genuine first-write case.
@@ -872,6 +894,17 @@ fi
 # /factlog check in a fresh KB — which fails, because facts/accepted.dl does not
 # exist yet — would drop a report into facts/ and thereby DENY the very first
 # creation of facts/query.dl, a write this gate has always allowed.
+#
+# That widening is what makes "fresh KB" the wrong name for this branch, and the
+# difference is a real state, not a hypothetical: with facts/accepted.dl compiled
+# and NO facts/query.dl, a report of a completed run CAN exist — and once the
+# engine breaks, /factlog check replaces it with a FAILED one and the first
+# creation of facts/query.dl is allowed here where origin/main denied it. That is
+# the intended trade (a broken engine must not make a KB unrecoverable through
+# the gated tools, and a file that does not exist cannot be stale against a
+# report), pinned by the bootstrap cases in tests/test_gate_check.sh. What the
+# branch actually rests on is the second clause: the target does not exist, so
+# there is nothing about it for a report to have been fresher than.
 # Verdict 2 (cannot judge) deliberately does NOT satisfy this branch: a report we
 # could not read is not evidence that this is a fresh KB, so the call falls
 # through to the deny below rather than being waved past as a first write.

@@ -499,7 +499,8 @@ def evaluate_queries(
 # describes a run in which THE ENGINE NEVER RAN. It is the whole discriminator
 # between "engine ran and found nothing" and "there is nothing to find out from
 # here", so it is matched as a whole line, byte for byte, on both sides. Change
-# it in one place only together with the other (`grep -qxF` in the gate).
+# it in one place only together with the other two: `_records_engine_failure` in
+# hooks/gate_check.sh and the same comparison in factlog/cli.py.
 #
 # The marker is NEGATIVE — a successful report carries no status line at all —
 # for one reason: the success report's text is a published contract
@@ -789,7 +790,22 @@ def main() -> None:
         # no facts/ to write into, and is not a statement about the engine.
         #
         # THE GUARANTEE IS "an exception out of build_report_text", NOT "any run
-        # in which the engine could not start". A run that dies before reaching
+        # in which the engine could not start", and it misses in BOTH directions.
+        #
+        # It over-labels. `run_wirelog` is only one statement inside
+        # build_report_text, so an exception from what follows it — the policy
+        # program, the query renderers, the report assembly — is written up as
+        # `status: engine-did-not-run` too, and that report's sentence "The engine
+        # did not run, so this report says NOTHING about the KB" is then false:
+        # the engine DID run. Deliberate, in this direction. The label decides
+        # whether the gate keeps denying, and "an engine result we could not
+        # finish rendering" is not a result the gate may act on either, so the
+        # conservative label is the safe one; `reason type:` carries the real
+        # classification for whoever reads the file. Narrowing the try to
+        # `run_wirelog` alone would trade a wrong word for a stale report, which
+        # is the whole defect #338 exists to remove.
+        #
+        # It also under-labels. A run that dies before reaching
         # this try still leaves the previous report standing, and one such path
         # is a real engine failure rather than a hypothetical: `common` guards
         # its `import pyrewire` with `except ImportError` ONLY, so an engine
@@ -826,6 +842,12 @@ def build_report_text() -> str:
     It is a separate function only so main can tell a report it could build from
     one it could not: everything here presumes ``run_wirelog`` returned, and the
     one caller turns any exception raised below into ``engine_failure_report``.
+
+    ANY exception, including one raised AFTER ``run_wirelog`` has returned. Such
+    a run is reported as `status: engine-did-not-run` even though the engine did
+    run — the label is deliberately conservative rather than accurate, because it
+    is what keeps the gate denying, and a report this module could not finish
+    building is not a result the gate may act on. See main's handler.
     """
     facts = load_accepted_facts()
     candidates = load_facts()
