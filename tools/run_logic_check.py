@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -614,6 +615,41 @@ def one_line(value: object) -> str:
     return repr(text) if any(ch in _FORBIDDEN_IN_LINE for ch in text) else text
 
 
+def _report_mode(out: Path) -> int:
+    """The permission bits facts/logic_report.txt must end up with.
+
+    `mkstemp` creates at 0600 and `os.replace` carries the SOURCE's mode onto
+    the destination, so without this the atomic write silently narrows the
+    report — measured 0644 on origin/main, 0600 here, on the SUCCESS path, every
+    run. That is not a cosmetic difference in this hook's company: an unreadable
+    report used to fall through to the mtime branch and be allowed, and now
+    hooks/gate_check.sh HARD DENIES it. Wherever the check and the gate run as
+    different UIDs — a devcontainer running the check as root, a CI stage that
+    switches user, a group-shared KB — 0600 turns into a blanket refusal of every
+    Write/Edit to facts/accepted.dl and facts/query.dl.
+
+    Two cases, and they are not the same rule:
+
+    - the report EXISTS: keep its mode. An operator who chmod'd it 0664 for a
+      shared KB did so deliberately, and `write_text` (what origin/main used)
+      never disturbed it. This is the case that matters, because it is the one a
+      cross-UID setup arrives in.
+    - it does NOT exist: 0666 masked by the process umask, which is exactly what
+      `open(..., "w")` would have produced. Read by setting and restoring the
+      umask, the only way to observe it; this module is single-threaded by the
+      time it writes, and nothing else creates a file inside that window.
+
+    Applied to the temp file BEFORE the replace, not to *out* after it, so no
+    reader can ever see the report at a mode it should not have.
+    """
+    try:
+        return stat.S_IMODE(out.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0o022)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
 def _write_report(text: str) -> None:
     """Put *text* in facts/logic_report.txt, atomically and with LF endings.
 
@@ -634,6 +670,15 @@ def _write_report(text: str) -> None:
     NOT common._atomic_write_text: same temp+replace shape, but that one writes
     in default text mode. Reusing it would reintroduce exactly the translation
     this pins against; the duplication is the difference.
+
+    KNOWN LIMITATION, and it is a behaviour change from origin/main: `mkstemp`
+    needs write permission on facts/ITSELF, where `write_text` needed it only on
+    the file. A KB with a read-only facts/ holding a writable logic_report.txt
+    used to complete a SUCCESSFUL check; here that raises PermissionError out of
+    main (measured: main exit 0, this exit 1 with a traceback). Not papered over
+    with an in-place fallback: the fallback would be a truncate-then-write in the
+    exact configuration nobody watches, which is the hazard the temp+replace
+    exists to remove. Make facts/ writable, or run the check somewhere it is.
     """
     out = FACTS_DIR / "logic_report.txt"
     # A per-run temp name, not a fixed "<name>.tmp": two checks running against
@@ -646,6 +691,7 @@ def _write_report(text: str) -> None:
     tmp = Path(tmp_name)
     try:
         tmp.write_text(text, encoding="utf-8", newline="\n")
+        os.chmod(tmp, _report_mode(out))
         os.replace(tmp, out)
     finally:
         if tmp.exists():
