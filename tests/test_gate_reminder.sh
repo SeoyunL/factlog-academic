@@ -422,10 +422,13 @@ run_case "CONTROL: parent-dir component must not be skipped like a dot — silen
 #
 # The bound is not a tuned wall-clock number, it is the timeout the plugin
 # actually ships in hooks.json. End to end through the hook, including its one
-# interpreter spawn: 0.69s for CASE 35 and 1.32s for CASE 35b against the 10s
-# limit, while the rewriting collapse takes SIGALRM on both shapes. Better than
-# 7x margin on the passing side and an overshoot on the failing side, so a
-# loaded host cannot flip either. The harness imposes no timeout of its own, so
+# interpreter spawn: 0.5-0.7s for CASE 35 and 1.1-1.3s for CASE 35b against the
+# 10s limit, while the rewriting collapse takes SIGALRM on both shapes. The
+# range is across two interpreters (3.11 and 3.14) — the spawn is the part that
+# moves, and quoting one figure would be reporting host load. Better than 7x
+# margin on the passing side even at the slow end, and an overshoot on the
+# failing side, so a loaded host cannot flip either. The harness imposes no
+# timeout of its own, so
 # without the alarm the old collapse would simply take 12s and PASS — which is
 # why these are written this way and not as plain run_cases.
 #
