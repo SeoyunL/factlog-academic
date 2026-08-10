@@ -942,3 +942,135 @@ class TestUseIsUnaffected:
         capsys.readouterr()
 
         assert factlog_config.read_root() == str(new.resolve())
+
+
+class TestAWriteFailureNamesOnlyWhatItChecked:
+    """One diagnosis for every ``OSError`` named a cause nobody had verified.
+
+    ``_write_root_or_explain`` turned the whole class into "something other than
+    a regular file is in the way — move or remove that path". With the config
+    *directory* unwritable (root-owned after an old ``sudo factlog setup``, or a
+    read-only mount) and ``config.json`` intact inside it, that sentence pointed
+    at the user's real config and told them to delete it: the recorded root and
+    ``lang`` gone, the directory still unwritable, the write still failing. The
+    loss #356 exists to prevent, invited by the message meant to prevent it.
+
+    The trailing "Nothing was changed" was false on the ``init --activate`` path
+    too — ``_init_kb`` has already scaffolded the KB by then.
+    """
+
+    @pytest.fixture()
+    def sealed(self, config_home):
+        """A good config inside a directory that cannot be written."""
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", "lang": "ko"}\n', encoding="utf-8")
+        path.parent.chmod(0o500)
+        yield path
+        path.parent.chmod(0o700)
+
+    @pytest.fixture(autouse=True)
+    def _not_root(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions, so nothing is unwritable")
+
+    def run_use(self, kb: Path, config_home: Path):
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env.pop("FACTLOG_ROOT", None)
+        return subprocess.run(
+            [sys.executable, "-m", "factlog", "use", str(kb)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, env=env, check=False,
+        )
+
+    def test_an_unwritable_directory_is_not_reported_as_a_blocked_config_path(
+        self, tmp_path, sealed, config_home
+    ):
+        kb = tmp_path / "scratch"
+        (kb / "sources").mkdir(parents=True)
+
+        proc = self.run_use(kb, config_home)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "other than a regular file" not in proc.stderr, (
+            f"asserted a cause it never checked; the config path holds a regular file: {proc.stderr}"
+        )
+        assert str(sealed.parent) in proc.stderr, (
+            f"the unwritable directory is what has to change, and is not named: {proc.stderr}"
+        )
+
+    def test_it_does_not_send_the_user_to_delete_their_config(
+        self, tmp_path, sealed, config_home
+    ):
+        """Following the old advice cost the root and the language, and fixed nothing."""
+        kb = tmp_path / "scratch"
+        (kb / "sources").mkdir(parents=True)
+        before = sealed.read_bytes()
+
+        proc = self.run_use(kb, config_home)
+
+        assert "move or remove" not in proc.stderr, proc.stderr
+        assert sealed.read_bytes() == before
+        assert "lang" in proc.stderr, (
+            f"the message does not say what deleting that file would cost: {proc.stderr}"
+        )
+
+    def test_init_activate_does_not_claim_nothing_was_changed(
+        self, tmp_path, sealed, config_home
+    ):
+        """``_init_kb`` has scaffolded the whole layout before the write is tried."""
+        kb = tmp_path / "newkb"
+
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env.pop("FACTLOG_ROOT", None)
+        proc = subprocess.run(
+            [sys.executable, "-m", "factlog", "init", "--activate", "--target", str(kb)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, env=env, check=False,
+        )
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert kb.joinpath("sources").is_dir(), "precondition: the KB layout is created first"
+        assert "Nothing was changed" not in proc.stderr, (
+            f"a KB was scaffolded at {kb} in the same run: {proc.stderr}"
+        )
+
+    def test_a_directory_at_the_config_path_still_names_that_path(self, tmp_path, config_home):
+        """GUARD: the one case the old sentence was right about keeps it."""
+        path = config_file(config_home)
+        path.mkdir(parents=True)
+        kb = tmp_path / "scratch"
+        (kb / "sources").mkdir(parents=True)
+
+        proc = self.run_use(kb, config_home)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "other than a regular file" in proc.stderr, proc.stderr
+        assert str(path) in proc.stderr, proc.stderr
+
+    @pytest.mark.parametrize(
+        "number", [pytest.param(28, id="ENOSPC"), pytest.param(2, id="ENOENT")]
+    )
+    def test_a_full_disk_or_a_lost_race_borrows_no_other_diagnosis(
+        self, tmp_path, config_home, monkeypatch, number
+    ):
+        """Neither is a blocked path nor a permission problem, so neither may say so."""
+        from factlog.common import FactlogError
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        config_file(config_home).parent.mkdir(parents=True, exist_ok=True)
+
+        def raise_oserror(_path):
+            raise OSError(number, os.strerror(number), str(factlog_config.config_path()))
+
+        monkeypatch.setattr(factlog_config, "write_root", raise_oserror)
+        with pytest.raises(FactlogError) as caught:
+            cli._write_root_or_explain("factlog use", tmp_path / "scratch")
+
+        message = str(caught.value)
+        assert "other than a regular file" not in message, message
+        assert "is not writable" not in message, message
+        assert os.strerror(number) in message, message
+

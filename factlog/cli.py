@@ -802,17 +802,68 @@ def _write_root_or_explain(command: str, target) -> None:
     put there deliberately is not this command's call. It reports which path
     blocks the write and what to do, and exits 1 through the normal
     ``FactlogError`` boundary instead of a stack trace.
+
+    The diagnosis is branched because a single one was worse than none. Every
+    ``OSError`` used to become "something other than a regular file is in the way
+    — move or remove that path": with an unwritable config *directory* (left root
+    owned by an old ``sudo factlog setup``, a read-only mount) and a perfectly
+    good ``config.json`` inside it, that named the user's real config file, and
+    following it deleted the recorded root and ``lang`` without making the
+    directory writable — the loss #356 exists to prevent, this time invited by
+    the message. So the non-regular-file claim is now made only when the path
+    really is one, ``EACCES``/``EROFS`` name the directory that cannot be written
+    and never suggest touching the config, and out-of-space or a losing race
+    stops at reporting the error rather than inventing a cause for it.
+
+    Each branch also checks the state it names rather than inferring it from the
+    errno alone — an ``EPERM`` from something other than directory permissions
+    would otherwise inherit the same unverified certainty the old single message
+    had. When nothing checks out, the error is reported and no cause is offered.
+
+    "Nothing was changed" is gone for the same reason: on the ``init --activate``
+    path ``_init_kb`` has already scaffolded the whole KB layout by the time this
+    runs. What holds in every branch is narrower — the write is staged in a
+    sibling temp file and swapped in, so a failure leaves the config path itself
+    exactly as it was — and that is now all the message claims.
     """
+    import errno
+    import os
+
     from factlog.common import FactlogError
 
     try:
         factlog_config.write_root(target)
     except OSError as exc:
+        path = factlog_config.config_path()
+        parent = path.parent
+        permission = exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS)
+        if path.exists() and not path.is_file():
+            cause = (
+                f"Something other than a regular file is at {path} — move or remove "
+                "that path, then re-run."
+            )
+        elif permission and parent.is_dir() and not os.access(parent, os.W_OK):
+            st = parent.stat()
+            detail = f"owner uid {st.st_uid}, mode {oct(st.st_mode & 0o777)}"
+            if exc.errno == errno.EROFS:
+                detail += ", read-only filesystem"
+            cause = (
+                f"The config directory {parent} is not writable ({detail}). Make it "
+                f"writable — {path.name} is not the obstacle, and deleting it would "
+                "drop the recorded root and lang without unblocking the write."
+            )
+        elif permission and not parent.is_dir():
+            cause = (
+                f"The directory {parent} does not exist and could not be created — "
+                "check write access on the nearest existing parent, then re-run."
+            )
+        elif exc.errno == errno.ENOSPC:
+            cause = f"The filesystem holding {parent} is out of space. Free some, then re-run."
+        else:
+            cause = "Re-run once that is resolved."
         raise FactlogError(
-            f"{command}: cannot write the active-KB config at "
-            f"{factlog_config.config_path()} ({exc.strerror or exc}). Something other "
-            "than a regular file is in the way — move or remove that path, then "
-            "re-run. Nothing was changed."
+            f"{command}: cannot write the active-KB config at {path} "
+            f"({exc.strerror or exc}). {cause} Nothing at that path was changed."
         ) from exc
 
 
