@@ -248,6 +248,28 @@ def _parse_merge(raws: set[str], unfolded_keys: dict[str, tuple]) -> list[str]:
     return sorted(_representative(members) for members in components.values())
 
 
+def _relation_map(by_object: dict[str, set[str]]) -> dict[str, list[str]]:
+    """Freeze ``{raw object: raw relation spellings}`` into sorted lists.
+
+    Same determinism argument as ``_variant_map``: the sets are built by
+    iterating rows, and this is a public field of ``ConflictScan``.
+    """
+    return {obj: sorted(relations) for obj, relations in sorted(by_object.items())}
+
+
+def _atom_count(members: list[str], relations: dict[str, list[str]]) -> int:
+    """How many ``accepted.dl`` atoms the canonically equivalent *members* become.
+
+    ``common.engine_atom_key`` is ``(NFC(subject), relation, NFC(object))``. Every
+    member of a fold class shares ``NFC(object)`` by definition, and they all sit
+    under one ``_fold(subject)`` bucket, so ``NFC(subject)`` is shared too. The
+    relation is the one component the compiler leaves verbatim while this module
+    canonicalizes it — so the atom count is exactly the number of distinct raw
+    relation spellings the members were written under.
+    """
+    return len({rel for member in members for rel in relations.get(member, ())})
+
+
 def _variant_map(groups: dict[tuple, set[str]]) -> dict[str, list[str]]:
     """Return ``{reported object: sorted raw objects}`` for *groups*, key-sorted.
 
@@ -405,6 +427,11 @@ class ConflictScan(NamedTuple):
       rows sit in **separate** pairs: a contradiction between them is invisible
       to this module, and at exit 0 nothing else in the run mentions the rows at
       all. Keyed on all pairs, not only conflicting ones, for that reason.
+    * *object_relations* — ``{reported object: sorted raw relation spellings}``
+      per key: the relation names the rows behind each raw object were actually
+      written under. Same key set as *object_variants*. Grouping canonicalizes
+      the relation and ``common.engine_atom_key`` does not, so a group here can
+      be more than one atom there; this is what lets the disclosure say which.
     """
 
     conflicts: dict[tuple[str, str], list[str]]
@@ -412,6 +439,7 @@ class ConflictScan(NamedTuple):
     object_variants: dict[tuple[str, str], dict[str, list[str]]]
     parse_merges: dict[tuple[str, str], dict[str, list[str]]]
     relation_variants: dict[tuple[str, str], list[str]]
+    object_relations: dict[tuple[str, str], dict[str, list[str]]]
 
 
 def collect_conflicts(
@@ -502,8 +530,15 @@ def collect_conflicts(
     **The relation axis is NOT untouched — do not read #342 as leaving it
     clean.** Grouping here is verbatim and ``engine_atom_key`` leaves the
     relation raw, so *those two* split two spellings of one relation the same
-    way. That agreement is only between this module and ``relation/3``. Two
-    places downstream already fold the relation, and they did before #342:
+    way. That agreement is only between this module and ``relation/3``, and only
+    while no alias is declared: ``_canonicalize`` collapses the relation axis
+    here whenever ``policy/relation-aliases.md`` names it, so
+    ``삼성 CEO NFC(이재용)`` and ``삼성 대표 NFD(이재용)`` under ``CEO -> 대표``
+    are ONE group here and **two** atoms in ``accepted.dl`` — measured. That is
+    why ``_report_resolved_merges`` counts atoms with ``_atom_count`` instead of
+    asserting the collapse: the merge this module made is not always a merge the
+    compiler reproduces. Two places downstream already fold the relation, and
+    they did before #342:
 
     * ``common.canonical_atoms`` NFC-folds the relation before the alias lookup,
       so an aliased pair emits **two** ``relation/3`` atoms and **one**
@@ -562,6 +597,12 @@ def collect_conflicts(
     unfolded: dict[tuple[str, str], dict[str, tuple]] = {}
     # Same pair -> set of raw subject spellings folded into it.
     raw_subjects: dict[tuple[str, str], set[str]] = {}
+    # Same pair -> raw object -> the raw relation spellings written for it.
+    # Grouping canonicalizes the relation; ``common.engine_atom_key`` keeps it
+    # verbatim, so alias-merged rows are one group here and two atoms there.
+    # Per raw object, because the disclosure has to gate its "single atom" claim
+    # on the rows behind the spelling group it is printing, not on the pair.
+    object_relations: dict[tuple[str, str], dict[str, set[str]]] = {}
     # (folded subject, folded relation) -> raw relation spellings seen, and the
     # raw subjects under them. Grouping does not fold the relation axis, so these
     # rows sit in separate pairs and never meet; the disclosure is what says so.
@@ -586,12 +627,14 @@ def collect_conflicts(
         by_key.setdefault(pair, {}).setdefault(key, set()).add(obj)
         unfolded.setdefault(pair, {})[obj] = _group_key_unfolded(obj, spec)
         raw_subjects.setdefault(pair, set()).add(row["subject"])
+        object_relations.setdefault(pair, {}).setdefault(obj, set()).add(relation)
         split = (pair[0], _fold(canon))
         raw_relations.setdefault(split, set()).add(canon)
         relation_subjects.setdefault(split, set()).add(row["subject"])
     conflicts: dict[tuple[str, str], list[str]] = {}
     subject_variants: dict[tuple[str, str], list[str]] = {}
     object_variants: dict[tuple[str, str], dict[str, list[str]]] = {}
+    reported_relations: dict[tuple[str, str], dict[str, list[str]]] = {}
     parse_merges: dict[tuple[str, str], dict[str, list[str]]] = {}
     for pair, groups in by_key.items():
         subjects = raw_subjects[pair]
@@ -614,6 +657,7 @@ def collect_conflicts(
             if merged or any(_fold_classes(sorted(raws)) for raws in groups.values()):
                 reported = (_representative(subjects), pair[1])
                 object_variants[reported] = _variant_map(groups)
+                reported_relations[reported] = _relation_map(object_relations[pair])
                 if merged:
                     parse_merges[reported] = merged
             continue
@@ -625,6 +669,7 @@ def collect_conflicts(
         conflicts[reported] = sorted(objects)
         subject_variants[reported] = sorted(subjects)
         object_variants[reported] = objects
+        reported_relations[reported] = _relation_map(object_relations[pair])
         # A pair that still contradicts can ALSO hold a fold-enabled parse merge:
         # three values collapse to two, one of them merged only because folding
         # let a typed literal parse. The CONFLICT line then names the survivors
@@ -647,7 +692,12 @@ def collect_conflicts(
         if len(names) > 1
     }
     return ConflictScan(
-        conflicts, subject_variants, object_variants, parse_merges, relation_variants
+        conflicts,
+        subject_variants,
+        object_variants,
+        parse_merges,
+        relation_variants,
+        reported_relations,
     )
 
 
@@ -735,6 +785,20 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     treated them as one, which is worth saying whether or not anything
     downstream still doubles.
 
+    **The equivalence message is gated on the atom count, not assumed.** "They
+    collapse into a single ``accepted.dl`` atom" is a claim about the compiler,
+    and this module's group is not the compiler's key: grouping canonicalizes the
+    relation through ``policy/relation-aliases.md`` while ``engine_atom_key``
+    keeps it verbatim. Under ``CEO -> 대표``, ``삼성 CEO NFC(이재용)`` and
+    ``삼성 대표 NFD(이재용)`` are one group here and two atoms there — measured,
+    with the advisory printing "single atom" at exit 0 while ``accepted.dl``
+    carried both. The reader was told the duplicate was already gone and left the
+    sources unmerged, which is the checker-vs-engine disagreement this whole
+    change exists to close. So ``_atom_count`` decides which sentence is printed,
+    and where the rows really are two atoms the message keeps the older "separate
+    atom" conclusion — true on that input before this change and still true —
+    with the accurate reason, which is the relation axis and not the raw triple.
+
     **Two message classes, because folding merges values two ways.** Canonical
     equivalence is one; making a typed literal parse is the other, and calling
     the second "canonically equivalent" would be a false statement about the
@@ -752,15 +816,19 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
     the exit-0 path where stderr would be dropped.
     """
     resolved = sorted(k for k in scan.object_variants if k not in scan.conflicts)
-    lines = []
+    lines: list[str] = []
+    split_lines: list[str] = []
     for key in resolved:
         subject, relation = key
+        relations = scan.object_relations.get(key, {})
         for obj, raws in sorted(scan.object_variants[key].items()):
             for members in _fold_classes(raws):
-                lines.append(
+                line = (
                     f"    '{relation}' on '{subject}' value {obj!r} spellings: "
                     f"{_spellings(members)}"
                 )
+                bucket = lines if _atom_count(members, relations) <= 1 else split_lines
+                bucket.append(line)
     if lines:
         print(
             f"check_conflicts: {len(lines)} spelling group(s) written in several Unicode "
@@ -775,6 +843,23 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
             "one. They still differ "
             "byte-wise in sources/ and facts/candidates.csv, where each one is its own row. "
             "Unify them at the source and re-collect."
+        )
+    if split_lines:
+        print(
+            f"check_conflicts: {len(split_lines)} spelling group(s) merged into one value "
+            "here, but written under more than one relation spelling, so they do NOT "
+            "collapse downstream:"
+        )
+        for line in split_lines:
+            print(line)
+        print(
+            "  These spellings are canonically equivalent, so this check treats them as "
+            "one value — it canonicalizes the relation through "
+            "policy/relation-aliases.md before grouping. The engine atom does not: it "
+            "keys the relation verbatim, so each relation spelling still enters "
+            "facts/accepted.dl as a separate atom and the duplicate survives this "
+            "run's exit 0. Unify the relation spelling as well as the value at the "
+            "source and re-collect."
         )
     # Every pair with a parse merge, not just the ones that ended up conflict-free.
     # A pair can merge two notations under the fold and still contradict on a
