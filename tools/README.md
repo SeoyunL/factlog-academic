@@ -29,7 +29,8 @@ Every script here resolves its KB root with the same precedence as the CLI:
 
 `validate.py` takes the root as a positional argument instead of a flag; the
 positional occupies the first slot. The active-KB config is what `factlog use
-<kb>` / `factlog init --target <kb>` records, so with no flag and no
+<kb>` records — `init`/`setup` record their target only while the config holds
+nothing yet, or when asked with `--activate` — so with no flag and no
 `$FACTLOG_ROOT` these scripts operate on the active KB from any directory.
 
 ## Intentionally absent scripts
