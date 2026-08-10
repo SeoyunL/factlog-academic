@@ -676,8 +676,23 @@ def _activated_line(target) -> str:
     ``setup`` the same string also goes out alone as a summary ``done:`` line,
     with nothing beside it. So the promise is dropped when it is not true, and
     the notes say where flagless commands actually go.
+
+    The condition is computed, not read back. This line is rendered by
+    ``_plan_activation``, *before* the write it confirms, so asking
+    ``resolve_root`` there answers about the config as it stands now. On a true
+    first run — no config, no ``$FACTLOG_ROOT`` — that resolver falls through to
+    cwd, the comparison missed, and the promise was dropped in the one case where
+    it was about to hold: the exact inverse of the rule above. What the resolver
+    *will* say once the config records *target* is decided by rank 2 alone —
+    ``$FACTLOG_ROOT`` when it is set, otherwise the value being written.
     """
-    if factlog_config.resolve_root()[0] == str(target):
+    import os
+    from pathlib import Path
+
+    recorded = str(Path(target).expanduser().resolve())
+    env = os.environ.get("FACTLOG_ROOT")
+    effective = str(Path(env).expanduser().resolve()) if env else recorded
+    if effective == recorded:
         return f"active-KB config set to {target} (ingest/ask/sync default here from any directory)"
     return f"active-KB config set to {target}"
 

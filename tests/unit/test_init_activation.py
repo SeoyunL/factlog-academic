@@ -1074,3 +1074,67 @@ class TestAWriteFailureNamesOnlyWhatItChecked:
         assert "is not writable" not in message, message
         assert os.strerror(number) in message, message
 
+
+class TestTheDefaultHerePromiseFollowsTheWrite:
+    """The clause was dropped in the one case where it was about to be true.
+
+    ``_activated_line`` asked ``resolve_root`` from inside ``_plan_activation``,
+    i.e. *before* the write it confirms. On a true first run — no config, no
+    ``$FACTLOG_ROOT`` — the resolver answers cwd, the comparison missed, and
+    ``(ingest/ask/sync default here from any directory)`` went missing from the
+    first-run line, while ``factlog where --porcelain`` on the very next line
+    already agreed with it. The docstring's rule is "drop the promise when it is
+    not true"; the code was dropping it when it was.
+
+    No test, doc or skill file pinned the string, so all of it stayed green.
+    """
+
+    def test_a_true_first_run_keeps_the_promise(self, tmp_path, config_home):
+        kb = tmp_path / "wiki"
+
+        proc = run_init("--target", str(kb), config_home=config_home)
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env.pop("FACTLOG_ROOT", None)
+        porcelain = subprocess.run(
+            [sys.executable, "-m", "factlog", "where", "--porcelain"],
+            cwd=str(tmp_path), capture_output=True, text=True, env=env, check=False,
+        ).stdout.strip()
+
+        assert porcelain == resolved(kb), "precondition: the promise is true here"
+        assert "(ingest/ask/sync default here from any directory)" in proc.stdout, (
+            f"dropped the promise in the case that makes it true: {proc.stdout}"
+        )
+
+    def test_setup_says_it_too_on_a_first_run(self, tmp_path, config_home, monkeypatch, capsys):
+        """`setup` prints the same string alone as a summary ``done:`` line."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+        monkeypatch.setattr(cli, "_pyrewire_ok", lambda: True)
+        monkeypatch.setattr(cli, "_run_doctor_checks", lambda *a, **k: True)
+        kb = tmp_path / "wiki"
+
+        assert cli.main(["setup", "--target", str(kb)]) == 0
+        out = capsys.readouterr().out
+
+        assert "(ingest/ask/sync default here from any directory)" in out, out
+
+    def test_the_promise_is_still_dropped_when_the_environment_outranks_it(
+        self, tmp_path, config_home
+    ):
+        """GUARD: the rule the docstring states, in the direction it already held."""
+        kb = tmp_path / "wiki"
+        env_kb = tmp_path / "envkb"
+        env_kb.mkdir()
+
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        env["FACTLOG_ROOT"] = str(env_kb)
+        proc = subprocess.run(
+            [sys.executable, "-m", "factlog", "init", "--target", str(kb)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, env=env, check=False,
+        )
+
+        assert "default here from any directory" not in proc.stdout, proc.stdout
