@@ -57,7 +57,7 @@ only four ways `init`/`setup` treat the active-KB setting:
 
 ```text
 factlog init: created /tmp/scratch
-factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT recorded there
+factlog init: active-KB root unchanged: /Users/me/wiki — /tmp/scratch is not recorded in the config
   to record it in the config: factlog use /tmp/scratch   (or re-run with --activate)
 ```
 
@@ -116,8 +116,7 @@ with nothing: a strictly worse loss than a root pointing at an unmounted volume,
 which at least survives as text.
 
 ```text
-factlog init: active-KB config at /Users/me/.config/factlog/config.json could not be read
-  — leaving it untouched; /tmp/scratch was created but is NOT recorded there
+factlog init: active-KB config at /Users/me/.config/factlog/config.json could not be read — leaving its bytes untouched; /tmp/scratch is not recorded in it
   repair that file, or overwrite it deliberately: factlog use /tmp/scratch
 ```
 
@@ -147,7 +146,7 @@ really is what you want. An empty directory and an existing KB have nothing to
 lose, so both proceed.
 
 ```text
-factlog init: no --target given; using /Users/me/wiki (from the active KB config)
+factlog init: no --target given; using /Users/me/wiki (from the active-KB config)
 ```
 
 ## Checking which KB won

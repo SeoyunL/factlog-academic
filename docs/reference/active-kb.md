@@ -64,7 +64,7 @@ factlog provenance Acme uses FastAPI   # trace a fact to its source(s)
 
 ```text
 factlog init: created /tmp/scratch
-factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was created but is NOT recorded there
+factlog init: active-KB root unchanged: /Users/me/wiki — /tmp/scratch is not recorded in the config
   to record it in the config: factlog use /tmp/scratch   (or re-run with --activate)
 ```
 
@@ -118,8 +118,7 @@ factlog init: active-KB config unchanged: /Users/me/wiki — /tmp/scratch was cr
 가리키는 경우보다 더 되돌리기 어렵습니다.
 
 ```text
-factlog init: active-KB config at /Users/me/.config/factlog/config.json could not be read
-  — leaving it untouched; /tmp/scratch was created but is NOT recorded there
+factlog init: active-KB config at /Users/me/.config/factlog/config.json could not be read — leaving its bytes untouched; /tmp/scratch is not recorded in it
   repair that file, or overwrite it deliberately: factlog use /tmp/scratch
 ```
 
@@ -145,7 +144,7 @@ KB가 아니라면 — `init` 은 만들지 않고 멈춥니다. 정말 그 자�
 잃을 것이 없으므로 그대로 진행합니다.
 
 ```text
-factlog init: no --target given; using /Users/me/wiki (from the active KB config)
+factlog init: no --target given; using /Users/me/wiki (from the active-KB config)
 ```
 
 ## 어느 KB가 이겼는지 확인하기
