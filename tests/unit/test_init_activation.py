@@ -803,6 +803,40 @@ class TestSetup:
             f"the way to record it never reaches the summary block: {summary_block}"
         )
 
+    def test_a_decision_not_to_write_is_not_a_done_action(self, tmp_path, config_home, capsys):
+        """`actions` are printed as ``done:``, so declining belongs in the notes.
+
+        The rule is stated in the comment beside ``notes`` — nothing setup did not
+        do goes into ``actions`` — and it was applied to the hint and the env note
+        but not to the summary they hang off, so leaving the config alone was
+        announced as ``done: active-KB root unchanged: …``.
+        """
+        active = tmp_path / "wiki"
+        active.mkdir()
+        write_pointer(config_home, active)
+        scratch = tmp_path / "scratch"
+
+        assert cli.main(["setup", "--target", str(scratch)]) == 0
+        out = capsys.readouterr().out
+        summary_block = out.split("=== factlog setup: summary ===", 1)[-1]
+        summary_block = summary_block.split("\nfactlog setup complete", 1)[0]
+
+        assert "done: active-KB root unchanged" not in summary_block, (
+            f"claimed credit for the write it declined: {summary_block}"
+        )
+        assert f"→ active-KB root unchanged: {active}" in summary_block, (
+            f"the untouched value dropped out of the summary entirely: {summary_block}"
+        )
+
+    def test_a_first_run_write_is_still_a_done_action(self, tmp_path, config_home, capsys):
+        """GUARD: the write setup really performs keeps its ``done:``."""
+        kb = tmp_path / "wiki"
+
+        assert cli.main(["setup", "--target", str(kb)]) == 0
+        out = capsys.readouterr().out
+
+        assert f"done: active-KB config set to {kb}" in out, out
+
     def test_closing_line_stays_generic_when_the_target_is_recorded(self, tmp_path, config_home, capsys):
         """GUARD: the first-run wording must survive the change above."""
         kb = tmp_path / "wiki"

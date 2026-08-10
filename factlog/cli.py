@@ -2495,13 +2495,20 @@ def cmd_setup(args: argparse.Namespace) -> int:
     activation, activation_notes = _apply_activation(
         "factlog setup", target, getattr(args, "activate", None), defer_reach=True
     )
-    actions.append(activation.summary)
+    # The summary is a "done:" action only when there *was* a write. The rule the
+    # next comment states — `actions` are prefixed "done:", so nothing setup
+    # declined to do belongs there — was applied to the hint and the notes but not
+    # to the line they hang off, and `done: active-KB root unchanged: …` announced
+    # leaving the config alone as an accomplishment.
+    if activation.write:
+        actions.append(activation.summary)
     # The hint and the notes travel with the summary into the block the user
     # actually reads at the end. Printed only at the moment of the decision, they
     # sat twenty-odd lines above the closing "next step" line with nothing to
     # recall them. They are kept out of `actions` because those are prefixed
     # "done:" and none of this is something setup did.
-    notes: list[str] = ([activation.hint] if activation.hint else []) + activation_notes
+    notes: list[str] = ([] if activation.write else [activation.summary])
+    notes += ([activation.hint] if activation.hint else []) + activation_notes
     # Optional narration language: applied only when --lang is given, so an existing
     # language survives a re-run of setup that omits the flag (the root write above,
     # when it happens, preserves it). Uses the shared validate/apply path, so an
