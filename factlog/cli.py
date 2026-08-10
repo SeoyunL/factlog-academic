@@ -1719,8 +1719,10 @@ def cmd_vocab(args: argparse.Namespace) -> int:
 
 # The whole line run_logic_check.py writes into facts/logic_report.txt when the
 # engine never ran (#338). Matched byte for byte against a whole line, the same
-# way hooks/gate_check.sh matches it (`grep -qxF`); the constant is also spelled
-# out in tools/run_logic_check.py as ENGINE_FAILED_STATUS_LINE. All three are one
+# way hooks/gate_check.sh matches it — its `_records_engine_failure` splits the
+# report on "\n", strips trailing CRs and compares for equality, which is what
+# the reader below does; the constant is also spelled out in
+# tools/run_logic_check.py as ENGINE_FAILED_STATUS_LINE. All three are one
 # vocabulary and change together. Its natural home is factlog/common.py, next to
 # the other shared report vocabulary — worth hoisting when something else needs
 # it, and not worth a third reader having to rediscover the coupling meanwhile.
