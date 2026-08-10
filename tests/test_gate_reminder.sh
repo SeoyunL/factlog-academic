@@ -232,20 +232,37 @@ fi
 # where `${path##*/}` hands back the whole string, so the matcher splits on both
 # separators.
 #
-# These pin BOTH backslash splits, and they run on any host: the matcher never
+# These pin the backslash handling, and they run on any host: the matcher never
 # touches the filesystem, so a backslash payload behaves identically on POSIX.
 # An earlier comment in the hook claimed the opposite — that these "cannot be
-# pinned from a POSIX host" — and justified shipping two untested lines with it.
-# The suite being green with either line deleted meant the suite had no case,
-# not that no case was possible.
+# pinned from a POSIX host" — and justified shipping untested lines with it.
+# The suite being green with the backslash handling deleted meant the suite had
+# no case, not that no case was possible.
 #
-# Measured against the whole suite: deleting `base="${base##*\\}"` fails all six
-# backslash-bearing cases (17, 18, 19 and the normalisation cases 25-27), since
-# every one of them reaches its BASENAME through a backslash. Deleting
-# `pdir="${pdir##*\\}"` fails four — 17 and 25-27, whose PARENT is reached
-# through a backslash — while case 18's parent is already reached through a
-# forward slash and case 19 has no parent separator at all, so those two
-# survive it.
+# HOW TO REPRODUCE THE NUMBERS BELOW. The matcher does not have a separate
+# "strip a backslash" line to delete — it names both separators in four bracket
+# sets. The equivalent mutation is to revert one bracket set at a time to the
+# forward-slash-only form it had before Git Bash was supported, and run the
+# whole suite. Measured on bash 3.2.57, one set at a time:
+#
+#   hooks/gate_reminder.sh line          reverted to        red  cases
+#   -----------------------------------  -----------------  ---  --------------------
+#   base="${path##*[/\\]}"               ${path##*/}          8  17 18 19 25 26 27 29 32
+#   tail="${parent##*[!/\\.]}"           ${parent##*[!/.]}   10  17 18 19 25 26 27 29 30 31 32
+#   [/\\]*) case arm on $tail            [/]*)                8  17 18 19 25 26 27 30 31
+#   pdir="${parent##*[/\\]}"             ${parent##*/}        6  17 25 26 27 30 31
+#
+# The basename set takes every case that reaches its BASENAME through a
+# backslash; the pdir set takes every case that reaches its PARENT through one,
+# which is why case 18 (parent reached through a forward slash) and case 19 (no
+# parent separator at all) survive that one. The tail set takes all ten
+# backslash-bearing cases, because a backslash it does not recognise as part of
+# the tail is left in `parent` and defeats the pdir comparison downstream.
+#
+# The first three numbers are the 8 / 10 / 6 the matcher's own comment in
+# hooks/gate_reminder.sh reports for its three expansions; the case arm is a
+# fourth site and is listed here because it is a separate edit someone could
+# make on its own.
 # ---------------------------------------------------------------------------
 run_case "Git Bash: all-backslash path to the engine input — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\query.dl"}}' fire
