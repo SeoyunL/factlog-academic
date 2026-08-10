@@ -391,43 +391,84 @@ run_case "CONTROL: parent-dir component must not be skipped like a dot — silen
   '{"tool_name":"Write","tool_input":{"file_path":"/facts/../accepted.dl"}}' silent
 
 # ---------------------------------------------------------------------------
-# CASE 35: the loop-free matcher, pinned against hooks.json's OWN timeout.
+# CASES 35 and 35b: the cost of a long separator run, pinned against
+# hooks.json's OWN timeout.
 #
 # A rewriting collapse was superlinear in the number of repeated separators:
-# measured 3.6s at 4000 and 11.7s at 6000, past hooks.json's `timeout: 10`, so
-# Claude Code kills the hook and NO nudge appears — a silent non-firing, the one
-# direction this hook must not fail in, and the fallback never runs either. The
-# loop-free reader is flat: 0.036s at 6000, 0.046s at 20000.
+# measured 3.5s at N=4000 and 12.0s at N=6000, past hooks.json's `timeout: 10`,
+# so Claude Code kills the hook and NO nudge appears — a silent non-firing, the
+# one direction this hook must not fail in, and the fallback never runs either.
 #
-# The bound here is not a tuned wall-clock number, it is the timeout the plugin
-# actually ships in hooks.json. That is what makes this robust rather than
-# flaky: the margin is 0.05s against a 10s limit on one side and 11.7s on the
-# other, so a loaded host cannot flip it. The harness does not otherwise impose
-# a timeout, so without this the old loop would simply take 12s and PASS —
-# which is exactly why the case is written this way and not as a plain
-# run_case.
+# WHERE THE RUN SITS DECIDES THE COST, so both cases put it in the expensive
+# place. The matcher no longer rewrites, but `${parent##*[!/\\.]}` is still a
+# greedy `##` and bash walks prefixes longest-first. If another component
+# follows the run, the match is found near the full length and the scan is
+# effectively linear; if the run sits immediately BEFORE the basename, every
+# prefix fails and the scan is quadratic. Measured on bash 3.2.57, matcher
+# only, seconds per call:
+#
+#   N        "/kb" + run + "facts/accepted.dl"   "/kb/facts" + run + "accepted.dl"
+#   1000     0.0007                              0.013
+#   6000     0.0035                              0.436
+#   20000    0.011                               4.771
+#   32000    0.018                              12.239
+#
+# The left column is flat at any N, so a case built on it cannot go red however
+# bad the per-character cost gets. An earlier version of CASE 35 used exactly
+# that shape, which is why both cases now use the right-hand one.
+#
+# CASE 35b is the same shape with a "/." run: two characters per repetition and
+# so about four times the work at equal N — 1.011s against 0.204s at N=4000.
+#
+# The bound is not a tuned wall-clock number, it is the timeout the plugin
+# actually ships in hooks.json. End to end through the hook, including its one
+# interpreter spawn: 0.69s for CASE 35 and 1.32s for CASE 35b against the 10s
+# limit, while the rewriting collapse takes SIGALRM on both shapes. Better than
+# 7x margin on the passing side and an overshoot on the failing side, so a
+# loaded host cannot flip either. The harness imposes no timeout of its own, so
+# without the alarm the old collapse would simply take 12s and PASS — which is
+# why these are written this way and not as plain run_cases.
+#
+# N is chosen to catch the collapse, not for realism: inside PATH_MAX the cost
+# of either shape is negligible (0.013s at N=1000). What these defend is the
+# bound the matcher's comment in hooks/gate_reminder.sh asserts, not a timeout
+# reachable in production.
 #
 # `perl -e 'alarm N; exec @ARGV'` is the timeout: /usr/bin/perl is present on
 # macOS and Linux, and `timeout(1)` is not on macOS (measured — it is coreutils,
 # not BSD).
 # ---------------------------------------------------------------------------
+run_timeout_case() {
+  local desc="$1" payload="$2"
+  local slow_exit=0 slow_err slow_verdict
+  slow_err="$(printf '%s' "$payload" \
+    | perl -e 'alarm 10; exec @ARGV' bash "$HOOK" 2>&1 >/dev/null)" || slow_exit=$?
+  case "$slow_err" in
+    *"An engine input was edited"*) slow_verdict=fire ;;
+    *) slow_verdict=silent ;;
+  esac
+  if [ "$slow_verdict" = "fire" ] && [ "$slow_exit" -eq 0 ]; then
+    echo "PASS: $desc (fire, exit 0)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc — expected fire/exit 0 within 10s, got $slow_verdict/exit $slow_exit"
+    echo "      (exit 142 = SIGALRM, i.e. the hook blew its timeout and produced no nudge)"
+    fail=$((fail + 1))
+  fi
+}
+
 many_slashes="$(printf '%*s' 6000 '' | tr ' ' '/')"
-slow_payload="$(printf '{"tool_name":"Write","tool_input":{"file_path":"/kb%sfacts/accepted.dl"}}' "$many_slashes")"
-slow_exit=0
-slow_err="$(printf '%s' "$slow_payload" \
-  | perl -e 'alarm 10; exec @ARGV' bash "$HOOK" 2>&1 >/dev/null)" || slow_exit=$?
-case "$slow_err" in
-  *"An engine input was edited"*) slow_verdict=fire ;;
-  *) slow_verdict=silent ;;
-esac
-if [ "$slow_verdict" = "fire" ] && [ "$slow_exit" -eq 0 ]; then
-  echo "PASS: 6000 repeated separators nudges within hooks.json's timeout (fire, exit 0)"
-  pass=$((pass + 1))
-else
-  echo "FAIL: 6000 repeated separators — expected fire/exit 0 within 10s, got $slow_verdict/exit $slow_exit"
-  echo "      (exit 142 = SIGALRM, i.e. the hook blew its timeout and produced no nudge)"
-  fail=$((fail + 1))
-fi
+run_timeout_case "6000 separators immediately before the basename, within hooks.json's timeout" \
+  "$(printf '{"tool_name":"Write","tool_input":{"file_path":"/kb/facts%saccepted.dl"}}' "$many_slashes")"
+
+many_dots=""
+dot_i=0
+while [ "$dot_i" -lt 4000 ]; do
+  many_dots="$many_dots/."
+  dot_i=$((dot_i + 1))
+done
+run_timeout_case "4000 '/.' components immediately before the basename, within hooks.json's timeout" \
+  "$(printf '{"tool_name":"Write","tool_input":{"file_path":"/kb/facts%s/accepted.dl"}}' "$many_dots")"
 
 # ---------------------------------------------------------------------------
 # CASE 36: a JSON-escaped forward slash. `\/` is a legal JSON escape for `/`,
