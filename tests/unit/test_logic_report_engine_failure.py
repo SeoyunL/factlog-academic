@@ -26,6 +26,7 @@ from __future__ import annotations
 import csv
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -474,6 +475,81 @@ class TestControlCharactersCannotReachAReportLine:
             "- query unknown predicate: nosuchpredicate(X, Y)?"
             in report.read_text(encoding="utf-8").splitlines()
         )
+
+
+class TestReportFileMode:
+    """The atomic write must not narrow facts/logic_report.txt.
+
+    ``tempfile.mkstemp`` creates at 0600 and ``os.replace`` carries the source's
+    mode onto the destination, so switching from ``write_text`` to temp+replace
+    silently changed the report from 0644 to 0600 on the SUCCESS path, every run.
+    That collides with the rest of #338: an unreadable report used to fall
+    through to the mtime branch and be allowed, and hooks/gate_check.sh now hard
+    denies it. Where the check and the gate run as different UIDs — a
+    devcontainer running the check as root, a CI stage that switches user, a
+    group-shared KB — the mode alone becomes a blanket refusal of every
+    Write/Edit to the engine inputs.
+
+    Measured against origin/main across umasks 022/077/002 and pre-existing modes
+    0644/0664/0600; these pin the same nine cells' rule in three.
+    """
+
+    def _mode(self, path: Path) -> int:
+        return stat.S_IMODE(path.stat().st_mode)
+
+    def test_a_new_report_gets_the_mode_an_ordinary_write_would(self, tmp_path):
+        """0666 masked by the umask — what ``open(..., "w")`` produces, which is
+        what origin/main's ``write_text`` did."""
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        umask = os.umask(0o022)
+        os.umask(umask)
+
+        result = _run(kb)
+
+        assert result.returncode == 0, result.stderr
+        assert _report(kb).is_file()
+        assert self._mode(_report(kb)) == 0o666 & ~umask
+
+    def test_an_existing_reports_mode_is_kept(self, tmp_path):
+        """A 0664 report on a group-shared KB was chmod'd deliberately, and
+        ``write_text`` never disturbed it."""
+        kb = _kb(tmp_path)
+        os.chmod(_report(kb), 0o664)
+
+        result = _run(kb)
+
+        assert result.returncode == 0, result.stderr
+        assert self._mode(_report(kb)) == 0o664
+
+    def test_a_narrow_existing_mode_is_not_widened(self, tmp_path):
+        """The rule is "keep what is there", not "force 0644": an operator who
+        restricted the report keeps that too.
+
+        A guard, not evidence — 0600 is what the unfixed writer produced anyway.
+        It is here so the fix cannot be written as "always widen to 0644", which
+        would pass the other three and hand out a report the operator closed.
+        """
+        kb = _kb(tmp_path)
+        os.chmod(_report(kb), 0o600)
+
+        result = _run(kb)
+
+        assert result.returncode == 0, result.stderr
+        assert self._mode(_report(kb)) == 0o600
+
+    def test_the_failure_path_keeps_the_mode_too(self, tmp_path):
+        """The failure report replaces the same file through the same writer, so
+        a broken engine must not lock the report away from the gate either."""
+        kb = _kb(tmp_path)
+        os.chmod(_report(kb), 0o664)
+        (kb / "facts" / "accepted.dl").unlink()
+
+        result = _run(kb)
+
+        assert result.returncode == 1
+        assert MARKER in _report(kb).read_text(encoding="utf-8").splitlines()
+        assert self._mode(_report(kb)) == 0o664
 
 
 class TestFailingStillFails:
