@@ -630,10 +630,16 @@ def render_engine_answer(
       listed beneath ('    ← <source>').
     - A relation row with NO backing extraction (no signal entry) carries no
       extraction confidence, so it is marked '[no extraction backing]' rather
-      than left ambiguous. Today accepted.dl is a 1:1 projection of the
-      candidates table and no rule derives relation atoms, so this only arises
-      when the two are out of sync (recompile via /factlog check); it would also
-      cover a future rule-derived relation. Either way the verdict stays binary.
+      than left ambiguous. Today every relation atom comes from the candidates
+      table and no rule derives one, so this only arises when the two are out of
+      sync (recompile via /factlog check); it would also cover a future
+      rule-derived relation. Either way the verdict stays binary. Note the
+      mapping is many-to-one and not a projection: ``dedup_engine_atoms``
+      collapses canonically equivalent rows and writes each value in the
+      spelling the KB uses for it, so an atom can carry a triple no single
+      candidate row did. That is why the lookup folds through
+      ``fold_atom_triple`` — a raw one would miss such an atom and report it
+      unbacked.
 
     Non-relation predicates (path/count/policy) pass signals=None and
     annotate_objects=False: their rows are computed by the engine, carry no
@@ -682,10 +688,12 @@ def render_engine_answer(
                 # A relation answer is expected to have an extraction-backed signal
                 # per row. A row without one carries no extraction confidence:
                 # today that means candidates.csv/accepted.dl are out of sync
-                # (accepted.dl is a 1:1 projection of the candidates table — no
-                # rule derives relation atoms yet); it would also cover a future
-                # rule-derived relation. Mark the absence; the verdict stays
-                # binary (the row IS verified).
+                # (every relation atom comes from the candidates table — no rule
+                # derives one yet); it would also cover a future rule-derived
+                # relation. Not a 1:1 projection: the atom is folded and its
+                # spelling comes from the KB, so the key above is folded to
+                # match. Mark the absence; the verdict stays binary (the row IS
+                # verified).
                 line += " [no extraction backing]"
             lines.append(line)
             if sig:
