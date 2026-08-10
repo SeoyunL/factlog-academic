@@ -209,6 +209,43 @@ class TestCanonicallyEquivalentSpellingsCollapse:
         assert out[0]["subject"] == common.composed_spelling({r["subject"] for r in rows})
         assert out[0]["object"] == common.composed_spelling({r["object"] for r in rows})
 
+    def test_one_value_gets_ONE_spelling_across_the_whole_kb(self):
+        # PIN. The spelling written is chosen per VALUE over every engine row,
+        # not per group over that group's members. Group-local choice rewrote a
+        # duplicated group to NFC and left an untouched neighbouring group in
+        # NFD, so the collapsed atom no longer joined the fact next to it — the
+        # engine saw two entities where the KB has one, which is the harm #342
+        # exists to remove, reintroduced on the path axis.
+        rows = [
+            _row(_nfd("삼성"), "대표", _nfd("이재용"), source="sources/a.md"),
+            _row(_nfc("삼성"), "대표", _nfc("이재용"), source="sources/b.md"),
+            _row(_nfd("이재용"), "거주", _nfd("서울"), source="sources/a.md"),
+        ]
+        out = common.dedup_engine_atoms(rows)
+        assert len(out) == 2
+        # the object of the collapsed atom and the subject of its neighbour are
+        # the same entity, so they must be the same bytes or the join is lost
+        assert out[0]["object"] == out[1]["subject"]
+        # and it is the composed spelling, which is the one the KB holds
+        assert out[0]["object"] == _nfc("이재용")
+        # 서울 is only ever written decomposed, so nothing is normalized for it
+        assert out[1]["object"] == _nfd("서울")
+
+    def test_spelling_pool_crosses_the_subject_object_axes(self):
+        # PIN, and the reason the pool cannot be per-axis. Here 이재용 is
+        # composed only in OBJECT position and decomposed only in SUBJECT
+        # position, so an axis-local pool has nothing to prefer on either side
+        # and leaves the two atoms spelled differently. The engine joins across
+        # the axes (edge(S,O) feeds path(M,O) through a subject), so the pool
+        # must too.
+        rows = [
+            _row("삼성", "대표", _nfc("이재용"), source="sources/a.md"),
+            _row(_nfd("이재용"), "거주", "서울", source="sources/b.md"),
+        ]
+        out = common.dedup_engine_atoms(rows)
+        assert len(out) == 2
+        assert out[0]["object"] == out[1]["subject"] == _nfc("이재용")
+
     def test_synthesized_atom_still_resolves_its_provenance(self):
         # Synthesis is only safe because every atom-keyed map is keyed on
         # engine_atom_key. If one were left raw it would miss this atom outright
