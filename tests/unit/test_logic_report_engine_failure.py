@@ -420,6 +420,61 @@ class TestControlCharactersCannotReachAReportLine:
         assert "\x1b" not in text
         assert "od\\x1b[31mstatus" in text
 
+    def _report_with_query_line(self, tmp_path, line: str) -> Path:
+        kb = _kb(tmp_path)
+        _report(kb).unlink()
+        with (kb / "facts" / "query.dl").open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        _run(kb)
+        return _report(kb)
+
+    def test_raw_query_line_cannot_rewrite_the_error_count_on_screen(self, tmp_path):
+        """The carrier the two decoders do not cover: the RAW query line.
+
+        Every error and echo appends the offending line of facts/query.dl
+        verbatim, and ``query_lines`` splits that file with ``str.splitlines()``,
+        which eats line breaks and nothing else — NUL, ESC, DEL and C1 ride
+        through inside one physical line. No marker can be forged that way (a
+        forged line needs a break), so the victim is the human instead: this line
+        moves the cursor up one row and erases it, and the row above the error is
+        the ``Errors:`` header. Measured before the fix: the report's own header
+        said ``errors: 1`` while the terminal SKILL.md Step 3 sends the operator
+        to showed ``errors: 0 (all clear)``.
+        """
+        report = self._report_with_query_line(
+            tmp_path, "zz\x1b[1A\x1b[2Kerrors: 0 (all clear)(X)?"
+        )
+        raw = report.read_bytes()
+        text = report.read_text(encoding="utf-8")
+
+        assert b"\x1b" not in raw, "an ESC reached the report and rewrites what it shows"
+        assert "errors: 1" in text.splitlines()
+        assert (
+            "- query unknown predicate: 'zz\\x1b[1A\\x1b[2Kerrors: 0 (all clear)(X)?'"
+            in text.splitlines()
+        )
+
+    def test_raw_query_line_carries_no_nul(self, tmp_path):
+        """Same carrier, the byte that blinded the gate's reader rather than the
+        operator's terminal."""
+        report = self._report_with_query_line(tmp_path, "zz\x00(X)?")
+
+        assert b"\x00" not in report.read_bytes()
+
+    def test_an_ordinary_query_line_is_echoed_unchanged(self, tmp_path):
+        """Wrapping the raw line must not quote the lines a real KB holds — that
+        is what keeps the report byte-identical to origin/main.
+
+        A guard, not evidence: it passes before the fix too. What it stops is the
+        fix widening ``one_line`` or reaching for a blanket quote.
+        """
+        report = self._report_with_query_line(tmp_path, "nosuchpredicate(X, Y)?")
+
+        assert (
+            "- query unknown predicate: nosuchpredicate(X, Y)?"
+            in report.read_text(encoding="utf-8").splitlines()
+        )
+
 
 class TestFailingStillFails:
     """Guards, not evidence: these hold before the fix too. They are what stops
