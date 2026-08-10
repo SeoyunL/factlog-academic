@@ -285,39 +285,45 @@ run_case "POSIX file literally named 'facts\\accepted.dl' — fire (known over-f
 # ---------------------------------------------------------------------------
 # CASES 20-24: NORMALISATION, forward-slash side. "//" and "/./" name exactly
 # the file the collapsed path names, so an engine input written either way is a
-# genuine engine input and must nudge. All five were SILENT before the collapse
-# was added — this is under-firing, the direction that costs a missed signal,
-# and it matters most for candidates.csv and logic-policy.dl, which
-# gate_check.sh does not guard at all.
+# genuine engine input and must nudge. All five were SILENT before redundant
+# separators were handled — this is under-firing, the direction that costs a
+# missed signal, and it matters most for candidates.csv and logic-policy.dl,
+# which gate_check.sh does not guard at all.
 #
-# The loop is pinned by the repeated forms: one pass over "///" leaves a "//"
-# behind, so a non-looping collapse fails cases 21 and 23.
+# Cases 21 and 23 pin the REPEATED forms of the same two shapes. Under the
+# current matcher they are not distinct pins: it reads the tail in one greedy
+# expansion and never counts separators, so "///" and "//" take an identical
+# path and cases 21/23 can only fail when 20/22 already have. They are kept as
+# a floor for a matcher that handles the single form by rewriting it — such a
+# matcher passes 20 and 22 and fails these — NOT because anything here needs to
+# iterate. Nothing in the matcher does; see CASE 35 for why it must not.
 # ---------------------------------------------------------------------------
 run_case "double slash before the basename — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"/facts//accepted.dl"}}' fire
-run_case "triple slash (pins the loop, not just one pass) — fire" \
+run_case "triple slash (repeated separator form) — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"/facts///accepted.dl"}}' fire
 run_case "dot component before the basename — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"/facts/./accepted.dl"}}' fire
-run_case "repeated dot components (pins the loop) — fire" \
+run_case "repeated dot components — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"/facts/././accepted.dl"}}' fire
 run_case "double slash in a policy path — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"/kb/policy//logic-policy.dl"}}' fire
 
 # ---------------------------------------------------------------------------
 # CASES 25-27: NORMALISATION, backslash side. The same redundant forms a Git
-# Bash payload can carry. These were still SILENT after the forward-slash
-# collapse landed — genuine engine inputs missed on the one platform the
-# backslash splits exist to serve, which is the same "list reads closed but has
-# a member missing" shape as the earlier round's finding.
+# Bash payload can carry. These were still SILENT after the forward-slash side
+# was handled — genuine engine inputs missed on the one platform the backslash
+# handling exists to serve, which is the same "list reads closed but has a
+# member missing" shape as the earlier round's finding.
 #
-# Case 27 pins the loop on this side too: one pass over "\\\\" leaves a "\\".
+# Case 27 is the repeated form on this side, and stands to 25 exactly as case
+# 21 stands to 20: a floor against a rewriting matcher, not a distinct pin.
 # ---------------------------------------------------------------------------
 run_case "Git Bash: doubled backslash before the basename — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\\\accepted.dl"}}' fire
 run_case "Git Bash: backslash dot component — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\.\\accepted.dl"}}' fire
-run_case "Git Bash: tripled backslash (pins the loop) — fire" \
+run_case "Git Bash: tripled backslash (repeated separator form) — fire" \
   '{"tool_name":"Write","tool_input":{"file_path":"C:\\kb\\facts\\\\\\accepted.dl"}}' fire
 
 # ---------------------------------------------------------------------------
