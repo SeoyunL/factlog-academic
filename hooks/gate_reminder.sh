@@ -91,13 +91,19 @@
 # an engine-input write — not a spawn added to an event that had none.
 # Declining the KB-root resolution is what keeps this hook's own count at one.
 #
-# The spawn is the whole of the cost only because the path matching below is
-# loop-free. It was not always: a rewriting collapse made cost depend on the
-# path's SHAPE, not just on the one spawn, and on a path with thousands of
-# repeated separators it ran past hooks.json's `timeout: 10` and killed the
-# nudge outright. The matcher's own comment has the measurements. Any future
-# edit that reintroduces per-character work on the whole path reopens that,
-# and this paragraph stops being true.
+# The spawn is the whole of the cost for any path a filesystem can hand over.
+# It is not an unconditional bound: cost still depends on the path's SHAPE, and
+# a separator run sitting immediately before the basename is quadratic in the
+# length of that run — 0.44s at 6000 separators, 12s at 32000. What makes the
+# spawn dominant is PATH_MAX, which puts a real payload near 1000, where the
+# matching costs 0.013s against the spawn's ~90ms.
+#
+# A rewriting collapse used to make this far worse — superlinear at every
+# shape, and on thousands of repeated separators it ran past hooks.json's
+# `timeout: 10` and killed the nudge outright. That is gone. The matcher's own
+# comment has both sets of measurements. Any future edit that reintroduces
+# per-character work on the whole path reopens it, and CASES 35 and 35b of
+# tests/test_gate_reminder.sh are what notice.
 #
 # WHEN THE TARGET CANNOT BE READ (no usable Python, an unparseable payload, or
 # an envelope with no path key at all) it falls back to the payload-wide grep —
@@ -177,8 +183,10 @@ fi
 # Both separators are honoured: under Git Bash a payload carries
 # "C:\kb\facts\query.dl", and every expansion below treats `/` and `\` alike via
 # the bracket set `[/\\]`. All three are pinned by tests/test_gate_reminder.sh —
-# measured, dropping the backslash turns 8 cases red in the basename set, 10 in
-# the tail set and 6 in the pdir set.
+# measured, reverting one bracket set at a time to the forward-slash-only form
+# turns 8 cases red in the basename set, 10 in the tail set and 6 in the pdir
+# set (and 8 in the `[/\\]*` case arm on `tail`, a fourth site someone could
+# edit alone). CASES 17-19 there list which cases and why.
 #
 # An earlier version of this comment claimed backslash handling "cannot be
 # pinned from a POSIX host". That was false, and the way it was false is worth
@@ -199,15 +207,34 @@ fi
 # An earlier version collapsed redundant separators by rewriting the WHOLE path
 # repeatedly (`${path//\/\//\/}` in a loop). It was superlinear and it did not
 # merely get slow, it broke the hook: hooks.json gives this hook `timeout: 10`,
-# and on "/kb" + N slashes + "facts/accepted.dl" the collapse took 3.6s at
-# N=4000, 11.7s at N=6000 — past the timeout, so the process is killed, NO nudge
+# and on "/kb" + N slashes + "facts/accepted.dl" the collapse took 3.5s at
+# N=4000, 12.0s at N=6000 — past the timeout, so the process is killed, NO nudge
 # appears, and the payload-grep fallback never runs either. That is a silent
 # non-firing, the one direction this hook must not fail in, and it contradicted
 # the header's claim that failure leans toward firing. At N=20000 it was 406s.
 #
 # Nothing is rewritten now. Redundant separators and "." components are skipped
-# by READING the tail, in a fixed number of parameter expansions with no loop:
-# same input, 0.036s at N=6000 and 0.046s at N=20000, flat.
+# by READING the tail, in a fixed number of parameter expansions with no loop.
+#
+# That removes the loop but NOT the dependence on the path's shape, and the
+# honest number depends on where the run sits. `##` is greedy and bash walks
+# prefixes longest-first, so a run followed by another component matches near
+# the full length and scans effectively linearly, while a run sitting
+# immediately before the basename fails at every prefix and scans quadratically.
+# Measured on bash 3.2.57, matcher only, seconds per call:
+#
+#   N        "/kb" + run + "facts/accepted.dl"   "/kb/facts" + run + "accepted.dl"
+#   1000     0.0007                              0.013
+#   6000     0.0035                              0.436
+#   20000    0.011                               4.771
+#   32000    0.018                              12.239
+#
+# So the quadratic column is 300x cheaper than the collapse at N=6000 (0.436s
+# against 12.0s) but it is not a constant, and at N=32000 it would blow the
+# same timeout the collapse blew. That N is unreachable: PATH_MAX bounds a real
+# payload near N=1000, where the cost is 0.013s. The bound worth stating is
+# therefore conditional, not absolute — see tests/test_gate_reminder.sh CASES 35
+# and 35b, which pin the expensive shape rather than the flat one.
 #
 #   base   = everything after the last separator of EITHER kind. `##*[/\\]` is
 #            greedy, so one expansion crosses any number of separators.
