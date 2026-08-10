@@ -16,6 +16,9 @@
 #   (f) Unicode: one fact written NFC and NFD is ONE atom, in the composed
 #       spelling, and the engine sees one (#342)
 #   (g) a uniformly decomposed KB keeps its decomposed spelling byte-for-byte
+#   (j) a folded atom still joins the rest of the KB: one entity keeps one
+#       spelling across accepted.dl, so path/2 and `ask` do not lose (or
+#       verified-negative) a path the KB supports
 #
 # Synthetic data only (relation path needs no pyrewire).
 # Usage: bash tests/test_compile_dedup.sh
@@ -364,6 +367,88 @@ PY
     || bad "the typed side-relation never received the folded atom"
 else
   echo "SKIP: pyrewire unavailable — skipping typed-literal assertions"
+fi
+
+# --- (j) the folded atom must still join the rest of the KB ----------------
+# The spelling in accepted.dl is joined on, not displayed. Choosing the
+# representative inside the folded group rewrites that group to NFC and leaves
+# the untouched neighbour in NFD, so the collapsed atom stops connecting to the
+# fact beside it: measured, path/2 fell from 4 to 2 and `path(삼성, 서울)?` —
+# a path the KB supports — answered `rows: 0 / verified negative`. The pool is
+# therefore per VALUE over the whole KB and over both axes (common.kb_spellings).
+# Note 이재용 is composed only as an OBJECT and decomposed only as a SUBJECT, so
+# a per-axis pool has nothing to prefer on either side and leaves this red.
+KB7="$(mktemp -d)/wiki"
+"$PYTHON" -m factlog init --target "$KB7" >/dev/null
+printf 'a\n' > "$KB7/sources/a.md"; printf 'b\n' > "$KB7/sources/b.md"
+"$PYTHON" - "$KB7" <<'PY'
+import sys, unicodedata
+from pathlib import Path
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+Path(sys.argv[1], "facts/candidates.csv").write_text(
+    "subject,relation,object,source,status,confidence,note\n"
+    f"{nfd('삼성')},대표,{nfd('이재용')},sources/a.md,confirmed,0.90,\n"
+    f"{nfc('삼성')},대표,{nfc('이재용')},sources/b.md,confirmed,0.95,\n"
+    f"{nfd('이재용')},거주,{nfd('서울')},sources/a.md,confirmed,0.90,\n",
+    encoding="utf-8",
+)
+PY
+FACTLOG_ROOT="$KB7" "$PYTHON" -m factlog.compile_facts >/dev/null
+
+n7="$(grep -cE '^relation\(' "$KB7/facts/accepted.dl" || true)"
+[ "$n7" = "2" ] && ok "mixed KB folds to 2 atoms" || bad "expected 2 atoms, got $n7"
+
+# one entity, one spelling: the object of the folded atom and the subject of its
+# neighbour are the same value and must be the same bytes.
+"$PYTHON" - "$KB7" <<'PY' && ok "one entity gets one spelling across the whole accepted.dl" || bad "the same entity is spelled two ways in accepted.dl"
+import sys, unicodedata
+from pathlib import Path
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+lines = [l for l in Path(sys.argv[1], "facts/accepted.dl").read_text(encoding="utf-8").split("\n")
+         if l.startswith("relation(")]
+assert len(lines) == 2, lines
+spellings = {v for l in lines for v in l.split('"')[1::2] if nfc(v) == nfc("이재용")}
+# 서울 is only ever written decomposed, so nothing may recompose it
+seoul = {v for l in lines for v in l.split('"')[1::2] if nfc(v) == nfc("서울")}
+sys.exit(0 if len(spellings) == 1 and seoul == {nfd("서울")} else 1)
+PY
+
+if "$PYTHON" -c "import pyrewire" >/dev/null 2>&1; then
+  # the engine derives the two-hop path again
+  ( cd "$PLUGIN_ROOT" && FACTLOG_ROOT="$KB7" "$PYTHON" - <<'PY'
+import sys, unicodedata
+sys.path.insert(0, ".")
+from factlog import common
+nfc = lambda s: unicodedata.normalize("NFC", s)
+paths = common.run_wirelog().get("path", set())
+assert paths, "PROBE FOUND NO path ROWS — refusing to report a clean result"
+folded = {tuple(nfc(str(v)) for v in row) for row in paths}
+assert (nfc("삼성"), nfc("서울")) in folded, f"two-hop path lost: {sorted(folded)}"
+PY
+  ) 2>/dev/null \
+    && ok "engine still derives path(삼성, 서울) across the folded atom" \
+    || bad "the folded atom no longer joins its neighbour — path(삼성, 서울) lost"
+
+  # ...and `ask` must not answer a verified NEGATIVE for it. That is the harm:
+  # not a missing answer but a confident wrong one.
+  q7="$("$PYTHON" - "$PLUGIN_ROOT" "$KB7" <<'PY'
+import sys, unicodedata
+nfc = lambda s: unicodedata.normalize("NFC", s)
+nfd = lambda s: unicodedata.normalize("NFD", s)
+print(f'path("{nfc("삼성")}", "{nfd("서울")}")?')
+PY
+)"
+  rn7="$(FACTLOG_ROOT="$KB7" "$PYTHON" "$ROUTER" render "$q7" --target "$KB7" 2>&1 || true)"
+  printf '%s' "$rn7" | grep -qF "verified negative" \
+    && bad "ask reports a verified negative for a path the KB supports: $rn7" \
+    || ok "ask does not report a verified negative for the supported path"
+  printf '%s' "$rn7" | grep -qE "rows: 1" \
+    && ok "ask answers the supported path with one row" \
+    || bad "ask did not answer the supported path: $rn7"
+else
+  echo "SKIP: pyrewire unavailable — skipping cross-atom join assertions"
 fi
 
 echo ""
