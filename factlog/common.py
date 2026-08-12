@@ -2635,6 +2635,132 @@ query_shape_error = _query_shape_error
 quoted_constants = _quoted_constants
 
 
+# Query-constant spelling resolution ------------------------------------------
+# The read side of the map ``dedup_engine_atoms`` writes. ``kb_spellings`` is the
+# WRITE-side decision (which spelling of a value ``accepted.dl`` gets); these two
+# are the LOOKUP that ``kb_spellings``' own docstring demands — "every map keyed
+# by this must be looked up through it too". Without them the fold is half a move:
+# atoms collapse to one spelling on disk and a query typed in the other spelling
+# addresses nothing.
+
+# Which argument positions of a query atom hold a VALUE (a subject, an object, a
+# path endpoint) — the positions the KB spelling map may rewrite. A predicate
+# absent from this table is a policy predicate, whose every position is a value
+# position (see resolve_query_spellings).
+#
+# The RELATION argument is deliberately absent from every entry. ``engine_atom_key``
+# folds the subject and object axes and leaves the relation axis alone, so one
+# ``accepted.dl`` may legitimately hold two spellings of one relation name and
+# there is no single spelling to resolve a relation constant onto. Relation
+# matching handles its own folding through ``_canonical_value`` on both sides
+# (see ``_relation_match_count``) and needs no rewrite. ``review_required`` holds
+# the user's ORIGINAL question, not a KB value, and is never rewritten.
+_QUERY_VALUE_POSITIONS: dict[str, tuple[int, ...]] = {
+    "relation": (0, 2),
+    "path": (0, 1),
+    "count": (0,),
+    "review_required": (),
+}
+
+
+def kb_query_spellings(facts: list[dict[str, str]]) -> dict[str, str]:
+    """Map a query constant's ``_canonical_value`` key to the ONE spelling
+    ``accepted.dl`` actually holds for it.
+
+    Read-side observation of what the file HAS, deliberately not a wrapper around
+    :func:`kb_spellings`. Three reasons they cannot be the same map:
+
+    * ``kb_spellings`` is keyed on plain NFC; a query constant is folded by
+      ``_canonical_value``, which folds NFC **and** ``amount`` unit quoting. A
+      query keyed one way cannot look up a map keyed the other.
+    * ``kb_spellings`` takes CANDIDATE rows (it reads ``status`` through
+      ``engine_input_rows``) and answers "what should be written". This answers
+      "what was written", which is the only thing a query can address. A KB
+      compiled by an older factlog, or an ``accepted.dl`` edited by hand, is
+      described correctly by this map and incorrectly by the other.
+    * the value pool is ``value_set`` — subjects and objects only, never relation
+      names. Relation names must stay out: this PR leaves the relation axis
+      unfolded, and a value that is also a relation name would otherwise take
+      part in a fold it has no representative for.
+
+    **Ambiguous folds are refused, not guessed.** ``_canonical_value`` folds
+    strictly further than NFC — ``literal_types.canonical_amount`` makes
+    ``amount(1,000,"억")`` and ``amount(1000,"억")`` one key — while
+    ``merge_candidates`` canonicalises only the object, never the subject. So one
+    ``accepted.dl`` really can hold two distinct atoms that share a key. Picking
+    either as "the" spelling would answer a question about one of them from the
+    other, silently. A key whose pool holds more than one distinct NFC spelling
+    is therefore DROPPED, and a query naming it is passed through untouched to
+    fail (or succeed) exactly as it does without this map.
+
+    Where the pool survives, the representative is :func:`composed_spelling` —
+    the same tie-break ``kb_spellings`` uses to choose what to write, so "which
+    spelling wins" has one definition on both sides. After a
+    ``dedup_engine_atoms`` compile every surviving pool is a singleton and the
+    tie-break is a formality; it does real work only on an ``accepted.dl`` that
+    holds two canonically equivalent spellings of one value, where it points the
+    query at the composed one — the spelling a fresh compile would have kept."""
+    pools: dict[str, set[str]] = {}
+    for value in value_set(facts):
+        pools.setdefault(_canonical_value(value), set()).add(value)
+    return {
+        key: composed_spelling(spellings)
+        for key, spellings in pools.items()
+        if len({unicodedata.normalize("NFC", v) for v in spellings}) == 1
+    }
+
+
+def resolve_query_spellings(line: str, spelling: dict[str, str]) -> str:
+    """Rewrite *line*'s value constants to the spellings ``accepted.dl`` holds.
+
+    *spelling* is :func:`kb_query_spellings`. Substitution happens on the query
+    STRING, before it is parsed or handed to the engine, because the engine joins
+    on bytes: resolving only a gate's membership test leaves the engine with the
+    original constant and turns a loud ``entity_not_accepted`` into a silent
+    ``rows: 0`` verified negative, which is worse than the refusal it replaces.
+
+    Only quoted constants at a VALUE position move (see
+    ``_QUERY_VALUE_POSITIONS``); variables, bare tokens, the relation argument
+    and ``review_required``'s question string are left alone. A predicate this
+    module does not know is a policy predicate: every position is resolved, which
+    is safe because positions past the first carry engine-derived reason codes
+    that are absent from the value map and so pass through unchanged. Resolving
+    only position 0 would be the half-move ``policy_row_matches`` documents
+    itself as deferring; resolving all of them keeps the router and the report
+    saying the same thing about the same row.
+
+    **Returns *line* UNCHANGED when nothing was substituted** — identity, not
+    merely an equivalent line. Reassembly normalises whitespace
+    (``relation( "a" , "b" , O )?`` comes back as ``relation("a", "b", O)?``), so
+    rewriting unconditionally would silently reformat every query line of a
+    uniformly spelled KB, where this function has nothing to do. Total: an
+    unparseable line is returned as given."""
+    match = re.match(r"^(\w+)\((.*)\)\?$", line.strip())
+    if not match:
+        return line
+    predicate = match.group(1)
+    args = _query_args(line)
+    positions = _QUERY_VALUE_POSITIONS.get(predicate)
+    if positions is None:
+        positions = tuple(range(len(args)))
+    resolved = list(args)
+    changed = False
+    for index in positions:
+        if index >= len(args) or not _is_quoted_string(args[index]):
+            continue
+        value = _arg_value(args[index])
+        target = spelling.get(_canonical_value(value))
+        if target is None or target == value:
+            continue
+        # json.dumps mirrors _arg_value's json.loads, so a value carrying quotes,
+        # commas or backslashes round-trips through the re-quoting unchanged.
+        resolved[index] = json.dumps(target, ensure_ascii=False)
+        changed = True
+    if not changed:
+        return line
+    return f"{predicate}({', '.join(resolved)})?"
+
+
 def _relation_match_count(
     query: str,
     facts: list[dict[str, str]],

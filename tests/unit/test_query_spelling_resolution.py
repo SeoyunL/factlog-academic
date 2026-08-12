@@ -1,0 +1,217 @@
+# SPDX-License-Identifier: Apache-2.0
+"""``kb_query_spellings`` / ``resolve_query_spellings`` — the READ side of the
+spelling ``dedup_engine_atoms`` writes.
+
+``kb_spellings`` picks one spelling per value for ``accepted.dl``. Its own
+docstring says every map keyed that way must be *looked up* through it too, and
+until these two helpers existed no lookup existed: a KB whose atoms had been
+folded to one spelling could not be addressed by a query written in the other.
+These tests pin the map's shape and the rewrite's invariants; the end-to-end
+effect on ``ask`` and on the report is pinned where those paths live.
+"""
+from __future__ import annotations
+
+import unicodedata
+
+import pytest
+
+from factlog.common import kb_query_spellings, resolve_query_spellings
+
+
+def nfc(value: str) -> str:
+    return unicodedata.normalize("NFC", value)
+
+
+def nfd(value: str) -> str:
+    return unicodedata.normalize("NFD", value)
+
+
+def rows(*triples: tuple[str, str, str]) -> list[dict[str, str]]:
+    """Engine-input rows (no ``status`` column), the shape ``load_accepted_facts``
+    returns — which is what the map must describe, because it reports what
+    ``accepted.dl`` HOLDS, not what a compile would decide to write."""
+    return [
+        {"subject": s, "relation": r, "object": o}
+        for s, r, o in triples
+    ]
+
+
+# The reviewer's reproduction, after this PR's fold: 삼성/이재용 land composed,
+# 서울 stays decomposed, so no single normalization form addresses the file.
+MIXED = rows(
+    (nfc("삼성"), "대표", nfc("이재용")),
+    (nfc("이재용"), "거주", nfd("서울")),
+)
+
+
+class TestKbQuerySpellings:
+    def test_maps_a_folded_key_to_the_spelling_the_file_holds(self) -> None:
+        spelling = kb_query_spellings(MIXED)
+        assert spelling[nfc("삼성")] == nfc("삼성")
+        assert spelling[nfc("서울")] == nfd("서울")
+
+    def test_key_is_the_folded_form_so_either_spelling_finds_it(self) -> None:
+        """The map is keyed by ``_canonical_value``, so a query constant typed in
+        EITHER form hits the same entry. This is the property that makes the
+        rewrite possible at all."""
+        spelling = kb_query_spellings(MIXED)
+        assert spelling[nfc(nfd("서울"))] == nfd("서울")
+
+    def test_relation_names_are_not_in_the_map(self) -> None:
+        """The pool is ``value_set`` — subjects and objects only. A relation name
+        must never acquire a representative here: this change leaves the relation
+        axis unfolded, so a value that is also a relation name would otherwise be
+        rewritten toward a spelling chosen for the wrong axis."""
+        spelling = kb_query_spellings(MIXED)
+        assert "대표" not in spelling
+        assert "거주" not in spelling
+
+    def test_ambiguous_fold_is_dropped_not_guessed(self) -> None:
+        """``_canonical_value`` folds past NFC (``literal_types.canonical_amount``)
+        while ``merge_candidates`` canonicalises only the object, so one
+        ``accepted.dl`` really can hold two distinct atoms sharing one key.
+        Resolving such a key would answer a question about one atom from the
+        other, silently — so the key is dropped and the query is passed through
+        to fail the way it does without the map."""
+        ambiguous = rows(
+            ("A", "금액", 'amount(1,000,"억")'),
+            ("B", "금액", 'amount(1000,"억")'),
+        )
+        spelling = kb_query_spellings(ambiguous)
+        assert [key for key in spelling if key.startswith("amount(")] == []
+        # The unambiguous neighbours in the same KB are unaffected.
+        assert spelling["A"] == "A"
+
+    def test_unambiguous_amount_fold_still_resolves(self) -> None:
+        """GUARD, not evidence — it passes before and after the ambiguity rule.
+        It is here so the rule above cannot be "fixed" into dropping every
+        amount-shaped key: only a key with two distinct NFC spellings is
+        ambiguous."""
+        single = rows(("A", "금액", 'amount(1000,"억")'))
+        spelling = kb_query_spellings(single)
+        assert spelling['amount(1000,"억")'] == 'amount(1000,"억")'
+
+
+class TestResolveQuerySpellings:
+    def test_rewrites_a_decomposed_constant_onto_the_composed_atom(self) -> None:
+        spelling = kb_query_spellings(MIXED)
+        line = f'path("{nfd("삼성")}", "{nfd("서울")}")?'
+        assert resolve_query_spellings(line, spelling) == (
+            f'path("{nfc("삼성")}", "{nfd("서울")}")?'
+        )
+
+    def test_rewrites_a_composed_constant_onto_the_decomposed_atom(self) -> None:
+        """The reverse direction matters as much: the file is mixed, so an
+        all-NFC query is just as unaddressable as an all-NFD one."""
+        spelling = kb_query_spellings(MIXED)
+        line = f'path("{nfc("삼성")}", "{nfc("서울")}")?'
+        assert resolve_query_spellings(line, spelling) == (
+            f'path("{nfc("삼성")}", "{nfd("서울")}")?'
+        )
+
+    def test_relation_argument_is_never_rewritten(self) -> None:
+        """``engine_atom_key`` leaves the relation axis unfolded, so one file may
+        hold two spellings of one relation and there is no representative to
+        resolve onto. A KB where a relation name also appears as a value must not
+        leak that value's representative into the relation position."""
+        both = rows((nfd("서울"), nfc("서울"), "x"))
+        spelling = kb_query_spellings(both)
+        line = f'relation(S, "{nfc("서울")}", O)?'
+        assert resolve_query_spellings(line, spelling) == line
+
+    def test_review_required_question_is_never_rewritten(self) -> None:
+        """Its constant is the user's original question, not a KB value."""
+        spelling = kb_query_spellings(MIXED)
+        line = f'review_required("{nfd("서울")} 인구는?")?'
+        assert resolve_query_spellings(line, spelling) == line
+
+    def test_variables_and_bare_tokens_are_left_alone(self) -> None:
+        spelling = kb_query_spellings(MIXED)
+        line = f'relation("{nfd("삼성")}", R, O)?'
+        assert resolve_query_spellings(line, spelling) == (
+            f'relation("{nfc("삼성")}", R, O)?'
+        )
+
+    def test_policy_predicate_resolves_every_position(self) -> None:
+        """An unknown predicate is a policy predicate. ``policy_row_matches``
+        compares RAW at every position, so fixing only position 0 would leave the
+        reason positions mismatched — the half-move that docstring names. The
+        reason codes are engine-derived and absent from the value map, so they
+        pass through untouched and resolving all positions is safe."""
+        spelling = kb_query_spellings(MIXED)
+        line = f'needs_review("{nfd("서울")}", "stale")?'
+        assert resolve_query_spellings(line, spelling) == (
+            f'needs_review("{nfd("서울")}", "stale")?'
+        )
+        line = f'needs_review("{nfc("서울")}", "stale")?'
+        assert resolve_query_spellings(line, spelling) == (
+            f'needs_review("{nfd("서울")}", "stale")?'
+        )
+
+    def test_returns_the_input_object_unchanged_when_nothing_moves(self) -> None:
+        """IDENTITY, not merely an equal line. Reassembly normalises whitespace,
+        so a function that rewrote unconditionally would silently reformat every
+        query line of a uniformly spelled KB — where it has nothing to do. Pinned
+        with a deliberately loose line: an equality-only assertion would pass on
+        the reformatting this forbids."""
+        spelling = kb_query_spellings(MIXED)
+        line = f'relation( "{nfc("삼성")}" ,  "대표" , O )?'
+        assert resolve_query_spellings(line, spelling) is line
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "not a query",
+            "relation(",
+            "",
+            "path()?",
+        ],
+    )
+    def test_unparseable_lines_pass_through(self, line: str) -> None:
+        """Total: the gate, not this function, is what refuses a malformed line."""
+        assert resolve_query_spellings(line, kb_query_spellings(MIXED)) is line
+
+    def test_embedded_quotes_and_commas_round_trip(self) -> None:
+        """``_query_args`` is quote-aware and the rewrite re-quotes with
+        ``json.dumps``, mirroring ``arg_value``'s ``json.loads``. A value carrying
+        the delimiters must survive being taken apart and put back together."""
+        tricky = nfd('서울, "특별시" \\ 1')
+        both = rows((nfc("삼성"), "대표", tricky))
+        spelling = kb_query_spellings(both)
+        import json
+
+        line = f'relation("{nfc("삼성")}", "대표", {json.dumps(nfc(tricky), ensure_ascii=False)})?'
+        out = resolve_query_spellings(line, spelling)
+        from factlog.common import arg_value, query_args
+
+        assert arg_value(query_args(out)[2]) == tricky
+
+
+class TestUniformKbIsUntouched:
+    """GUARD, not evidence — every case here passes before and after the fix.
+
+    They exist because the reviewer's strongest praise for this PR was that a
+    uniformly spelled KB compiles byte-identically to main. The query side must
+    keep that promise: on a KB written one way, every pool is a singleton, every
+    constant already names its own spelling, and no line may move.
+    """
+
+    @pytest.mark.parametrize("form", [nfc, nfd])
+    def test_no_line_moves_on_a_uniform_kb(self, form) -> None:
+        uniform = rows(
+            (form("삼성"), "대표", form("이재용")),
+            (form("이재용"), "거주", form("서울")),
+        )
+        spelling = kb_query_spellings(uniform)
+        for line in (
+            f'path("{form("삼성")}", "{form("서울")}")?',
+            f'relation("{form("삼성")}", "대표", O)?',
+            f'count("{form("삼성")}", "대표")?',
+        ):
+            assert resolve_query_spellings(line, spelling) is line
+
+    @pytest.mark.parametrize("form", [nfc, nfd])
+    def test_map_is_the_identity_on_a_uniform_kb(self, form) -> None:
+        uniform = rows((form("삼성"), "대표", form("이재용")))
+        for key, value in kb_query_spellings(uniform).items():
+            assert value == key or nfc(value) == key
