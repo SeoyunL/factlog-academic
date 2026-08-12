@@ -780,11 +780,17 @@ class _Unreadable(NamedTuple):
     how the first two drifted out of agreement in the first place.
 
     ``lost`` serves the two sites that go through with the write (``--activate``
-    and ``factlog use``) rather than refusing, and is the field the class
-    distinction matters most for: they announced "any narration language in it is
-    gone", which on a broken link is vacuous — nothing was readable, so no
-    language was ever read — while saying nothing about the link they had just
-    replaced with a regular file.
+    and ``factlog use``) rather than refusing, and it is **on a different axis
+    from the other four**. Those answer *what is wrong*, for which reachability
+    is the right question: a reachable-but-malformed target really does have
+    bytes worth preserving and really is fixed by repairing that file. ``lost``
+    answers *what will this write destroy*, and the answer is decided by
+    ``is_symlink()`` alone — ``os.replace`` swaps the link itself, so every
+    symlinked config loses its indirection whether the far end is unmounted,
+    truncated, a directory, or unreadable by mode. Keying ``lost`` off
+    reachability let the four reachable-but-unreadable classes announce "any
+    narration language in it is gone" and say nothing at all about the link they
+    had just replaced with a regular file.
     """
 
     reason: str
@@ -796,8 +802,17 @@ class _Unreadable(NamedTuple):
 
 def _unreadable() -> _Unreadable:
     path = factlog_config.config_path()
-    # `config_status` classifies this pair together because both mean "do not
-    # write"; only the words differ, so the split is here rather than there.
+    # Two questions, two predicates — see the class docstring. What a write
+    # destroys is decided by the link alone, because `os.replace` swaps the link
+    # and not its target, so the indirection goes whatever the far end holds.
+    lost = (
+        "the symlink is gone — it is a regular file now"
+        if path.is_symlink()
+        else "any narration language in it is gone"
+    )
+    # What is *wrong* is decided by reachability. `config_status` classifies this
+    # pair together because both mean "do not write"; only the words differ, so
+    # the split is here rather than there.
     if path.is_symlink() and not path.exists():
         return _Unreadable(
             "is a symlink whose target is not reachable right now",
@@ -808,14 +823,14 @@ def _unreadable() -> _Unreadable:
             # Mounting the volume and re-pointing the link exclude each other, so
             # the `or` has to live in the fragment, not in one caller's glue.
             "mount it or re-point the link",
-            "the symlink is gone — it is a regular file now",
+            lost,
         )
     return _Unreadable(
         "could not be read",
         "leaving its bytes untouched",
         "destroy the KB root it may still hold",
         "repair that file",
-        "any narration language in it is gone",
+        lost,
     )
 
 
