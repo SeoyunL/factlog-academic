@@ -305,6 +305,27 @@ class TestDamagedConfigIsNotOverwritten:
         assert pointer(config_home) == resolved(scratch), proc.stdout
         assert "unreadable" in proc.stdout, f"replaced a corrupt config without saying so: {proc.stdout}"
 
+    def test_activate_discloses_the_language_it_destroys(self, tmp_path, config_home):
+        """The same loss ``use`` names, named the same way from this entry point.
+
+        ``write_root`` rebuilds the file from a read that returned ``{}``, so
+        ``--activate`` takes ``lang`` down with the root — and said only that it
+        replaced "an unreadable config". ``use`` was given the missing clause
+        when its own version of this was found; ``init --activate`` is the other
+        door to the identical write, and a user who reads one page and takes the
+        other door should not be told less.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"root": "/real/kb", "lang": "ko"', encoding="utf-8")
+
+        proc = run_init("--target", str(tmp_path / "scratch"), "--activate", config_home=config_home)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "narration language" in proc.stdout, (
+            f"--activate dropped the configured language without saying so: {proc.stdout}"
+        )
+
     def test_a_readable_config_with_no_usable_root_still_activates(self, tmp_path, config_home):
         """GUARD, not evidence — deliberately on the *write* side of the line.
 
