@@ -85,8 +85,7 @@ factlog init: active-KB root unchanged: /Users/me/wiki — /tmp/scratch is not r
 결과(`$FACTLOG_ROOT` > 설정 > 현재 디렉터리)를 봅니다.
 
 ```text
-  a flagless command would target /Users/me/wiki (from $FACTLOG_ROOT), not /tmp/scratch
-    — pass --target /tmp/scratch, or point $FACTLOG_ROOT at /tmp/scratch
+  a flagless command would target /Users/me/wiki (from $FACTLOG_ROOT), not /tmp/scratch — pass --target /tmp/scratch, or point $FACTLOG_ROOT at /tmp/scratch
 ```
 
 `setup` 의 마지막 줄도 같은 질문을 씁니다. 설정 파일이 무엇을 기록하고 있든, 다음에

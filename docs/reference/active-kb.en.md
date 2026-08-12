@@ -80,8 +80,7 @@ same resolution `factlog where` reports (`$FACTLOG_ROOT` > config > cwd), not th
 config alone.
 
 ```text
-  a flagless command would target /Users/me/wiki (from $FACTLOG_ROOT), not /tmp/scratch
-    — pass --target /tmp/scratch, or point $FACTLOG_ROOT at /tmp/scratch
+  a flagless command would target /Users/me/wiki (from $FACTLOG_ROOT), not /tmp/scratch — pass --target /tmp/scratch, or point $FACTLOG_ROOT at /tmp/scratch
 ```
 
 `setup`'s closing line asks the same question, because "where does my next
