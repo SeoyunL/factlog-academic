@@ -756,17 +756,58 @@ def _not_active_lines(current: str | None, target) -> tuple[str, str]:
     return summary, _switch_hint(target)
 
 
+class _Unreadable(NamedTuple):
+    """The fragments every "I would not write this config" sentence is built from.
+
+    ``UNREADABLE`` covers two unrelated failures, and the prose was written for
+    only one of them. A truncated write has bytes worth preserving and is fixed
+    by repairing the file; a symlink whose target is not mounted has no bytes at
+    all, holds a *pointer* rather than a root, and is fixed by mounting the
+    volume or re-pointing the link. Three sentences in three places say this —
+    the activation refusal, the ``--lang`` deferral note, and ``setup``'s rc-1
+    closing line — so the branch lives here once instead of three times, which is
+    how the first two drifted out of agreement in the first place.
+    """
+
+    reason: str
+    preserved: str
+    cost: str
+    remedy: str
+
+
+def _unreadable() -> _Unreadable:
+    path = factlog_config.config_path()
+    # `config_status` classifies this pair together because both mean "do not
+    # write"; only the words differ, so the split is here rather than there.
+    if path.is_symlink() and not path.exists():
+        return _Unreadable(
+            "is a symlink whose target is not reachable right now",
+            "leaving the link in place",
+            "replace the link with a file",
+            "mount it, re-point the link",
+        )
+    return _Unreadable(
+        "could not be read",
+        "leaving its bytes untouched",
+        "destroy the KB root it may still hold",
+        "repair that file",
+    )
+
+
 def _unreadable_lines(target) -> tuple[str, str]:
-    """Said when the config exists but cannot be parsed, so it is left alone.
+    """Said when the config exists but must not be written, so it is left alone.
 
     Refusing here is the point: the unreadable bytes may be a truncated write of
     the user's real root — and ``write_root`` rebuilds the file from a failed
     read, so writing would replace both that root and any ``lang`` with nothing.
+    A broken symlink is refused for the neighbouring reason and described in its
+    own words; see ``_unreadable``.
     """
+    said = _unreadable()
     return (
-        f"active-KB config at {factlog_config.config_path()} could not be read — "
-        f"leaving its bytes untouched; {target} is not recorded in it",
-        f"repair that file, or overwrite it deliberately: factlog use {target}",
+        f"active-KB config at {factlog_config.config_path()} {said.reason} — "
+        f"{said.preserved}; {target} is not recorded in it",
+        f"{said.remedy}, or overwrite it deliberately: factlog use {target}",
     )
 
 
@@ -2559,9 +2600,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if lang_normalized is not None:
         if factlog_config.config_status() == factlog_config.UNREADABLE:
             lang_deferred = True
+            said = _unreadable()
             notes.append(
-                f"narration language NOT set: {factlog_config.config_path()} could not be read, "
-                "and writing it would destroy the KB root it may still hold — repair that file, "
+                f"narration language NOT set: {factlog_config.config_path()} {said.reason}, "
+                f"and writing it would {said.cost} — {said.remedy}, "
                 "then set the language with `factlog lang`"
             )
         else:
@@ -2597,10 +2639,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
         # A valid --lang was asked for and not applied. Exiting 0 handed a script
         # three agreeing signals — rc 0, a "complete" line, and `factlog lang`
         # printing empty — with only prose to say the request had been declined.
+        said = _unreadable()
         print(
             f"\nfactlog setup: the KB at {target} is ready, but --lang was not applied "
-            f"because {factlog_config.config_path()} could not be read (see above). "
-            "Repair that file, then set the language with `factlog lang`.",
+            f"because {factlog_config.config_path()} {said.reason} (see above). "
+            f"{said.remedy[0].upper()}{said.remedy[1:]}, then set the language "
+            "with `factlog lang`.",
             file=sys.stderr,
         )
         return 1

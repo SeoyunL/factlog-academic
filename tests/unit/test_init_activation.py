@@ -268,6 +268,27 @@ class TestDamagedConfigIsNotOverwritten:
         assert scratch.joinpath("sources").is_dir(), "init must still create the KB"
         assert path.is_symlink(), f"init replaced the link with a file: {proc.stdout}"
 
+    def test_a_broken_symlink_is_described_as_one(self, tmp_path, config_home):
+        """The refusal has to describe what it actually found.
+
+        "could not be read — leaving its bytes untouched" and "repair that file"
+        were written for the truncated-JSON class, and every word of that is
+        wrong here: a dangling link has no bytes to preserve, what was caught is
+        a *pointer* rather than a root, and the remedy is mounting the volume or
+        re-pointing the link, not repairing a file. Routing a new class through
+        prose that fit the old one produces advice the user cannot act on.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+
+        out = run_init("--target", str(tmp_path / "scratch"), config_home=config_home).stdout
+
+        assert "symlink" in out, f"the link is not described as one: {out}"
+        assert "repair that file" not in out, f"advises repairing a file that has no bytes: {out}"
+        assert "leaving its bytes untouched" not in out, f"there are no bytes to leave: {out}"
+        assert str(path) in out, f"the config to fix is not named: {out}"
+
     def test_says_it_could_not_read_the_file(self, tmp_path, config_home):
         path = config_file(config_home)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -989,6 +1010,30 @@ class TestSetup:
         assert "narration language NOT set" in out, f"dropped the language silently: {out}"
         assert path.is_symlink(), f"setup replaced the link with a file: {out}"
         assert scratch.joinpath("sources").is_dir(), "setup must still create the KB"
+
+    def test_the_deferral_and_the_exit_line_describe_a_symlink_as_one(
+        self, tmp_path, config_home, capsys
+    ):
+        """Both ``--lang`` sentences, not just the activation one.
+
+        The deferral note and the rc-1 closing line carry their own copies of
+        "could not be read … repair that file". Fixing only the activation
+        refusal would leave a run that says "symlink" once and "repair that file"
+        twice, about the same file, in the same output.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+
+        cli.main(["setup", "--target", str(tmp_path / "scratch"), "--lang", "ko"])
+        captured = capsys.readouterr()
+
+        assert "symlink" in captured.out, f"the deferral note misdescribes it: {captured.out}"
+        assert "symlink" in captured.err, f"the closing line misdescribes it: {captured.err}"
+        for stream, name in ((captured.out, "stdout"), (captured.err, "stderr")):
+            assert "epair that file" not in stream, (
+                f"{name} advises repairing a file that has no bytes: {stream}"
+            )
 
     def test_lang_still_applies_once_activate_has_replaced_the_damaged_config(
         self, tmp_path, config_home, capsys
