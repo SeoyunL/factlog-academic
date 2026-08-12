@@ -923,10 +923,13 @@ def _plan_activation(target, activate: bool | None) -> Activation:
         if activate is True:
             # Explicitly asked for, and the only way back to a usable setting
             # from a corrupt file — but say what was destroyed rather than
-            # letting the old bytes vanish quietly.
+            # letting the old bytes vanish quietly. The `lang` clause is worded
+            # exactly as `factlog use` words it: this is the same write through
+            # the other door, and the two must not disclose different amounts.
             return Activation(
                 True,
-                f"active-KB root: replaced an unreadable {factlog_config.config_path()} with {target}",
+                f"active-KB root: replaced an unreadable {factlog_config.config_path()} with {target}"
+                " (any narration language in it is gone)",
                 None,
             )
         return Activation(False, *_unreadable_lines(target))
@@ -1055,8 +1058,9 @@ def cmd_use(args: argparse.Namespace) -> int:
     # write_root rebuilds the file from a read that returned {}. Unlike `init`,
     # `use` still goes ahead — re-pointing is the whole command, and it is the
     # advertised way out of a damaged config — but it says what it is about to
-    # cost instead of dropping it silently, which is what `init --activate`
-    # already does.
+    # cost. `init --activate` reaches the same write through the other door and
+    # now names the same loss in the same words (`_plan_activation`), so the two
+    # entry points disclose the same thing.
     replacing_unreadable = factlog_config.config_status() == factlog_config.UNREADABLE
     _write_root_or_explain("factlog use", target)
     # --lang, when given, is set (or cleared) alongside the root in the same config
