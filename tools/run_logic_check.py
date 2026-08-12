@@ -65,6 +65,38 @@ def query_lines() -> list[str]:
     ]
 
 
+def query_constants(line: str) -> list[str]:
+    """Every quoted-literal ARGUMENT of *line*, decoded — the quote-aware twin of
+    ``common.quoted_constants``.
+
+    Use this, not ``quoted_constants``, wherever a line is read BEFORE and AFTER
+    ``resolve_query_spellings``. That function re-quotes through ``json.dumps``,
+    so resolving onto a value that itself carries a ``"`` puts a ``\\"`` into the
+    query string; ``quoted_constants``' raw ``"([^"]+)"`` splits on the escape and
+    returns a different NUMBER of constants for the same line. Measured on
+    ``relation("예산안", R, "amount(1000,億)")?`` over a KB holding
+    ``amount(1000,"億")``: ``['amount(1000,億)']`` written against
+    ``['amount(1000,\\\\', ')']`` resolved. Every canonical ``amount`` value carries
+    a quote — it is the form merge stores — so this is the ordinary case for any
+    query naming an amount, not an exotic one.
+
+    Going through ``query_args``/``is_quoted_string``/``arg_value`` decodes with
+    ``json.loads`` instead of scanning for quote characters, so the two readings
+    match by construction: ``resolve_query_spellings`` rebuilds the line from the
+    same argument list, substituting in place.
+
+    Decoding is also what the vocabulary tests want: *entities* is ``value_set``,
+    which holds values as the KB decodes them, so a query constant must be
+    compared decoded rather than as the raw text between quotes.
+
+    NOT a drop-in replacement for ``quoted_constants`` everywhere. It sees
+    arguments, so a line that does not parse as an atom, or whose argument does
+    not parse as one quoted string, yields nothing where the regex still returned
+    text. Every caller here reads a line ``query_error`` has already accepted.
+    """
+    return [arg_value(arg) for arg in query_args(line) if is_quoted_string(arg)]
+
+
 def path_endpoints(line: str) -> list[str]:
     """The quoted endpoints of a path query, INCLUDING an empty literal.
 
@@ -73,7 +105,7 @@ def path_endpoints(line: str) -> list[str]:
     gate, and vanished from the report — no result line, no warning — while
     `ask`'s router answers the same query with a reason. #329 is what made `""`
     a graph node that is NOT an accepted entity, so the report has to say so."""
-    return [arg_value(arg) for arg in query_args(line) if is_quoted_string(arg)]
+    return query_constants(line)
 
 
 def display_value(value: str) -> str:
@@ -274,8 +306,24 @@ def validate_query(
     # mismatch. The path-endpoint pairing above IS load-bearing — entity_set is
     # narrower than value_set, so a resolved constant can still be warned about
     # there — and is pinned.
+    #
+    # ``query_constants``, NOT ``quoted_constants``: both sides of a pairing must
+    # be read by the SAME parser. Two cheaper guards look right and are not, and
+    # both were measured before this was settled. Neither is worth trying again.
+    #
+    #   - "keep the regex, but fall back to it only when the parser finds FEWER
+    #     constants". The regex OVER-counts the resolved line — 3 against the
+    #     parser's 2 on ``count("amount(1000,億)", "규모")?``, because it splits
+    #     the ``\"`` that ``json.dumps`` wrote — so the floor picks the wrong list
+    #     and the bug comes straight back. The regex is not merely incomplete on
+    #     escaped text; it is wrong in BOTH directions, which is why it cannot
+    #     serve as a floor, a ceiling or a cross-check anywhere.
+    #   - "regex on the written side, parser on the resolved side", which does fix
+    #     the amount case. It desyncs on an EMPTY literal instead: the regex drops
+    #     ``""`` and the parser keeps it, so ``relation("a", "r", "")?`` reads 2
+    #     against 3 and loses resolution on a line with nothing wrong with it.
     for constant, tested in _paired_constants(
-        quoted_constants(line), quoted_constants(resolved)
+        query_constants(line), query_constants(resolved)
     ):
         if constant and tested not in entities and tested not in {"S", "R", "O", "X", "Q"}:
             warnings.append(

@@ -294,3 +294,72 @@ class TestUniformKbIsUntouched:
             f"{form('삼성')} -> {form('이재용')} -> {form('서울')}",
             f"relation results: 1 rows; O={form('이재용')}",
         ]
+
+
+class TestResolutionOntoACanonicalAmount:
+    """A query that resolves onto a canonical ``amount`` value must not be warned
+    about as absent, and the report must not contradict itself about the line.
+
+    Every canonical ``amount`` value carries a ``"`` (``amount(1000,"億")`` — it
+    is the form merge stores), so resolution puts a ``\\"`` into the query STRING:
+    ``resolve_query_spellings`` re-quotes through ``json.dumps``. Scanning that
+    string with ``quoted_constants``' raw ``"([^"]+)"`` splits on the escape and
+    returns a DIFFERENT NUMBER of constants than the written line has —
+    ``['amount(1000,\\\\', ')', '규모']`` against ``['amount(1000,億)', '규모']`` —
+    so ``_paired_constants`` took its desync fallback and reverted the vocabulary
+    test to the unresolved reading.
+
+    The result was one report disagreeing with itself about one line: the answer
+    branches index ``query_args(resolved)`` and answered correctly, while the
+    warning said the KB had never heard of the value it had just counted. That is
+    the #328/#329 shape. Nothing to do with forbidden characters — it fires for
+    any query naming an amount in the unquoted-unit form a human types.
+    """
+
+    ROWS = rows(("예산안", "규모", 'amount(1000,"億")'))
+    VALUES = {row[key] for row in ROWS for key in ("subject", "object")}
+    SPELLING = kb_query_spellings(ROWS)
+    # The unquoted-unit spelling, which is what an author writes and what
+    # `_canonical_value` folds onto the stored form.
+    # The relation argument is a VARIABLE so every quoted constant on the line
+    # is a value the KB holds: the relation NAME is legitimate vocabulary that
+    # `build_report_text` drops through `names_a_relation`, and leaving it in
+    # would put a warning in these lists that says nothing about resolution.
+    WRITTEN = 'relation("예산안", R, "amount(1000,億)")?'
+
+    def test_a_resolvable_amount_is_not_warned_as_absent(self) -> None:
+        """RED before:
+        ``['query references non-engine entity or relation: amount(1000,億)']``."""
+        errors, warnings = rlc.validate_query(
+            self.WRITTEN, self.VALUES, set(), None, self.SPELLING
+        )
+        assert (errors, warnings) == ([], [])
+
+    def test_the_report_does_not_contradict_itself_about_the_line(
+        self, monkeypatch
+    ) -> None:
+        """The answer branch reads ``query_args(resolved)`` directly and was
+        always right; the warning came from the pairing and was wrong. Asserted
+        together because a report carrying both lines is the defect — either line
+        alone reads as correct."""
+        monkeypatch.setattr(rlc, "query_lines", lambda: [self.WRITTEN])
+        assert rlc.evaluate_queries(
+            self.ROWS, {}, set(), None, self.SPELLING
+        ) == ["relation results: 1 rows; R=규모"]
+        _errors, warnings = rlc.validate_query(
+            self.WRITTEN, self.VALUES, set(), None, self.SPELLING
+        )
+        assert warnings == []
+
+    def test_an_absent_amount_is_still_warned_and_named_as_typed(self) -> None:
+        """GUARD for the display side of the pairing: the constant reaching the
+        message is now the parser's decoded argument rather than the regex's raw
+        capture, so pin that an amount the KB does NOT hold still draws the
+        warning and still reads back in the spelling the author typed."""
+        written = 'relation("예산안", R, "amount(2000,億)")?'
+        _errors, warnings = rlc.validate_query(
+            written, self.VALUES, set(), None, self.SPELLING
+        )
+        assert warnings == [
+            "query references non-engine entity or relation: amount(2000,億)"
+        ]
