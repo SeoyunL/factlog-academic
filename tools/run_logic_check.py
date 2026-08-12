@@ -36,6 +36,8 @@ from common import (  # noqa: E402
     entity_set,
     value_set,
     ensure_dirs,
+    kb_query_spellings,
+    resolve_query_spellings,
     load_accepted_facts,
     load_facts,
     load_logic_policy,
@@ -169,6 +171,7 @@ def validate_query(
     entities: set[str],
     policy_query_predicates: set[str],
     path_nodes: set[str] | None = None,
+    spelling: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Validate one query line against the KB vocabulary.
 
@@ -178,12 +181,23 @@ def validate_query(
     enforces for `ask`. ``None`` means "do not distinguish the two" and keeps the
     pre-#329 behaviour for the callers that pass three arguments.
 
+    *spelling* is ``kb_query_spellings``. Every VOCABULARY test below reads the
+    resolved line, so a constant naming a value accepted.dl holds under its other
+    canonically equivalent spelling is not warned about as absent — the same
+    resolution the gate and the engine apply, so all three agree about which
+    constants the KB carries. ``None`` means "do not resolve", which is what a
+    caller passing four arguments gets.
+
+    Every MESSAGE keeps the line and the constant as the author wrote them: the
+    report is an artifact a reader compares to their own query file.
+
     Signature errors come first, from ``query_error``: a line the gate refuses on
     arity or shape is reported as an error and never also warned about or
     answered (#328).
     """
     errors: list[str] = []
     warnings: list[str] = []
+    resolved = line if spelling is None else resolve_query_spellings(line, spelling)
     predicate = line.split("(", 1)[0]
     if predicate not in QUERY_PREDICATES and predicate not in policy_query_predicates:
         errors.append(f"query unknown predicate: {one_line(line)}")
@@ -203,7 +217,7 @@ def validate_query(
             errors.append(policy_error)
             return errors, warnings
         args = query_args(line)
-        if is_quoted_string(args[0]) and arg_value(args[0]) not in entities:
+        if is_quoted_string(args[0]) and arg_value(query_args(resolved)[0]) not in entities:
             warnings.append(
                 f"query references non-engine entity: {one_line(arg_value(args[0]))}"
             )
@@ -236,20 +250,38 @@ def validate_query(
             # the same query outright — say why here too, rather than letting the
             # result line answer "(not found)", which reads as "the facts do not
             # connect them" (#329).
-            for constant in path_endpoints(line):
+            for constant, tested in _paired_constants(
+                path_endpoints(line), path_endpoints(resolved)
+            ):
                 # `not constant` covers the empty string, which value_set drops, so
                 # the generic unknown-constant check below is silent on it as well —
                 # without it that endpoint drew no diagnostic anywhere.
-                if constant not in path_nodes and (constant in entities or not constant):
+                if tested not in path_nodes and (tested in entities or not tested):
                     warnings.append(
                         f"query path argument is not an accepted entity: {display_value(constant)}"
                     )
-    for constant in quoted_constants(line):
-        if constant and constant not in entities and constant not in {"S", "R", "O", "X", "Q"}:
+    for constant, tested in _paired_constants(
+        quoted_constants(line), quoted_constants(resolved)
+    ):
+        if constant and tested not in entities and tested not in {"S", "R", "O", "X", "Q"}:
             warnings.append(
                 f"query references non-engine entity or relation: {one_line(constant)}"
             )
     return errors, warnings
+
+
+def _paired_constants(written: list[str], resolved: list[str]) -> list[tuple[str, str]]:
+    """Zip a line's constants with the same line's after spelling resolution:
+    ``(what the author wrote, what to test against the KB vocabulary)``.
+
+    Resolution substitutes in place and never adds or drops an argument, so the
+    two lists line up. It falls back to pairing each constant with itself if they
+    ever do not — a diagnostic must not be attributed to the wrong constant, and
+    the unresolved reading is the pre-existing behaviour, so the fallback can
+    only warn where the old code warned."""
+    if len(written) != len(resolved):
+        return [(constant, constant) for constant in written]
+    return list(zip(written, resolved, strict=True))
 
 
 # The two validate_query warnings that fire on a constant absent from the KB
@@ -316,7 +348,12 @@ def policy_row_matches(args: list[str], row: tuple[str, ...] | list[str]) -> boo
     return True
 
 
-def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[str, ...]]]) -> str | None:
+def policy_result_line(
+    predicate: str,
+    line: str,
+    inferred: dict[str, set[tuple[str, ...]]],
+    resolved: str | None = None,
+) -> str | None:
     """Render one policy query's result, or None when the query is malformed.
 
     The test is `query_error`, the SAME verdict validate_query puts in the
@@ -355,7 +392,15 @@ def policy_result_line(predicate: str, line: str, inferred: dict[str, set[tuple[
     if query_error("policy query", line) is not None:
         return None
     args = query_args(line)
-    rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(args, row)]
+    # policy_row_matches compares RAW at EVERY position (deliberately, so the
+    # report and ask_router filter identically), so the constants it sees must
+    # already carry the KB's spelling. *resolved* is *line* with its value
+    # constants moved onto the spellings accepted.dl holds; positions past the
+    # first hold engine-derived reason codes, which are absent from the value map
+    # and pass through untouched. None keeps the unresolved reading for the
+    # three-argument callers.
+    filter_args = args if resolved is None else query_args(resolved)
+    rows = [row for row in sorted(inferred[predicate]) if policy_row_matches(filter_args, row)]
     values: list[str] = []
     for row in rows:
         bindings = []
@@ -382,6 +427,13 @@ def evaluate_queries(
     *path_nodes* is entity_set — the values that may be path endpoints. ``None``
     means "do not distinguish", the pre-#329 behaviour kept for three-argument
     callers; ``main`` always passes it.
+
+    Every branch EVALUATES the resolved line and ECHOES the written one. The
+    engine and the raw comparisons here join on bytes, so a query naming a value
+    under its other canonically equivalent spelling has to be moved onto the
+    spelling accepted.dl holds before anything is matched; but the report is read
+    beside facts/query.dl, so what it prints back must be what the author typed.
+    The two differ only on a KB that stores both forms of some value.
     """
     results: list[str] = []
     # Read policy/attribute-relations.md at most once for the whole run, not once
@@ -389,10 +441,14 @@ def evaluate_queries(
     # is None. classify_query hoists it the same way. Stays lazy so a KB with no
     # path query does not touch the file at all.
     attribute_rels: set[str] | None = None
+    # Built once for the whole run, like attribute_rels: it is one pass over the
+    # accepted rows, not one per query line.
+    spelling = kb_query_spellings(facts)
     for line in query_lines():
+        resolved = resolve_query_spellings(line, spelling)
         predicate = line.split("(", 1)[0]
         if predicate in policy_query_predicates:
-            result_line = policy_result_line(predicate, line, inferred)
+            result_line = policy_result_line(predicate, line, inferred, resolved)
             if result_line is not None:
                 results.append(result_line)
         elif predicate == "path":
@@ -403,6 +459,11 @@ def evaluate_queries(
             if query_error("path", line) is not None:
                 continue
             constants = path_endpoints(line)
+            # Display from the WRITTEN line, evaluation from the RESOLVED one:
+            # the head echoes the endpoints the author typed, while membership,
+            # reachability and the trace all have to use the spelling the engine
+            # joined on.
+            evaluated = _paired_constants(constants, path_endpoints(resolved))
             if len(constants) >= 2:
                 # An endpoint that is a literal (object of a declared attribute
                 # relation) is not a path node at all. Name the reason instead of
@@ -411,7 +472,7 @@ def evaluate_queries(
                 # because classify_query rejects the query as entity_not_accepted
                 # (#329).
                 not_nodes = (
-                    [value for value in constants[:2] if value not in path_nodes]
+                    [written for written, tested in evaluated[:2] if tested not in path_nodes]
                     if path_nodes is not None else []
                 )
                 head = (
@@ -423,11 +484,12 @@ def evaluate_queries(
                         f"{head}: (not evaluated — not an accepted entity: {reason})"
                     )
                     continue
-                is_reachable = (constants[0], constants[1]) in inferred["path"]
+                start, target = evaluated[0][1], evaluated[1][1]
+                is_reachable = (start, target) in inferred["path"]
                 if is_reachable:
                     if attribute_rels is None:
                         attribute_rels = attribute_relations()
-                    trace = dependency_path(facts, constants[0], constants[1], attribute_rels)
+                    trace = dependency_path(facts, start, target, attribute_rels)
                 else:
                     trace = []
                 # one_line here because the trace nodes come from
@@ -444,7 +506,10 @@ def evaluate_queries(
         elif predicate == "relation":
             if query_error("relation", line) is not None:
                 continue
-            rows = relation_results(line, facts)
+            # relation_results compares RAW, so it must see the resolved line;
+            # the bindings below are named from the written one, which resolution
+            # cannot change (a variable is never a value position).
+            rows = relation_results(resolved, facts)
             args = query_args(line)
             result_values: list[str] = []
             for subject, relation, object_ in rows:
@@ -471,7 +536,7 @@ def evaluate_queries(
             # lines.
             if query_error("count", line) is not None:
                 continue
-            subj_q, rel_q = query_args(line)
+            subj_q, rel_q = query_args(resolved)
             subj, rel = arg_value(subj_q), arg_value(rel_q)
             objects = {
                 f["object"]
@@ -485,6 +550,12 @@ def evaluate_queries(
             # policy echo this is unconditional — count has no "Policy evaluation:"
             # extent line for a variable-only query to be read against, and a
             # dropped line misaligns every shape equally.
+            #
+            # The echo is the WRITTEN line, never the resolved one. It is what
+            # tests/golden/logic_report.txt pins, and more to the point the reader
+            # matches this line against facts/query.dl by eye: printing back a
+            # spelling they did not type would be a difference they cannot see and
+            # cannot search for.
             results.append(
                 f"count results (query: {one_line(line)}): {len(objects)} (distinct objects)"
             )
@@ -861,6 +932,8 @@ def build_report_text() -> str:
     # test classify_query applies for `ask`, so the report and the router give
     # the same answer to the same path query (#329).
     path_nodes = entity_set(facts)
+    # One pass over the accepted rows for the whole run, not one per query line.
+    spelling = kb_query_spellings(facts)
     relations = allowed_relations(facts)
     errors: list[str] = []
     warnings: list[str] = []
@@ -882,7 +955,9 @@ def build_report_text() -> str:
             policy_findings.append(f"{one_line(predicate)}: {one_line(target)} ({one_line(reason)})")
 
     for line in query_lines():
-        query_errors, query_warnings = validate_query(line, entities, policy_query_predicates, path_nodes)
+        query_errors, query_warnings = validate_query(
+            line, entities, policy_query_predicates, path_nodes, spelling
+        )
         errors.extend(query_errors)
         warnings.extend(
             [item for item in query_warnings if not names_a_relation(item, relations)]
