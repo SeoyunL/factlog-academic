@@ -590,6 +590,19 @@ def _init_kb(target) -> bool:
 
 _DEFAULT_KB = "~/wiki"
 
+# Human-readable name for each rank ``resolve_root`` can report, minus ``flag``:
+# a target named on the command line is never announced, so it never needs one.
+# Indexed, not ``.get``-with-fallthrough. This pair of commands delegates the
+# chain precisely so a rank added to ``resolve_root`` cannot be silently ignored
+# here — and a fallthrough reinstates that in a quieter form, printing the raw
+# token ("from localrc") inside a sentence written for these names. A KeyError
+# lands on whoever adds the rank, which is the only person who can label it.
+_TARGET_SOURCE_LABELS = {
+    "env": "$FACTLOG_ROOT",
+    "config": "the active-KB config",
+    "default": f"the default {_DEFAULT_KB}",
+}
+
 
 def _resolve_kb_target(cli_value: str | None, command: str):
     """Resolve the KB root `init`/`setup` will scaffold, announcing an implicit one.
@@ -625,11 +638,6 @@ def _resolve_kb_target(cli_value: str | None, command: str):
 
     resolved, origin = factlog_config.resolve_root(cli_value, fallback=_DEFAULT_KB)
     target = Path(resolved)
-    source = {
-        "env": "$FACTLOG_ROOT",
-        "config": "the active-KB config",
-        "default": f"the default {_DEFAULT_KB}",
-    }.get(origin, origin)
 
     # `_init_kb` mkdirs `<target>/sources`, so a regular file at `<target>` raised
     # a bare `NotADirectoryError` — a stack trace where a sentence belongs. Here
@@ -646,8 +654,9 @@ def _resolve_kb_target(cli_value: str | None, command: str):
             "Pass --target with a directory path."
             if origin == "flag"
             else (
-                f"It was chosen implicitly (from {source}), not named on the command "
-                "line — point that at a directory, or pass --target with a directory path."
+                f"It was chosen implicitly (from {_TARGET_SOURCE_LABELS[origin]}), not named "
+                "on the command line — point that at a directory, or pass --target with a "
+                "directory path."
             )
         )
         raise FactlogError(
@@ -657,6 +666,8 @@ def _resolve_kb_target(cli_value: str | None, command: str):
 
     if origin == "flag":
         return target
+
+    source = _TARGET_SOURCE_LABELS[origin]
 
     # Keeping cwd out of the *chain* was not enough to keep it out of the
     # outcome. `factlog where --porcelain` prints cwd when nothing is configured
