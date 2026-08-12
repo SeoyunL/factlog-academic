@@ -260,6 +260,20 @@ def validate_query(
                     warnings.append(
                         f"query path argument is not an accepted entity: {display_value(constant)}"
                     )
+    # DEFENSIVE, unlike its sibling above — this pairing cannot currently change
+    # any message, and that is structural rather than accidental. ``main`` derives
+    # *entities* (``value_set(facts)``) and *spelling* (``kb_query_spellings(facts)``)
+    # from the SAME rows, so the map's values are a subset of *entities*: a
+    # constant that resolved is necessarily in *entities* and this warning cannot
+    # fire for it. ``constant`` and ``tested`` therefore only ever differ on
+    # constants this branch stays silent about. Mutating ``{constant}`` to
+    # ``{tested}`` here survives the suite for that reason; do not go looking for
+    # the pin that would catch it. It is written this way so the rule "a message
+    # names what the author wrote" holds by construction at every site, and so a
+    # future caller passing a map derived from other rows cannot reintroduce the
+    # mismatch. The path-endpoint pairing above IS load-bearing — entity_set is
+    # narrower than value_set, so a resolved constant can still be warned about
+    # there — and is pinned.
     for constant, tested in _paired_constants(
         quoted_constants(line), quoted_constants(resolved)
     ):
@@ -275,10 +289,16 @@ def _paired_constants(written: list[str], resolved: list[str]) -> list[tuple[str
     ``(what the author wrote, what to test against the KB vocabulary)``.
 
     Resolution substitutes in place and never adds or drops an argument, so the
-    two lists line up. It falls back to pairing each constant with itself if they
-    ever do not — a diagnostic must not be attributed to the wrong constant, and
-    the unresolved reading is the pre-existing behaviour, so the fallback can
-    only warn where the old code warned."""
+    two lists line up; the desync branch is unreachable. If they ever do not, a
+    diagnostic must not be attributed to the wrong constant, so this ABANDONS
+    RESOLUTION for the line and pairs each constant with itself — the unresolved
+    reading, which is the pre-existing behaviour, so the fallback can only warn
+    where the old code warned.
+
+    ``common.classify_query``'s ``_shown`` guard degrades the same way for the
+    same reason. The two were written pointing in opposite directions — one
+    reverting the display, the other the evaluation — which would have made a
+    desync produce a gate and a report that disagree about the same line."""
     if len(written) != len(resolved):
         return [(constant, constant) for constant in written]
     return list(zip(written, resolved, strict=True))

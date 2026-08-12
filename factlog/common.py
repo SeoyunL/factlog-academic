@@ -2667,6 +2667,15 @@ def kb_query_spellings(facts: list[dict[str, str]]) -> dict[str, str]:
     """Map a query constant's ``_canonical_value`` key to the ONE spelling
     ``accepted.dl`` actually holds for it.
 
+    **Pass ACCEPTED rows** (``load_accepted_facts()``), never candidates. The
+    refusal below is per value over whatever rows it is given, and candidates
+    still carry every spelling the sources used — the duplicates
+    ``dedup_engine_atoms`` exists to collapse. Handing them in therefore refuses
+    exactly the values a mixed KB most needs resolved, quietly turning the map
+    off. ``value_set`` filters a row list carrying ``status`` down to engine
+    input, so the mistake does not raise; it just returns a smaller map. Every
+    caller today reads ``load_accepted_facts()``.
+
     Read-side observation of what the file HAS, deliberately not a wrapper around
     :func:`kb_spellings`. Three reasons they cannot be the same map:
 
@@ -2910,11 +2919,16 @@ def classify_query(
     args = _query_args(query)
     _shown = _query_args(written)
     if len(_shown) != len(args):
-        # Resolution substitutes in place and never adds or drops an argument, so
-        # this cannot fire; falling back to the resolved args keeps every message
-        # well-formed rather than risking an index error on a line shape neither
-        # parser agreed about.
-        _shown = args
+        # Unreachable: resolution substitutes in place and never adds or drops an
+        # argument. If the two parses ever disagree the pairing cannot be trusted,
+        # so ABANDON RESOLUTION for this line and read the written one throughout
+        # — the same rule `run_logic_check._paired_constants` applies when its two
+        # lists desync, stated once so the gate and the report cannot degrade in
+        # opposite directions. Reverting to the unresolved reading restores
+        # pre-#363 behaviour for that one line; falling back to the resolved args
+        # instead would revert only the DISPLAY, which is the defect this
+        # `_shown` pairing was added to fix.
+        query, args, _shown = written, _shown, _shown
     # Read the attribute-relation policy ONCE and reuse it for both the entity
     # membership check and the path evaluation below, so the endpoint guard and
     # dependency_path can never disagree about which relations are attributes
