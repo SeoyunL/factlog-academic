@@ -605,8 +605,15 @@ def _resolve_kb_target(cli_value: str | None, command: str):
     would be a worse default than the one it replaces, so ``~/wiki`` stays the
     last resort. A target that was not spelled out is printed with its source —
     an implicit target is only safe if the user can see which one it was.
+
+    "Same order" is enforced rather than asserted: the chain itself is
+    ``factlog_config.resolve_root``, which the config module's docstring claims
+    to own for every caller, and ``~/wiki`` reaches it as the ``fallback``
+    argument. A second copy here would drift without any test noticing — the
+    shape of #356 itself, where these two commands were the ones ignoring the
+    documented precedence. What stays local is only what is local: rejecting an
+    empty ``--target``, the human labels for each source, and the cwd guard.
     """
-    import os
     from pathlib import Path
     from factlog.common import FactlogError
 
@@ -615,17 +622,16 @@ def _resolve_kb_target(cli_value: str | None, command: str):
         # that was simply false, and then scaffolded somewhere the user had not
         # named. An empty value is a mistake worth reporting, not a synonym.
         raise FactlogError(f"{command}: --target was given but empty. Pass a path, or omit the flag.")
-    if cli_value:
-        return Path(cli_value).expanduser().resolve()
 
-    env = os.environ.get("FACTLOG_ROOT")
-    configured = factlog_config.read_root()
-    if env:
-        target, source = Path(env).expanduser().resolve(), "$FACTLOG_ROOT"
-    elif configured:
-        target, source = Path(configured), "the active-KB config"
-    else:
-        target, source = Path(_DEFAULT_KB).expanduser().resolve(), f"the default {_DEFAULT_KB}"
+    resolved, origin = factlog_config.resolve_root(cli_value, fallback=_DEFAULT_KB)
+    target = Path(resolved)
+    if origin == "flag":
+        return target
+    source = {
+        "env": "$FACTLOG_ROOT",
+        "config": "the active-KB config",
+        "default": f"the default {_DEFAULT_KB}",
+    }.get(origin, origin)
 
     # Keeping cwd out of the *chain* was not enough to keep it out of the
     # outcome. `factlog where --porcelain` prints cwd when nothing is configured
