@@ -2852,6 +2852,24 @@ def classify_query(
     if predicate not in allowed_predicates:
         return False, QUERY_UNKNOWN_PREDICATE, f"unknown predicate: {predicate}"
 
+    # Resolve value constants onto the spellings accepted.dl holds before any
+    # membership test reads one. The path and policy branches below compare RAW
+    # (`_arg_value(arg) not in entities`), so on a KB whose atoms were folded to
+    # one spelling per value a query typed in the other form was refused outright
+    # — measured on a mixed KB, BOTH `path(NFD(삼성), NFD(서울))?` and
+    # `path(NFC(삼성), NFC(서울))?` returned entity_not_accepted, with did_you_mean
+    # empty, so no single form the user could type reached the file.
+    #
+    # This must never land without ask_router.evaluate's matching resolution:
+    # measured, folding the gate alone turns that loud refusal into `rows: 0`,
+    # a verified negative for a path the KB supports — the harm kb_spellings'
+    # docstring names. The gate decides whether to run; the engine still joins on
+    # bytes, so both sides have to see the same constants.
+    #
+    # Rebinding `query` means a reason string names the resolved constant rather
+    # than the typed one. The two are canonically equivalent, so they render
+    # identically; and the caller's `did_you_mean_hints` reads the original draft.
+    query = resolve_query_spellings(query, kb_query_spellings(facts))
     args = _query_args(query)
     # Read the attribute-relation policy ONCE and reuse it for both the entity
     # membership check and the path evaluation below, so the endpoint guard and

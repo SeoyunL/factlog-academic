@@ -22,6 +22,12 @@ import unicodedata
 import pytest
 
 import ask_router
+from factlog.common import (
+    QUERY_ENTITY_NOT_ACCEPTED,
+    QUERY_FACT_ABSENT,
+    QUERY_OK,
+    classify_query,
+)
 
 
 def nfc(value: str) -> str:
@@ -102,3 +108,66 @@ class TestEvaluateResolvesSpellings:
                 "rows": [["0"]],
                 "count": 0,
             }
+
+
+class TestGateAdmitsEitherSpelling:
+    """``classify_query`` decides whether ``ask`` runs the engine at all.
+
+    Its path and policy branches compare RAW membership, so on this KB a path
+    query was refused in BOTH single forms — the all-NFC case is the strongest
+    evidence, because there is no mixed-form excuse for it: the user wrote one
+    normalization form throughout and the KB simply does not store 서울 that way.
+
+    This gate fix may never ship without ``evaluate``'s: measured, folding the
+    gate alone converts the loud ``entity_not_accepted`` into ``rows: 0`` — a
+    verified negative for a path the KB supports, which is worse than the refusal
+    it replaces.
+    """
+
+    @pytest.mark.parametrize("form", [nfd, nfc])
+    def test_path_is_admitted_in_either_spelling(self, form) -> None:
+        """RED before this fix, in BOTH parametrizations:
+        ``(False, 'entity_not_accepted', 'path argument is not an accepted
+        entity: …')``."""
+        ok, code, _reason = classify_query(
+            f'path("{form("삼성")}", "{form("서울")}")?', MIXED, policy_program=""
+        )
+        assert (ok, code) == (True, QUERY_OK)
+
+    @pytest.mark.parametrize("form", [nfd, nfc])
+    def test_the_gate_and_the_engine_agree(self, form) -> None:
+        """The pairing that matters: whatever the gate admits, the engine must
+        answer. A gate that opened onto an engine still holding the typed
+        constants would report a verified empty result."""
+        line = f'path("{form("삼성")}", "{form("서울")}")?'
+        ok, _code, _reason = classify_query(line, MIXED, policy_program="")
+        assert ok
+        assert ask_router.evaluate(line, MIXED)["count"] == 1
+
+    def test_an_unreachable_pair_is_still_refused_as_fact_absent(self) -> None:
+        """Resolution admits the vocabulary; it must not fabricate a path.
+        ``이재용 -> 삼성`` runs the wrong way down the only edge."""
+        ok, code, _reason = classify_query(
+            f'path("{nfd("이재용")}", "{nfd("삼성")}")?', MIXED, policy_program=""
+        )
+        assert (ok, code) == (False, QUERY_FACT_ABSENT)
+
+    def test_an_absent_entity_is_still_refused(self) -> None:
+        ok, code, _reason = classify_query(
+            f'path("{nfd("현대")}", "{nfd("서울")}")?', MIXED, policy_program=""
+        )
+        assert (ok, code) == (False, QUERY_ENTITY_NOT_ACCEPTED)
+
+    @pytest.mark.parametrize("form", [nfc, nfd])
+    def test_uniform_kb_gate_is_a_guard_not_evidence(self, form) -> None:
+        """GUARD, not evidence — passes before and after. A KB written one way
+        was always addressable in that way; the pin is here so the resolution
+        cannot start refusing it."""
+        uniform = rows(
+            (form("삼성"), "대표", form("이재용")),
+            (form("이재용"), "거주", form("서울")),
+        )
+        ok, code, _reason = classify_query(
+            f'path("{form("삼성")}", "{form("서울")}")?', uniform, policy_program=""
+        )
+        assert (ok, code) == (True, QUERY_OK)
