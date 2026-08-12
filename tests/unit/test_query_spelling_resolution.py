@@ -166,21 +166,53 @@ class TestResolveQuerySpellings:
             f'relation("{nfc("삼성")}", R, O)?'
         )
 
-    def test_policy_predicate_resolves_every_position(self) -> None:
+    def test_policy_predicate_position_0_resolves(self) -> None:
         """An unknown predicate is a policy predicate. ``policy_row_matches``
-        compares RAW at every position, so fixing only position 0 would leave the
-        reason positions mismatched — the half-move that docstring names. The
-        reason codes are engine-derived and absent from the value map, so they
-        pass through untouched and resolving all positions is safe."""
+        compares RAW at every position, so an unresolved constant simply misses
+        the row."""
         spelling = kb_query_spellings(MIXED)
-        line = f'needs_review("{nfd("서울")}", "stale")?'
-        assert resolve_query_spellings(line, spelling) == (
-            f'needs_review("{nfd("서울")}", "stale")?'
+        assert resolve_query_spellings(
+            f'needs_review("{nfc("서울")}", "stale")?', spelling
+        ) == f'needs_review("{nfd("서울")}", "stale")?'
+
+    def test_policy_predicate_resolves_positions_PAST_the_first(self) -> None:
+        """The pin that makes ``tuple(range(len(args)))`` load-bearing.
+
+        An ASCII reason code like ``"stale"`` is absent from the value map, so it
+        passes through whether the code resolves one position or all of them — an
+        assertion using one cannot tell ``(0,)`` from ``range``. This uses a
+        reason code that IS a KB value stored in the other normal form, which is
+        the only shape that distinguishes them.
+
+        Reachable only through a hand-written ``logic-policy.extra.dl``:
+        ``generate_logic_policy.REASON_RE`` forces ``[a-z0-9_]+`` on generated
+        codes, so no generated one can collide with a Korean value. The trade-off
+        is recorded in ``resolve_query_spellings``' docstring — see also
+        ``test_a_reason_code_that_is_also_a_kb_value_is_rewritten`` below, which
+        pins the cost rather than hiding it."""
+        facts = rows((nfc("삼성"), "상태", nfd("보류")))
+        spelling = kb_query_spellings(facts)
+        assert resolve_query_spellings(
+            f'needs_review("{nfc("삼성")}", "{nfc("보류")}")?', spelling
+        ) == f'needs_review("{nfc("삼성")}", "{nfd("보류")}")?'
+
+    def test_a_reason_code_that_is_also_a_kb_value_is_rewritten(self) -> None:
+        """The KNOWN COST of resolving every policy position, pinned so it cannot
+        be rediscovered as a surprise.
+
+        When a hand-written policy emits a reason code that is also a KB value,
+        and the KB stores that value in the other normal form, the query's reason
+        constant moves and ``policy_row_matches`` (raw) stops matching the row.
+        The alternative — resolving only position 0 — breaks every hand-written
+        policy query on a folded KB instead, which is the wider harm. If this
+        test ever needs to change, that trade-off is what is being revisited."""
+        facts = rows((nfc("삼성"), "상태", nfd("보류")))
+        spelling = kb_query_spellings(facts)
+        resolved = resolve_query_spellings(
+            f'needs_review("{nfc("삼성")}", "{nfc("보류")}")?', spelling
         )
-        line = f'needs_review("{nfc("서울")}", "stale")?'
-        assert resolve_query_spellings(line, spelling) == (
-            f'needs_review("{nfd("서울")}", "stale")?'
-        )
+        # An engine row carrying the NFC reason code no longer matches.
+        assert nfd("보류") in resolved and f'"{nfc("보류")}"' not in resolved
 
     def test_returns_the_input_object_unchanged_when_nothing_moves(self) -> None:
         """IDENTITY, not merely an equal line. Reassembly normalises whitespace,

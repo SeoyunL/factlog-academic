@@ -20,7 +20,7 @@ import unicodedata
 import pytest
 
 import run_logic_check as rlc
-from factlog.common import kb_query_spellings
+from factlog.common import kb_query_spellings, resolve_query_spellings
 
 
 def nfc(value: str) -> str:
@@ -150,6 +150,65 @@ class TestValidateQueryVocabulary:
         assert warnings == [
             f"query references non-engine entity or relation: {nfd('현대')}"
         ]
+
+    def test_omitting_the_map_keeps_the_unresolved_reading(self) -> None:
+        """GUARD, not evidence. The parameter is trailing and optional; the
+        four-argument callers that existed before must behave exactly as they
+        did."""
+        _errors, warnings = rlc.validate_query(
+            f'path("{nfd("삼성")}", "{nfd("서울")}")?', VALUES, set(), NODES
+        )
+        assert warnings == [
+            f"query references non-engine entity or relation: {nfd('삼성')}"
+        ]
+
+
+class TestPolicyResultLineFiltersOnResolvedArgs:
+    """``policy_row_matches`` compares RAW at every position, so the constants it
+    filters with must already carry the KB's spelling — otherwise the report
+    answers 0 rows for a policy row the engine really inferred, and prints it
+    beside a "Policy evaluation: N rows" extent line that disagrees.
+
+    This is the pin that makes ``filter_args = query_args(resolved)`` load-bearing;
+    with ``filter_args = args`` the whole suite still passed.
+    """
+
+    # A reason code that is also a KB value, stored decomposed — the only shape
+    # where a position past the first moves. See
+    # test_a_reason_code_that_is_also_a_kb_value_is_rewritten for why this is a
+    # documented cost rather than a bug.
+    FACTS = rows((nfc("삼성"), "상태", nfd("보류")))
+    INFERRED = {"needs_review": {(nfc("삼성"), nfd("보류"))}}
+
+    def test_position_0_filters_on_the_resolved_constant(self) -> None:
+        spelling = kb_query_spellings(rows((nfd("서울"), "상태", "x")))
+        line = rlc.policy_result_line(
+            "needs_review",
+            f'needs_review("{nfc("서울")}", R)?',
+            {"needs_review": {(nfd("서울"), "stale")}},
+            resolve_query_spellings(f'needs_review("{nfc("서울")}", R)?', spelling),
+        )
+        assert line.startswith("needs_review results (query: ") and "1 rows" in line
+
+    def test_positions_past_the_first_filter_on_the_resolved_constant(self) -> None:
+        spelling = kb_query_spellings(self.FACTS)
+        written = f'needs_review("{nfc("삼성")}", "{nfc("보류")}")?'
+        line = rlc.policy_result_line(
+            "needs_review",
+            written,
+            self.INFERRED,
+            resolve_query_spellings(written, spelling),
+        )
+        assert "1 rows" in line, line
+        # ...and the echo is still the line the author wrote.
+        assert f"(query: {written})" in line
+
+    def test_omitting_resolved_keeps_the_unresolved_reading(self) -> None:
+        """GUARD, not evidence. The parameter is trailing and optional; the
+        three-argument callers that existed before must behave as they did."""
+        written = f'needs_review("{nfc("삼성")}", "{nfc("보류")}")?'
+        line = rlc.policy_result_line("needs_review", written, self.INFERRED)
+        assert "0 rows" in line, line
 
     def test_omitting_the_map_keeps_the_unresolved_reading(self) -> None:
         """GUARD, not evidence. The parameter is trailing and optional; the
