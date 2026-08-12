@@ -250,6 +250,28 @@ class TestTheChainItselfIsShared:
         with pytest.raises(KeyError):
             factlog_cli._resolve_kb_target(None, "factlog init")
 
+    def test_an_unknown_rank_pointing_at_a_file_raises_too(self, tmp_path, monkeypatch):
+        """The label is read in two places; the test above only reaches one.
+
+        Because that one resolves to a path which does not exist, it walks past
+        the existing-file guard and trips the announce-line lookup. Reverting
+        *only* the guard's lookup to a fallthrough therefore left the whole suite
+        green — a surviving mutant, and on the branch that builds a `FactlogError`
+        message, where a leaked token is user-facing text rather than a log line.
+        """
+        from factlog import cli as factlog_cli
+
+        occupied = tmp_path / "notes.md"
+        occupied.write_text("mine\n", encoding="utf-8")
+
+        def resolve_root(cli_value=None, *, fallback=None):
+            return str(occupied), "localrc"
+
+        monkeypatch.setattr(factlog_cli.factlog_config, "resolve_root", resolve_root)
+
+        with pytest.raises(KeyError):
+            factlog_cli._resolve_kb_target(None, "factlog init")
+
     def test_the_fallback_is_passed_rather_than_applied_afterwards(self, tmp_path, monkeypatch):
         """``~/wiki`` is the chain's last resort, not a patch over its cwd result.
 
