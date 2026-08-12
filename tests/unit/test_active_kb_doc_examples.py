@@ -61,11 +61,16 @@ def sandbox(tmp_path):
     }
 
 
-def run_init(sandbox, *args, cwd: Path | None = None) -> list[str]:
+def run_init(sandbox, *args, cwd: Path | None = None, env_root: str | None = None) -> list[str]:
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = str(sandbox["cfg_home"])
     env["PYTHONPATH"] = str(REPO_ROOT)
+    # Dropped by default — the repo-root conftest pins it, and an inherited value
+    # would decide the target these captures are choosing on purpose. *env_root*
+    # puts it back for the one block that is about the environment.
     env.pop("FACTLOG_ROOT", None)
+    if env_root is not None:
+        env["FACTLOG_ROOT"] = env_root
     proc = subprocess.run(
         [sys.executable, "-m", "factlog", "init", *args],
         cwd=str(cwd or REPO_ROOT),
@@ -134,6 +139,31 @@ def test_a_damaged_config_is_left_alone(sandbox):
             "factlog init: active-KB config at",
             "  repair that file,",
         )
+    )
+
+
+def test_a_flagless_command_would_go_elsewhere(sandbox):
+    """The "would not reach" block — the one block no test pinned, and so the one
+    that drifted: the page wrapped a single line of output across two, with a
+    continuation indent the command never prints.
+
+    ``$FACTLOG_ROOT`` is set to the *same* KB the config records, deliberately.
+    Nothing is being overridden, so ``_env_override_note`` stays silent and the
+    capture is this block alone — which is how the page frames it.
+    """
+    sandbox["config"].write_text(
+        json.dumps({"root": str(sandbox["wiki"].resolve())}, indent=2) + "\n", encoding="utf-8"
+    )
+
+    lines = run_init(
+        sandbox,
+        "--target",
+        str(sandbox["scratch"]),
+        env_root=str(sandbox["wiki"].resolve()),
+    )
+
+    assert_pages_quote(
+        as_documented(sandbox, lines, "  a flagless command would target")
     )
 
 
