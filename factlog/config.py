@@ -82,12 +82,18 @@ def config_status() -> str:
     ``resolve_root`` already reports such a config as holding nothing.
     """
     path = config_path()
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return MISSING
     # ``exists()``, not ``is_file()``: a *directory* at the config path is not
     # "nothing is recorded yet". Classifying it MISSING broke this function's own
     # invariant and sent callers down the write path, where every write raises
     # ``IsADirectoryError``. It is unreadable, which is exactly what it is.
+    #
+    # ``is_symlink()`` for the same reason, from the other side: ``exists()``
+    # follows the link, so a link to a KB config on a volume that is not mounted
+    # right now answered "nothing here". Something *is* here — a link the user
+    # placed on purpose — and the write that followed replaced the link itself
+    # with a regular file, which remounting the volume no longer undoes.
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
