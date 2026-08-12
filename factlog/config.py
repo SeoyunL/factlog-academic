@@ -8,6 +8,10 @@ config file and resolves the effective root with the precedence:
 
     --wiki/--target flag  >  $FACTLOG_ROOT  >  config file  >  cwd
 
+A caller may hand ``resolve_root`` a *fallback* that takes the place of cwd as
+the last resort — ``init``/``setup`` scaffold rather than read, and pass
+``~/wiki``. Only the last rank moves; see ``resolve_root``.
+
 The config lives at ${XDG_CONFIG_HOME:-~/.config}/factlog/config.json as
 {"root": "<absolute kb path>", "lang": "<code>"}. The optional ``lang`` field
 records the language for the assistant's human-facing narration/summaries only
@@ -174,11 +178,26 @@ def write_lang(code: str | None) -> Path:
     return cfg
 
 
-def resolve_root(cli_value: str | None = None) -> tuple[str, str]:
+def resolve_root(cli_value: str | None = None, *, fallback: str | None = None) -> tuple[str, str]:
     """Resolve the effective KB root and where it came from.
 
     Returns (absolute_root, source) where source is one of
-    'flag' | 'env' | 'config' | 'cwd', following the documented precedence.
+    'flag' | 'env' | 'config' | 'default' | 'cwd', following the documented
+    precedence.
+
+    *fallback* replaces the last resort only. ``init``/``setup`` scaffold a
+    directory rather than read one, and a bare ``init`` that scattered a KB
+    layout across whatever directory the user happens to stand in would be a
+    worse default than the ``~/wiki`` it replaces — so they pass ``~/wiki`` here
+    and get the source ``'default'`` instead of ``'cwd'``.
+
+    That is a parameter rather than a second chain in ``factlog/cli.py`` because
+    the module docstring above claims to *own* this precedence for every caller,
+    and a hand-rolled copy makes the claim untrue in a way no test can see: a new
+    rank added here would be silently ignored by the one pair of commands whose
+    bug (#356) was not following the documented order in the first place.
+    Callers that pass no *fallback* are unaffected — ``'default'`` cannot occur
+    without it.
     """
     if cli_value:
         return str(Path(cli_value).expanduser().resolve()), "flag"
@@ -188,6 +207,8 @@ def resolve_root(cli_value: str | None = None) -> tuple[str, str]:
     cfg = read_root()
     if cfg:
         return str(Path(cfg).resolve()), "config"
+    if fallback is not None:
+        return str(Path(fallback).expanduser().resolve()), "default"
     return str(Path(".").resolve()), "cwd"
 
 

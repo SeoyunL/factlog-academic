@@ -141,3 +141,115 @@ class TestTheResolvedTargetIsAnnounced:
         out = run_init("--target", str(flag_kb), home=home).stdout
 
         assert "no --target given" not in out, out
+
+
+class TestTheChainItselfIsShared:
+    """The precedence must live in one place, not be re-implemented per command.
+
+    ``factlog/config.py`` declares in its module docstring that it owns this
+    order "so both factlog/cli.py and every tool's pre-import root resolver can
+    share it". ``init``/``setup`` used to hand-roll their own copy of it, and a
+    hand-rolled copy is invisible to every test above: those drive the chain from
+    the outside, so a rank added to ``resolve_root`` and ignored by ``init``
+    looks exactly like a rank that was never added.
+
+    So this pins the *wiring*, not the order. It is the reviewer's drift
+    experiment turned into a test: give ``resolve_root`` a rank nothing else
+    knows about and require ``init``'s resolution to see it.
+    """
+
+    def test_init_resolution_goes_through_config_resolve_root(self, tmp_path, monkeypatch):
+        """A rank only ``resolve_root`` knows about still reaches ``init``.
+
+        Red before the delegation: the hand-rolled chain read ``$FACTLOG_ROOT``
+        and ``read_root()`` itself, so it returned the environment KB and never
+        called the patched resolver at all.
+        """
+        from factlog import cli as factlog_cli
+
+        env_kb = tmp_path / "env-kb"
+        newer_rank = tmp_path / "newer-rank-kb"
+        monkeypatch.setenv("FACTLOG_ROOT", str(env_kb))
+        calls: list[tuple] = []
+
+        def resolve_root(cli_value=None, *, fallback=None):
+            # Stands in for a rank added between env and config later — the shape
+            # of change this test exists to keep honest.
+            calls.append((cli_value, fallback))
+            return str(newer_rank), "config"
+
+        monkeypatch.setattr(factlog_cli.factlog_config, "resolve_root", resolve_root)
+
+        target = factlog_cli._resolve_kb_target(None, "factlog init")
+
+        assert calls == [(None, "~/wiki")], (
+            f"init did not ask config.resolve_root for the target: {calls}"
+        )
+        assert target == newer_rank, (
+            f"init resolved {target}, not the {newer_rank} the shared chain returned"
+        )
+
+    def test_the_fallback_is_passed_rather_than_applied_afterwards(self, tmp_path, monkeypatch):
+        """``~/wiki`` is the chain's last resort, not a patch over its cwd result.
+
+        Red before the delegation for the same reason, and separately worth
+        pinning: applying the default *after* calling ``resolve_root`` would
+        agree with the test above while still leaving two chains — the shared one
+        would answer ``cwd`` and be overruled here.
+        """
+        from factlog import cli as factlog_cli
+
+        seen: list[str | None] = []
+
+        def resolve_root(cli_value=None, *, fallback=None):
+            seen.append(fallback)
+            return str(tmp_path / "answered"), "default"
+
+        monkeypatch.setattr(factlog_cli.factlog_config, "resolve_root", resolve_root)
+
+        factlog_cli._resolve_kb_target(None, "factlog init")
+
+        assert seen == ["~/wiki"], f"the ~/wiki fallback did not reach the chain: {seen}"
+
+
+class TestResolveRootFallbackIsOptIn:
+    """``fallback`` must not change what existing callers get."""
+
+    def test_without_fallback_the_last_resort_is_still_cwd(self, tmp_path, monkeypatch):
+        """GUARD, not evidence: passes before and after. Every other command
+        relies on the cwd fallback, so opting one pair out must not move it."""
+        from factlog import config as factlog_config
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-cfg"))
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        assert factlog_config.resolve_root()[1] == "cwd"
+
+    def test_with_fallback_the_last_resort_is_named_default(self, tmp_path, monkeypatch):
+        from factlog import config as factlog_config
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-cfg"))
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)
+        fallback = tmp_path / "fallback-kb"
+
+        root, source = factlog_config.resolve_root(fallback=str(fallback))
+
+        assert source == "default"
+        assert root == str(fallback.resolve())
+
+    def test_fallback_does_not_outrank_the_config(self, tmp_path, monkeypatch):
+        """The new argument is a *last* resort, not a new rank above the config."""
+        from factlog import config as factlog_config
+
+        cfg_home = tmp_path / "cfg"
+        configured = tmp_path / "configured-kb"
+        configured.mkdir()
+        write_pointer(cfg_home, configured)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+
+        root, source = factlog_config.resolve_root(fallback=str(tmp_path / "fallback-kb"))
+
+        assert (root, source) == (str(configured.resolve()), "config")
