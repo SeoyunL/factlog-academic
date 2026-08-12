@@ -233,3 +233,51 @@ class TestReasonNamesWhatTheUserTyped:
             f'path("{form("삼성")}", "{form("서울")}")?', uniform, policy_program=""
         )
         assert (ok, code) == (True, QUERY_OK)
+
+
+class TestCoverageHintQuotesWhatTheUserTyped:
+    """``evaluate``'s coverage hint must be built from the WRITTEN draft.
+
+    The hint's decision is spelling-insensitive (``coverage_hint`` folds every
+    comparison through ``canonical_value`` and re-runs ``classify``), so passing
+    it the resolved draft would not change whether a hint appears. Its TEXT is a
+    different matter: the message interpolates the subject and the relation
+    argument straight off the draft, so the resolved draft quotes the user a
+    spelling they never typed.
+
+    Reached through the ``evaluate`` API and the ``factlog ask evaluate``
+    subcommand — ``cmd_evaluate`` calls ``evaluate`` with no gate in front of it,
+    so this is not dead code behind ``cmd_render``.
+    """
+
+    FACTS = rows(
+        (nfc("삼성"), "대표", nfc("이재용")),
+        (nfc("이재용"), "거주", nfd("서울")),
+    )
+
+    def test_hint_keeps_the_authors_normalization(self) -> None:
+        """The subject is asked decomposed; the KB stores it composed. The hint
+        must quote the decomposed form back."""
+        draft = f'relation("{nfd("삼성")}", "거주", "{nfc("서울")}")?'
+        result = ask_router.evaluate(draft, self.FACTS)
+        assert result["count"] == 0
+        hint = result["coverage_hint"]
+        assert nfd("삼성") in hint
+        assert f"'{nfc('삼성')}'" not in hint
+
+    def test_hint_keeps_the_authors_quoting(self) -> None:
+        """The visible axis: ``_canonical_value`` folds ``canonical_amount`` on
+        top of NFC, so a resolved hint would add quotes around the unit."""
+        # 거주 must be an ACCEPTED relation (it is, on the second row) or the
+        # query is refused as relation_not_accepted and never becomes the
+        # verified negative a coverage hint is defined for.
+        facts = rows(
+            ('amount(7,"억")', "대표", "이재용"),
+            (nfc("삼성"), "거주", nfd("서울")),
+        )
+        draft = 'relation("amount(7,억)", "거주", "이재용")?'
+        result = ask_router.evaluate(draft, facts)
+        hint = result.get("coverage_hint")
+        assert hint is not None, result
+        assert "amount(7,억)" in hint
+        assert 'amount(7,"억")' not in hint
