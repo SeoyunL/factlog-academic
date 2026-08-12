@@ -2683,30 +2683,47 @@ def kb_query_spellings(facts: list[dict[str, str]]) -> dict[str, str]:
       unfolded, and a value that is also a relation name would otherwise take
       part in a fold it has no representative for.
 
-    **Ambiguous folds are refused, not guessed.** ``_canonical_value`` folds
-    strictly further than NFC — ``literal_types.canonical_amount`` makes
-    ``amount(1,000,"억")`` and ``amount(1000,"억")`` one key — while
-    ``merge_candidates`` canonicalises only the object, never the subject. So one
-    ``accepted.dl`` really can hold two distinct atoms that share a key. Picking
-    either as "the" spelling would answer a question about one of them from the
-    other, silently. A key whose pool holds more than one distinct NFC spelling
-    is therefore DROPPED, and a query naming it is passed through untouched to
-    fail (or succeed) exactly as it does without this map.
+    **A value spelled more than one way is refused, not guessed.** The refusal
+    is on the RAW spellings: a key is kept only when the whole KB writes that
+    value exactly one way. Anything looser resolves a query onto an atom the user
+    did not name, in two different ways:
 
-    Where the pool survives, the representative is :func:`composed_spelling` —
-    the same tie-break ``kb_spellings`` uses to choose what to write, so "which
-    spelling wins" has one definition on both sides. After a
-    ``dedup_engine_atoms`` compile every surviving pool is a singleton and the
-    tie-break is a formality; it does real work only on an ``accepted.dl`` that
-    holds two canonically equivalent spellings of one value, where it points the
-    query at the composed one — the spelling a fresh compile would have kept."""
+    * *past NFC.* ``_canonical_value`` folds further than NFC —
+      ``literal_types.canonical_amount`` makes ``amount(1,000,"억")`` and
+      ``amount(1000,"억")`` one key — while ``merge_candidates`` canonicalises
+      only the object, never the subject. One ``accepted.dl`` can hold two
+      distinct atoms sharing a key.
+    * *within NFC.* ``relation/3`` atoms are keyed on BYTES, so two canonically
+      equivalent subjects are two atoms, not one. Refusing only on a second NFC
+      form would let a stale or hand-edited file answer the decomposed atom's
+      question from the composed atom's row — measured on
+      ``relation(NFD(삼성), "대표", "이건희")`` beside
+      ``relation(NFC(삼성), "대표", "이재용")``, where
+      ``relation(NFD(삼성), "대표", O)?`` went from ``O=이건희`` to ``O=이재용``.
+      Substituting one atom's facts for another's is worse than the
+      unaddressability it was meant to cure.
+
+    A refused key is simply absent, and a query naming it passes through
+    untouched to fail (or succeed) exactly as it does without this map. The cost
+    is nothing on a compiled KB: ``kb_spellings`` already gives each value one
+    spelling in ``accepted.dl``, so every pool of a freshly compiled KB — mixed,
+    uniformly composed or uniformly decomposed — is a singleton. Only a file that
+    was hand-edited or written by an older factlog loses resolution, and there it
+    keeps its pre-existing behaviour rather than acquiring a new wrong answer.
+
+    The representative goes through :func:`composed_spelling`, the same rule
+    ``kb_spellings`` uses to choose what to WRITE, so "which spelling wins" has
+    one definition on both sides. Under the refusal above every surviving pool is
+    a singleton and the call is an identity; it is kept so that a future decision
+    to admit wider pools inherits the shared rule instead of re-deriving an
+    ordering of its own."""
     pools: dict[str, set[str]] = {}
     for value in value_set(facts):
         pools.setdefault(_canonical_value(value), set()).add(value)
     return {
         key: composed_spelling(spellings)
         for key, spellings in pools.items()
-        if len({unicodedata.normalize("NFC", v) for v in spellings}) == 1
+        if len(spellings) == 1
     }
 
 
