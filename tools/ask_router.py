@@ -84,6 +84,7 @@ from common import (  # noqa: E402
     entity_set,
     fact_signals,
     fold_atom_triple,
+    kb_query_spellings,
     load_accepted_facts,
     load_facts,
     load_logic_policy,
@@ -91,6 +92,7 @@ from common import (  # noqa: E402
     nearby_vocabulary,
     policy_predicates,
     relation_aliases,
+    resolve_query_spellings,
     run_wirelog,
     is_sync_ignored,
     sync_ignore_patterns,
@@ -517,6 +519,18 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     raises for the same reason, on every predicate (see `_require_signature`).
     """
     predicate = _predicate_of(draft)
+    # Resolve the query's value constants onto the spellings accepted.dl actually
+    # holds, BEFORE anything reads an argument. dedup_engine_atoms picks one
+    # spelling per value KB-wide, so a KB carrying both forms ends up addressable
+    # by neither one alone; count is the sharpest case, because it answers `0`
+    # and the router presents that as a verified aggregate the reader cannot
+    # check by eye. The predicate is read from the ORIGINAL line — resolution
+    # never changes it — and every branch below reads the resolved one.
+    #
+    # The rendered echo stays the ORIGINAL: cmd_render passes `args.draft`, so
+    # the user is shown the question they asked, not the spelling the KB happens
+    # to store it under.
+    draft = resolve_query_spellings(draft, kb_query_spellings(facts))
     args = query_args(draft)
     if predicate == "relation":
         _require_signature("relation", args)
