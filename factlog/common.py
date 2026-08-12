@@ -1828,7 +1828,14 @@ def engine_atom_key(row: dict[str, str]) -> tuple[str, str, str]:
     ways depending on the group's shape: it under-counts where the raw lookup
     still happens to hit, and drops the annotation outright where the
     representative is synthesized. Neither merely duplicates, which is what the
-    all-raw arrangement did. See ``fact_signals`` for both measured."""
+    all-raw arrangement did. See ``fact_signals`` for both measured.
+
+    :func:`kb_query_spellings` is NOT one of those maps and is not an exception
+    to the rule: it is keyed on ``_canonical_value``, which folds further than
+    this (``literal_types.canonical_amount`` on top of NFC), and it is looked up
+    through that same function by :func:`resolve_query_spellings`. Named here
+    because it is the third spelling-related map in this file and the obvious
+    question at this paragraph is whether it belongs to the enumeration above."""
     return fold_atom_triple(row["subject"], row["relation"], row["object"])
 
 
