@@ -964,6 +964,32 @@ class TestSetup:
         assert path.read_bytes() == before, f"--lang overwrote an unreadable config: {out}"
         assert "narration language NOT set" in out, f"dropped the language silently: {out}"
 
+    def test_lang_is_deferred_and_reported_on_a_broken_symlink_config(
+        self, tmp_path, config_home, capsys
+    ):
+        """A dangling link reaches the ``--lang`` deferral, and so the rc, too.
+
+        Reclassifying a broken symlink as UNREADABLE moved this case from the
+        first-run path to the refusal path, which changed ``setup --lang``'s exit
+        code from 0 to 1. That is the right answer — a declined ``--lang`` that
+        exits 0 hands a script three agreeing signals that it was applied — but
+        it is a *contract* change, and the commit that caused it pinned only the
+        classification and the surviving link. This is the missing half.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+        scratch = tmp_path / "scratch"
+
+        rc = cli.main(["setup", "--target", str(scratch), "--lang", "ko"])
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+
+        assert rc == 1, f"a declined --lang still exited {rc}: {out}"
+        assert "narration language NOT set" in out, f"dropped the language silently: {out}"
+        assert path.is_symlink(), f"setup replaced the link with a file: {out}"
+        assert scratch.joinpath("sources").is_dir(), "setup must still create the KB"
+
     def test_lang_still_applies_once_activate_has_replaced_the_damaged_config(
         self, tmp_path, config_home, capsys
     ):
