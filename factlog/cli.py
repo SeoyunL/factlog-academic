@@ -625,13 +625,38 @@ def _resolve_kb_target(cli_value: str | None, command: str):
 
     resolved, origin = factlog_config.resolve_root(cli_value, fallback=_DEFAULT_KB)
     target = Path(resolved)
-    if origin == "flag":
-        return target
     source = {
         "env": "$FACTLOG_ROOT",
         "config": "the active-KB config",
         "default": f"the default {_DEFAULT_KB}",
     }.get(origin, origin)
+
+    # `_init_kb` mkdirs `<target>/sources`, so a regular file at `<target>` raised
+    # a bare `NotADirectoryError` — a stack trace where a sentence belongs. Here
+    # rather than after the `flag` return below, because all four sources can
+    # name a file and the implicit ones are the worse crash: the traceback
+    # printed *before* the "no --target given" line, leaving no clue which source
+    # had chosen the path.
+    #
+    # `exists()` follows symlinks, so a link to a file is caught. A *broken* link
+    # is deliberately not: `.resolve()` has already flattened it to a
+    # nonexistent path, which `mkdir` creates happily.
+    if target.exists() and not target.is_dir():
+        advice = (
+            "Pass --target with a directory path."
+            if origin == "flag"
+            else (
+                f"It was chosen implicitly (from {source}), not named on the command "
+                "line — point that at a directory, or pass --target with a directory path."
+            )
+        )
+        raise FactlogError(
+            f"{command}: refusing to scaffold a KB at {target}, which is an existing "
+            f"file, not a directory. {advice}"
+        )
+
+    if origin == "flag":
+        return target
 
     # Keeping cwd out of the *chain* was not enough to keep it out of the
     # outcome. `factlog where --porcelain` prints cwd when nothing is configured
