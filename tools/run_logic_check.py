@@ -421,12 +421,20 @@ def evaluate_queries(
     inferred: dict[str, set[tuple[str, ...]]],
     policy_query_predicates: set[str],
     path_nodes: set[str] | None = None,
+    spelling: dict[str, str] | None = None,
 ) -> list[str]:
     """Render one result line per query in facts/query.dl.
 
     *path_nodes* is entity_set — the values that may be path endpoints. ``None``
     means "do not distinguish", the pre-#329 behaviour kept for three-argument
     callers; ``main`` always passes it.
+
+    *spelling* is ``kb_query_spellings``, shared with ``validate_query`` so a run
+    derives it once; ``None`` derives it here, which is what the callers passing
+    four arguments or fewer get. Unlike ``validate_query``'s parameter, ``None``
+    does NOT mean "do not resolve" — this function has *facts* and must always
+    evaluate against the spellings the file holds, or the report would answer a
+    query the Errors section simultaneously accepts.
 
     Every branch EVALUATES the resolved line and ECHOES the written one. The
     engine and the raw comparisons here join on bytes, so a query naming a value
@@ -441,9 +449,8 @@ def evaluate_queries(
     # is None. classify_query hoists it the same way. Stays lazy so a KB with no
     # path query does not touch the file at all.
     attribute_rels: set[str] | None = None
-    # Built once for the whole run, like attribute_rels: it is one pass over the
-    # accepted rows, not one per query line.
-    spelling = kb_query_spellings(facts)
+    if spelling is None:
+        spelling = kb_query_spellings(facts)
     for line in query_lines():
         resolved = resolve_query_spellings(line, spelling)
         predicate = line.split("(", 1)[0]
@@ -932,7 +939,8 @@ def build_report_text() -> str:
     # test classify_query applies for `ask`, so the report and the router give
     # the same answer to the same path query (#329).
     path_nodes = entity_set(facts)
-    # One pass over the accepted rows for the whole run, not one per query line.
+    # Derived ONCE for the whole run and handed to both consumers below, so the
+    # vocabulary warnings and the answers are decided by the same map.
     spelling = kb_query_spellings(facts)
     relations = allowed_relations(facts)
     errors: list[str] = []
@@ -994,7 +1002,7 @@ def build_report_text() -> str:
     report.extend([f"- {item}" for item in policy_items] or ["- no generated policy predicates"])
     report.append("")
     report.append("Query evaluation:")
-    query_results = evaluate_queries(facts, inferred, policy_query_predicates, path_nodes)
+    query_results = evaluate_queries(facts, inferred, policy_query_predicates, path_nodes, spelling)
     if query_results:
         report.extend([f"- {item}" for item in query_results])
     elif not (FACTS_DIR / "query.dl").is_file() and not query_lines():

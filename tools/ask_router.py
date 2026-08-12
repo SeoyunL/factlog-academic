@@ -530,6 +530,7 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
     # The rendered echo stays the ORIGINAL: cmd_render passes `args.draft`, so
     # the user is shown the question they asked, not the spelling the KB happens
     # to store it under.
+    written = draft
     draft = resolve_query_spellings(draft, kb_query_spellings(facts))
     args = query_args(draft)
     if predicate == "relation":
@@ -539,7 +540,13 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # Optional, additive coverage hint (#189) for a verified-negative relation
         # query — never changes rows/count, only appended when informative.
         if not rows:
-            hint = coverage_hint(draft, facts)
+            # The WRITTEN draft, matching cmd_render's call on the same hint for
+            # the same query. coverage_hint compares every value through
+            # canonical_value and re-runs classify (which resolves internally), so
+            # it is spelling-insensitive either way and the two calls cannot
+            # disagree; passing the written line keeps every user-facing string on
+            # this path derived from what the user typed.
+            hint = coverage_hint(written, facts)
             if hint:
                 result["coverage_hint"] = hint
         return result
