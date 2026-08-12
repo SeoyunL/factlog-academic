@@ -83,13 +83,47 @@ class TestKbQuerySpellings:
         assert spelling["A"] == "A"
 
     def test_unambiguous_amount_fold_still_resolves(self) -> None:
-        """GUARD, not evidence — it passes before and after the ambiguity rule.
+        """GUARD, not evidence — it passes before and after the refusal rule.
         It is here so the rule above cannot be "fixed" into dropping every
-        amount-shaped key: only a key with two distinct NFC spellings is
-        ambiguous."""
+        amount-shaped key: only a value the KB spells more than one way is
+        refused."""
         single = rows(("A", "금액", 'amount(1000,"억")'))
         spelling = kb_query_spellings(single)
         assert spelling['amount(1000,"억")'] == 'amount(1000,"억")'
+
+    def test_two_spellings_of_one_value_are_refused_even_within_NFC(self) -> None:
+        """The refusal is on the RAW spellings, not on the NFC forms.
+
+        ``relation/3`` atoms are keyed on BYTES, so two canonically equivalent
+        subjects are TWO atoms. A rule that refused only a second NFC form would
+        pass this pool and resolve the decomposed query onto the composed atom —
+        answering a question about one atom with another atom's object, which is
+        worse than the unaddressability the map exists to cure.
+
+        Measured before the raw-spelling refusal:
+        ``relation(NFD(삼성), "대표", O)?`` returned ``O=이재용`` where the raw
+        report returned ``O=이건희``."""
+        stale = rows(
+            (nfd("삼성"), "대표", "이건희"),
+            (nfc("삼성"), "대표", "이재용"),
+        )
+        spelling = kb_query_spellings(stale)
+        assert nfc("삼성") not in spelling
+        line = f'relation("{nfd("삼성")}", "대표", O)?'
+        assert resolve_query_spellings(line, spelling) is line
+        # The rest of the same KB keeps resolving.
+        assert spelling["이건희"] == "이건희"
+
+    def test_refusal_costs_nothing_on_a_compiled_kb(self) -> None:
+        """``kb_spellings`` already gives each value ONE spelling in
+        accepted.dl, so every pool of a freshly compiled KB is a singleton and
+        the stricter refusal drops nothing. Pinned on the mixed KB the reviewer
+        reproduced with, which is the hardest case: both forms occur in the file,
+        but no single VALUE is spelled two ways."""
+        spelling = kb_query_spellings(MIXED)
+        assert spelling[nfc("삼성")] == nfc("삼성")
+        assert spelling[nfc("서울")] == nfd("서울")
+        assert spelling[nfc("이재용")] == nfc("이재용")
 
 
 class TestResolveQuerySpellings:
