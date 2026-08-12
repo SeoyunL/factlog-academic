@@ -122,6 +122,47 @@ class TestBareInitFollowsThePrecedence:
         assert not env_kb.exists(), proc.stdout
 
 
+class TestATargetThatIsAFileIsRefusedInWords:
+    """A file where the KB should go must be reported, not crash the command.
+
+    ``_init_kb`` calls ``mkdir`` on ``<target>/sources`` and a regular file at
+    ``<target>`` makes that raise ``NotADirectoryError``, which reaches the top
+    level as a stack trace. The implicit case is the worse one: the traceback
+    prints *before* the "no --target given; using …" line, so the user sees a
+    crash with nothing naming which source picked the path.
+
+    The guard therefore sits where resolution ends and before the explicit
+    target returns early — one placement covering both entry points and all four
+    sources, rather than only the case the user could already see.
+    """
+
+    def test_an_explicit_file_target_is_refused(self, tmp_path, home):
+        occupied = tmp_path / "notes.md"
+        occupied.write_text("mine\n", encoding="utf-8")
+
+        proc = run_init("--target", str(occupied), home=home)
+
+        assert proc.returncode != 0, proc.stdout
+        assert "Traceback" not in proc.stderr, f"crashed instead of reporting: {proc.stderr}"
+        assert "NotADirectoryError" not in proc.stderr, proc.stderr
+        assert "not a directory" in proc.stderr, f"the reason is not stated: {proc.stderr}"
+        assert str(occupied) in proc.stderr, f"the offending path is not named: {proc.stderr}"
+
+    def test_a_file_reached_through_factlog_root_names_its_source(self, tmp_path, home):
+        """The implicit half — and the half that printed a trace with no clue."""
+        occupied = tmp_path / "notes.md"
+        occupied.write_text("mine\n", encoding="utf-8")
+
+        proc = run_init(home=home, factlog_root=occupied)
+
+        assert proc.returncode != 0, proc.stdout
+        assert "Traceback" not in proc.stderr, f"crashed instead of reporting: {proc.stderr}"
+        assert "not a directory" in proc.stderr, f"the reason is not stated: {proc.stderr}"
+        assert "$FACTLOG_ROOT" in proc.stderr, (
+            f"the user cannot tell which source chose this path: {proc.stderr}"
+        )
+
+
 class TestTheResolvedTargetIsAnnounced:
     """An implicit target is only safe if the user can see which one it was."""
 
