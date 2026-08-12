@@ -778,12 +778,20 @@ class _Unreadable(NamedTuple):
     the activation refusal, the ``--lang`` deferral note, and ``setup``'s rc-1
     closing line — so the branch lives here once instead of three times, which is
     how the first two drifted out of agreement in the first place.
+
+    ``lost`` serves the two sites that go through with the write (``--activate``
+    and ``factlog use``) rather than refusing, and is the field the class
+    distinction matters most for: they announced "any narration language in it is
+    gone", which on a broken link is vacuous — nothing was readable, so no
+    language was ever read — while saying nothing about the link they had just
+    replaced with a regular file.
     """
 
     reason: str
     preserved: str
     cost: str
     remedy: str
+    lost: str
 
 
 def _unreadable() -> _Unreadable:
@@ -800,12 +808,14 @@ def _unreadable() -> _Unreadable:
             # Mounting the volume and re-pointing the link exclude each other, so
             # the `or` has to live in the fragment, not in one caller's glue.
             "mount it or re-point the link",
+            "the symlink is gone — it is a regular file now",
         )
     return _Unreadable(
         "could not be read",
         "leaving its bytes untouched",
         "destroy the KB root it may still hold",
         "repair that file",
+        "any narration language in it is gone",
     )
 
 
@@ -1004,13 +1014,15 @@ def _plan_activation(target, activate: bool | None) -> Activation:
         if activate is True:
             # Explicitly asked for, and the only way back to a usable setting
             # from a corrupt file — but say what was destroyed rather than
-            # letting the old bytes vanish quietly. The `lang` clause is worded
-            # exactly as `factlog use` words it: this is the same write through
-            # the other door, and the two must not disclose different amounts.
+            # letting it vanish quietly. The clause is worded exactly as `factlog
+            # use` words it: this is the same write through the other door, and
+            # the two must not disclose different amounts. What "destroyed" means
+            # depends on the class, so it comes from `_unreadable`, and it is
+            # read here — before the write — while the link still exists.
             return Activation(
                 True,
                 f"active-KB root: replaced an unreadable {factlog_config.config_path()} with {target}"
-                " (any narration language in it is gone)",
+                f" ({_unreadable().lost})",
                 None,
             )
         return Activation(False, *_unreadable_lines(target))
@@ -1142,7 +1154,11 @@ def cmd_use(args: argparse.Namespace) -> int:
     # cost. `init --activate` reaches the same write through the other door and
     # now names the same loss in the same words (`_plan_activation`), so the two
     # entry points disclose the same thing.
-    replacing_unreadable = factlog_config.config_status() == factlog_config.UNREADABLE
+    # Captured *before* the write, not just tested before it: the write replaces a
+    # broken symlink with a regular file, so asking `_unreadable()` at print time
+    # would describe the file this command just created instead of the link it
+    # destroyed — and describe it in the words of the other class.
+    replacing = _unreadable() if factlog_config.config_status() == factlog_config.UNREADABLE else None
     _write_root_or_explain("factlog use", target)
     # --lang, when given, is set (or cleared) alongside the root in the same config
     # file; when omitted the existing language is preserved by write_root, so `use`
@@ -1154,8 +1170,8 @@ def cmd_use(args: argparse.Namespace) -> int:
     print(f"factlog use: active KB set to {target}{note}")
     if phrase is not None:
         print(f"  {phrase}")
-    if replacing_unreadable:
-        print("  replaced an unreadable config (any narration language in it is gone)")
+    if replacing is not None:
+        print(f"  replaced an unreadable config ({replacing.lost})")
     print(f"  config: {factlog_config.config_path()}")
     # `use` is where the hint from `init`/`setup` sends people, so it owes the same
     # disclosure they do: it writes rank 3, and rank 2 outranks it. Without this,

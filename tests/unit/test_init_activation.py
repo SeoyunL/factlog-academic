@@ -350,6 +350,31 @@ class TestDamagedConfigIsNotOverwritten:
             f"--activate dropped the configured language without saying so: {proc.stdout}"
         )
 
+    def test_activate_over_a_symlink_names_the_link_it_destroyed(self, tmp_path, config_home):
+        """The highest-loss site, and the one still using the other class's words.
+
+        ``--activate`` is the one path here that *does* write, and on a broken
+        symlink what it destroys is the link — replaced by a regular file, so
+        remounting the volume no longer brings the setting back. It announced
+        "any narration language in it is gone", which for this class is vacuous
+        (nothing was readable, so no language was ever read) and silent about the
+        only thing actually lost.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+        scratch = tmp_path / "scratch"
+
+        proc = run_init("--target", str(scratch), "--activate", config_home=config_home)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert pointer(config_home) == resolved(scratch), proc.stdout
+        assert not path.is_symlink(), "precondition: --activate replaces the link"
+        assert "symlink" in proc.stdout, f"the destroyed link is not mentioned: {proc.stdout}"
+        assert "narration language" not in proc.stdout, (
+            f"claims a language was lost from bytes it never read: {proc.stdout}"
+        )
+
     def test_a_readable_config_with_no_usable_root_still_activates(self, tmp_path, config_home):
         """GUARD, not evidence — deliberately on the *write* side of the line.
 
@@ -574,6 +599,29 @@ class TestUseOwnsTheSameDisclosures:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert pointer(config_home) == resolved(newkb)
         assert "unreadable" in proc.stdout, f"replaced a damaged config silently: {proc.stdout}"
+
+    def test_use_names_the_symlink_it_destroys(self, tmp_path, config_home):
+        """The other door to the same write, and the same misdescription.
+
+        ``use`` reads the status before writing and reports it after, so the link
+        is already a regular file by the time the line is printed — the fragment
+        has to be captured before the write, not looked up after it.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+        newkb = tmp_path / "newkb"
+        (newkb / "sources").mkdir(parents=True)
+
+        proc = self.run_use("use", str(newkb), config_home=config_home)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert pointer(config_home) == resolved(newkb)
+        assert not path.is_symlink(), "precondition: use replaces the link"
+        assert "symlink" in proc.stdout, f"the destroyed link is not mentioned: {proc.stdout}"
+        assert "narration language" not in proc.stdout, (
+            f"claims a language was lost from bytes it never read: {proc.stdout}"
+        )
 
 
 class TestImplicitTargetNeverLandsInTheCurrentDirectory:
