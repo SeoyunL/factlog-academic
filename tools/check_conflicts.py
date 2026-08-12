@@ -839,8 +839,8 @@ def _report_resolved_merges(scan: ConflictScan) -> None:
             print(line)
         print(
             "  These spellings are canonically equivalent, so they collapse into a single "
-            "facts/accepted.dl atom, written in the composed spelling where the group has "
-            "one. They still differ "
+            "facts/accepted.dl atom, written in the composed spelling wherever the KB "
+            "authored one. They still differ "
             "byte-wise in sources/ and facts/candidates.csv, where each one is its own row. "
             "Unify them at the source and re-collect."
         )
