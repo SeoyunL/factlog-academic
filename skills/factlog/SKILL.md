@@ -53,6 +53,9 @@ tools use (`factlog/config.py` `resolve_root`):
 
 > **`--wiki`/`--target` flag  >  `$FACTLOG_ROOT`  >  active-KB config file  >  cwd**
 
+`init`/`setup` differ in the **last** rank only: they scaffold rather than read, so
+their fallback is `~/wiki`, not cwd — see `docs/reference/active-kb.md`.
+
 Exporting once turns the hook↔tool agreement from a "same-env assumption" into an
 enforced invariant: every later command and the gate hook read this exact root.
 
