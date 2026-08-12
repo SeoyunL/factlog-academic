@@ -336,3 +336,26 @@ class TestResolveRootFallbackIsOptIn:
         root, source = factlog_config.resolve_root(fallback=str(tmp_path / "fallback-kb"))
 
         assert (root, source) == (str(configured.resolve()), "config")
+
+
+class TestSkillMdQuotesTheRealFallback:
+    """SKILL.md tells an assistant what these commands do; it must stay true.
+
+    The line it pins is a statement about a constant rather than a transcript of
+    output, so it cannot drift as the code around it moves — with one exception,
+    which is the whole reason this exists: changing ``_DEFAULT_KB`` makes the
+    skill file silently false, and silently false is exactly what this branch
+    spent a commit closing on the ``.get(origin, origin)`` fallthrough. The
+    human-facing page states the same chain in prose; this is the machine-facing
+    half, and the half an LLM acts on.
+    """
+
+    def test_the_skill_file_names_the_fallback_the_code_uses(self):
+        from factlog import cli as factlog_cli
+
+        text = (REPO_ROOT / "skills" / "factlog" / "SKILL.md").read_text(encoding="utf-8")
+
+        assert f"their fallback is `{factlog_cli._DEFAULT_KB}`, not cwd" in text, (
+            "skills/factlog/SKILL.md no longer names the fallback init/setup actually use "
+            f"({factlog_cli._DEFAULT_KB})"
+        )
