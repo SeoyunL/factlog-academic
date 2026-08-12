@@ -215,14 +215,27 @@ class TestResolveQuerySpellings:
         assert nfd("보류") in resolved and f'"{nfc("보류")}"' not in resolved
 
     def test_returns_the_input_object_unchanged_when_nothing_moves(self) -> None:
-        """IDENTITY, not merely an equal line. Reassembly normalises whitespace,
-        so a function that rewrote unconditionally would silently reformat every
-        query line of a uniformly spelled KB — where it has nothing to do. Pinned
-        with a deliberately loose line: an equality-only assertion would pass on
-        the reformatting this forbids."""
+        """IDENTITY, not merely an equal line.
+
+        Two fixtures, because they fail the "rewrite unconditionally" mutant for
+        different reasons and only one of them justifies the ``is``:
+
+        * the ALREADY-CANONICAL line is the one that makes ``is`` load-bearing.
+          Reassembly reproduces it character for character, so an ``==``
+          assertion passes on the mutant and only object identity catches it.
+        * the LOOSELY spaced line shows what the invariant is protecting —
+          reassembly normalises whitespace, so a function that rewrote
+          unconditionally would silently reformat every query line of a
+          uniformly spelled KB, where it has nothing to do. ``==`` would catch
+          this one too; that is not what it is here for.
+
+        Measured against a guard-less copy of the function: canonical → ``==``
+        survives, ``is`` fails; loose → both fail."""
         spelling = kb_query_spellings(MIXED)
-        line = f'relation( "{nfc("삼성")}" ,  "대표" , O )?'
-        assert resolve_query_spellings(line, spelling) is line
+        canonical = f'relation("{nfc("삼성")}", "대표", O)?'
+        assert resolve_query_spellings(canonical, spelling) is canonical
+        loose = f'relation( "{nfc("삼성")}" ,  "대표" , O )?'
+        assert resolve_query_spellings(loose, spelling) is loose
 
     @pytest.mark.parametrize(
         "line",
