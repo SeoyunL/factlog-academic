@@ -61,9 +61,14 @@ def evaluate(monkeypatch):
     ``query_lines`` reads ``facts/query.dl``; patching it keeps these pins off
     the filesystem and lets each one name its own query."""
 
-    def run(query: str, inferred=None) -> list[str]:
+    def run(query: str, inferred=None, path_nodes=None) -> list[str]:
         monkeypatch.setattr(rlc, "query_lines", lambda: [query])
-        return rlc.evaluate_queries(MIXED, inferred or REACHABLE, set(), NODES)
+        return rlc.evaluate_queries(
+            MIXED,
+            inferred or REACHABLE,
+            set(),
+            NODES if path_nodes is None else path_nodes,
+        )
 
     return run
 
@@ -119,8 +124,32 @@ class TestEchoIsWhatTheAuthorWrote:
         [line] = evaluate(query)
         assert line.startswith(f"path {nfd('삼성')} -> {nfd('서울')}: ")
 
-    def test_path_refusal_names_the_written_endpoint(self, evaluate) -> None:
-        """An endpoint that does not resolve is refused, and named as typed."""
+    def test_path_refusal_names_a_constant_that_DID_move(self, evaluate) -> None:
+        """The refusal message must name the WRITTEN endpoint even when that
+        endpoint was resolved on the way to the verdict.
+
+        The earlier version of this pin asked about 현대 (absent from the map)
+        and 서울 (asked in its stored form), so resolution was the identity on
+        every constant in the line and a message built from the *tested* constant
+        read the same — it could not fail. This one asks about 서울 in the form
+        the KB does NOT store, so the constant moves, and the endpoint is a
+        literal (object of an attribute relation) so the refusal still fires.
+        Mutating the message to ``{display_value(tested)}`` dies here."""
+        [line] = evaluate(
+            f'path("{nfc("삼성")}", "{nfc("서울")}")?',
+            inferred=REACHABLE,
+            path_nodes={nfc("삼성")},
+        )
+        assert line == (
+            f"path {nfc('삼성')} -> {nfc('서울')}: "
+            f"(not evaluated — not an accepted entity: {nfc('서울')})"
+        )
+        assert nfd("서울") not in line
+
+    def test_path_refusal_still_names_an_absent_endpoint(self, evaluate) -> None:
+        """GUARD, not evidence — 현대 is absent from the map, so resolution is
+        the identity here and this passes either way. Kept so the message cannot
+        regress for the ordinary unknown-constant case."""
         [line] = evaluate(f'path("{nfd("현대")}", "{nfd("서울")}")?')
         assert line == (
             f"path {nfd('현대')} -> {nfd('서울')}: "
@@ -143,23 +172,35 @@ class TestValidateQueryVocabulary:
             )
             assert (errors, warnings) == ([], []), form
 
+    def test_a_warning_about_a_MOVED_constant_names_the_written_form(self) -> None:
+        """The path-endpoint warning must quote what the author typed even when
+        the constant was resolved to reach the verdict.
+
+        Same gap the router pin uses: 서울 is a literal here (path_nodes excludes
+        it), so it resolves — NFC to the stored NFD — and is still warned about.
+        A warning built from the tested constant would print the NFD form the
+        author never wrote. The earlier pin asked only about constants on which
+        resolution was the identity, so it could not fail."""
+        _errors, warnings = rlc.validate_query(
+            f'path("{nfc("삼성")}", "{nfc("서울")}")?',
+            VALUES,
+            set(),
+            {nfc("삼성")},
+            SPELLING,
+        )
+        assert warnings == [
+            f"query path argument is not an accepted entity: {nfc('서울')}"
+        ]
+        assert nfd("서울") not in warnings[0]
+
     def test_an_absent_constant_is_still_warned_and_named_as_typed(self) -> None:
+        """GUARD, not evidence — 현대 is absent from the map, so resolution is
+        the identity and this reads the same either way."""
         _errors, warnings = rlc.validate_query(
             f'path("{nfd("현대")}", "{nfd("서울")}")?', VALUES, set(), NODES, SPELLING
         )
         assert warnings == [
             f"query references non-engine entity or relation: {nfd('현대')}"
-        ]
-
-    def test_omitting_the_map_keeps_the_unresolved_reading(self) -> None:
-        """GUARD, not evidence. The parameter is trailing and optional; the
-        four-argument callers that existed before must behave exactly as they
-        did."""
-        _errors, warnings = rlc.validate_query(
-            f'path("{nfd("삼성")}", "{nfd("서울")}")?', VALUES, set(), NODES
-        )
-        assert warnings == [
-            f"query references non-engine entity or relation: {nfd('삼성')}"
         ]
 
 
