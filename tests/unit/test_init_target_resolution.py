@@ -230,6 +230,26 @@ class TestTheChainItselfIsShared:
             f"init resolved {target}, not the {newer_rank} the shared chain returned"
         )
 
+    def test_an_unknown_rank_raises_instead_of_leaking_its_token(self, tmp_path, monkeypatch):
+        """The point of sharing the chain is that a new rank cannot be ignored.
+
+        A ``.get(origin, origin)`` fallthrough let it be ignored anyway, just
+        more quietly: ``init`` would resolve the target correctly and then print
+        the internal token — "(from localrc)" — inside a sentence written for
+        human-readable source names, with nothing failing. Indexing turns the one
+        thing this class exists to prevent into a crash at the point of the
+        omission, which is where the person adding the rank is standing.
+        """
+        from factlog import cli as factlog_cli
+
+        def resolve_root(cli_value=None, *, fallback=None):
+            return str(tmp_path / "a-rank-nobody-labelled"), "localrc"
+
+        monkeypatch.setattr(factlog_cli.factlog_config, "resolve_root", resolve_root)
+
+        with pytest.raises(KeyError):
+            factlog_cli._resolve_kb_target(None, "factlog init")
+
     def test_the_fallback_is_passed_rather_than_applied_afterwards(self, tmp_path, monkeypatch):
         """``~/wiki`` is the chain's last resort, not a patch over its cwd result.
 
