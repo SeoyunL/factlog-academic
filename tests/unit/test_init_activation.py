@@ -71,6 +71,31 @@ def write_pointer(config_home: Path, root: Path | str, **extra) -> bytes:
     return path.read_bytes()
 
 
+def dangling_target(tmp_path: Path) -> Path:
+    """A link target that does not exist — the unmounted-volume case."""
+    return tmp_path / "not-mounted" / "config.json"
+
+
+def unreadable_target(tmp_path: Path) -> Path:
+    """A link target that *is* reachable and still cannot be parsed.
+
+    Also ``UNREADABLE``, so also inside the contract, and the write replaces the
+    link exactly the same way. The distinction the disclosure turns on is whether
+    a link is being destroyed, not why the read failed — so both belong wherever
+    that disclosure is pinned.
+    """
+    target = tmp_path / "elsewhere" / "config.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"root": "/real/kb", "lang": "ko"', encoding="utf-8")
+    return target
+
+
+LINK_TARGETS = [
+    pytest.param(dangling_target, id="dangling"),
+    pytest.param(unreadable_target, id="reachable-but-unreadable"),
+]
+
+
 def resolved(path: Path) -> str:
     """The absolute form ``write_root`` stores, so a comparison is not testing
     whether the temp dir happened to arrive already symlink-free."""
@@ -350,19 +375,26 @@ class TestDamagedConfigIsNotOverwritten:
             f"--activate dropped the configured language without saying so: {proc.stdout}"
         )
 
-    def test_activate_over_a_symlink_names_the_link_it_destroyed(self, tmp_path, config_home):
+    @pytest.mark.parametrize("link_target", LINK_TARGETS)
+    def test_activate_over_a_symlink_names_the_link_it_destroyed(
+        self, tmp_path, config_home, link_target
+    ):
         """The highest-loss site, and the one still using the other class's words.
 
-        ``--activate`` is the one path here that *does* write, and on a broken
-        symlink what it destroys is the link — replaced by a regular file, so
-        remounting the volume no longer brings the setting back. It announced
-        "any narration language in it is gone", which for this class is vacuous
-        (nothing was readable, so no language was ever read) and silent about the
-        only thing actually lost.
+        ``--activate`` is the one path here that *does* write, and on a symlinked
+        config what it destroys is the link — replaced by a regular file, so
+        repairing or remounting the far end no longer brings the setting back. It
+        announced "any narration language in it is gone", which says nothing
+        about the only thing this write actually destroys.
+
+        Both link targets, because the disclosure turns on ``is_symlink()`` and
+        not on why the read failed. Pinning only the dangling case let a
+        reachable-but-unparseable target keep the file wording while the link was
+        destroyed in silence — a general claim held up by one specific example.
         """
         path = config_file(config_home)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+        path.symlink_to(link_target(tmp_path))
         scratch = tmp_path / "scratch"
 
         proc = run_init("--target", str(scratch), "--activate", config_home=config_home)
@@ -600,16 +632,20 @@ class TestUseOwnsTheSameDisclosures:
         assert pointer(config_home) == resolved(newkb)
         assert "unreadable" in proc.stdout, f"replaced a damaged config silently: {proc.stdout}"
 
-    def test_use_names_the_symlink_it_destroys(self, tmp_path, config_home):
+    @pytest.mark.parametrize("link_target", LINK_TARGETS)
+    def test_use_names_the_symlink_it_destroys(self, tmp_path, config_home, link_target):
         """The other door to the same write, and the same misdescription.
 
         ``use`` reads the status before writing and reports it after, so the link
         is already a regular file by the time the line is printed — the fragment
         has to be captured before the write, not looked up after it.
+
+        Parametrised for the same reason as its ``--activate`` twin: what is lost
+        is the link, whichever way the read failed.
         """
         path = config_file(config_home)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+        path.symlink_to(link_target(tmp_path))
         newkb = tmp_path / "newkb"
         (newkb / "sources").mkdir(parents=True)
 
