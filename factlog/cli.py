@@ -785,12 +785,23 @@ class _Unreadable(NamedTuple):
     is the right question: a reachable-but-malformed target really does have
     bytes worth preserving and really is fixed by repairing that file. ``lost``
     answers *what will this write destroy*, and the answer is decided by
-    ``is_symlink()`` alone — ``os.replace`` swaps the link itself, so every
-    symlinked config loses its indirection whether the far end is unmounted,
-    truncated, a directory, or unreadable by mode. Keying ``lost`` off
-    reachability let the four reachable-but-unreadable classes announce "any
-    narration language in it is gone" and say nothing at all about the link they
-    had just replaced with a regular file.
+    ``is_symlink()`` alone — ``os.replace`` swaps the link itself, so a symlinked
+    config loses its indirection whether the far end is unmounted, truncated, a
+    directory, or unreadable by mode. Keying ``lost`` off reachability let those
+    four reachable-but-unreadable classes announce "any narration language in it
+    is gone" and say nothing at all about the link they had just replaced with a
+    regular file.
+
+    Scope, because the sentence above is about the fragments and not about every
+    symlinked config: every caller of this reaches it only inside the
+    ``config_status() == UNREADABLE`` branch, so "loses its indirection" is
+    disclosed for the configs *this* module classifies as damaged. A symlink
+    pointing at a **valid** config — the ordinary dotfiles arrangement, and the
+    most valuable symlinked case — is ``READABLE``, never reaches here, and is
+    still replaced by a regular file with nothing said about it. That is a known
+    gap rather than a promise kept: it predates this branch, sits outside the
+    damaged-config contract these fragments serve, and closing it means changing
+    what the writing paths do, not what they say.
     """
 
     reason: str
