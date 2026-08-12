@@ -1854,12 +1854,31 @@ def kb_spellings(rows: list[dict[str, str]]) -> dict[str, str]:
     entity two ways and the collapsed atom stops joining the fact beside it.
     Measured on three confirmed rows — ``NFD(삼성) 대표 NFD(이재용)``,
     ``NFC(삼성) 대표 NFC(이재용)``, ``NFD(이재용) 거주 NFD(서울)`` — group-local
-    choice folded the first two to NFC, left the third in NFD, and took
-    ``path/2`` from 4 to 2: ``path(NFD(삼성), NFD(서울))?`` went from
-    ``VERIFIED / rows: 1`` to ``entity_not_accepted``, and asked NFC/NFD it
-    answers ``rows: 0`` — a **verified negative for a path the KB supports**.
-    That is the #342 harm reappearing on the path axis, so identity and spelling
-    must be decided over the same scope.
+    choice folds the first two to NFC, leaves the third in NFD, and takes
+    ``path/2`` from 4 to 2. Re-measured against the current tree, which answers
+    every spelling of that path the same way::
+
+        undeduped (what main writes)   path(NFD삼성, NFD서울)? -> ok / rows: 1
+        group-local (rejected)         path(NFD삼성, NFD서울)? -> fact_absent
+                                       path(NFC삼성, NFC서울)? -> fact_absent
+                                       path(NFC삼성, NFD서울)? -> fact_absent
+        KB-wide (shipped)              both single-form spellings -> ok
+
+    So the rejected design turns a path main answers into a **verified negative
+    for a path the KB supports**, and no spelling recovers it. That is the #342
+    harm reappearing on the path axis, and identity and spelling must therefore
+    be decided over the same scope.
+
+    The diagnostic used to differ by spelling — one form drew a loud
+    ``entity_not_accepted``, another a silent ``rows: 0``. It no longer does, and
+    the reason is worth knowing before re-deriving this decision (#210/#345):
+    :func:`kb_query_spellings` now resolves query constants, and on the rejected
+    file ``삼성`` and ``서울`` are each spelled one way, so both ENDPOINTS resolve
+    and clear the membership gate. Only ``이재용`` is spelled two ways, and it is
+    the middle node — refused by the map, but never a query argument. The gate
+    therefore passes and the broken join surfaces as ``fact_absent``. Do not go
+    looking for the refusal; the harm is now uniformly the silent one, which
+    makes the argument stronger, not weaker.
 
     **Why the two axes share one pool.** ``entity_node`` admits a value from
     either position and ``edge(S, O) :- relation(S, R, O), entity_node(O)``
@@ -1881,6 +1900,14 @@ def kb_spellings(rows: list[dict[str, str]]) -> dict[str, str]:
     equal under NFC are the same bytes), so where the group had a composed
     member the wider pool finds the same one, and where it had none the wider
     pool may find one — the fix direction only.
+
+    **The lookup side is** :func:`kb_query_spellings`. This function decides what
+    ``accepted.dl`` is WRITTEN as; that one reads back what it holds and moves a
+    query's constants onto it, which is the "looked up through the same key" rule
+    ``engine_atom_key`` states. The two are deliberately not one map — it is
+    keyed on ``_canonical_value`` rather than plain NFC, takes accepted rows
+    rather than candidates, and refuses any value the file spells more than one
+    way; see its docstring for why each of those three has to differ.
 
     Not shared with ``check_conflicts._representative``, which pools a value over
     the rows of its own conflict group. For a value spelled consistently across
@@ -1960,8 +1987,19 @@ def dedup_engine_atoms(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     the scope: because the pool is KB-wide, an atom can be rewritten even when
     its own group is a singleton — a value written NFC in one fact and NFD in
     another is unified in both, which is the whole point. Only a KB already
-    mixing forms for one value sees this, and on such a KB agreeing with itself
-    is the correction, not a regression."""
+    mixing forms for one value sees this.
+
+    **Agreeing with itself is the correction only because the query side moves
+    too.** Collapsing the atoms without that is half a move: it picks one
+    spelling per value KB-wide, and a query typed in the other spelling then
+    addresses nothing — measured on the three rows in :func:`kb_spellings`, where
+    BOTH single-form ``path`` queries were refused and ``count`` answered ``0``
+    while presenting it as verified. :func:`kb_query_spellings` and
+    :func:`resolve_query_spellings` are the read side that closes it, applied by
+    ``classify_query``, ``ask_router.evaluate`` and ``run_logic_check``. Anything
+    that changes which spelling this function writes has to keep them in step;
+    the write side alone decides only what the file contains, not what a reader
+    can ask for."""
     spelling = kb_spellings(rows)
     groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     for row in rows:

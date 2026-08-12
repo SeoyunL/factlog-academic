@@ -298,7 +298,17 @@ def _paired_constants(written: list[str], resolved: list[str]) -> list[tuple[str
     ``common.classify_query``'s ``_shown`` guard degrades the same way for the
     same reason. The two were written pointing in opposite directions — one
     reverting the display, the other the evaluation — which would have made a
-    desync produce a gate and a report that disagree about the same line."""
+    desync produce a gate and a report that disagree about the same line.
+
+    Three sites read the resolved line by direct index instead —
+    ``validate_query``'s policy branch, ``policy_result_line``'s ``filter_args``,
+    and the ``count`` branch of ``evaluate_queries``. They would RAISE on a
+    desync rather than degrade, which is the opposite of the rule above. Left as
+    they are on purpose: each unpacks a fixed arity that ``query_error`` has
+    already accepted, so a guard there would be dead code shaped like a policy,
+    and none of them attributes a message to a constant — the failure this
+    function exists to prevent. If ``resolve_query_spellings`` ever stops
+    preserving arity, those three are where it surfaces."""
     if len(written) != len(resolved):
         return [(constant, constant) for constant in written]
     return list(zip(written, resolved, strict=True))
