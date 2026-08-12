@@ -2883,11 +2883,26 @@ def classify_query(
     # docstring names. The gate decides whether to run; the engine still joins on
     # bytes, so both sides have to see the same constants.
     #
-    # Rebinding `query` means a reason string names the resolved constant rather
-    # than the typed one. The two are canonically equivalent, so they render
-    # identically; and the caller's `did_you_mean_hints` reads the original draft.
+    # EVALUATE the resolved line, NAME the written one. `_shown` pairs each
+    # resolved argument with the argument the author actually typed, and every
+    # reason string below reads `_shown`. Resolution is not a display-invisible
+    # change: `_canonical_value` folds `literal_types.canonical_amount` on top of
+    # NFC, so `path("amount(7,억)", ...)` resolves to `amount(7,"억")` and a
+    # reason built from the resolved constant would quote a unit the user did not
+    # quote. The same render JSON carries `did_you_mean`, which ask_router
+    # computes from the original draft, so a resolved reason beside a written
+    # hint would cite two different constants for one refusal. This is the
+    # discipline run_logic_check applies with `_paired_constants`.
+    written = query
     query = resolve_query_spellings(query, kb_query_spellings(facts))
     args = _query_args(query)
+    _shown = _query_args(written)
+    if len(_shown) != len(args):
+        # Resolution substitutes in place and never adds or drops an argument, so
+        # this cannot fire; falling back to the resolved args keeps every message
+        # well-formed rather than risking an index error on a line shape neither
+        # parser agreed about.
+        _shown = args
     # Read the attribute-relation policy ONCE and reuse it for both the entity
     # membership check and the path evaluation below, so the endpoint guard and
     # dependency_path can never disagree about which relations are attributes
@@ -2918,7 +2933,7 @@ def classify_query(
         if not _is_variable(subject) and _canonical_value(_arg_value(subject)) not in {
             _canonical_value(entity) for entity in entities
         }:
-            return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation subject is not an accepted entity: {_arg_value(subject)}"
+            return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation subject is not an accepted entity: {_arg_value(_shown[0])}"
         # Read relation_aliases() at most once per relation query and hand it to
         # _relation_match_count below: the canonical-acceptance check here and the
         # match count were the two sites that each re-read it per relation query
@@ -2942,11 +2957,11 @@ def classify_query(
             # lookup is already form-insensitive.
             _rel_aliases = relation_aliases()
             if not canonical_variants_of(_arg_value(relation), _rel_aliases):
-                return False, QUERY_RELATION_NOT_ACCEPTED, f"relation name is not accepted: {_arg_value(relation)}"
+                return False, QUERY_RELATION_NOT_ACCEPTED, f"relation name is not accepted: {_arg_value(_shown[1])}"
         if not _is_variable(object_) and _canonical_value(_arg_value(object_)) not in {
             _canonical_value(v) for v in values
         }:
-            return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation object is not an accepted entity: {_arg_value(object_)}"
+            return False, QUERY_ENTITY_NOT_ACCEPTED, f"relation object is not an accepted entity: {_arg_value(_shown[2])}"
         if _relation_match_count(query, facts, _rel_aliases) == 0:
             return False, QUERY_FACT_ABSENT, "relation query does not match accepted facts"
         return True, QUERY_OK, "passed"
@@ -2957,9 +2972,9 @@ def classify_query(
         shape_error = _query_shape_error("path", args)
         if shape_error:
             return False, QUERY_MALFORMED, shape_error
-        for arg in args:
+        for index, arg in enumerate(args):
             if not _is_variable(arg) and _arg_value(arg) not in entities:
-                return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(arg)}"
+                return False, QUERY_ENTITY_NOT_ACCEPTED, f"path argument is not an accepted entity: {_arg_value(_shown[index])}"
         if all(_is_quoted_string(arg) for arg in args) and not dependency_path(
             facts, _arg_value(args[0]), _arg_value(args[1]), _attribute_rels
         ):
@@ -2981,7 +2996,7 @@ def classify_query(
         if not _is_variable(subject) and _canonical_value(_arg_value(subject)) not in {
             _canonical_value(entity) for entity in entities
         }:
-            return False, QUERY_ENTITY_NOT_ACCEPTED, f"count subject is not an accepted entity: {_arg_value(subject)}"
+            return False, QUERY_ENTITY_NOT_ACCEPTED, f"count subject is not an accepted entity: {_arg_value(_shown[0])}"
         # Same folded membership as the relation branch above — a count over an
         # NFD-stored relation must accept an NFC-typed query name (#213).
         if not _is_variable(relation) and _canonical_value(_arg_value(relation)) not in {
@@ -2991,7 +3006,7 @@ def classify_query(
             # counts as accepted even though the canonical itself may not appear
             # literally in accepted.dl — the stored facts use surface variants.
             if not canonical_variants_of(_arg_value(relation), relation_aliases()):
-                return False, QUERY_RELATION_NOT_ACCEPTED, f"count relation is not accepted: {_arg_value(relation)}"
+                return False, QUERY_RELATION_NOT_ACCEPTED, f"count relation is not accepted: {_arg_value(_shown[1])}"
         return True, QUERY_OK, "passed"
     if predicate in policy_query_predicates:
         arity_error = _query_arity_error("policy query", args)
@@ -3001,7 +3016,7 @@ def classify_query(
         if shape_error:
             return False, QUERY_MALFORMED, shape_error
         if not _is_variable(args[0]) and _arg_value(args[0]) not in entities:
-            return False, QUERY_ENTITY_NOT_ACCEPTED, f"policy query entity is not accepted: {_arg_value(args[0])}"
+            return False, QUERY_ENTITY_NOT_ACCEPTED, f"policy query entity is not accepted: {_arg_value(_shown[0])}"
         return True, QUERY_OK, "passed"
     return False, QUERY_UNSUPPORTED, "unsupported query"
 

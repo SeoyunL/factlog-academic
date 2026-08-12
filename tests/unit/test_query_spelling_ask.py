@@ -171,3 +171,65 @@ class TestGateAdmitsEitherSpelling:
             f'path("{form("삼성")}", "{form("서울")}")?', uniform, policy_program=""
         )
         assert (ok, code) == (True, QUERY_OK)
+
+
+class TestReasonNamesWhatTheUserTyped:
+    """A refusal must quote the constant the author wrote, not the resolved one.
+
+    Resolution is NOT a display-invisible change. ``_canonical_value`` folds
+    ``literal_types.canonical_amount`` on top of NFC, so an ``amount`` constant
+    comes back with the unit quoted — visibly different text, not a codepoint
+    difference the terminal hides. And the same render JSON carries
+    ``did_you_mean``, which ask_router computes from the ORIGINAL draft, so a
+    resolved reason beside a written hint would cite two different constants for
+    one refusal.
+
+    The gap these exploit is entity_set vs value_set: the object of a declared
+    attribute relation is a KB value (so it resolves) but not a path node (so the
+    refusal still fires) — the one shape where a constant both moves and is
+    reported on.
+    """
+
+    ATTR_FACTS = rows((nfc("삼성"), "금액", 'amount(7,"억")'))
+
+    @pytest.fixture(autouse=True)
+    def _attribute_relation(self, monkeypatch):
+        monkeypatch.setattr(
+            "factlog.common.attribute_relations", lambda *a, **k: {"금액"}
+        )
+
+    def test_amount_reason_keeps_the_authors_quoting(self) -> None:
+        """RED before: ``path argument is not an accepted entity: amount(7,"억")``
+        — a unit the user did not quote."""
+        ok, code, reason = classify_query(
+            'path("삼성", "amount(7,억)")?', self.ATTR_FACTS, policy_program=""
+        )
+        assert (ok, code) == (False, QUERY_ENTITY_NOT_ACCEPTED)
+        assert reason == "path argument is not an accepted entity: amount(7,억)"
+        assert 'amount(7,"억")' not in reason
+
+    def test_normalization_reason_keeps_the_authors_form(self) -> None:
+        """Same rule on the NFC/NFD axis. The two render identically in a
+        terminal, which is exactly why this one needs a codepoint assertion
+        rather than an eyeball."""
+        facts = rows((nfc("삼성"), "금액", nfd("칠억")))
+        ok, code, reason = classify_query(
+            f'path("삼성", "{nfc("칠억")}")?', facts, policy_program=""
+        )
+        assert (ok, code) == (False, QUERY_ENTITY_NOT_ACCEPTED)
+        assert reason.endswith(nfc("칠억"))
+        assert not reason.endswith(nfd("칠억"))
+
+    @pytest.mark.parametrize("form", [nfc, nfd])
+    def test_uniform_kb_gate_is_a_guard_not_evidence(self, form) -> None:
+        """GUARD, not evidence — passes before and after. A KB written one way
+        was always addressable in that way; the pin is here so the resolution
+        cannot start refusing it."""
+        uniform = rows(
+            (form("삼성"), "대표", form("이재용")),
+            (form("이재용"), "거주", form("서울")),
+        )
+        ok, code, _reason = classify_query(
+            f'path("{form("삼성")}", "{form("서울")}")?', uniform, policy_program=""
+        )
+        assert (ok, code) == (True, QUERY_OK)
