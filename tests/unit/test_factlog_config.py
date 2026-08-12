@@ -173,6 +173,22 @@ class TestConfigStatus:
     def test_missing_file(self):
         assert factlog_config.config_status() == factlog_config.MISSING
 
+    def test_a_broken_symlink_is_unreadable_not_missing(self):
+        """``exists()`` follows the link, so a dangling one answered "nothing here".
+
+        There *is* something here — a link the user placed on purpose, pointing at
+        a KB config on a volume that is not mounted right now. Classifying it
+        MISSING sent writers down the first-run path, where the write replaces the
+        link itself with a regular file and the pointer is gone for good. The same
+        reasoning as the directory case below: unreadable is exactly what it is.
+        """
+        path = factlog_config.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(path.parent / "not-mounted" / "config.json")
+
+        assert not path.exists(), "precondition: the link must dangle"
+        assert factlog_config.config_status() == factlog_config.UNREADABLE
+
     def test_object_is_readable(self):
         self._write('{"root": "/kb"}')
         assert factlog_config.config_status() == factlog_config.READABLE

@@ -246,6 +246,28 @@ class TestDamagedConfigIsNotOverwritten:
         assert scratch.joinpath("sources").is_dir(), "init must still create the KB"
         assert path.read_bytes() == before, f"{label}: init overwrote a config it could not read: {proc.stdout}"
 
+    def test_a_broken_symlink_config_survives_init(self, tmp_path, config_home):
+        """A dangling link is a config too, and the write destroys the link itself.
+
+        The bytes cases above are held because ``read_text`` fails on them. A
+        symlink whose target is not mounted right now fails a different way:
+        ``exists()`` follows it and reports nothing, so ``init`` took the
+        first-run path and wrote a *regular file* over the link. Unlike a
+        truncated config, which at least leaves the old text somewhere to
+        recover, this leaves no record that a link was ever there — and remounting
+        the volume no longer brings the setting back.
+        """
+        path = config_file(config_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(tmp_path / "not-mounted" / "config.json")
+        scratch = tmp_path / "scratch"
+
+        proc = run_init("--target", str(scratch), config_home=config_home)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert scratch.joinpath("sources").is_dir(), "init must still create the KB"
+        assert path.is_symlink(), f"init replaced the link with a file: {proc.stdout}"
+
     def test_says_it_could_not_read_the_file(self, tmp_path, config_home):
         path = config_file(config_home)
         path.parent.mkdir(parents=True, exist_ok=True)
