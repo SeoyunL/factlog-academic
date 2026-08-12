@@ -2738,13 +2738,25 @@ def resolve_query_spellings(line: str, spelling: dict[str, str]) -> str:
 
     Only quoted constants at a VALUE position move (see
     ``_QUERY_VALUE_POSITIONS``); variables, bare tokens, the relation argument
-    and ``review_required``'s question string are left alone. A predicate this
-    module does not know is a policy predicate: every position is resolved, which
-    is safe because positions past the first carry engine-derived reason codes
-    that are absent from the value map and so pass through unchanged. Resolving
-    only position 0 would be the half-move ``policy_row_matches`` documents
-    itself as deferring; resolving all of them keeps the router and the report
-    saying the same thing about the same row.
+    and ``review_required``'s question string are left alone.
+
+    A predicate this module does not know is a policy predicate, and EVERY
+    position of one is resolved. Resolving only position 0 would be the half-move
+    ``policy_row_matches`` documents itself as deferring, and it would leave the
+    router and the report describing the same row differently.
+
+    Positions past the first hold reason codes, and resolving them is safe only
+    *conventionally*, not necessarily. ``generate_logic_policy.REASON_RE`` forces
+    ``[a-z0-9_]+`` on every GENERATED code, and no such code can collide with a
+    Korean KB value or differ from it by normalization, so the map never touches
+    one. A hand-written ``logic-policy.extra.dl`` is not bound by that regex: a
+    non-ASCII constant at position 1 that also names a KB value stored in the
+    other normal form WILL be rewritten, and ``policy_row_matches`` compares raw,
+    so the row stops matching — ``needs_review(NFC(삼성), NFC(보류))?`` against a
+    KB storing ``NFD(보류)`` goes from ``1 rows`` to ``0``. That is the narrower
+    of two evils: leaving position 0 unresolved breaks every hand-written policy
+    query on a folded KB, while this breaks only one that reuses a KB value as a
+    reason code. See ``tests/unit/test_query_spelling_resolution.py`` for both.
 
     **Returns *line* UNCHANGED when nothing was substituted** — identity, not
     merely an equivalent line. Reassembly normalises whitespace
