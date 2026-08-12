@@ -19,6 +19,11 @@
 #   (j) a folded atom still joins the rest of the KB: one entity keeps one
 #       spelling across accepted.dl, so path/2 and `ask` do not lose (or
 #       verified-negative) a path the KB supports
+#   (k) the folded KB stays ADDRESSABLE: `path` and `count` asked in ONE
+#       normalization form — either one, which is what a human writes — reach
+#       the facts. (j) is about the engine's internal join and is spelling-blind
+#       by design; (k) is about the query constants a reader types, which is a
+#       different claim and needs its own assertions
 #
 # Synthetic data only (relation path needs no pyrewire).
 # Usage: bash tests/test_compile_dedup.sh
@@ -416,7 +421,14 @@ sys.exit(0 if len(spellings) == 1 and seoul == {nfd("서울")} else 1)
 PY
 
 if "$PYTHON" -c "import pyrewire" >/dev/null 2>&1; then
-  # the engine derives the two-hop path again
+  # The engine derives the two-hop path again.
+  #
+  # This one folds BOTH sides to NFC before comparing, and that is correct for
+  # what it claims: the engine's join is spelling-blind by construction — it
+  # matches bytes, and the assertion is that the two atoms still meet, not that
+  # any particular spelling is addressable. Do NOT "fix" it into a single-form
+  # comparison; that would make it a weaker duplicate of the `ask` assertions
+  # below, which are the ones that test ADDRESSABILITY.
   ( cd "$PLUGIN_ROOT" && FACTLOG_ROOT="$KB7" "$PYTHON" - <<'PY'
 import sys, unicodedata
 sys.path.insert(0, ".")
@@ -433,20 +445,47 @@ PY
 
   # ...and `ask` must not answer a verified NEGATIVE for it. That is the harm:
   # not a missing answer but a confident wrong one.
-  q7="$("$PYTHON" - "$PLUGIN_ROOT" "$KB7" <<'PY'
+  #
+  # Both endpoints are asked in ONE normalization form at a time, which is what a
+  # human writes. This block used to ask `path(NFC(삼성), NFD(서울))?` — the
+  # mixed spelling the fold happens to leave addressable — so it stayed green
+  # while every form a user could actually type was refused. A reader cannot
+  # predict that combination without opening accepted.dl, and `did_you_mean` is
+  # empty, so it is a dead end rather than an answer.
+  for form in nfd nfc; do
+    q7="$("$PYTHON" - "$form" <<'PY'
 import sys, unicodedata
-nfc = lambda s: unicodedata.normalize("NFC", s)
-nfd = lambda s: unicodedata.normalize("NFD", s)
-print(f'path("{nfc("삼성")}", "{nfd("서울")}")?')
+form = {"nfc": "NFC", "nfd": "NFD"}[sys.argv[1]]
+w = lambda s: unicodedata.normalize(form, s)
+print(f'path("{w("삼성")}", "{w("서울")}")?')
 PY
 )"
-  rn7="$(FACTLOG_ROOT="$KB7" "$PYTHON" "$ROUTER" render "$q7" --target "$KB7" 2>&1 || true)"
-  printf '%s' "$rn7" | grep -qF "verified negative" \
-    && bad "ask reports a verified negative for a path the KB supports: $rn7" \
-    || ok "ask does not report a verified negative for the supported path"
-  printf '%s' "$rn7" | grep -qE "rows: 1" \
-    && ok "ask answers the supported path with one row" \
-    || bad "ask did not answer the supported path: $rn7"
+    rn7="$(FACTLOG_ROOT="$KB7" "$PYTHON" "$ROUTER" render "$q7" --target "$KB7" 2>&1 || true)"
+    printf '%s' "$rn7" | grep -qF "verified negative" \
+      && bad "ask reports a verified negative for the supported path asked all-$form: $rn7" \
+      || ok "ask does not report a verified negative for the supported path (all-$form)"
+    printf '%s' "$rn7" | grep -qE "rows: 1" \
+      && ok "ask answers the supported path with one row (all-$form)" \
+      || bad "ask did not answer the supported path asked all-$form: $rn7"
+  done
+
+  # The aggregate is the output a reader cannot check by eye, and it fails in the
+  # worst direction: `count` has no "not accepted" verdict, so an unaddressable
+  # subject comes back as 0 presented as a VERIFIED answer. The KB has exactly
+  # one 대표 object for 삼성, in either spelling.
+  for form in nfd nfc; do
+    qc7="$("$PYTHON" - "$form" <<'PY'
+import sys, unicodedata
+form = {"nfc": "NFC", "nfd": "NFD"}[sys.argv[1]]
+w = lambda s: unicodedata.normalize(form, s)
+print(f'count("{w("삼성")}", "대표")?')
+PY
+)"
+    ev7="$(FACTLOG_ROOT="$KB7" "$PYTHON" "$ROUTER" evaluate "$qc7" --target "$KB7" 2>&1 || true)"
+    printf '%s' "$ev7" | grep -qF '"count": 1' \
+      && ok "count(삼성, 대표) answers 1 asked all-$form" \
+      || bad "count(삼성, 대표) asked all-$form did not answer 1: $ev7"
+  done
 else
   echo "SKIP: pyrewire unavailable — skipping cross-atom join assertions"
 fi
