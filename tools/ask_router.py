@@ -541,11 +541,17 @@ def evaluate(draft: str, facts: list[dict[str, str]]) -> dict[str, object]:
         # query — never changes rows/count, only appended when informative.
         if not rows:
             # The WRITTEN draft, matching cmd_render's call on the same hint for
-            # the same query. coverage_hint compares every value through
-            # canonical_value and re-runs classify (which resolves internally), so
-            # it is spelling-insensitive either way and the two calls cannot
-            # disagree; passing the written line keeps every user-facing string on
-            # this path derived from what the user typed.
+            # the same query.
+            #
+            # coverage_hint's DECISION is spelling-insensitive — it compares every
+            # value through canonical_value and re-runs classify, which resolves
+            # internally — so which draft it receives cannot change whether a hint
+            # is emitted. Its STRING is not: the message interpolates the subject
+            # and the relation argument straight off the draft it was handed, so
+            # the resolved draft would quote the user a spelling they did not type
+            # (`amount(7,억)` comes back as `amount(7,"억")`). Emitted-or-not is
+            # the same either way; the text is not, and the text is the whole
+            # point of the hint.
             hint = coverage_hint(written, facts)
             if hint:
                 result["coverage_hint"] = hint
