@@ -288,6 +288,9 @@ class TestDamagedConfigIsNotOverwritten:
         assert "repair that file" not in out, f"advises repairing a file that has no bytes: {out}"
         assert "leaving its bytes untouched" not in out, f"there are no bytes to leave: {out}"
         assert str(path) in out, f"the config to fix is not named: {out}"
+        assert "mount it, re-point" not in out, (
+            f"reads as a two-step procedure; the two are alternatives: {out}"
+        )
 
     def test_says_it_could_not_read_the_file(self, tmp_path, config_home):
         path = config_file(config_home)
@@ -1033,6 +1036,15 @@ class TestSetup:
         for stream, name in ((captured.out, "stdout"), (captured.err, "stderr")):
             assert "epair that file" not in stream, (
                 f"{name} advises repairing a file that has no bytes: {stream}"
+            )
+            # These two sites append ", then set the language …", so a remedy that
+            # is itself a comma list turns two alternatives into a procedure:
+            # "mount it, re-point the link, then set the language". Mounting and
+            # re-pointing exclude each other — mount the volume and re-pointing
+            # is wrong; re-point and the mount is beside the point. Only the
+            # third site supplied an `or`, which is why the refactor hid this.
+            assert "ount it, re-point" not in stream, (
+                f"{name} reads as a procedure; the two are alternatives: {stream}"
             )
 
     def test_lang_still_applies_once_activate_has_replaced_the_damaged_config(

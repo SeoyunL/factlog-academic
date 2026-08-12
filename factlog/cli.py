@@ -795,7 +795,11 @@ def _unreadable() -> _Unreadable:
             "is a symlink whose target is not reachable right now",
             "leaving the link in place",
             "replace the link with a file",
-            "mount it, re-point the link",
+            # "mount it, re-point the link" turned two *alternatives* into a
+            # procedure at the two sites that append ", then set the language …".
+            # Mounting the volume and re-pointing the link exclude each other, so
+            # the `or` has to live in the fragment, not in one caller's glue.
+            "mount it or re-point the link",
         )
     return _Unreadable(
         "could not be read",
