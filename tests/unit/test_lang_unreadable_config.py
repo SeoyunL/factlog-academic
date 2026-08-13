@@ -360,6 +360,48 @@ class TestTheWriteBoundary:
         assert "factlog lang: cannot write" in proc.stderr, proc.stderr
 
 
+class TestEverySiteThatDeclinesKnowsTheWayOut:
+    """Three sentences decline to set a language; only one knew `--force`.
+
+    `setup --lang` ended both of its refusals with "then set the language with
+    `factlog lang`" — a command that, on the same damaged config, refuses in
+    turn. The user learned the escape hatch existed one wasted rc 1 later. That
+    is the drift `_Unreadable` was built to prevent, so the fragment is shared
+    and this asserts the sharing by behaviour, not by grepping the source.
+    """
+
+    def test_the_hint_quotes_the_code_including_the_clear_action(self):
+        assert cli._lang_force_hint("ko") == "factlog lang ko --force"
+        assert cli._lang_force_hint("") == "factlog lang '' --force"
+
+    def test_lang_refusal_carries_it(self, cfg, capsys):
+        seed_truncated(cfg)
+        run_lang("ko")
+        assert cli._lang_force_hint("ko") in capsys.readouterr().err
+
+    def test_setup_carries_it_in_both_its_notes_and_its_closing_line(
+        self, cfg, capsys, tmp_path, monkeypatch
+    ):
+        """`setup --lang` produces two of the three sentences: a summary note and
+        the rc-1 closing line. Both must name it."""
+        import argparse
+
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+        seed_truncated(cfg)
+        kb = tmp_path / "kb"
+        rc = cli.cmd_setup(argparse.Namespace(target=str(kb), lang="ko", activate=False))
+        captured = capsys.readouterr()
+
+        assert rc == 1, "a --lang that was not applied must not exit 0"
+        # Spelled out rather than taken from `_lang_force_hint`, so this fails on
+        # a tree where the two setup sites simply never learned the flag —
+        # asserting via the helper would only prove the helper exists.
+        assert "factlog lang ko --force" in captured.out, captured.out
+        assert "factlog lang ko --force" in captured.err, captured.err
+        # And the refusal it belongs to is still intact: nothing was written.
+        assert cfg.read_bytes() == b'{"root": "/Users/real/kb",'
+
+
 def test_invalid_code_is_still_rejected_before_the_config_is_consulted(cfg, capsys):
     """rc 2 (invalid input) outranks rc 1 (unwritable config): the value is wrong
     whatever the config says, and reporting the config instead would send the

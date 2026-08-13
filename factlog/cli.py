@@ -1187,6 +1187,28 @@ def _normalize_lang(code: str) -> tuple[str | None, str | None]:
     return normalized, None
 
 
+def _lang_force_hint(code: str) -> str:
+    """The exact command that sets *code* over a config that could not be read.
+
+    Three sentences now decline to set a narration language — ``factlog lang``'s
+    refusal and ``setup``'s two, in its notes and its rc-1 closing line — and only
+    the first of them knew ``--force`` existed. The other two ended "repair that
+    file, then set the language with `factlog lang`", which sent the user to run
+    a command that would refuse in turn; they learned about the way out one
+    wasted rc 1 later. That is precisely the drift ``_Unreadable`` exists to
+    prevent, so the fragment lives here once.
+
+    The code is quoted rather than written ``<code>`` because the clear action is
+    ``factlog lang ''`` and a placeholder loses the one argument a reader cannot
+    guess. ``setup --lang ko`` is answered with ``factlog lang ko --force``, not
+    ``setup --lang ko --force``: setup has no such flag, and inventing one in a
+    message would be a second lie.
+    """
+    import shlex
+
+    return f"factlog lang {shlex.quote(code)} --force"
+
+
 def _apply_lang(normalized: str, command: str) -> str:
     """Persist an already-validated *normalized* language and return the one-line
     confirmation phrase. An empty string clears the setting. Centralised so all
@@ -1308,17 +1330,11 @@ def cmd_lang(args: argparse.Namespace) -> int:
         # that did — `setup --lang` exits 1 for this reason on the same refusal.
         # Nothing is written, so `preserved` is the one place these fragments are
         # literally true rather than a promise to keep.
-        #
-        # The retry line quotes the code the user actually typed rather than
-        # `<code>`: the clear action is `factlog lang ''`, and a placeholder there
-        # loses the one argument a reader would not guess.
-        import shlex
-
         print(
             f"factlog lang: narration language NOT set: {factlog_config.config_path()} "
             f"{replacing.reason} — {replacing.preserved}, because writing it would "
             f"{replacing.cost}. {replacing.remedy[0].upper()}{replacing.remedy[1:]}, "
-            f"or overwrite it deliberately: factlog lang {shlex.quote(code)} --force",
+            f"or overwrite it deliberately: {_lang_force_hint(code)}",
             file=sys.stderr,
         )
         return 1
@@ -2859,7 +2875,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             notes.append(
                 f"narration language NOT set: {factlog_config.config_path()} {said.reason}, "
                 f"and writing it would {said.cost} — {said.remedy}, "
-                "then set the language with `factlog lang`"
+                "then set the language with `factlog lang`; "
+                f"or set it over the damaged file: {_lang_force_hint(lang_normalized)}"
             )
         else:
             phrase = _apply_lang(lang_normalized, "factlog setup")
@@ -2899,7 +2916,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             f"\nfactlog setup: the KB at {target} is ready, but --lang was not applied "
             f"because {factlog_config.config_path()} {said.reason} (see above). "
             f"{said.remedy[0].upper()}{said.remedy[1:]}, then set the language "
-            "with `factlog lang`.",
+            f"with `factlog lang`; or set it over the damaged file: "
+            f"{_lang_force_hint(lang_normalized)}.",
             file=sys.stderr,
         )
         return 1
