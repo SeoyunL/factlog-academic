@@ -162,6 +162,48 @@ def test_relative_python_resolves_where_the_steps_run(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("value", ["kb", "", "./kb"])
+def test_setup_kb_that_is_not_absolute_is_refused(tmp_path: Path, value: str) -> None:
+    """``SETUP_KB`` is deleted, so a value that resolves elsewhere must not run.
+
+    Step 1 runs ``rm -rf "$SETUP_KB"`` in the caller's cwd while ``setup
+    --target`` runs from ``PLUGIN_ROOT``. ``SETUP_KB=kb`` therefore deleted the
+    caller's ``./kb`` and built a fresh one inside the checkout, then reported
+    ``2 passed, 7 failed`` about ``setup``. An empty value fell back to the
+    machine-wide default and deleted that instead, with nothing in the output to
+    say the isolation the caller asked for had not happened.
+
+    The caller's directory below must still be there afterwards: refusing in the
+    output but deleting anyway would be the same defect with a better message.
+    """
+    caller = tmp_path / "caller"
+    (caller / "kb").mkdir(parents=True)
+    keep = caller / "kb" / "IMPORTANT"
+    keep.write_text("the caller's data", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PYTHON"] = str(_engine_shim(tmp_path, "any", "exit 0\n"))
+    env["HOME"] = str(tmp_path / "home")
+    env["SETUP_KB"] = value
+    result = subprocess.run(
+        ["bash", str(SETUP_SH)],
+        cwd=str(caller),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    combined = result.stdout + result.stderr
+
+    assert result.returncode != 0, combined
+    assert "FATAL: SETUP_KB" in result.stderr, (
+        "a SETUP_KB that is not absolute was accepted\n" + combined
+    )
+    assert "Setup results:" not in result.stdout, (
+        "the harness ran its steps against a path it could not place\n" + combined
+    )
+    assert keep.is_file(), "the refused run deleted the caller's directory anyway"
+
+
 def test_output_names_the_interpreter_that_ran(tmp_path: Path) -> None:
     """The run must say which interpreter it used, given one or choosing one.
 
