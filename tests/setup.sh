@@ -3,9 +3,11 @@
 #
 # Verifies the `setup` subcommand performs doctor + init and exits 0 on an
 # environment where pyrewire is ALREADY present, WITHOUT depending on the
-# network or a real pip install. The venv at /tmp/factlog-venv already has
-# pyrewire >=1.0.3, so setup takes the "already satisfied, skip install" path —
-# the pip branch is exercised by code review (PEP 668 guidance), not here.
+# network or a real pip install: on an interpreter that already has pyrewire
+# >=1.0.3 setup takes the "already satisfied, skip install" path — the pip
+# branch is exercised by code review (PEP 668 guidance), not here. Point PYTHON
+# at such an interpreter; on one without it, every assertion below fails for a
+# reason that has nothing to do with the `setup` command.
 #
 # Asserts:
 #   - setup exits 0
@@ -14,6 +16,7 @@
 #
 # Usage:
 #   bash tests/setup.sh
+#   PYTHON=<interpreter> bash tests/setup.sh
 #
 # Returns 0 if all checks pass, 1 on first failure.
 
@@ -25,11 +28,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Python interpreter: the engine (pyrewire) is required for setup's doctor
-# checks to pass, so prefer the prepared factlog-venv; fall back to python3.
-if [ -x "/tmp/factlog-venv/bin/python" ]; then
-  PYTHON="/tmp/factlog-venv/bin/python"
-else
-  PYTHON="python3"
+# checks to pass, so an unset PYTHON prefers the prepared factlog-venv and falls
+# back to python3.
+#
+# The caller's value used to be overwritten unconditionally, so the
+# `PYTHON=<interpreter> bash tests/x.sh` convention the rest of tests/ follows
+# was silently discarded here (#361, the same defect golden.sh carried in #354).
+# On a machine without /tmp/factlog-venv a run told to use an interpreter WITH
+# pyrewire fell through to a bare python3 without it and reported 0 passed,
+# 9 failed — and the reverse misattribution is worse: a 9/9 under a PATH that
+# happened to hold a good python3 was read as "because I exported PYTHON", a
+# mechanism that did not exist.
+#
+# golden.sh dropped its /tmp/factlog-venv branch entirely, on the ground that a
+# regression harness must not silently choose a different interpreter from the
+# other 39. This one keeps it: it is a dev-environment script whose whole
+# premise is an environment where pyrewire is already installed, and that path
+# is where this repo's dev setup puts it. The branch only runs when the caller
+# named nothing.
+if [ -z "${PYTHON:-}" ]; then
+  if [ -x "/tmp/factlog-venv/bin/python" ]; then
+    PYTHON="/tmp/factlog-venv/bin/python"
+  else
+    PYTHON="python3"
+  fi
+elif ! (cd "$PLUGIN_ROOT" && command -v "$PYTHON" >/dev/null 2>&1); then
+  # A named interpreter that cannot run must stop the harness, not fall back:
+  # dropping to python3 here would measure something other than what was asked
+  # for and report the verdict as if it were about the branch under test.
+  #
+  # Checked from PLUGIN_ROOT because that is where every step below invokes it,
+  # so a relative path is judged against the directory it will actually be
+  # resolved in rather than against the caller's cwd.
+  echo "FATAL: PYTHON is not an executable interpreter: $PYTHON" >&2
+  exit 1
 fi
 
 SETUP_KB="/tmp/factlog-setup-test-kb"
