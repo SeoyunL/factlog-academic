@@ -132,18 +132,24 @@ factlog init: active-KB config at /Users/me/.config/factlog/config.json could no
 일어납니다. 다만 걸린 것이 남길 바이트가 아니라 **포인터**이므로 문장이 다릅니다. 링크
 자리에 쓰기를 하면 링크가 일반 파일로 바뀌어, 볼륨을 다시 마운트해도 설정이 돌아오지
 않습니다. 그래서 고칠 방법도 "파일을 고치라" 가 아니라 마운트하거나 링크를 다시 걸라는
-쪽입니다. KB 자체는 그대로 만들어지고, 거부되는 것은 활성화뿐입니다.
+쪽입니다. KB 자체는 그대로 만들어집니다 — 거부되는 것은 설정 파일에 대한 쓰기, 즉
+활성화와 `--lang` 둘 다입니다.
 
 ```text
 factlog init: active-KB config at /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now — leaving the link in place; /tmp/scratch is not recorded in it
   mount it or re-point the link, or overwrite it deliberately: factlog use /tmp/scratch
 ```
 
-이 설정 위에서 `setup --lang` 이 끝날 때 찍는 마지막 줄도 같은 말을 씁니다.
+최종 환경 점검까지 통과했다면, 이 설정 위에서 `setup --lang` 이 찍는 마지막 줄도 같은
+말을 씁니다.
 
 ```text
 factlog setup: the KB at /tmp/scratch is ready, but --lang was not applied because /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now (see above). Mount it or re-point the link, then set the language with `factlog lang`.
 ```
+
+점검이 실패하면 그 자리는 환경 문제를 알리는 줄로 바뀌고, `--lang` 이 거절됐다는 사실은
+요약의 `→ narration language NOT set: …` 줄로만 남습니다. 어느 쪽이든 종료 코드는
+1 입니다.
 
 파일을 고쳤거나 버려도 좋다면 `--activate` 로 덮어쓸 수 있고, 그 경우 무엇을 덮어썼는지
 출력합니다(이때는 설정이 다시 온전해지므로 같은 실행의 `--lang` 도 정상 적용됩니다). 반면 파일이 **읽히기는 하는데** 기록된 root가 없으면(`{"lang": "ko"}`,
@@ -166,11 +172,18 @@ KB가 아니라면 — `init` 은 만들지 않고 멈춥니다. 정말 그 자�
 factlog init: no --target given; using /Users/me/wiki (from the active-KB config)
 ```
 
-대상 자리에 이미 **일반 파일**이 있을 때도 `init` 은 만들지 않고 멈춥니다(종료 코드 1).
-예전에는 `<대상>/sources` 를 만들려다 `NotADirectoryError` 트레이스백이 났습니다.
+대상 자리에 이미 **일반 파일**이 있을 때도 `init`/`setup` 은 만들지 않고 멈춥니다(종료
+코드 1). 예전에는 `<대상>/sources` 를 만들려다 `NotADirectoryError` 트레이스백이
+났습니다.
 
 ```text
 factlog init: refusing to scaffold a KB at /Users/me/notes.md, which is an existing file, not a directory. Pass --target with a directory path.
+```
+
+대상을 정하는 자리가 두 명령에 공유되므로, `setup` 도 자기 이름으로 같은 문장을 씁니다.
+
+```text
+factlog setup: refusing to scaffold a KB at /Users/me/notes.md, which is an existing file, not a directory. Pass --target with a directory path.
 ```
 
 플래그로 이름을 댄 대상이든 `$FACTLOG_ROOT`·활성 KB 설정·`~/wiki` 에서 암묵적으로 온

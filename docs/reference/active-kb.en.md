@@ -132,19 +132,25 @@ activation refusal and the same `--lang` deferral happen. What is at stake is a
 **pointer** rather than bytes worth preserving, though, so the wording differs.
 Writing at the link replaces it with a regular file, and remounting the volume no
 longer brings the setting back; the remedy is therefore mounting it or re-pointing
-the link, not repairing a file. The KB itself is still created — only the
-activation is refused.
+the link, not repairing a file. The KB itself is still created; what is refused
+is the write to the config file — both the activation and the `--lang`.
 
 ```text
 factlog init: active-KB config at /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now — leaving the link in place; /tmp/scratch is not recorded in it
   mount it or re-point the link, or overwrite it deliberately: factlog use /tmp/scratch
 ```
 
-The line `setup --lang` closes with over such a config uses the same words.
+When the final environment check passes, the line that `setup --lang` closes with
+over such a config uses those same words, too.
 
 ```text
 factlog setup: the KB at /tmp/scratch is ready, but --lang was not applied because /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now (see above). Mount it or re-point the link, then set the language with `factlog lang`.
 ```
+
+If that check fails, this line is replaced by the one reporting the environment
+problem, and the only remaining record that `--lang` was declined is the
+`→ narration language NOT set: …` note in the summary. The exit code is 1 either
+way.
 
 Once you have repaired it — or decided it is expendable — `--activate` overwrites
 it and reports what it replaced (the config is sound again at that point, so a
@@ -171,12 +177,19 @@ lose, so both proceed.
 factlog init: no --target given; using /Users/me/wiki (from the active-KB config)
 ```
 
-A target that is an existing **regular file** stops `init` as well (exit code 1).
-It used to raise a `NotADirectoryError` traceback on the way to creating
+A target that is an existing **regular file** stops `init`/`setup` as well (exit
+code 1). It used to raise a `NotADirectoryError` traceback on the way to creating
 `<target>/sources`.
 
 ```text
 factlog init: refusing to scaffold a KB at /Users/me/notes.md, which is an existing file, not a directory. Pass --target with a directory path.
+```
+
+Both commands share the step that picks the target, so `setup` says the same
+sentence under its own name.
+
+```text
+factlog setup: refusing to scaffold a KB at /Users/me/notes.md, which is an existing file, not a directory. Pass --target with a directory path.
 ```
 
 The check applies whether the target was named with the flag or came implicitly
