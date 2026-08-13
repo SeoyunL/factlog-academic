@@ -2147,6 +2147,93 @@ rm -f "$libgood_err"
 rm -rf "$libgood_plugin" "$KB_LIBBAD"
 
 # ---------------------------------------------------------------------------
+# CASE 67f: A NAME THAT IS NOT SET RETURNS, IT DOES NOT KILL THE SHELL (#359).
+#
+# Passing the payload by name means the reader expands `${!name}`, which under
+# `set -u` is fatal when the name is unset. That expansion sits inside a process
+# substitution, so what dies is the SUBSHELL rather than the hook — and that is
+# the interesting part. Measured with the `${!name+set}` test removed: the `read`
+# finds nothing, the function returns 0, and the record comes back
+# ("", "", "incomplete"), which is exactly what a dead interpreter produces. The
+# gate then reports "the payload extractor returned no complete record" and falls
+# OPEN, blaming the extractor for what is really a caller bug. With the test in
+# place the function returns 1 and gate_check.sh denies (CASE 67b's branch).
+#
+# Exercised against the real gate_payload.sh in a `set -u` subshell, because the
+# condition lives inside the shared reader and no payload can provoke it from
+# outside — only a caller bug can, which is what it defends against. Removing the
+# test turns this case red with `returned=0` in place of `returned=1`.
+# ---------------------------------------------------------------------------
+unset_name_rc=0
+unset_name_out="$(bash -u -c '
+  . "$1/gate_payload.sh"
+  factlog_hook_read_payload definitely_not_a_set_variable /bin/true
+  echo "returned=$?"
+  echo "kind=[${FACTLOG_HOOK_TOOL_INPUT_KIND}]"
+' _ "$HOOKS_DIR" 2>&1)" || unset_name_rc=$?
+case "$unset_name_rc:$unset_name_out" in
+  0:*"returned=1"*)
+    echo "PASS: an unset payload variable name returns non-zero without killing the shell"
+    pass=$((pass + 1))
+    ;;
+  *)
+    echo "FAIL: unset payload variable name — expected a clean return 1, got rc=$unset_name_rc out=$unset_name_out"
+    fail=$((fail + 1))
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# CASE 67e: THE PAYLOAD IS PASSED BY NAME, NOT BY VALUE (#359).
+#
+# A hook payload is bounded only by the tool call, so `content` can be megabytes,
+# and every value copy is linear in it. Passing the payload by value cost two
+# extra whole-payload copies per call — measured at 20MB, min of 7, interleaved:
+# gate_check 0.82s pre-#359, 1.23s by value (+50%), 0.87s by name; gate_reminder
+# 0.69s, 1.10s (+59%), 0.71s. It matters beyond speed because hooks.json gives
+# each hook `timeout: 10` and a killed hook cannot deliver exit 2, so a timeout
+# is a fail-open — by value pulled the extrapolated 10s crossing from ~290MB to
+# ~174MB.
+#
+# THIS IS A SOURCE-SHAPE ASSERTION, and that needs justifying, because every
+# other case in this file asserts behaviour. A behavioural version would have to
+# time a large payload and compare against a threshold, and a wall-clock
+# threshold is exactly the kind of case that goes red on a loaded CI box for
+# reasons that have nothing to do with the code — the regression is ~50%, but
+# run-to-run spread on this host was already ~10% and the whole suite would
+# inherit that flakiness. Nothing else distinguishes one copy from three:
+# bash exposes no copy counter, and peak RSS is not portable. So the mechanism is
+# pinned directly. It is deliberately narrow — it says only that the call sites
+# pass a NAME and that the shared reader expands it indirectly.
+# ---------------------------------------------------------------------------
+byname_ok=1
+for hook_src in "$HOOKS_DIR/gate_check.sh" "$HOOKS_DIR/gate_reminder.sh"; do
+  if grep -qE 'factlog_hook_read_payload[[:space:]]+"\$payload"' "$hook_src"; then
+    echo "FAIL: $(basename "$hook_src") passes the payload BY VALUE to factlog_hook_read_payload"
+    byname_ok=0
+  elif ! grep -qE 'factlog_hook_read_payload[[:space:]]+payload[[:space:]]' "$hook_src"; then
+    echo "FAIL: $(basename "$hook_src") does not call factlog_hook_read_payload with the variable NAME"
+    byname_ok=0
+  fi
+done
+# The other half: the shared reader must expand that name indirectly rather than
+# copying it into a local. `local _payload="$1"` is the exact line that cost the
+# second copy.
+if grep -qE '^[[:space:]]*local[[:space:]]+_payload=' "$HOOKS_DIR/gate_payload.sh"; then
+  echo "FAIL: gate_payload.sh copies the payload into a local instead of expanding it by name"
+  byname_ok=0
+fi
+if ! grep -qF '${!_payload_var}' "$HOOKS_DIR/gate_payload.sh"; then
+  echo "FAIL: gate_payload.sh does not expand the payload variable indirectly"
+  byname_ok=0
+fi
+if [ "$byname_ok" -eq 1 ]; then
+  echo "PASS: the payload is passed by name and expanded indirectly (no whole-payload copies)"
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1))
+fi
+
+# ---------------------------------------------------------------------------
 # CASE 68: THE RECORD LEADS WITH `target` (#359).
 #
 # The extractor writes three NUL-separated fields, and a NUL inside a JSON

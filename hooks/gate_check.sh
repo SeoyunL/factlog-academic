@@ -387,10 +387,17 @@ fi
 # of the four kinds the Python emits, or the "incomplete" seed of its own. So an
 # empty kind after the call means the contract was broken, and it cannot be
 # confused with any honest outcome.
+#
+# `payload` is passed BY NAME, not by value. The payload is unbounded — a Write's
+# `content` can be megabytes — and passing it by value copies the whole thing
+# twice more per call: measured on 20MB, 0.87s by name against 1.23s by value,
+# where the pre-#359 hook took 0.82s. See gate_payload.sh for why that is a
+# correctness matter and not a preference: hooks.json allows this hook 10
+# seconds, and a hook that is killed never delivers exit 2.
 FACTLOG_HOOK_TARGET_PATH=""
 FACTLOG_HOOK_TOOL_NAME=""
 FACTLOG_HOOK_TOOL_INPUT_KIND=""
-if ! factlog_hook_read_payload "$payload" "${PYTHON_RUNNER[@]}" \
+if ! factlog_hook_read_payload payload "${PYTHON_RUNNER[@]}" \
   || [ -z "$FACTLOG_HOOK_TOOL_INPUT_KIND" ]; then
   echo "[factlog GATE] DENIED: the shared payload extractor did not honour its contract." >&2
   echo "  Loaded from: $GATE_PAYLOAD_LIB" >&2
