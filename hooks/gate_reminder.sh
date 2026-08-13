@@ -103,7 +103,8 @@
 #
 # WHEN THE TARGET CANNOT BE READ (no usable Python, an unparseable payload, an
 # envelope with no path key at all, or — since #359 — a shared extractor that
-# will not load) it falls back to the payload-wide grep —
+# will not load or that this hook declines to load because it cannot tell which
+# directory it lives in) it falls back to the payload-wide grep —
 # i.e. to the pre-#337 behaviour. That direction is the opposite of the one
 # gate_check.sh takes for a comparable blind spot, and deliberately so: there,
 # guessing costs a blocked write, so it falls open; here, guessing costs one
@@ -118,9 +119,17 @@
 payload="$(</dev/stdin)"
 
 _hook_dir="${BASH_SOURCE[0]}"
+# Whether $HOOK_DIR is the directory this SCRIPT lives in, or merely the cwd.
+# `${BASH_SOURCE[0]}` carries a path in every way this hook is actually launched
+# — hooks.json passes an absolute one, and PATH lookup, `bash -c` and `exec -a`
+# all still yield one (measured). The bare-name case survives only for
+# `bash gate_reminder.sh` run from inside the script's own directory, and there
+# "." is right for the interpreter but must NOT be trusted for the library: see
+# the source guard below.
+_hook_dir_is_script_dir=true
 case "$_hook_dir" in
   */*) _hook_dir="${_hook_dir%/*}" ;;
-  *) _hook_dir="." ;;
+  *) _hook_dir="."; _hook_dir_is_script_dir=false ;;
 esac
 HOOK_DIR="$(cd "$_hook_dir" && pwd)"
 PYTHON_RUNNER_SCRIPT="${FACTLOG_PYTHON_RUNNER:-"$HOOK_DIR/../tools/factlog_python.sh"}"
@@ -154,10 +163,28 @@ PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
 # missing extractor means a write cannot be shown to be safe, so it denies;
 # here it means one line of output might be wrong, so it errs toward still
 # saying something. This hook must not turn an install problem into silence.
+# WHEN $HOOK_DIR IS ONLY THE CWD, DO NOT SOURCE. Sourcing runs arbitrary code, so
+# the one case where $HOOK_DIR was not derived from a path — `bash gate_reminder.sh`
+# from inside some directory — must not reach for a gate_payload.sh sitting
+# there. gate_check.sh cannot get here at all: its `cd "${BASH_SOURCE[0]%/*}"`
+# fails first and `set -e` ends the script.
+#
+# The residue is that a COPY or symlink of this hook placed in a hostile
+# directory, invoked from inside it, would otherwise have sourced that
+# directory's gate_payload.sh. Closed here rather than deferred because #359 is
+# what moved the target: before it the nearest sourced thing was
+# `$HOOK_DIR/../tools/factlog_python.sh`, a PARENT directory, and the library
+# brought it down into the SAME directory as the decoy. That parent-directory
+# exposure is unchanged from main and stays out of scope — narrowing it would
+# change how the interpreter is located, which this issue is not about.
+#
+# Skipping the source leaves target_path empty, which is the documented fallback
+# below and not a new behaviour.
 GATE_PAYLOAD_LIB="$HOOK_DIR/gate_payload.sh"
 
 target_path=""
-if [ -r "$GATE_PAYLOAD_LIB" ] \
+if [ "$_hook_dir_is_script_dir" = true ] \
+  && [ -r "$GATE_PAYLOAD_LIB" ] \
   && . "$GATE_PAYLOAD_LIB" \
   && declare -f factlog_hook_read_payload >/dev/null 2>&1; then
   factlog_hook_read_payload "$payload" "${PYTHON_RUNNER[@]}"
