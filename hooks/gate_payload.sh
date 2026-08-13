@@ -154,42 +154,105 @@ except Exception:
 sys.stdout.write(target + \"\\0\" + tool_name + \"\\0\" + input_kind + \"\\0\")
 "
 
-# factlog_hook_read_payload <payload> <runner> [runner-arg...]
+# factlog_hook_read_payload <payload-variable-NAME> <runner> [runner-arg...]
 #
-# Runs the extractor over <payload> and sets, in the caller's shell:
+# THE FIRST ARGUMENT IS A VARIABLE NAME, NOT THE PAYLOAD. That is a performance
+# contract, and it is the reason this reads awkwardly.
+#
+# A hook payload is bounded only by what the tool call carries, so `content` can
+# be megabytes, and every value copy is then linear in the payload. Passing the
+# payload BY VALUE costs two extra copies of the whole thing — one into `$1` at
+# the call, one into a `local` inside — on top of the one expansion the extractor
+# actually needs. Measured against the pre-#359 hooks, min of 7, runs interleaved
+# so host drift cannot favour either side, both hooks returning 0 so the real
+# path is what is being timed:
+#
+#            payload   pre-#359   by value          by name
+#   check      20MB      0.82s     1.23s (+50%)     0.87s (+6.1%)
+#   check      40MB      1.50s     2.37s (+58%)     1.56s (+4.0%)
+#   reminder   20MB      0.69s     1.10s (+59%)     0.71s (+2.9%)
+#   reminder   40MB      1.36s     2.19s (+61%)     1.43s (+5.1%)
+#
+# By name the payload is expanded exactly once, at the `printf` that feeds the
+# interpreter — which is what each hook did before it shared this code. The few
+# percent that remain are this file's own `source` plus the set-ness guard below,
+# whose cost a micro-benchmark puts at ~0.05s on 40MB; the four-fold gap between
+# a value copy and no copy is what mattered.
+#
+# WHY THIS IS A CORRECTNESS CONCERN AND NOT A PREFERENCE. hooks.json gives each
+# hook `timeout: 10`. A hook that is killed cannot deliver exit 2, and the
+# PreToolUse contract this repo documents (see gate_check.sh's CHANNEL note)
+# blocks on exit 2 alone — so a timeout is a fail-OPEN, and slowing the hooks
+# moves the payload size where that starts closer to the user. Extrapolating the
+# two measured points linearly, the 10s crossing for gate_check sits near 290MB
+# before #359, would have been near 174MB by value, and is near 285MB by name.
+# Those sizes are far past anything a real tool call carries; the point of
+# recording them is that the direction was toward the user and is now not.
+#
+# Claude Code's actual behaviour on a hook timeout cannot be observed from this
+# repository, so read the fail-open direction as INFERRED from the documented
+# contract rather than measured. gate_reminder.sh's header already rests on the
+# same inference for the PostToolUse side.
+#
+# The name is taken from the caller rather than hardcoded here so that this file
+# still knows nothing about either hook's variable names — reading a global
+# `$payload` directly would have been the same speed and would have reintroduced
+# exactly the kind of implicit contract between the two hooks that #359 exists to
+# remove.
+#
+# Runs the extractor over that variable's value and sets, in the caller's shell:
 #   FACTLOG_HOOK_TARGET_PATH      the target path, or "" when none was read
 #   FACTLOG_HOOK_TOOL_NAME        the raw tool_name, or ""
 #   FACTLOG_HOOK_TOOL_INPUT_KIND  "unparsed"|"absent"|"object"|"other", or
 #                                 "incomplete" when NO record came back at all
 #
-# FAILURE IS THE CALLER'S. This function ALWAYS returns 0 and always leaves the
-# three variables set. A dead interpreter, a truncated record, anything that is
-# not three NUL-terminated fields — all of it lands as
-# ("", "", "incomplete"), which is a state the caller can read and act on rather
-# than an exit status it might forget to check. That matters because the callers
-# want opposite things from it: gate_check.sh falls OPEN, since with no record it
-# cannot even tell the call is a write and denying would block every tool call in
-# the session on evidence it does not have; gate_reminder.sh falls back to its
-# pre-#337 payload-wide grep, since guessing there costs one extra line of output
-# instead of a blocked write. Returning non-zero would also have been a hazard in
-# the caller that runs under `set -e`.
+# EXTRACTION FAILURE IS THE CALLER'S. Anything that goes wrong while READING the
+# payload — a dead interpreter, a truncated record, anything that is not three
+# NUL-terminated fields — returns 0 and lands as ("", "", "incomplete"). That is
+# a state the caller can read and act on rather than an exit status it might
+# forget to check, and it matters because the two callers want opposite things
+# from it: gate_check.sh falls OPEN, since with no record it cannot even tell the
+# call is a write and denying would block every tool call in the session on
+# evidence it does not have; gate_reminder.sh falls back to its pre-#337
+# payload-wide grep, since guessing there costs one extra line of output instead
+# of a blocked write.
+#
+# A BROKEN CALL returns NON-ZERO, and that is a different thing: an argument that
+# does not name a set variable is a bug in the caller, not a payload this could
+# not read. gate_check.sh turns it into a deny; gate_reminder.sh leaves the
+# target empty and falls back.
+#
+# The name is CHECKED before it is expanded, and what that buys is narrower than
+# it first looks. `${!name}` on an unset name is fatal under `set -u`, but the
+# expansion here sits inside a process substitution, so what dies is that
+# SUBSHELL, not the hook. Measured with the guard removed: the `read` then finds
+# nothing, the function returns 0, and the record comes back ("", "",
+# "incomplete") — indistinguishable from an interpreter that failed to run. So
+# gate_check.sh would report "the payload extractor returned no complete record"
+# and fall OPEN, silently attributing a caller bug to the extractor. The guard
+# turns that into a deny with the reason it actually has. `${!name+set}` asks
+# whether the variable exists without expanding its value.
 #
 # "incomplete" is chosen as the seed precisely because the Python above can never
 # write it — it only ever writes one of the four kinds — so it is unambiguous.
 # A record whose kind field is none of the five means a NUL inside a JSON string
 # shifted the fields; gate_check.sh has a branch for that.
 factlog_hook_read_payload() {
-  local _payload="$1"
+  local _payload_var="$1"
   shift
 
   FACTLOG_HOOK_TARGET_PATH=""
   FACTLOG_HOOK_TOOL_NAME=""
   FACTLOG_HOOK_TOOL_INPUT_KIND="incomplete"
 
+  if [ -z "$_payload_var" ] || [ -z "${!_payload_var+set}" ]; then
+    return 1
+  fi
+
   if ! { IFS= read -r -d '' FACTLOG_HOOK_TARGET_PATH \
       && IFS= read -r -d '' FACTLOG_HOOK_TOOL_NAME \
       && IFS= read -r -d '' FACTLOG_HOOK_TOOL_INPUT_KIND; } \
-      < <(printf '%s' "$_payload" | "$@" -c "$FACTLOG_HOOK_PAYLOAD_PY" 2>/dev/null); then
+      < <(printf '%s' "${!_payload_var}" | "$@" -c "$FACTLOG_HOOK_PAYLOAD_PY" 2>/dev/null); then
     # A partial read leaves the earlier variables holding real values, so reset
     # all three: "incomplete" has to mean the whole record is absent, not that
     # the tail of it is.
