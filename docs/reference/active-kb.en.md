@@ -121,7 +121,30 @@ factlog init: active-KB config at /Users/me/.config/factlog/config.json could no
 
 `setup --lang` is withheld for the same reason: recording a language rebuilds the
 whole config file, so it would erase the root bytes that could not be read — the
-command would be touching the file one line after saying it left it alone.
+command would be touching the file one line after saying it left it alone. The
+`--lang` you asked for was not applied, so `setup` **exits 1**. Exiting 0 would
+hand a script three agreeing signals — the exit code, a completion line, and an
+empty `factlog lang`.
+
+A config file that is a **broken symlink** — typically a link into a dotfiles
+volume you have not mounted — is classified as unreadable too, so the same
+activation refusal and the same `--lang` deferral happen. What is at stake is a
+**pointer** rather than bytes worth preserving, though, so the wording differs.
+Writing at the link replaces it with a regular file, and remounting the volume no
+longer brings the setting back; the remedy is therefore mounting it or re-pointing
+the link, not repairing a file. The KB itself is still created — only the
+activation is refused.
+
+```text
+factlog init: active-KB config at /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now — leaving the link in place; /tmp/scratch is not recorded in it
+  mount it or re-point the link, or overwrite it deliberately: factlog use /tmp/scratch
+```
+
+The line `setup --lang` closes with over such a config uses the same words.
+
+```text
+factlog setup: the KB at /tmp/scratch is ready, but --lang was not applied because /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now (see above). Mount it or re-point the link, then set the language with `factlog lang`.
+```
 
 Once you have repaired it — or decided it is expendable — `--activate` overwrites
 it and reports what it replaced (the config is sound again at that point, so a
@@ -146,6 +169,24 @@ lose, so both proceed.
 
 ```text
 factlog init: no --target given; using /Users/me/wiki (from the active-KB config)
+```
+
+A target that is an existing **regular file** stops `init` as well (exit code 1).
+It used to raise a `NotADirectoryError` traceback on the way to creating
+`<target>/sources`.
+
+```text
+factlog init: refusing to scaffold a KB at /Users/me/notes.md, which is an existing file, not a directory. Pass --target with a directory path.
+```
+
+The check applies whether the target was named with the flag or came implicitly
+from `$FACTLOG_ROOT`, the active-KB config, or `~/wiki`. A target you did not
+name on the command line is reported **with the rank it came from** — the
+traceback used to fire before the "no --target given" line, leaving no way to
+tell whether the environment variable or the config file had chosen that path.
+
+```text
+factlog init: refusing to scaffold a KB at /Users/me/notes.md, which is an existing file, not a directory. It was chosen implicitly (from the active-KB config), not named on the command line — point that at a directory, or pass --target with a directory path.
 ```
 
 ## Checking which KB won

@@ -13,14 +13,21 @@ page still carried the old spelling, which is the shape of the problem: the doc
 was hand-written beside the code instead of taken from it.
 
 So these run the command and compare. The only edit applied to the captured
-output is path substitution — the pages use ``/Users/me/wiki`` and
-``/tmp/scratch`` as illustrations, and a test cannot create those. Every other
-byte, including the em dashes and the double space before ``(or re-run with
---activate)``, has to match what the page prints.
+output is path substitution — the pages use ``/Users/me/wiki``, ``/tmp/scratch``
+and ``/Users/me/notes.md`` as illustrations, and a test cannot create those.
+Every other byte, including the em dashes and the double space before ``(or
+re-run with --activate)``, has to match what the page prints.
 
 The blocks are excerpts: ``init`` also lists every scaffolded directory, and the
 pages leave that out. Each scenario therefore names the prefixes it quotes, and
 the assertion is that those lines, in that order, appear verbatim in both pages.
+
+One block is ``setup``'s, not ``init``'s, and it is driven through
+``cli.main`` in-process with the doctor/pip stages stubbed — the same shape
+``tests/unit/test_init_activation.py`` uses and for the same reason: a
+subprocess ``setup`` would try to pip-install pyrewire when the engine is
+absent, and its doctor output is machine- and locale-dependent noise. The line
+being captured is produced by unstubbed code either way.
 """
 from __future__ import annotations
 
@@ -35,6 +42,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+sys.path.insert(0, str(REPO_ROOT))
+from factlog import cli  # noqa: E402
+
 PAGES = (
     REPO_ROOT / "docs" / "reference" / "active-kb.md",
     REPO_ROOT / "docs" / "reference" / "active-kb.en.md",
@@ -44,20 +54,29 @@ PAGES = (
 DOC_WIKI = "/Users/me/wiki"
 DOC_SCRATCH = "/tmp/scratch"
 DOC_CONFIG = "/Users/me/.config/factlog/config.json"
+DOC_FILE = "/Users/me/notes.md"
 
 
 @pytest.fixture()
 def sandbox(tmp_path):
-    """An isolated config home plus the two KB paths the pages illustrate."""
+    """An isolated config home plus the paths the pages illustrate.
+
+    ``file`` is created for every scenario, not just the two that name it: it
+    costs one write, and a substitution entry that matches nothing is a no-op
+    for the blocks that do not mention it.
+    """
     cfg_home = tmp_path / "cfg"
     (cfg_home / "factlog").mkdir(parents=True)
     wiki = tmp_path / "wiki"
     wiki.mkdir()
+    notes = tmp_path / "notes.md"
+    notes.write_text("a plain file, where a KB is about to be asked for\n", encoding="utf-8")
     return {
         "cfg_home": cfg_home,
         "config": cfg_home / "factlog" / "config.json",
         "wiki": wiki,
         "scratch": tmp_path / "scratch",
+        "file": notes,
     }
 
 
@@ -89,6 +108,7 @@ def as_documented(sandbox, lines: list[str], *prefixes: str) -> list[str]:
     swapped = []
     for line in kept:
         for real, shown in (
+            (str(sandbox["file"].resolve()), DOC_FILE),
             (str(sandbox["scratch"].resolve()), DOC_SCRATCH),
             (str(sandbox["wiki"].resolve()), DOC_WIKI),
             (str(sandbox["config"]), DOC_CONFIG),
@@ -139,6 +159,85 @@ def test_a_damaged_config_is_left_alone(sandbox):
             "factlog init: active-KB config at",
             "  repair that file,",
         )
+    )
+
+
+def test_a_broken_symlink_config_is_described_as_a_link(sandbox):
+    """The damaged-config section's second class: a link, not unreadable bytes.
+
+    Every word differs from the block above it — "is a symlink whose target is
+    not reachable right now" for "could not be read", "leaving the link in
+    place" for "leaving its bytes untouched", "mount it or re-point the link"
+    for "repair that file". Routing the new class through the old block's prose
+    is exactly what an unpinned page drifts back into.
+    """
+    sandbox["config"].symlink_to(sandbox["cfg_home"] / "not-mounted" / "config.json")
+
+    lines = run_init(sandbox, "--target", str(sandbox["scratch"]))
+
+    assert_pages_quote(
+        as_documented(
+            sandbox,
+            lines,
+            "factlog init: active-KB config at",
+            "  mount it or re-point the link,",
+        )
+    )
+
+
+def test_setup_says_why_it_withheld_the_language(sandbox, monkeypatch, capsys):
+    """``setup``'s rc-1 closing line, the other half of the same refusal.
+
+    Driven in-process for the reason in the module docstring. The exit code is
+    asserted alongside the wording because the page states it: a ``--lang`` that
+    was declined must not report success, and the sentence quoted here is the
+    only place the run says why.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(sandbox["cfg_home"]))
+    monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+    monkeypatch.setattr(cli, "_pyrewire_ok", lambda: True)
+    monkeypatch.setattr(cli, "_run_doctor_checks", lambda *a, **k: True)
+    sandbox["config"].symlink_to(sandbox["cfg_home"] / "not-mounted" / "config.json")
+
+    rc = cli.main(["setup", "--target", str(sandbox["scratch"]), "--lang", "ko"])
+    captured = capsys.readouterr()
+    lines = (captured.out + captured.err).splitlines()
+
+    assert rc == 1, f"a declined --lang exited {rc}, which the page says is 1"
+    assert_pages_quote(as_documented(sandbox, lines, "factlog setup: the KB at"))
+
+
+def test_a_named_file_target_is_refused_in_a_sentence(sandbox):
+    """A regular file where a KB was asked for, named with the flag.
+
+    ``_init_kb`` mkdirs ``<target>/sources``, so this used to be a bare
+    ``NotADirectoryError`` traceback. The page quotes the sentence that replaced
+    it, and the advice half is what distinguishes this from the implicit block
+    below.
+    """
+    lines = run_init(sandbox, "--target", str(sandbox["file"]))
+
+    assert_pages_quote(
+        as_documented(sandbox, lines, "factlog init: refusing to scaffold a KB at")
+    )
+
+
+def test_an_implicit_file_target_names_the_rank_it_came_from(sandbox):
+    """The same refusal, for a target the user never typed.
+
+    This is the worse crash of the two: the traceback fired *before* the "no
+    --target given" line, so nothing said whether ``$FACTLOG_ROOT`` or the
+    config had chosen the path. The config is used here because it is the rank
+    the page's block names.
+    """
+    sandbox["config"].write_text(
+        json.dumps({"root": str(sandbox["file"])}, indent=2) + "\n", encoding="utf-8"
+    )
+
+    lines = run_init(sandbox)
+
+    assert_pages_quote(
+        as_documented(sandbox, lines, "factlog init: refusing to scaffold a KB at")
     )
 
 
