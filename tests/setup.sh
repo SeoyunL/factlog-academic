@@ -17,9 +17,17 @@
 # Usage:
 #   bash tests/setup.sh
 #   PYTHON=<interpreter> bash tests/setup.sh
+#   SETUP_KB=<absolute dir> bash tests/setup.sh
 #
-# Returns 0 if all checks pass or pyrewire is absent (SKIP), 1 on first failure
-# or if PYTHON names something that cannot run.
+# SETUP_KB IS DELETED, contents and all, before the run starts and is not
+# restored afterwards. It defaults to /tmp/factlog-setup-test-kb, which every
+# checkout and every concurrent run on the machine shares. Point it somewhere
+# private if anything else on the box might be using that path. It must be
+# absolute: the delete and the run resolve a relative path in different
+# directories.
+#
+# Returns 0 if all checks pass or pyrewire is absent (SKIP), 1 on first failure,
+# on a PYTHON that cannot run, or on a SETUP_KB that is not an absolute path.
 
 set -euo pipefail
 
@@ -76,7 +84,29 @@ fi
 # Overridable so a caller — the unit pin in particular — can keep the run inside
 # its own scratch directory. The default is machine-wide: every checkout and
 # every parallel lane on the box shares it, and Step 1 begins by deleting it.
-SETUP_KB="${SETUP_KB:-/tmp/factlog-setup-test-kb}"
+#
+# `-`, not `:-`: an empty value is a caller who tried to redirect the run and
+# handed over an empty variable, which is not the same as a caller who said
+# nothing. Falling back would delete the shared default they were getting away
+# from, and the run would look like it had been isolated.
+SETUP_KB="${SETUP_KB-/tmp/factlog-setup-test-kb}"
+
+# Absolute only, because this path is deleted. A relative value is resolved in
+# two different directories: the `rm -rf` below runs in the caller's cwd while
+# `setup --target` runs from PLUGIN_ROOT, so `SETUP_KB=kb` erased the caller's
+# ./kb and then built a fresh one INSIDE the checkout — a test that writes to
+# the working tree and destroys data the caller never pointed at.
+case "$SETUP_KB" in
+  /*) ;;
+  "")
+    echo "FATAL: SETUP_KB is set but empty; refusing to fall back to the shared default and delete it" >&2
+    exit 1
+    ;;
+  *)
+    echo "FATAL: SETUP_KB must be an absolute path (it is deleted before the run): $SETUP_KB" >&2
+    exit 1
+    ;;
+esac
 
 pass=0
 fail=0
