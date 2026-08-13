@@ -168,16 +168,23 @@ sys.stdout.write(target + \"\\0\" + tool_name + \"\\0\" + input_kind + \"\\0\")
 # path is what is being timed:
 #
 #            payload   pre-#359   by value          by name
-#   check      20MB      0.82s     1.23s (+50%)     0.87s (+6.1%)
-#   check      40MB      1.50s     2.37s (+58%)     1.56s (+4.0%)
-#   reminder   20MB      0.69s     1.10s (+59%)     0.71s (+2.9%)
-#   reminder   40MB      1.36s     2.19s (+61%)     1.43s (+5.1%)
+#   check      20MB      0.83s     1.25s (+50.6%)   0.85s (+1.8%)
+#   check      40MB      1.64s     2.47s (+50.4%)   1.59s (-3.3%)
+#   reminder   20MB      0.70s     1.14s (+63.6%)   0.71s (+2.2%)
+#   reminder   40MB      1.49s     2.32s (+55.6%)   1.48s (-0.4%)
 #
 # By name the payload is expanded exactly once, at the `printf` that feeds the
-# interpreter — which is what each hook did before it shared this code. The few
-# percent that remain are this file's own `source` plus the set-ness guard below,
-# whose cost a micro-benchmark puts at ~0.05s on 40MB; the four-fold gap between
-# a value copy and no copy is what mattered.
+# interpreter — which is what each hook did before it shared this code. The
+# by-name column straddles zero at both sizes, so what is left is measurement
+# noise, not a residue: this file's own `source` does not register.
+#
+# It took two passes to get there. The first by-name version still ran a few
+# percent slow, and that residue was mis-explained here as the fixed cost of the
+# `source` — a plausible story that the numbers did not support, because the
+# absolute gap GREW with payload size instead of holding still. Bisecting the
+# hook (main; main plus the three-field program; by-name without the guard;
+# by-name with it) put the whole of it on the set-ness guard, and the note above
+# the function has the fix.
 #
 # WHY THIS IS A CORRECTNESS CONCERN AND NOT A PREFERENCE. hooks.json gives each
 # hook `timeout: 10`. A hook that is killed cannot deliver exit 2, and the
@@ -230,8 +237,26 @@ sys.stdout.write(target + \"\\0\" + tool_name + \"\\0\" + input_kind + \"\\0\")
 # "incomplete") — indistinguishable from an interpreter that failed to run. So
 # gate_check.sh would report "the payload extractor returned no complete record"
 # and fall OPEN, silently attributing a caller bug to the extractor. The guard
-# turns that into a deny with the reason it actually has. `${!name+set}` asks
-# whether the variable exists without expanding its value.
+# turns that into a deny with the reason it actually has.
+#
+# SET-NESS WITHOUT READING THE VALUE. The obvious spelling, `${!name+set}`, is
+# wrong here for a reason that is invisible until measured: bash 3.2 materialises
+# the variable's value before applying the `+` modifier, so a test that logically
+# inspects one bit costs a full pass over the payload. `eval` and a direct
+# `${name+set}` do the same. Per call, min of 200:
+#
+#           payload    no guard     ${!name+set}      ${!name*}
+#             5MB      0.000062s     0.008098s        0.000095s
+#            40MB      0.000134s     0.079755s        0.000103s
+#
+# `${!prefix*}` lists variable NAMES and never touches values, so it is flat in
+# the payload size — the column above is the whole difference between a guard
+# that scales with the payload and one that does not. It cost gate_reminder.sh
+# ~4-6% end to end while every other part of #359 measured at parity, which is
+# how it was found: the residual tracked payload size instead of sitting still.
+#
+# It is a PREFIX match, so the answer is word-matched exactly below; otherwise a
+# variable named `payload_backup` would vouch for an unset `payload`.
 #
 # "incomplete" is chosen as the seed precisely because the Python above can never
 # write it — it only ever writes one of the four kinds — so it is unambiguous.
@@ -245,9 +270,33 @@ factlog_hook_read_payload() {
   FACTLOG_HOOK_TOOL_NAME=""
   FACTLOG_HOOK_TOOL_INPUT_KIND="incomplete"
 
-  if [ -z "$_payload_var" ] || [ -z "${!_payload_var+set}" ]; then
-    return 1
-  fi
+  # Two checks, neither of which may touch the payload's VALUE — see the
+  # "SET-NESS WITHOUT READING THE VALUE" note above the function.
+  #
+  # First: the argument has to be a plain identifier. That makes the `eval`
+  # below safe, and it is also what rejects a caller that passes the payload
+  # itself instead of its name — a JSON document is not an identifier, so the
+  # old by-value calling convention now fails loudly instead of silently
+  # reading an unset variable.
+  # Spelled as exclusions, because `case` takes GLOBS and not regexes: the
+  # obvious `[A-Za-z_][A-Za-z0-9_]*` reads like an identifier rule and is not
+  # one. Its `*` is "any string", so it demands a SECOND character — it rejects
+  # a one-letter name — and then accepts whatever follows, including `a$(cmd)`,
+  # which is an injection straight into the `eval` below. Excluding the bad
+  # shapes has neither problem.
+  case "$_payload_var" in
+    "" | [0-9]* | *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  # Second: the variable has to exist. `${!prefix*}` lists variable NAMES with
+  # that prefix and never expands their values, so this is flat in the payload
+  # size. It is a PREFIX match, so the result is word-matched exactly —
+  # otherwise a stray `payload_backup` would vouch for an unset `payload`.
+  local _payload_set
+  eval "_payload_set=\"\${!${_payload_var}*}\""
+  case " $_payload_set " in
+    *" $_payload_var "*) ;;
+    *) return 1 ;;
+  esac
 
   if ! { IFS= read -r -d '' FACTLOG_HOOK_TARGET_PATH \
       && IFS= read -r -d '' FACTLOG_HOOK_TOOL_NAME \

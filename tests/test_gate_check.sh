@@ -2194,17 +2194,57 @@ esac
 # is a fail-open — by value pulled the extrapolated 10s crossing from ~290MB to
 # ~174MB.
 #
-# THIS IS A SOURCE-SHAPE ASSERTION, and that needs justifying, because every
-# other case in this file asserts behaviour. A behavioural version would have to
-# time a large payload and compare against a threshold, and a wall-clock
-# threshold is exactly the kind of case that goes red on a loaded CI box for
-# reasons that have nothing to do with the code — the regression is ~50%, but
-# run-to-run spread on this host was already ~10% and the whole suite would
-# inherit that flakiness. Nothing else distinguishes one copy from three:
-# bash exposes no copy counter, and peak RSS is not portable. So the mechanism is
-# pinned directly. It is deliberately narrow — it says only that the call sites
-# pass a NAME and that the shared reader expands it indirectly.
+# THE FIRST HALF IS BEHAVIOURAL, and it is the half that matters. The by-name
+# API rejects a caller that hands over the payload itself, because a JSON
+# document is not an identifier — so "was this called by value?" has an
+# observable answer that no amount of source-shaping can fake. The old
+# convention returned 0 with a target; the new one returns 1 with none.
+#
+# The source-shape checks that follow are a SECOND signal, not the pin. A
+# grep-the-script assertion can be satisfied by code that has quietly lost the
+# behaviour it names, so it is here only to catch a partial revert — one call
+# site switched back while the other stays — which the behavioural half cannot
+# see, since it exercises the function rather than the hooks.
+#
+# Neither half is a timing test. A behavioural version of the COST would have to
+# time a large payload against a threshold, and a wall-clock threshold is exactly
+# the case that goes red on a loaded CI box for reasons unrelated to the code:
+# the regression is ~50%, but run-to-run spread on this host reached ~10% and one
+# noisy sweep even reported the fixed build as FASTER than main. Nothing else
+# distinguishes one copy from three — bash exposes no copy counter and peak RSS
+# is not portable — so the cost itself is left unpinned deliberately.
 # ---------------------------------------------------------------------------
+# The name reaches an `eval`, so the accept/reject matrix is also the injection
+# boundary. `p` is in it because the first version of the check was written as
+# `[A-Za-z_][A-Za-z0-9_]*`, which LOOKS like an identifier rule but is a glob:
+# its `*` means "any string", so it demanded a second character (rejecting a
+# one-letter name) and then accepted anything after it, `a$(cmd)` included. The
+# source-shape half of this case was green throughout that bug.
+byname_api_rc=0
+byname_api_out="$(bash -u -c '
+  . "$1/gate_payload.sh"
+  p='"'"'{"tool_name":"Write","tool_input":{"file_path":"/kb/facts/accepted.dl"}}'"'"'
+  payload="$p"
+  INJECT_MARKER=nope
+  probe() { factlog_hook_read_payload "$1" "$2" >/dev/null 2>&1; printf "%s=%s:[%s] " "$3" "$?" "$FACTLOG_HOOK_TARGET_PATH"; }
+  probe payload "$2"                      byname
+  probe p "$2"                            shortname
+  probe "$p" /bin/true                    byvalue
+  probe "p;INJECT_MARKER=pwned" /bin/true injection
+  probe nosuchvariable /bin/true          unset
+  echo "marker=$INJECT_MARKER"
+' _ "$HOOKS_DIR" "$PYTHON_RUNNER" 2>&1)" || byname_api_rc=$?
+byname_api_want='byname=0:[/kb/facts/accepted.dl] shortname=0:[/kb/facts/accepted.dl] byvalue=1:[] injection=1:[] unset=1:[] marker=nope'
+if [ "$byname_api_rc" -eq 0 ] && [ "$byname_api_out" = "$byname_api_want" ]; then
+  echo "PASS: the reader takes a variable NAME — by-value, injection and unset names all rejected"
+  pass=$((pass + 1))
+else
+  echo "FAIL: by-name API — rc=$byname_api_rc"
+  echo "        want: $byname_api_want"
+  echo "        got : $byname_api_out"
+  fail=$((fail + 1))
+fi
+
 byname_ok=1
 for hook_src in "$HOOKS_DIR/gate_check.sh" "$HOOKS_DIR/gate_reminder.sh"; do
   if grep -qE 'factlog_hook_read_payload[[:space:]]+"\$payload"' "$hook_src"; then
@@ -2224,6 +2264,23 @@ if grep -qE '^[[:space:]]*local[[:space:]]+_payload=' "$HOOKS_DIR/gate_payload.s
 fi
 if ! grep -qF '${!_payload_var}' "$HOOKS_DIR/gate_payload.sh"; then
   echo "FAIL: gate_payload.sh does not expand the payload variable indirectly"
+  byname_ok=0
+fi
+# The set-ness guard must not read the VALUE. `${!name+set}` and `${name+set}`
+# both look like they test one bit; bash 3.2 materialises the whole payload for
+# either, which cost gate_reminder.sh 4-6% end to end while every other part of
+# #359 measured at parity. `${!prefix*}` lists names only and is flat.
+#
+# This is the ONE property here with no behavioural pin behind it, and that is a
+# stated gap rather than an oversight: the guard's semantics are identical either
+# way — the matrix above passes against both — so nothing but the clock can tell
+# them apart, and a wall-clock threshold is the flaky case this file avoids.
+# Comments are stripped first: the note above the guard NAMES the bad form in
+# order to explain why it is not used, and matching that would make this check
+# fire on its own documentation.
+if grep -vE '^[[:space:]]*#' "$HOOKS_DIR/gate_payload.sh" \
+  | grep -qE '\$\{!?[A-Za-z_][A-Za-z0-9_]*\+set\}'; then
+  echo "FAIL: gate_payload.sh tests set-ness with a form that expands the payload's value"
   byname_ok=0
 fi
 if [ "$byname_ok" -eq 1 ]; then
