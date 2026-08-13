@@ -2217,9 +2217,12 @@ esac
 # The name reaches an `eval`, so the accept/reject matrix is also the injection
 # boundary. `p` is in it because the first version of the check was written as
 # `[A-Za-z_][A-Za-z0-9_]*`, which LOOKS like an identifier rule but is a glob:
-# its `*` means "any string", so it demanded a second character (rejecting a
-# one-letter name) and then accepted anything after it, `a$(cmd)` included. The
-# source-shape half of this case was green throughout that bug.
+# its brackets constrain only the first two characters and its `*` means "any
+# string", so it demanded a second character (rejecting a one-letter name) and
+# then accepted anything after it — `payload$(cmd)` and `ab;id` both passed.
+# (`a$(cmd)` did not: the second character is still checked. The hole needed two
+# leading identifier characters.) The source-shape half of this case was green
+# throughout that bug.
 byname_api_rc=0
 byname_api_out="$(bash -u -c '
   . "$1/gate_payload.sh"
