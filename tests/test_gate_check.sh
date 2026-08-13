@@ -482,11 +482,17 @@ FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_OBS" \
   <<< "$(printf '{"file_path":"%s"}' "$KB_OBS/facts/accepted.dl")" \
   >/dev/null 2>"$obs_err" || obs_exit=$?
 
-if [ "$obs_exit" -eq 2 ]; then
+# The REASON is asserted, not just exit 2. This runs against a hand-built plugin
+# root, and every install-level deny the gate has also exits 2 — so a bare exit-2
+# check would keep passing if this case stopped reaching the freshness predicate
+# at all and started denying because the root was assembled wrong. That is not
+# hypothetical: adding the shared extractor (#359) is exactly such a change, and
+# it would have slipped past this assertion.
+if [ "$obs_exit" -eq 2 ] && grep -qF "facts/logic_report.txt does not exist" "$obs_err"; then
   echo "PASS: resolver import-failure — KB_ROOT degrades to \$FACTLOG_ROOT, deny preserved (exit $obs_exit)"
   pass=$((pass + 1))
 else
-  echo "FAIL: resolver import-failure — expected prior-behaviour deny (exit 2), got $obs_exit"
+  echo "FAIL: resolver import-failure — expected the absent-report deny (exit 2), got exit=$obs_exit stderr=$(head -1 "$obs_err")"
   fail=$((fail + 1))
 fi
 
@@ -1470,24 +1476,32 @@ touch_file "$KBTILDE_HOME/kb/facts/logic_report.txt"
 set_mtime_past "$KBTILDE_HOME/kb/facts/logic_report.txt"   # the report the CONTROL arm reads
 clear_config
 
+# The expected REASON is a parameter, not an afterthought: this runs against a
+# hand-built plugin root, where every install-level deny also exits 2, so a bare
+# exit-2 check cannot tell "the tilde guard held" from "the root was assembled
+# wrong and the gate never reached the predicate". The two arms below deny for
+# genuinely different reasons and each says which.
 kb_tilde_case() {
   local desc="$1"
   local root="$2"
+  local want_msg="$3"
   local actual_exit=0
+  local err; err="$(mktemp)"
   HOME="$KBTILDE_HOME" FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$root" \
     bash "$KBTILDE_PLUGIN/hooks/gate_check.sh" \
-    <<< "$(envelope Write "$KBTILDE_HOME/shared/my-queries.dl")" >/dev/null 2>&1 || actual_exit=$?
-  if [ "$actual_exit" -eq 2 ]; then
+    <<< "$(envelope Write "$KBTILDE_HOME/shared/my-queries.dl")" >/dev/null 2>"$err" || actual_exit=$?
+  if [ "$actual_exit" -eq 2 ] && grep -qF "$want_msg" "$err"; then
     echo "PASS: $desc (exit $actual_exit)"
     pass=$((pass + 1))
   else
-    echo "FAIL: $desc — expected deny (exit 2), got $actual_exit"
+    echo "FAIL: $desc — expected deny (exit 2) saying '$want_msg', got exit=$actual_exit stderr=$(head -1 "$err")"
     fail=$((fail + 1))
   fi
+  rm -f "$err"
 }
 
 kb_tilde_case "tilde KB_ROOT over a symlinked engine input — deny (guard 2 not disabled)" \
-  '~/kb'
+  '~/kb' "facts/logic_report.txt does not exist"
 # CONTROL: the same KB, same degraded resolver, KB_ROOT spelled absolutely. Guard
 # 2 can reach the symlink, so this denies with or without the KB_ROOT tilde
 # guard — it passes both before and after the fix, and is here only to show the
@@ -1500,7 +1514,7 @@ kb_tilde_case "tilde KB_ROOT over a symlinked engine input — deny (guard 2 not
 # exact — deleting the KB_ROOT tilde guard flips this case and nothing else —
 # but do not read the pair as isolating a single variable.
 kb_tilde_case "control: the same KB by absolute path — deny" \
-  "$KBTILDE_HOME/kb"
+  "$KBTILDE_HOME/kb" "facts/logic_report.txt is stale"
 rm -rf "$KBTILDE_HOME" "$KBTILDE_PLUGIN"
 
 # ---------------------------------------------------------------------------
