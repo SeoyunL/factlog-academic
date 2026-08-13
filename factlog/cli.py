@@ -779,9 +779,10 @@ class _Unreadable(NamedTuple):
     closing line — so the branch lives here once instead of three times, which is
     how the first two drifted out of agreement in the first place.
 
-    ``lost`` serves the two sites that go through with the write (``--activate``
-    and ``factlog use``) rather than refusing, and it is **on a different axis
-    from the other four**. Those answer *what is wrong*, for which reachability
+    ``lost`` serves the sites that go through with the write rather than refusing
+    — ``init --activate`` and ``factlog use``, joined by ``factlog lang --force``,
+    which reads ``lost_root`` below — and it is **on a different axis from the
+    other four**. Those answer *what is wrong*, for which reachability
     is the right question: a reachable-but-malformed target really does have
     bytes worth preserving and really is fixed by repairing that file. ``lost``
     answers *what will this write destroy*, and the answer is decided by
@@ -1302,8 +1303,13 @@ def cmd_lang(args: argparse.Namespace) -> int:
     `{"root": "/…/kb",` that still carried the user's root *as text* became
     unrecoverable (#366). #356 closed this for `init`/`setup` by asking
     `config_status()` first and refusing on UNREADABLE; the language write is the
-    same hole through the sibling door, and is refused here in the same shape and
-    the same words. MISSING still writes — a first run must be able to set a
+    same hole through the sibling door, and is refused here on the same question,
+    out of the same `_unreadable()` fragments. Not in the same sentence, though —
+    each of the four refusal sites picks a different subset. `_unreadable_lines`
+    takes reason+preserved+remedy, `setup`'s note takes reason+cost+remedy, and
+    this one is the only one that says all four, because it is the only refusal
+    that *is* the whole outcome rather than a note under a command that did its
+    work anyway. MISSING still writes — a first run must be able to set a
     language before any `init` — and so does a config that parses but records no
     root, which has no path to lose.
     """

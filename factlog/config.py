@@ -160,12 +160,20 @@ def write_root(path: str | os.PathLike) -> Path:
 
     The preservation is only as good as the read: ``_read_config`` folds an
     unreadable file into ``{}``, so on a damaged config this re-emits the root
-    and nothing else, and whatever those bytes held is gone. That is deliberate
-    at the two callers that reach it — ``factlog use`` and ``init --activate``
-    are the advertised way out of a damaged config, and both name the loss
-    first — but it is **not** a property of this function, so ask
-    ``config_status()`` before calling it from anywhere new. Wording it as an
-    unconditional promise is how the sibling ``write_lang`` acquired #366.
+    and nothing else, and whatever those bytes held is gone.
+
+    That is deliberate at the commands that reach it — ``factlog use``,
+    ``init --activate`` and ``setup --activate``, which is two doors
+    (``cmd_use`` and ``_apply_activation``) but three commands. Each *discloses*
+    the loss, and disclosure is all it is: the line prints after the write, under
+    the success line, with no prior warning and no confirmation prompt. So the
+    justification is "the user asked for the one command that exists to overwrite
+    a damaged config, and can see afterwards what it cost", not "they were asked
+    first".
+
+    None of that is a property of this function, so ask ``config_status()``
+    before calling it from anywhere new. Wording it as an unconditional promise
+    is how the sibling ``write_lang`` acquired #366.
     """
     cfg = config_path()
     data = _read_config()
