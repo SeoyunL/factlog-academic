@@ -52,8 +52,13 @@ echo "PYTHON: $PYTHON"
 # tell them apart — it fails identically — so the executable check comes first
 # and is fatal, and only a real interpreter can reach the skip below.
 #
-# Checked from PLUGIN_ROOT because that is where every step invokes it, so a
-# relative path is judged against the directory it will actually resolve in.
+# Both checks run from PLUGIN_ROOT, which is where the steps invoke $PYTHON: a
+# relative path has to be judged against the directory it will actually resolve
+# in, and a check that resolves it somewhere else answers a question about a
+# different interpreter than the one that will run. The probe was left in the
+# caller's cwd once, and a relative PYTHON with the engine reported "pyrewire
+# not installed" and exited 0 from any cwd but the repo root — a green run that
+# measured nothing, the same confusion this block exists to prevent, inverted.
 if ! (cd "$PLUGIN_ROOT" && command -v "$PYTHON" >/dev/null 2>&1); then
   echo "FATAL: PYTHON is not an executable interpreter: $PYTHON" >&2
   exit 1
@@ -63,7 +68,7 @@ fi
 # engine cannot reach the "already satisfied" path this harness exists to check,
 # so the run says nothing about `setup` — reporting it as 9 failures names the
 # wrong subject.
-if ! "$PYTHON" -c "import pyrewire" >/dev/null 2>&1; then
+if ! (cd "$PLUGIN_ROOT" && "$PYTHON" -c "import pyrewire") >/dev/null 2>&1; then
   echo "SKIP: pyrewire not installed; tests/setup.sh requires the engine"
   exit 0
 fi

@@ -53,10 +53,14 @@ def _write_shim(path: Path, body: str) -> Path:
 
 
 def _run_setup(
-    tmp_path: Path, python: Path | str | None = None
+    tmp_path: Path,
+    python: Path | str | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the harness. ``python=None`` leaves ``PYTHON`` unset, which is the
-    only way to exercise the branch that picks the interpreter itself."""
+    only way to exercise the branch that picks the interpreter itself. ``cwd``
+    defaults to the checkout, the one directory in which a relative ``PYTHON``
+    cannot expose where the harness resolves it."""
     env = os.environ.copy()
     if python is None:
         env.pop("PYTHON", None)
@@ -71,7 +75,7 @@ def _run_setup(
     env["SETUP_KB"] = str(tmp_path / "kb")
     return subprocess.run(
         ["bash", str(SETUP_SH)],
-        cwd=REPO_ROOT,
+        cwd=str(cwd or REPO_ROOT),
         env=env,
         capture_output=True,
         text=True,
@@ -111,6 +115,41 @@ def test_honours_python_from_environment(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "0 failed" not in result.stdout
+
+
+def test_relative_python_resolves_where_the_steps_run(tmp_path: Path) -> None:
+    """A relative ``PYTHON`` must be resolved in one directory, not two.
+
+    The steps invoke ``$PYTHON`` from ``PLUGIN_ROOT``. When the engine probe was
+    left in the caller's cwd instead, a relative path to an interpreter that HAS
+    pyrewire reported ``SKIP: pyrewire not installed`` and exited 0 from every
+    cwd except the repo root: a green run that measured nothing, and the
+    "mistyped path" / "machine without the engine" confusion the surrounding
+    check exists to prevent, running in the other direction.
+
+    The case runs from outside the checkout with a path relative to it, so a
+    check performed in the wrong directory resolves to nothing. Nothing is
+    written inside the checkout: the shim lives in ``tmp_path`` and is named by
+    a path relative to the repo root.
+    """
+    stepped = tmp_path / "stepped"
+    shim = _engine_shim(tmp_path, "relative", f': > "{stepped}"\nexit 3\n')
+    relative = os.path.relpath(shim, REPO_ROOT)
+    assert not os.path.isabs(relative)
+
+    result = _run_setup(tmp_path, relative, cwd=tmp_path)
+    combined = result.stdout + result.stderr
+
+    assert "SKIP:" not in result.stdout, (
+        "an interpreter that has the engine was reported as a machine without "
+        "it, because the probe resolved the path somewhere the steps do not\n"
+        + combined
+    )
+    assert "FATAL:" not in result.stderr, combined
+    assert stepped.exists(), (
+        "the harness never reached a step with the caller's interpreter\n"
+        + combined
+    )
 
 
 def test_output_names_the_interpreter_that_ran(tmp_path: Path) -> None:
