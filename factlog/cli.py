@@ -1309,10 +1309,30 @@ def cmd_lang(args: argparse.Namespace) -> int:
     """
     code = getattr(args, "code", None)
     if code is None:
+        if getattr(args, "force", False):
+            # `--force` is the destructive flag on this command, and with no CODE
+            # there is nothing for it to force: the branch below is a read. Taking
+            # the query silently would make a mistyped `factlog lang --force`
+            # (CODE dropped, flag kept) look like it did something, and print the
+            # *old* language as if it were the new one. rc 2, matching every other
+            # "the arguments are wrong" exit here.
+            print(
+                "factlog lang: --force applies to setting a language, and no CODE was "
+                "given. Give the code to force (e.g. `factlog lang ko --force`), or "
+                "drop --force to print the current setting.",
+                file=sys.stderr,
+            )
+            return 2
         # Query mode: one line, no label (empty line when unset). A read, so an
         # unreadable config is not this branch's problem: `read_lang` folds it to
-        # None and prints the empty line, and adding a warning here would break
-        # the porcelain contract the skill parses.
+        # None and prints the empty line.
+        #
+        # Nothing is added here even so. A stderr note would not break SKILL.md's
+        # contract — that is stdout, "one line, do not scrape prose" — but the
+        # skill acts on this line by *narrating in the language it names*, and an
+        # unreadable config yields the same empty line as a config that simply
+        # sets no language. There is no wrong narration to warn about, and the
+        # commands that would destroy the file say so themselves.
         print(factlog_config.read_lang() or "")
         return 0
     normalized, error = _normalize_lang(code)

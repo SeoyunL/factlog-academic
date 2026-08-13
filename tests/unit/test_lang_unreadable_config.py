@@ -250,6 +250,35 @@ def test_readable_config_without_a_root_is_written(cfg, capsys):
     assert json.loads(cfg.read_text(encoding="utf-8")) == {"lang": "ko"}
 
 
+class TestForceWithoutACode:
+    """`factlog lang --force` alone did nothing and said nothing.
+
+    `code is None` fell straight through to the query branch, which never reads
+    `force`. So the destructive flag typed on its own — the plausible slip is
+    dropping the CODE and keeping the flag — printed the *old* language on stdout
+    and exited 0, which reads exactly like a successful set.
+    """
+
+    def test_it_is_rejected_rather_than_treated_as_a_query(self, cfg, capsys):
+        cfg.write_text(json.dumps({"lang": "en"}), encoding="utf-8")
+        assert run_lang(None, force=True) == 2
+        captured = capsys.readouterr()
+        assert "--force applies to setting a language" in captured.err
+        assert captured.out == "", "a rejected command must not emit the porcelain line"
+
+    def test_it_changes_nothing(self, cfg, capsys):
+        cfg.write_text(json.dumps({"root": "/Users/real/kb", "lang": "en"}), encoding="utf-8")
+        before = cfg.read_bytes()
+        run_lang(None, force=True)
+        assert cfg.read_bytes() == before
+
+    def test_a_bare_query_is_untouched(self, cfg, capsys):
+        """The flag is what is rejected, not the query."""
+        cfg.write_text(json.dumps({"lang": "en"}), encoding="utf-8")
+        assert run_lang(None) == 0
+        assert capsys.readouterr().out == "en\n"
+
+
 def test_query_mode_leaves_a_damaged_config_alone_and_stays_porcelain(cfg, capsys):
     """A read must not become a write, and must not grow a second line: the skill
     parses exactly one bare line here."""
