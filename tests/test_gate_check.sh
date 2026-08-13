@@ -1963,6 +1963,103 @@ rm -f "$cannot_err"
 rm -rf "$REALKB"
 
 # ---------------------------------------------------------------------------
+# CASE 67: A SHARED EXTRACTOR THAT WILL NOT LOAD DENIES (#359).
+#
+# hooks/gate_payload.sh holds the payload extractor both hooks read the envelope
+# with, and gate_check.sh sources it by absolute path off its own directory. If
+# it is not there, no target path can be read for ANY call — branch 1's
+# condition (the predicate is unevaluable because the install is broken), not
+# branch 2's (a payload whose shape we could not read) — so the gate must DENY.
+#
+# THE DIRECTION IS THE POINT. `.` on a missing file returns non-zero, and under
+# `set -euo pipefail` that would have exited 1. PreToolUse reads any non-zero
+# that is not 2 as a NON-BLOCKING error: the write proceeds. A half-installed
+# plugin would then have disabled the gate while reporting only a hook error.
+# Replacing the explicit check with a bare `. "$HOOK_DIR/gate_payload.sh"` turns
+# this case red with exit 1 — measured.
+#
+# The target is an UNRELATED file under a KB with no engine input, i.e. a call
+# every other branch of this gate allows. That is what makes the deny
+# attributable: nothing else here would produce one.
+#
+# Built as a fake plugin root — copying gate_check.sh in WITHOUT its library —
+# rather than by deleting the real file, so the rest of the suite and any
+# concurrent run are untouched. The factlog package is symlinked in so the
+# resolver still works and the missing library is the only anomaly.
+# ---------------------------------------------------------------------------
+NOLIB_PLUGIN="$(mktemp -d)"
+mkdir -p "$NOLIB_PLUGIN/hooks"
+cp "$GATE" "$NOLIB_PLUGIN/hooks/gate_check.sh"      # deliberately NOT gate_payload.sh
+ln -s "$(cd "$(dirname "$0")/.." && pwd)/factlog" "$NOLIB_PLUGIN/factlog"
+
+KB_NOLIB="$(mktemp -d)"
+make_kb "$KB_NOLIB"
+mkdir -p "$KB_NOLIB/docs"
+clear_config
+
+nolib_err="$(mktemp)"
+nolib_exit=0
+FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_NOLIB" \
+  bash "$NOLIB_PLUGIN/hooks/gate_check.sh" \
+  <<< "$(envelope Write "$KB_NOLIB/docs/notes.md")" \
+  >/dev/null 2>"$nolib_err" || nolib_exit=$?
+
+if [ "$nolib_exit" -eq 2 ] && grep -qF "shared payload extractor could not be loaded" "$nolib_err"; then
+  echo "PASS: missing hooks/gate_payload.sh — deny, not fail-open (exit $nolib_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: missing hooks/gate_payload.sh — expected exit 2 naming the extractor, got exit=$nolib_exit stderr=$(cat "$nolib_err")"
+  fail=$((fail + 1))
+fi
+
+# The same install, with the library present, must ALLOW that write — otherwise
+# the case above proves only that this fake plugin root denies everything.
+install_hooks "$NOLIB_PLUGIN/hooks"
+lib_exit=0
+FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_NOLIB" \
+  bash "$NOLIB_PLUGIN/hooks/gate_check.sh" \
+  <<< "$(envelope Write "$KB_NOLIB/docs/notes.md")" \
+  >/dev/null 2>/dev/null || lib_exit=$?
+if [ "$lib_exit" -eq 0 ]; then
+  echo "PASS: the same install WITH hooks/gate_payload.sh — allow (exit $lib_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: the same install WITH hooks/gate_payload.sh — expected allow (exit 0), got $lib_exit"
+  fail=$((fail + 1))
+fi
+rm -f "$nolib_err"
+rm -rf "$NOLIB_PLUGIN" "$KB_NOLIB"
+
+# ---------------------------------------------------------------------------
+# CASE 68: THE RECORD LEADS WITH `target` (#359).
+#
+# The extractor writes three NUL-separated fields, and a NUL inside a JSON
+# string pushes every LATER field along by one. `target` is written FIRST for
+# exactly that reason: it is the field this gate bases a deny on, and the first
+# field is the only one no other field's contents can shift.
+#
+# Pinned with a `tool_name` carrying a NUL and a `file_path` naming a stale
+# engine input. Reading `target` first, the gate sees the real path and DENIES.
+# Under the pre-#359 order — tool_name, target, input_kind — the path was pushed
+# into `input_kind`, the gate read the fragment "ite" as its target, and the
+# write to an engine input was ALLOWED: measured exit 0, with nothing on any
+# channel. Restoring that order turns this case red.
+#
+# Unreachable in normal operation, since Claude Code writes `tool_name` and the
+# model does not. It is pinned because the ordering looks arbitrary and is not:
+# an edit that "tidies" the fields back reopens a silent allow on an engine
+# input. CASE 53 pins the other half — a NUL inside the PATH still shifts the
+# fields that follow it, and that must stay noisy rather than silent.
+# ---------------------------------------------------------------------------
+KB_NULNAME="$(mktemp -d)"
+kb_stale "$KB_NULNAME"
+run_payload_case "NUL inside tool_name — target still read, engine input denied" \
+  "$KB_NULNAME" \
+  "$(printf '{"tool_name":"Wr\\u0000ite","tool_input":{"file_path":"%s"}}' "$KB_NULNAME/facts/accepted.dl")" \
+  2
+rm -rf "$KB_NULNAME"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

@@ -507,6 +507,87 @@ run_case "target read from the 'path' key — silent" \
 run_case "target read from the 'notebook_path' key — silent" \
   '{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/tmp/nb.ipynb","content":"see facts/query.dl"}}' silent
 
+# ---------------------------------------------------------------------------
+# CASES 42-43: A SHARED EXTRACTOR THAT WILL NOT LOAD FALLS BACK, NOT SILENT (#359).
+#
+# Since #359 the extractor lives in hooks/gate_payload.sh, shared with
+# hooks/gate_check.sh and sourced by absolute path off the hook's own directory.
+# If it cannot be loaded, this hook must land where a broken interpreter already
+# lands (CASE 16): target empty, payload-wide grep decides, exit 0. That is the
+# OPPOSITE of what gate_check.sh does with the same condition — there a missing
+# extractor DENIES, because a write it cannot read cannot be shown to be safe;
+# here it costs one line of output, so the hook keeps talking.
+#
+# The payload is #337's false positive: an unrelated target whose CONTENT names
+# an engine input. With the library present that is SILENT — the whole point of
+# #337. With it missing the grep fires. One payload, two verdicts, so the pair
+# proves the fallback ran rather than that the hook fires on everything.
+#
+# A fake hooks/ directory holding gate_reminder.sh alone, rather than deleting
+# the real library, so the rest of the suite and any concurrent run are
+# untouched.
+#
+# FACTLOG_PYTHON_RUNNER is pinned at the real runner for BOTH halves. The hook
+# locates tools/factlog_python.sh relatively to itself too, so a bare temp
+# directory takes the interpreter away along with the library — and then the
+# first half fires because there is no Python, which is CASE 16's condition, not
+# this one. Measured: without this, the second half fires as well and the pair
+# stops distinguishing anything.
+# ---------------------------------------------------------------------------
+NOLIB_HOOKS="$(mktemp -d)"
+cp "$HOOK" "$NOLIB_HOOKS/gate_reminder.sh"      # deliberately NOT gate_payload.sh
+REAL_RUNNER="$(cd "$(dirname "$0")/.." && pwd)/tools/factlog_python.sh"
+FP_PAYLOAD='{"tool_name":"Write","tool_input":{"file_path":"/tmp/notes.md","content":"see facts/accepted.dl"}}'
+
+nolib_exit=0
+nolib_err="$(printf '%s' "$FP_PAYLOAD" \
+  | FACTLOG_PYTHON_RUNNER="$REAL_RUNNER" bash "$NOLIB_HOOKS/gate_reminder.sh" 2>&1 >/dev/null)" || nolib_exit=$?
+case "$nolib_err" in
+  *"An engine input was edited"*) nolib_fired=fire ;;
+  *) nolib_fired=silent ;;
+esac
+if [ "$nolib_fired" = "fire" ] && [ "$nolib_exit" -eq 0 ]; then
+  echo "PASS: missing hooks/gate_payload.sh — falls back to the payload grep, still exit 0 (fire, exit 0)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: missing hooks/gate_payload.sh — expected fire/exit 0, got $nolib_fired/exit $nolib_exit"
+  fail=$((fail + 1))
+fi
+
+cp "$(cd "$(dirname "$0")/.." && pwd)/hooks/gate_payload.sh" "$NOLIB_HOOKS/gate_payload.sh"
+lib_exit=0
+lib_err="$(printf '%s' "$FP_PAYLOAD" \
+  | FACTLOG_PYTHON_RUNNER="$REAL_RUNNER" bash "$NOLIB_HOOKS/gate_reminder.sh" 2>&1 >/dev/null)" || lib_exit=$?
+case "$lib_err" in
+  *"An engine input was edited"*) lib_fired=fire ;;
+  *) lib_fired=silent ;;
+esac
+if [ "$lib_fired" = "silent" ] && [ "$lib_exit" -eq 0 ]; then
+  echo "PASS: the same payload WITH hooks/gate_payload.sh — silent (silent, exit 0)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: the same payload WITH hooks/gate_payload.sh — expected silent/exit 0, got $lib_fired/exit $lib_exit"
+  fail=$((fail + 1))
+fi
+rm -rf "$NOLIB_HOOKS"
+
+# ---------------------------------------------------------------------------
+# CASE 44: A NUL IN tool_name DOES NOT COST THE NUDGE (#359).
+#
+# This hook used to run its own extractor, which emitted the target as the ONLY
+# field, so nothing could shift it. Sharing gate_check.sh's three-field record
+# would have put the nudge behind two other fields — and a NUL inside a JSON
+# string pushes every later field along by one, so a NUL in `tool_name` would
+# have moved the real path out of `target` and the nudge would have gone silent.
+# The shared record writes `target` FIRST for exactly this reason.
+#
+# Under-firing is the direction this hook's header calls the one that costs
+# something, and it is what a naive de-duplication would have bought. Reordering
+# the fields in hooks/gate_payload.sh turns this case red.
+# ---------------------------------------------------------------------------
+run_case "NUL inside tool_name — target still read, nudge survives" \
+  '{"tool_name":"Wr\u0000ite","tool_input":{"file_path":"/kb/facts/accepted.dl"}}' fire
+
 echo "---"
 echo "gate_reminder: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
