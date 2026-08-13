@@ -280,10 +280,13 @@ factlog_hook_read_payload() {
   # reading an unset variable.
   # Spelled as exclusions, because `case` takes GLOBS and not regexes: the
   # obvious `[A-Za-z_][A-Za-z0-9_]*` reads like an identifier rule and is not
-  # one. Its `*` is "any string", so it demands a SECOND character — it rejects
-  # a one-letter name — and then accepts whatever follows, including `a$(cmd)`,
-  # which is an injection straight into the `eval` below. Excluding the bad
-  # shapes has neither problem.
+  # one. Its two bracket groups constrain only the first two characters, and its
+  # `*` is "any string" rather than "more of the same class". So it rejects a
+  # one-letter name `p`, and once two identifier characters lead it accepts
+  # whatever follows: `payload$(cmd)` and `ab;id` both pass, which is an
+  # injection straight into the `eval` below. (`a$(cmd)` does NOT pass — the
+  # second character is checked — so the hole needs two leading identifier
+  # characters, not one.) Excluding the bad shapes has neither problem.
   case "$_payload_var" in
     "" | [0-9]* | *[!A-Za-z0-9_]*) return 1 ;;
   esac
