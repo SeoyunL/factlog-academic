@@ -201,3 +201,51 @@ class TestAttributeRelationsAreReadOnce:
         monkeypatch.setattr(rlc, "query_lines", lambda: ['relation("갑봇", "통합", "을서비스")?'])
         rlc.evaluate_queries(FACTS, {"path": set()}, set(), NODES)
         assert calls == []
+
+
+class TestCountEchoIsWrapped:
+    """The count echo prints the query line verbatim, and that line can carry a
+    character which would corrupt the report.
+
+    The echo looked structurally safe: it is only reached after ``query_error``
+    accepted the line, so every argument is a strict variable or a string
+    ``json.loads`` parsed, and JSON forbids raw control characters below 0x20.
+    But ``_FORBIDDEN_IN_LINE`` is wider than C0 — it also covers DEL (0x7f) and
+    the C1 block (0x80-0x9f) — and JSON accepts all of those raw inside a string
+    literal. So a query.dl carrying the byte itself reaches the echo with it
+    intact, on one physical line, with no error raised anywhere on the way.
+
+    Below 0x20 really is unreachable, and this asserts that too: written raw the
+    line is refused by ``query_error``, and written as a ``\\uXXXX`` escape the
+    physical line holds six ordinary characters that need no wrapping. That is
+    the case the report was already safe against.
+    """
+
+    @pytest.mark.parametrize("char", ["\x7f", "\x80", "\x9f"])
+    def test_a_c1_or_del_byte_in_the_echo_is_escaped(self, char, queries):
+        """RED before (with the echo unwrapped): the report line carries the raw
+        byte, which is the whole hazard ``one_line`` exists for — an unprintable
+        that a terminal may act on rather than show."""
+        subject = f"갑{char}봇"
+        query = f'count("{subject}", "통합")?'
+        assert rlc.query_error("count", query) is None, "the gate must accept it"
+        assert len(query.splitlines()) == 1, "it must be ONE physical line"
+        queries(query)
+        [line] = rlc.evaluate_queries([R(subject, "통합", "을서비스")], {}, set(), NODES)
+        assert char not in line
+        assert line == f"count results (query: {query!r}): 1 (distinct objects)"
+
+    def test_a_c0_byte_never_reaches_the_echo(self, queries):
+        """GUARD for the boundary the note draws: raw, the gate refuses it, so
+        the echo is not the thing standing between it and the report."""
+        query = 'count("갑\x01봇", "통합")?'
+        assert rlc.query_error("count", query) is not None
+
+    def test_a_c0_escape_leaves_the_echo_byte_identical(self, queries):
+        """GUARD: written as an escape it is six ordinary characters in the
+        physical line, so ``one_line`` is the identity and the report reads back
+        exactly what the author typed."""
+        query = 'count("갑\\u0001봇", "통합")?'
+        queries(query)
+        [line] = rlc.evaluate_queries([R("갑\x01봇", "통합", "을서비스")], {}, set(), NODES)
+        assert line == f"count results (query: {query}): 1 (distinct objects)"
