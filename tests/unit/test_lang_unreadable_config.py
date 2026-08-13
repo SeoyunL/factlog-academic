@@ -201,6 +201,104 @@ def test_query_mode_leaves_a_damaged_config_alone_and_stays_porcelain(cfg, capsy
     assert captured.err == ""
 
 
+class TestTheWriteBoundary:
+    """`factlog lang` must reach the same OSError boundary the root write does.
+
+    ``_write_root_or_explain`` exists because a *directory* at the config path
+    made every advertised way out of a damaged config die on
+    ``IsADirectoryError`` — pinned as ``TestADirectoryAtTheConfigPath`` in
+    test_init_activation.py, and promised in that function's own docstring.
+    ``factlog lang --force`` is a third advertised exit, and it was added outside
+    that boundary: the refusal named the command (``factlog lang ko --force``)
+    and the command then crashed.
+
+    The unwritable-config-directory case is here for the sharper reason. That
+    config is perfectly *readable*, so the UNREADABLE guard never fires and no
+    ``--force`` is involved — a plain ``factlog lang ko`` crashed. So the
+    boundary cannot live inside the damaged-config branch; it belongs to the act
+    of writing the file, which is why ``_apply_lang`` now goes through it and all
+    three entry points are covered at once.
+
+    Subprocess rather than in-process: "no traceback" is a claim about what the
+    process prints to stderr, and only a real process can be asked.
+    """
+
+    @pytest.fixture
+    def blocked_by_a_directory(self, cfg):
+        cfg.mkdir()
+        return cfg
+
+    @pytest.fixture
+    def blocked_by_an_unwritable_dir(self, cfg):
+        cfg.write_bytes(b'{"root": "/Users/real/kb"}')
+        cfg.parent.chmod(0o500)
+        yield cfg
+        # Restore before teardown, or pytest cannot clean up tmp_path.
+        cfg.parent.chmod(0o700)
+
+    def run_cli(self, cfg, *argv):
+        import subprocess
+        import sys
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return subprocess.run(
+            [sys.executable, "-m", "factlog", *argv],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "XDG_CONFIG_HOME": str(cfg.parent.parent),
+                "PYTHONPATH": repo_root,
+            },
+            check=False,
+        )
+
+    def assert_explained(self, proc, cfg):
+        assert proc.returncode != 0, proc.stdout + proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert "IsADirectoryError" not in proc.stderr, proc.stderr
+        assert "PermissionError" not in proc.stderr, proc.stderr
+        assert "cannot write the active-KB config" in proc.stderr, proc.stderr
+        # The message ends "Nothing at that path was changed", and the atomic
+        # writer stages a `.tmp` sibling before the swap. Without cleanup on the
+        # failure path that sentence is false and a stray config.json.tmp stays
+        # next to the real config for good.
+        strays = [p.name for p in cfg.parent.iterdir() if p.name.endswith(".tmp")]
+        assert not strays, f"a failed write left {strays} behind while claiming nothing changed"
+
+    def test_force_explains_instead_of_crashing_on_a_directory(self, blocked_by_a_directory):
+        proc = self.run_cli(blocked_by_a_directory, "lang", "ko", "--force")
+        self.assert_explained(proc, blocked_by_a_directory)
+
+    def test_the_refusal_it_prints_names_a_command_that_works(self, blocked_by_a_directory):
+        """The refusal and the crash were one command apart: whatever `--force`
+        does here, it must not be a traceback."""
+        refusal = self.run_cli(blocked_by_a_directory, "lang", "ko")
+        assert refusal.returncode == 1
+        assert "factlog lang ko --force" in refusal.stderr, refusal.stderr
+        forced = self.run_cli(blocked_by_a_directory, "lang", "ko", "--force")
+        assert "Traceback" not in forced.stderr, forced.stderr
+
+    def test_a_readable_config_under_an_unwritable_dir_explains(self, blocked_by_an_unwritable_dir):
+        proc = self.run_cli(blocked_by_an_unwritable_dir, "lang", "ko")
+        self.assert_explained(proc, blocked_by_an_unwritable_dir)
+        # The diagnosis must name the directory, not the config file: deleting
+        # config.json drops the root and lang without unblocking the write.
+        assert "not writable" in proc.stderr, proc.stderr
+
+    def test_the_unwritable_dir_case_keeps_the_config_intact(self, blocked_by_an_unwritable_dir):
+        before = blocked_by_an_unwritable_dir.read_bytes()
+        self.run_cli(blocked_by_an_unwritable_dir, "lang", "ko")
+        assert blocked_by_an_unwritable_dir.read_bytes() == before
+
+    def test_the_message_names_the_command_that_could_not_write(self, blocked_by_a_directory):
+        """`_apply_lang` is shared by three commands, so the boundary is told
+        which one is speaking rather than hard-coding `factlog use`."""
+        proc = self.run_cli(blocked_by_a_directory, "lang", "ko", "--force")
+        assert "factlog lang: cannot write" in proc.stderr, proc.stderr
+
+
 def test_invalid_code_is_still_rejected_before_the_config_is_consulted(cfg, capsys):
     """rc 2 (invalid input) outranks rc 1 (unwritable config): the value is wrong
     whatever the config says, and reporting the config instead would send the

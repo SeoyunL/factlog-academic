@@ -941,13 +941,23 @@ def _reach_note(target, *, quiet_when: str | None = None) -> str | None:
     return f"a flagless command would target {effective} (from {origin}), not {target} — {fix}"
 
 
-def _write_root_or_explain(command: str, target) -> None:
-    """``write_root``, but a filesystem refusal becomes an actionable message.
+def _config_write_or_explain(command: str, write: Callable[[], object]) -> None:
+    """Run *write*, but a filesystem refusal becomes an actionable message.
 
     The contract this branch added is "a damaged config always has a way out",
-    and both advertised exits — ``init --activate`` and ``factlog use`` — go
-    through this write. With a *directory* sitting at the config path every write
-    raises ``IsADirectoryError``, so both exits died on the same traceback.
+    and every advertised exit — ``init --activate``, ``factlog use`` and
+    ``factlog lang --force`` — goes through a config write. With a *directory*
+    sitting at the config path every write raises ``IsADirectoryError``, so those
+    exits died on the same traceback.
+
+    *write* is a thunk rather than a fixed call because the exits do not all
+    write the same field. This started as ``write_root``'s wrapper, and
+    ``write_lang`` was left outside it — so the refusal that ``factlog lang``
+    prints ("overwrite it deliberately: factlog lang ko --force") named a command
+    that then crashed with a traceback, and a *readable* config under a
+    mode-0500 config directory crashed the same way with no ``--force`` in sight
+    (#366 review). The boundary belongs to the act of writing this file, not to
+    one of its two fields.
 
     Nothing here removes what is in the way: deleting a path the user may have
     put there deliberately is not this command's call. It reports which path
@@ -983,7 +993,7 @@ def _write_root_or_explain(command: str, target) -> None:
     from factlog.common import FactlogError
 
     try:
-        factlog_config.write_root(target)
+        write()
     except OSError as exc:
         path = factlog_config.config_path()
         parent = path.parent
@@ -1016,6 +1026,15 @@ def _write_root_or_explain(command: str, target) -> None:
             f"{command}: cannot write the active-KB config at {path} "
             f"({exc.strerror or exc}). {cause} Nothing at that path was changed."
         ) from exc
+
+
+def _write_root_or_explain(command: str, target) -> None:
+    """Record *target* as the active KB through the shared write boundary.
+
+    ``factlog_config.write_root`` is resolved when the thunk runs, not when it is
+    built, so the tests that monkeypatch it still reach this handler.
+    """
+    _config_write_or_explain(command, lambda: factlog_config.write_root(target))
 
 
 def _plan_activation(target, activate: bool | None) -> Activation:
@@ -1159,11 +1178,20 @@ def _normalize_lang(code: str) -> tuple[str | None, str | None]:
     return normalized, None
 
 
-def _apply_lang(normalized: str) -> str:
+def _apply_lang(normalized: str, command: str) -> str:
     """Persist an already-validated *normalized* language and return the one-line
     confirmation phrase. An empty string clears the setting. Centralised so all
-    three entry points word the set/clear outcome identically."""
-    factlog_config.write_lang(normalized or None)
+    three entry points word the set/clear outcome identically.
+
+    Goes through ``_config_write_or_explain`` for the same reason the root write
+    does: this is a write of the same file, and it failed the same way. A
+    directory at the config path, or a config directory the user cannot write,
+    used to leave every one of the three entry points on a raw ``IsADirectoryError``
+    / ``PermissionError`` — including a perfectly *readable* config, where the
+    damaged-config guard above never fires. *command* names the caller so the
+    message says which command could not write.
+    """
+    _config_write_or_explain(command, lambda: factlog_config.write_lang(normalized or None))
     if normalized:
         return f"narration language set to {normalized}"
     return "narration language cleared"
@@ -1204,7 +1232,7 @@ def cmd_use(args: argparse.Namespace) -> int:
     # never silently drops a configured narration language.
     phrase: str | None = None
     if normalized is not None:
-        phrase = _apply_lang(normalized)
+        phrase = _apply_lang(normalized, "factlog use")
     note = "" if (target / "sources").is_dir() else "  (warning: no sources/ — not a factlog KB yet; run 'factlog init')"
     print(f"factlog use: active KB set to {target}{note}")
     if phrase is not None:
@@ -1285,7 +1313,7 @@ def cmd_lang(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    phrase = _apply_lang(normalized)
+    phrase = _apply_lang(normalized, "factlog lang")
     print(f"factlog lang: {phrase}")
     if replacing is not None:
         # The escape hatch says what it cost, as `factlog use` and `init
@@ -2810,7 +2838,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 "then set the language with `factlog lang`"
             )
         else:
-            phrase = _apply_lang(lang_normalized)
+            phrase = _apply_lang(lang_normalized, "factlog setup")
             actions.append(f"{phrase} (assistant prose only)")
 
     print("\n=== factlog setup: final environment check ===")
