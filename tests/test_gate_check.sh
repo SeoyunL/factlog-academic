@@ -2045,6 +2045,108 @@ rm -f "$nolib_err"
 rm -rf "$NOLIB_PLUGIN" "$KB_NOLIB"
 
 # ---------------------------------------------------------------------------
+# CASES 67b-67d: A LIBRARY THAT LOADS BUT MISBEHAVES ALSO DENIES (#359).
+#
+# CASE 67 covers a library that is not THERE. These cover the three ways one can
+# be there and still leave the gate with no usable record. Every one of them
+# reached a DIFFERENT fail-open before the guards went in, and none of them was
+# reachable through the corpus, because the corpus varies the payload and these
+# vary the install:
+#
+#   67b  the function sets none of the three variables
+#          -> `set -u` unbound variable at the first read, exit 1
+#   67c  the file sources cleanly but defines no function
+#          -> `command not found`, exit 127
+#   67d  the function returns non-zero
+#          -> `set -e`, exit 7, and NOTHING on stdout or stderr
+#
+# PreToolUse reads 1, 127 and 7 alike as non-blocking errors, so all three let
+# the write through; 67d did it in complete silence. Measured on a plugin root
+# whose gate_payload.sh was replaced, against the same stale KB used here, where
+# an intact install denies with exit 2.
+#
+# 67c is the one that pins the `declare -f` probe. Deleting that probe leaves
+# this suite at 99 passed / 0 failed without it — measured — so the probe is
+# load-bearing and was, until this case, unpinned.
+#
+# Each case asserts the deny REASON, not just exit 2. The KB here is stale and
+# the target IS an engine input, so a working gate also denies — exit 2 alone
+# cannot tell the two apart, and a case that cannot tell them apart would go on
+# passing after the guard it exists for was removed.
+# ---------------------------------------------------------------------------
+KB_LIBBAD="$(mktemp -d)"
+kb_stale "$KB_LIBBAD"
+clear_config
+
+libbad_case() {
+  local desc="$1"
+  local lib_body="$2"
+  local want_msg="$3"
+
+  local plugin; plugin="$(mktemp -d)"
+  mkdir -p "$plugin/hooks"
+  cp "$GATE" "$plugin/hooks/gate_check.sh"
+  ln -s "$(cd "$(dirname "$0")/.." && pwd)/factlog" "$plugin/factlog"
+  printf '%s\n' "$lib_body" > "$plugin/hooks/gate_payload.sh"
+
+  local err; err="$(mktemp)"
+  local rc=0
+  FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_LIBBAD" \
+    bash "$plugin/hooks/gate_check.sh" \
+    <<< "$(envelope Write "$KB_LIBBAD/facts/accepted.dl")" \
+    >/dev/null 2>"$err" || rc=$?
+
+  if [ "$rc" -eq 2 ] && grep -qF "$want_msg" "$err"; then
+    echo "PASS: $desc — deny, not fail-open (exit $rc)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc — expected exit 2 with '$want_msg', got exit=$rc stderr=$(head -1 "$err")"
+    fail=$((fail + 1))
+  fi
+  rm -f "$err"
+  rm -rf "$plugin"
+}
+
+libbad_case "library defines a function that sets no variables" \
+  'factlog_hook_read_payload() { return 0; }' \
+  "did not honour its contract"
+
+libbad_case "library sources cleanly but defines no function" \
+  'X=1' \
+  "could not be loaded"
+
+libbad_case "library defines a function that returns non-zero" \
+  'factlog_hook_read_payload() {
+  FACTLOG_HOOK_TARGET_PATH=""
+  FACTLOG_HOOK_TOOL_NAME=""
+  FACTLOG_HOOK_TOOL_INPUT_KIND="incomplete"
+  return 7
+}' \
+  "did not honour its contract"
+
+# The same stale KB with a GENUINE library must still reach the freshness
+# predicate and deny for THAT reason. Without this, the three cases above prove
+# only that the gate denies whenever it is handed a fake plugin root.
+libgood_plugin="$(mktemp -d)"
+install_hooks "$libgood_plugin/hooks"
+ln -s "$(cd "$(dirname "$0")/.." && pwd)/factlog" "$libgood_plugin/factlog"
+libgood_err="$(mktemp)"
+libgood_exit=0
+FACTLOG_PYTHON_RUNNER="$PYTHON_RUNNER" FACTLOG_ROOT="$KB_LIBBAD" \
+  bash "$libgood_plugin/hooks/gate_check.sh" \
+  <<< "$(envelope Write "$KB_LIBBAD/facts/accepted.dl")" \
+  >/dev/null 2>"$libgood_err" || libgood_exit=$?
+if [ "$libgood_exit" -eq 2 ] && grep -qF "is stale" "$libgood_err"; then
+  echo "PASS: the same root with a genuine library denies on FRESHNESS, not on the library (exit $libgood_exit)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: genuine library — expected the stale-report deny, got exit=$libgood_exit stderr=$(head -1 "$libgood_err")"
+  fail=$((fail + 1))
+fi
+rm -f "$libgood_err"
+rm -rf "$libgood_plugin" "$KB_LIBBAD"
+
+# ---------------------------------------------------------------------------
 # CASE 68: THE RECORD LEADS WITH `target` (#359).
 #
 # The extractor writes three NUL-separated fields, and a NUL inside a JSON

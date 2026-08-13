@@ -90,13 +90,24 @@
 #   1. The python-availability check below DENYs when no usable Python 3.11+ is
 #      present, since the predicate cannot then be evaluated. Escape hatch:
 #      FACTLOG_PYTHON (point it at a usable interpreter).
-#   1b. The same reasoning covers a hooks/gate_payload.sh — the payload extractor
-#      shared with gate_reminder.sh (#359) — that cannot be sourced: with no
-#      extractor no target path can be read for any call at all. It is listed
-#      beside branch 1 rather than after branch 3 because it is the same
-#      condition (a broken install makes the predicate unevaluable), and it has
-#      NO escape hatch, since FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD releases
-#      branch 2 only.
+#   1b. The same reasoning covers hooks/gate_payload.sh — the payload extractor
+#      shared with gate_reminder.sh (#359) — when it cannot be sourced, defines
+#      no factlog_hook_read_payload, or defines one that breaks the contract its
+#      header states (return 0, all three variables set). In every one of those
+#      no target path can be read or trusted for any call at all. Listed beside
+#      branch 1 rather than after branch 3 because it is the same condition — a
+#      broken install makes the predicate unevaluable — and it has NO escape
+#      hatch, since FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD releases branch 2 only.
+#      Each of those three is CHECKED rather than left to `set -e`/`set -u`:
+#      measured, they otherwise exit 1, 127 and 7 respectively, and PreToolUse
+#      reads every one of those as a non-blocking error, i.e. fail-open. The
+#      exit-7 case produced no output on any channel at all.
+#      This branch denies every write while it holds, including writes to files
+#      that have nothing to do with any KB. That global outage is the cost, and
+#      it is accepted here where branch 2's is not, because the condition is
+#      unambiguous (the install is broken, not the payload) and recoverable from
+#      inside the session — the Write|Edit matcher leaves Bash open, so `cp` puts
+#      the file back. The deny message says so.
 #   2. Target-path extraction DENYs only in the narrow case where the payload
 #      carries a `tool_input` JSON OBJECT, `tool_name` is one of the write-class
 #      tools this hook is registered for, and NO usable path can be read from
@@ -348,12 +359,51 @@ if [ ! -r "$GATE_PAYLOAD_LIB" ] \
   echo "  Without it no target path can be read, so this write cannot be shown to miss" >&2
   echo "  facts/accepted.dl or facts/query.dl. That is an install problem rather than a" >&2
   echo "  payload one: reinstall the factlog plugin so hooks/ ships whole." >&2
+  echo "  The Write|Edit matcher leaves Bash open, so a session that hits this can restore" >&2
+  echo "  the file itself — copy hooks/gate_payload.sh back from the plugin source." >&2
   echo "  This branch has no escape hatch. FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1" >&2
   echo "  releases the payload-shape deny below and nothing else." >&2
   exit 2
 fi
 
-factlog_hook_read_payload "$payload" "${PYTHON_RUNNER[@]}"
+# The record is SEEDED HERE, before the shared reader is called, and the reader's
+# contract is then CHECKED rather than trusted.
+#
+# gate_payload.sh's header promises the function always returns 0 and always
+# leaves all three variables set. A promise in a comment is not a guarantee in a
+# security gate, and both ways of breaking it landed fail-OPEN — measured on a
+# plugin root whose gate_payload.sh was replaced:
+#   - a function that sets no variables      -> `set -u` unbound variable, exit 1
+#   - a function that returns non-zero        -> `set -e`, exit 7, and NOTHING on
+#                                                any channel
+# PreToolUse reads any non-zero that is not 2 as a non-blocking error, so both
+# let the write through, and the second did it silently. That is the same
+# direction the branch above already closes for a library that will not source;
+# `declare -f` only proves the function EXISTS, so the check has to go one step
+# further than that.
+#
+# The seeds are empty strings rather than the real "no record" values, because an
+# empty `tool_input_kind` is a state the reader can never produce: it writes one
+# of the four kinds the Python emits, or the "incomplete" seed of its own. So an
+# empty kind after the call means the contract was broken, and it cannot be
+# confused with any honest outcome.
+FACTLOG_HOOK_TARGET_PATH=""
+FACTLOG_HOOK_TOOL_NAME=""
+FACTLOG_HOOK_TOOL_INPUT_KIND=""
+if ! factlog_hook_read_payload "$payload" "${PYTHON_RUNNER[@]}" \
+  || [ -z "$FACTLOG_HOOK_TOOL_INPUT_KIND" ]; then
+  echo "[factlog GATE] DENIED: the shared payload extractor did not honour its contract." >&2
+  echo "  Loaded from: $GATE_PAYLOAD_LIB" >&2
+  echo "  factlog_hook_read_payload must return 0 and set FACTLOG_HOOK_TARGET_PATH," >&2
+  echo "  FACTLOG_HOOK_TOOL_NAME and FACTLOG_HOOK_TOOL_INPUT_KIND. It did not, so no" >&2
+  echo "  target path can be trusted and this write cannot be shown to miss" >&2
+  echo "  facts/accepted.dl or facts/query.dl. Like a missing library this is an install" >&2
+  echo "  problem: restore hooks/gate_payload.sh from the plugin source (Bash is not" >&2
+  echo "  gated, so a session that hits this can do it with cp)." >&2
+  echo "  This branch has no escape hatch." >&2
+  exit 2
+fi
+
 target_path="$FACTLOG_HOOK_TARGET_PATH"
 tool_name="$FACTLOG_HOOK_TOOL_NAME"
 # "incomplete" means the extractor produced no record AT ALL — the interpreter
