@@ -253,18 +253,28 @@ def validate_query(
         # the WRITTEN one, deliberately and in that order: 4428952 and fc98675
         # are what made the gate and `ask` judge vocabulary on the spelling
         # accepted.dl actually holds, and this is the report's copy of that
-        # decision. NO TEST GUARDS IT — mutating `query_args(resolved)[0]` back to
-        # `args[0]` passes the whole suite (measured: 1868 passed), silently
-        # undoing both commits and returning the report to warning that the KB has
-        # never heard of a value it holds under its other spelling.
+        # decision.
         #
-        # Nor is the safety of reading *resolved* here enforceable at this level.
-        # It rests on a CALLER-level invariant: validate_query takes *entities*
-        # and *spelling* as independent parameters and nothing inside it checks
-        # that the map's values are a subset of *entities*. build_report_text
-        # derives both from the same rows, which is what makes the subset hold —
-        # a caller that derives them from different rows breaks it silently, here
-        # and at the vocabulary loop below.
+        # BOTH halves are pinned, in
+        # tests/unit/test_query_spelling_report.py::TestPolicyBranchEchoNamesTheWrittenConstant.
+        # Each direction had to be mutated separately to find that out — reverting
+        # the membership operand to `args[0]`, and moving the message operand to
+        # `query_args(resolved)[0]` — and before that pin existed BOTH survived the
+        # whole suite, silently undoing the two commits above.
+        #
+        # The echo half is not observable through build_report_text, which is why
+        # it went unpinned so long: that caller derives *entities*
+        # (`value_set(facts)`) and *spelling* (`kb_query_spellings(facts)`) from
+        # the SAME rows, so a constant that resolved is necessarily in *entities*,
+        # this warning cannot fire for it, and the written and resolved constants
+        # never differ where a message is produced. That subset property is a
+        # CALLER-level invariant and nothing here enforces it: validate_query
+        # takes *entities* and *spelling* as independent parameters and never
+        # checks one against the other. The pin therefore calls this function
+        # directly with a map whose value is absent from *entities* — not a KB the
+        # pipeline can build today, and precisely the configuration a second
+        # caller would introduce. The vocabulary loop below has the same shape and
+        # is NOT pinned; see there for why it cannot be.
         if is_quoted_string(args[0]) and arg_value(query_args(resolved)[0]) not in entities:
             warnings.append(
                 f"query references non-engine entity: {one_line(arg_value(args[0]))}"
@@ -316,8 +326,16 @@ def validate_query(
     # in *entities* and this warning cannot fire for it. ``constant`` and
     # ``tested`` therefore only ever differ on constants this branch stays silent
     # about. Mutating ``{constant}`` to ``{tested}`` here survives the suite for
-    # that reason (re-measured: 1868 passed); do not go looking for the pin that
-    # would catch it. It is written this way so the rule "a message names what the
+    # that reason (re-measured: 1877 passed). No pin is possible THROUGH
+    # ``build_report_text`` — that is the precise claim, and it is narrower than
+    # "no pin is possible". The policy branch above has the identical shape and IS
+    # pinned, by a direct call handing in a map whose values are not a subset of
+    # *entities*. The same construction would reach this loop. It is left unpinned
+    # because the vocabulary loop, unlike the policy branch, would need that
+    # fabricated caller to assert anything at all about a site no real caller can
+    # reach — so read the pin next door as covering the rule, and this comment as
+    # covering why the rule holds here without one.
+    # It is written this way so the rule "a message names what the
     # author wrote" holds by construction at every site, and so a future caller
     # passing a map derived from other rows cannot reintroduce the mismatch. The
     # path-endpoint pairing above IS load-bearing — entity_set is narrower than
@@ -396,15 +414,33 @@ def _paired_constants(written: list[str], resolved: list[str]) -> list[tuple[str
     reverting the display, the other the evaluation — which would have made a
     desync produce a gate and a report that disagree about the same line.
 
-    Three sites read the resolved line by direct index instead —
-    ``validate_query``'s policy branch, ``policy_result_line``'s ``filter_args``,
-    and the ``count`` branch of ``evaluate_queries``. They would RAISE on a
-    desync rather than degrade, which is the opposite of the rule above. Left as
-    they are on purpose: each unpacks a fixed arity that ``query_error`` has
-    already accepted, so a guard there would be dead code shaped like a policy,
-    and none of them attributes a message to a constant — the failure this
-    function exists to prevent. If ``resolve_query_spellings`` ever stops
-    preserving arity, those three are where it surfaces."""
+    Three sites read the resolved line by direct index instead, and they do NOT
+    behave alike on a desync. Measured, one at a time:
+
+    * the ``count`` branch of ``evaluate_queries`` — ``subj_q, rel_q =
+      query_args(resolved)`` RAISES ``ValueError`` on any arity but 2. Loud, at
+      every mismatch.
+    * ``validate_query``'s policy branch — ``query_args(resolved)[0]`` raises
+      ``IndexError``, but ONLY when the resolved line does not parse as an atom at
+      all. A resolved line that parses with the wrong arity still has an index 0
+      and passes through silently; ``needs_review()?`` yields ``['']`` and warns
+      about the empty constant rather than raising.
+    * ``policy_result_line``'s ``filter_args`` — **never raises.**
+      ``policy_row_matches`` iterates ``enumerate(args)`` behind an
+      ``index >= len(row)`` guard and returns False, and the binding loop is
+      ``zip(..., strict=False)``. A resolved line carrying one extra argument
+      turns a real answer into a verified negative in silence:
+
+          correct   : needs_review results (…): 1 rows; R=stale
+          on desync : needs_review results (…): 0 rows
+
+    So the site that fails most quietly is the one this docstring used to promise
+    would surface a desync loudest. The count branch is the only unconditional
+    raise. If ``resolve_query_spellings`` ever stops preserving arity, that is
+    where it surfaces — and ``policy_result_line`` is where it would NOT, which
+    makes it the one place an arity guard here would earn its keep. None of the
+    three attributes a message to a constant, which is the failure this function
+    exists to prevent, so none of them is given one today."""
     if len(written) != len(resolved):
         return [(constant, constant) for constant in written]
     return list(zip(written, resolved, strict=True))
@@ -712,6 +748,18 @@ def evaluate_queries(
             # ``one_line`` has nothing to do with. 0x85 is excluded too, by
             # ``query_lines``' ``splitlines``. So the reachable set is DEL and C1
             # minus 0x85, and that is what the pin uses.
+            #
+            # The derivation above is about the CHARACTER SET, not about this call
+            # site, so it carries verbatim to the other query-derived values this
+            # report prints: the `review_required` question echo, the
+            # `query must end with ?` error, and the path trace nodes. All three
+            # are reachable with the same bytes and none is pinned. They are
+            # main's, byte-identical, and left alone on purpose — `_LINE_BREAKS`
+            # above is pinned per FAMILY (newline, NUL, U+2028), one pin per
+            # carrier rather than one per call site, and adding three more here
+            # would be arguing with that policy rather than with a defect. Written
+            # down so the next reader does not re-derive the reachability and
+            # conclude the wrapping is decorative.
             results.append(
                 f"count results (query: {one_line(line)}): {len(objects)} (distinct objects)"
             )
