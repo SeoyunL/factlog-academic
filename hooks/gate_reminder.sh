@@ -163,6 +163,37 @@ PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
 # missing extractor means a write cannot be shown to be safe, so it denies;
 # here it means one line of output might be wrong, so it errs toward still
 # saying something. This hook must not turn an install problem into silence.
+#
+# WHEN THAT BRANCH IS ACTUALLY REACHED, though, is narrower than the paragraph
+# above makes it sound, and the difference matters because the branch revives
+# #337's false positive. Under the SHIPPED hooks.json it is not reached at all:
+# gate_check.sh is registered on PreToolUse for the same Write|Edit matcher, and
+# a gate_payload.sh it cannot load makes it deny every such call (branch 1b), so
+# the tool never runs and this PostToolUse hook never fires. The trade is live
+# only where gate_check.sh is absent, disabled, or OLDER — a pre-#359
+# gate_check.sh carries its own extractor and does not need the library, so a
+# plugin upgrade applied file-by-file can leave a window with the new reminder,
+# the old gate, and no gate_payload.sh. In that window an unrelated write whose
+# content names an engine input is allowed by the gate and nudged by this hook,
+# which is exactly #337. The window is short, but it is not hypothetical.
+# tests/test_gate_reminder.sh CASE 42 rests on the same premise and says so.
+# WHEN $HOOK_DIR IS ONLY THE CWD, DO NOT SOURCE. Sourcing runs arbitrary code, so
+# the one case where $HOOK_DIR was not derived from a path — `bash gate_reminder.sh`
+# from inside some directory — must not reach for a gate_payload.sh sitting
+# there. gate_check.sh cannot get here at all: its `cd "${BASH_SOURCE[0]%/*}"`
+# fails first and `set -e` ends the script.
+#
+# The residue is that a COPY or symlink of this hook placed in a hostile
+# directory, invoked from inside it, would otherwise have sourced that
+# directory's gate_payload.sh. Closed here rather than deferred because #359 is
+# what moved the target: before it the nearest sourced thing was
+# `$HOOK_DIR/../tools/factlog_python.sh`, a PARENT directory, and the library
+# brought it down into the SAME directory as the decoy. That parent-directory
+# exposure is unchanged from main and stays out of scope — narrowing it would
+# change how the interpreter is located, which this issue is not about.
+#
+# Skipping the source leaves target_path empty, which is the documented fallback
+# below and not a new behaviour.
 GATE_PAYLOAD_LIB="$HOOK_DIR/gate_payload.sh"
 
 target_path=""
