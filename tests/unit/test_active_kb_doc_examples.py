@@ -22,12 +22,22 @@ The blocks are excerpts: ``init`` also lists every scaffolded directory, and the
 pages leave that out. Each scenario therefore names the prefixes it quotes, and
 the assertion is that those lines, in that order, appear verbatim in both pages.
 
-One block is ``setup``'s, not ``init``'s, and it is driven through
+Two blocks are ``setup``'s, not ``init``'s, and they are driven through
 ``cli.main`` in-process with the doctor/pip stages stubbed — the same shape
 ``tests/unit/test_init_activation.py`` uses and for the same reason: a
 subprocess ``setup`` would try to pip-install pyrewire when the engine is
-absent, and its doctor output is machine- and locale-dependent noise. The line
-being captured is produced by unstubbed code either way.
+absent, and its doctor output is machine- and locale-dependent noise.
+
+The stub is not consequence-free for one of them, so state what it does: the
+``--lang`` closing line is printed only under ``if final_ok and lang_deferred``,
+so forcing the doctor to pass is what puts that branch in reach at all. With a
+failing final doctor the run still exits 1, but that line is replaced by the
+environment-problem one and the refusal survives only as the summary's
+``narration language NOT set`` note — which is why the page states the premise.
+What the stub does *not* do is compose the sentence or choose the exit code;
+both come from unstubbed code, and those are what the page quotes. The
+file-target block is a ``FactlogError`` raised before either stubbed stage is
+reached.
 """
 from __future__ import annotations
 
@@ -84,9 +94,12 @@ def run_init(sandbox, *args, cwd: Path | None = None, env_root: str | None = Non
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = str(sandbox["cfg_home"])
     env["PYTHONPATH"] = str(REPO_ROOT)
-    # Dropped by default — the repo-root conftest pins it, and an inherited value
-    # would decide the target these captures are choosing on purpose. *env_root*
-    # puts it back for the one block that is about the environment.
+    # Dropped by default, and this pop is the actual defence rather than a
+    # belt-and-braces one: the repo-root conftest *defers* to an inherited
+    # FACTLOG_ROOT ("if not os.environ.get(...)") instead of overriding it, so
+    # without this an inherited value would decide the target these captures are
+    # choosing on purpose. *env_root* puts it back for the one block that is
+    # about the environment.
     env.pop("FACTLOG_ROOT", None)
     if env_root is not None:
         env["FACTLOG_ROOT"] = env_root
@@ -99,6 +112,22 @@ def run_init(sandbox, *args, cwd: Path | None = None, env_root: str | None = Non
         check=False,
     )
     return (proc.stdout + proc.stderr).splitlines()
+
+
+def run_setup(sandbox, monkeypatch, capsys, *args) -> tuple[int, list[str]]:
+    """Drive ``factlog setup`` in-process; only doctor/pip are stubbed.
+
+    See the module docstring for what that stubbing does and does not decide.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(sandbox["cfg_home"]))
+    monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+    monkeypatch.setattr(cli, "_pyrewire_ok", lambda: True)
+    monkeypatch.setattr(cli, "_run_doctor_checks", lambda *a, **k: True)
+
+    rc = cli.main(["setup", *args])
+
+    captured = capsys.readouterr()
+    return rc, (captured.out + captured.err).splitlines()
 
 
 def as_documented(sandbox, lines: list[str], *prefixes: str) -> list[str]:
@@ -190,21 +219,44 @@ def test_setup_says_why_it_withheld_the_language(sandbox, monkeypatch, capsys):
 
     Driven in-process for the reason in the module docstring. The exit code is
     asserted alongside the wording because the page states it: a ``--lang`` that
-    was declined must not report success, and the sentence quoted here is the
-    only place the run says why.
+    was declined must not report success, and this sentence is where the run
+    says why.
+
+    The page's paragraph also claims the refusal covers the ``--lang`` and not
+    only the activation, so the summary note that carries that half is asserted
+    too — an earlier draft said "only the activation is refused" while the block
+    right underneath it read ``--lang was not applied``.
     """
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(sandbox["cfg_home"]))
-    monkeypatch.delenv("FACTLOG_ROOT", raising=False)
-    monkeypatch.setattr(cli, "_pyrewire_ok", lambda: True)
-    monkeypatch.setattr(cli, "_run_doctor_checks", lambda *a, **k: True)
     sandbox["config"].symlink_to(sandbox["cfg_home"] / "not-mounted" / "config.json")
 
-    rc = cli.main(["setup", "--target", str(sandbox["scratch"]), "--lang", "ko"])
-    captured = capsys.readouterr()
-    lines = (captured.out + captured.err).splitlines()
+    rc, lines = run_setup(
+        sandbox, monkeypatch, capsys, "--target", str(sandbox["scratch"]), "--lang", "ko"
+    )
 
     assert rc == 1, f"a declined --lang exited {rc}, which the page says is 1"
+    assert any("narration language NOT set" in line for line in lines), (
+        "the page says the --lang is refused too; nothing in the run says so:\n"
+        + "\n".join(lines)
+    )
     assert_pages_quote(as_documented(sandbox, lines, "factlog setup: the KB at"))
+
+
+def test_setup_refuses_a_file_target_under_its_own_name(sandbox, monkeypatch, capsys):
+    """The file-target check belongs to the shared target-picking step.
+
+    ``_resolve_kb_target`` is called by ``cmd_init`` and ``cmd_setup`` alike, so
+    the page writes this guard as ``init``/``setup`` — its convention for shared
+    behaviour. Only the command name differs in the sentence, which is exactly
+    the kind of claim that is cheap to assert and easy to let rot: prose saying
+    "``setup`` says the same" stays on the page unchanged if someone gives
+    ``setup`` its own wording.
+    """
+    rc, lines = run_setup(sandbox, monkeypatch, capsys, "--target", str(sandbox["file"]))
+
+    assert rc == 1, f"a file target exited {rc}, which the page says is 1"
+    assert_pages_quote(
+        as_documented(sandbox, lines, "factlog setup: refusing to scaffold a KB at")
+    )
 
 
 def test_a_named_file_target_is_refused_in_a_sentence(sandbox):
