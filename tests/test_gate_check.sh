@@ -2219,10 +2219,18 @@ esac
 # `[A-Za-z_][A-Za-z0-9_]*`, which LOOKS like an identifier rule but is a glob:
 # its brackets constrain only the first two characters and its `*` means "any
 # string", so it demanded a second character (rejecting a one-letter name) and
-# then accepted anything after it — `payload$(cmd)` and `ab;id` both passed.
-# (`a$(cmd)` did not: the second character is still checked. The hole needed two
-# leading identifier characters.) The source-shape half of this case was green
-# throughout that bug.
+# then accepted anything after it. `a$(cmd)` did not get through — the second
+# character is still checked — so the hole needed two leading identifier
+# characters.
+#
+# The injection probe below is the shape that actually EXECUTES, which is not
+# the obvious one. `ab$(cmd)` and `ab;id` clear the old glob and then do
+# nothing: the eval builds `${!ab$(cmd)*}` and bash rejects it as a bad
+# substitution. Only a tail that closes the expansion and the eval's quoting
+# runs anything, so the probe uses `ab*}"; ...; :"` — measured to set the marker
+# under the old check and to be rejected outright under the current one. A probe
+# built from the inert shapes would have passed either way.
+# The source-shape half of this case was green throughout that bug.
 byname_api_rc=0
 byname_api_out="$(bash -u -c '
   . "$1/gate_payload.sh"
@@ -2233,7 +2241,7 @@ byname_api_out="$(bash -u -c '
   probe payload "$2"                      byname
   probe p "$2"                            shortname
   probe "$p" /bin/true                    byvalue
-  probe "p;INJECT_MARKER=pwned" /bin/true injection
+  probe "ab*}\"; INJECT_MARKER=pwned; :\"" /bin/true injection
   probe nosuchvariable /bin/true          unset
   echo "marker=$INJECT_MARKER"
 ' _ "$HOOKS_DIR" "$PYTHON_RUNNER" 2>&1)" || byname_api_rc=$?

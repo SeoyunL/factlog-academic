@@ -283,10 +283,18 @@ factlog_hook_read_payload() {
   # one. Its two bracket groups constrain only the first two characters, and its
   # `*` is "any string" rather than "more of the same class". So it rejects a
   # one-letter name `p`, and once two identifier characters lead it accepts
-  # whatever follows: `payload$(cmd)` and `ab;id` both pass, which is an
-  # injection straight into the `eval` below. (`a$(cmd)` does NOT pass — the
-  # second character is checked — so the hole needs two leading identifier
-  # characters, not one.) Excluding the bad shapes has neither problem.
+  # whatever follows. (`a$(cmd)` does NOT pass — the second character is still
+  # checked — so the hole needs two leading identifier characters, not one.)
+  #
+  # What getting past the glob COSTS depends on the tail, and the distinction is
+  # kept here because it is easy to overstate in both directions. `payload$(cmd)`
+  # and `ab;id` do get through the glob and then run nothing: the eval builds
+  # `${!payload$(cmd)*}`, which bash rejects as a bad substitution. Execution
+  # needs a tail that CLOSES the expansion and the eval's quoting —
+  # `ab*}"; cmd; :"` clears the glob and runs `cmd`, measured by the file it
+  # creates. So the glob was a real hole, but the executable shape is the
+  # quote-breaking one, not the command substitution. Excluding the bad shapes
+  # stops all of them.
   case "$_payload_var" in
     "" | [0-9]* | *[!A-Za-z0-9_]*) return 1 ;;
   esac
