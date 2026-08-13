@@ -101,6 +101,12 @@ def test_honours_python_from_environment(tmp_path: Path) -> None:
     honours ``PYTHON`` cannot report a pass. Before the fix the assignment was
     unconditional and the run reported its verdict under whatever ``python3``
     resolved to.
+
+    The refused Step 1 makes this the case that can also see WHERE the run put
+    its KB — Step 2 names the path in each ``FAIL:`` line — so it pins
+    ``SETUP_KB`` too. Without that assertion the harness could go back to the
+    hardcoded ``/tmp/factlog-setup-test-kb`` and every case here would stay
+    green while deleting a directory the whole machine shares.
     """
     shim = _engine_shim(
         tmp_path, "refuse-all", 'echo "shim: refused $*" >&2\nexit 3\n'
@@ -115,6 +121,10 @@ def test_honours_python_from_environment(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "0 failed" not in result.stdout
+    assert str(tmp_path / "kb") in combined, (
+        "the run ignored SETUP_KB and used its machine-wide default, which it "
+        f"deletes before Step 1\n{combined}"
+    )
 
 
 def test_relative_python_resolves_where_the_steps_run(tmp_path: Path) -> None:
