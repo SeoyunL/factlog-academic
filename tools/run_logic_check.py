@@ -249,6 +249,22 @@ def validate_query(
             errors.append(policy_error)
             return errors, warnings
         args = query_args(line)
+        # The membership test reads the RESOLVED constant and the message names
+        # the WRITTEN one, deliberately and in that order: 4428952 and fc98675
+        # are what made the gate and `ask` judge vocabulary on the spelling
+        # accepted.dl actually holds, and this is the report's copy of that
+        # decision. NO TEST GUARDS IT — mutating `query_args(resolved)[0]` back to
+        # `args[0]` passes the whole suite (measured: 1868 passed), silently
+        # undoing both commits and returning the report to warning that the KB has
+        # never heard of a value it holds under its other spelling.
+        #
+        # Nor is the safety of reading *resolved* here enforceable at this level.
+        # It rests on a CALLER-level invariant: validate_query takes *entities*
+        # and *spelling* as independent parameters and nothing inside it checks
+        # that the map's values are a subset of *entities*. build_report_text
+        # derives both from the same rows, which is what makes the subset hold —
+        # a caller that derives them from different rows breaks it silently, here
+        # and at the vocabulary loop below.
         if is_quoted_string(args[0]) and arg_value(query_args(resolved)[0]) not in entities:
             warnings.append(
                 f"query references non-engine entity: {one_line(arg_value(args[0]))}"
@@ -293,23 +309,30 @@ def validate_query(
                         f"query path argument is not an accepted entity: {display_value(constant)}"
                     )
     # DEFENSIVE, unlike its sibling above — this pairing cannot currently change
-    # any message, and that is structural rather than accidental. ``main`` derives
-    # *entities* (``value_set(facts)``) and *spelling* (``kb_query_spellings(facts)``)
-    # from the SAME rows, so the map's values are a subset of *entities*: a
-    # constant that resolved is necessarily in *entities* and this warning cannot
-    # fire for it. ``constant`` and ``tested`` therefore only ever differ on
-    # constants this branch stays silent about. Mutating ``{constant}`` to
-    # ``{tested}`` here survives the suite for that reason; do not go looking for
-    # the pin that would catch it. It is written this way so the rule "a message
-    # names what the author wrote" holds by construction at every site, and so a
-    # future caller passing a map derived from other rows cannot reintroduce the
-    # mismatch. The path-endpoint pairing above IS load-bearing — entity_set is
-    # narrower than value_set, so a resolved constant can still be warned about
-    # there — and is pinned.
+    # any message, and that is structural rather than accidental.
+    # ``build_report_text`` derives *entities* (``value_set(facts)``) and
+    # *spelling* (``kb_query_spellings(facts)``) from the SAME rows, so the map's
+    # values are a subset of *entities*: a constant that resolved is necessarily
+    # in *entities* and this warning cannot fire for it. ``constant`` and
+    # ``tested`` therefore only ever differ on constants this branch stays silent
+    # about. Mutating ``{constant}`` to ``{tested}`` here survives the suite for
+    # that reason (re-measured: 1868 passed); do not go looking for the pin that
+    # would catch it. It is written this way so the rule "a message names what the
+    # author wrote" holds by construction at every site, and so a future caller
+    # passing a map derived from other rows cannot reintroduce the mismatch. The
+    # path-endpoint pairing above IS load-bearing — entity_set is narrower than
+    # value_set, so a resolved constant can still be warned about there — and is
+    # pinned.
     #
     # ``query_constants``, NOT ``quoted_constants``: both sides of a pairing must
-    # be read by the SAME parser. Two cheaper guards look right and are not, and
-    # both were measured before this was settled. Neither is worth trying again.
+    # be read by the SAME parser. Reading them with the raw regex made this
+    # pairing DESYNC on every query that resolved onto a canonical ``amount``, at
+    # which point the paragraph above was true and irrelevant — the fallback
+    # discarded resolution before the subset argument could apply. See
+    # ``_paired_constants``.
+    #
+    # Two cheaper guards look right and are not, and both were measured before
+    # this was settled. Neither is worth trying again.
     #
     #   - "keep the regex, but fall back to it only when the parser finds FEWER
     #     constants". The regex OVER-counts the resolved line — 3 against the
@@ -336,12 +359,37 @@ def _paired_constants(written: list[str], resolved: list[str]) -> list[tuple[str
     """Zip a line's constants with the same line's after spelling resolution:
     ``(what the author wrote, what to test against the KB vocabulary)``.
 
-    Resolution substitutes in place and never adds or drops an argument, so the
-    two lists line up; the desync branch is unreachable. If they ever do not, a
-    diagnostic must not be attributed to the wrong constant, so this ABANDONS
-    RESOLUTION for the line and pairs each constant with itself — the unresolved
-    reading, which is the pre-existing behaviour, so the fallback can only warn
-    where the old code warned.
+    When the lists disagree in length a diagnostic must not be attributed to the
+    wrong constant, so this ABANDONS RESOLUTION for the line and pairs each
+    constant with itself — the unresolved reading, which is the pre-existing
+    behaviour, so the fallback can only warn where the old code warned.
+
+    **This branch used to be documented as unreachable, and it fired.** The
+    argument given was "resolution substitutes in place and never adds or drops
+    an argument", which is true — and did not apply, because the callers were not
+    counting arguments. Two of them scanned the line with ``quoted_constants``'
+    raw ``"([^"]+)"``, which cannot see JSON escaping, while
+    ``resolve_query_spellings`` re-quotes through ``json.dumps``. Resolving onto
+    any value that itself carries a ``"`` therefore changed the COUNT of what the
+    regex found, and every canonical ``amount`` value carries one. The reader who
+    trusted the sentence would have looked for a mistake in the substitution and
+    found none.
+
+    Every caller now reads both sides with ``query_constants``, and the reason
+    the branch does not fire is the one the old sentence claimed: the resolved
+    line is REBUILT from ``query_args(line)`` with per-position substitutions that
+    preserve "this argument is a quoted string", so re-parsing it yields the same
+    number of constants by construction. Measured over 300k generated lines
+    against a map that actually moves constants: of the 23002 that were rewritten,
+    the regex reading disagreed on 14720 and the parser reading on 0.
+
+    So the branch is kept, and the invariant it now guards is narrower and
+    stated where it can be checked: **both sides must be read by the same
+    parser.** That is the thing that broke, not arity. A caller that reaches for
+    ``quoted_constants`` here again, or hands in two lists produced by different
+    readers, lands in this fallback — silently, since it degrades rather than
+    raises. It is also a module-level helper with no guard on its arguments, so
+    "unreachable" was never a property of the function, only of its callers.
 
     ``common.classify_query``'s ``_shown`` guard degrades the same way for the
     same reason. The two were written pointing in opposite directions — one
@@ -505,7 +553,7 @@ def evaluate_queries(
 
     *path_nodes* is entity_set — the values that may be path endpoints. ``None``
     means "do not distinguish", the pre-#329 behaviour kept for three-argument
-    callers; ``main`` always passes it.
+    callers; ``build_report_text`` always passes it.
 
     *spelling* is ``kb_query_spellings``, shared with ``validate_query`` so a run
     derives it once; ``None`` derives it here, which is what the callers passing
@@ -641,6 +689,29 @@ def evaluate_queries(
             # matches this line against facts/query.dl by eye: printing back a
             # spelling they did not type would be a difference they cannot see and
             # cannot search for.
+            #
+            # The ``one_line`` here FIRES ON REAL INPUT, and is pinned. It was
+            # nearly documented as defence over a structurally unreachable path,
+            # on this argument: the echo is `line`, this branch is reached only
+            # after ``query_error("count", line)`` returned None, and that requires
+            # every argument to be a strict ``[A-Z_][A-Za-z0-9_]*`` variable or a
+            # string ``json.loads`` accepts — and JSON forbids raw control
+            # characters below 0x20 inside a string literal.
+            #
+            # The argument is sound and covers too little. ``_FORBIDDEN_IN_LINE``
+            # is wider than C0: it also holds DEL (0x7f) and the whole C1 block
+            # (0x80-0x9f), and JSON permits every one of those inside a string.
+            # Measured — ``count("a\x7fb", "r")?`` with the byte raw in the file is
+            # ONE physical line, ``query_error`` returns None, and it arrives here
+            # with the byte intact; same for 0x80 and 0x9f.
+            #
+            # What IS structurally excluded is exactly the C0 range the old
+            # argument named, and doubly: ``json.loads`` rejects those raw, and an
+            # author who escapes them instead writes a six-character
+            # ``\uXXXX`` escape, ordinary characters in the physical line that
+            # ``one_line`` has nothing to do with. 0x85 is excluded too, by
+            # ``query_lines``' ``splitlines``. So the reachable set is DEL and C1
+            # minus 0x85, and that is what the pin uses.
             results.append(
                 f"count results (query: {one_line(line)}): {len(objects)} (distinct objects)"
             )
