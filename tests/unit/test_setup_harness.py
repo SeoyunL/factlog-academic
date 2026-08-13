@@ -56,6 +56,7 @@ def _run_setup(
     tmp_path: Path,
     python: Path | str | None = None,
     cwd: Path | None = None,
+    path_prefix: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the harness. ``python=None`` leaves ``PYTHON`` unset, which is the
     only way to exercise the branch that picks the interpreter itself. ``cwd``
@@ -73,6 +74,10 @@ def _run_setup(
     # default is /tmp/factlog-setup-test-kb, which every checkout and every
     # parallel lane on the machine shares, and Step 1 begins by deleting it.
     env["SETUP_KB"] = str(tmp_path / "kb")
+    if path_prefix is not None:
+        # Decides what a bare name like `python3` resolves to, so a case about
+        # the unset branch does not depend on what this machine's python3 is.
+        env["PATH"] = f"{path_prefix}{os.pathsep}{env['PATH']}"
     return subprocess.run(
         ["bash", str(SETUP_SH)],
         cwd=str(cwd or REPO_ROOT),
@@ -211,6 +216,12 @@ def test_output_names_the_interpreter_that_ran(tmp_path: Path) -> None:
     9 failed`` be read as a broken tree and a green run be attributed to an
     exported ``PYTHON`` that was in fact discarded. Reading the output has to be
     enough to tell.
+
+    The unset half puts a shim named ``python3`` at the front of ``PATH``. Left
+    to the machine's own ``python3``, the case would run two real ``factlog
+    setup`` invocations end to end wherever that interpreter has pyrewire — the
+    CI unit job included — while asserting only on one line, so a failing
+    ``setup`` would still pass it. What it pins is the selection, not ``setup``.
     """
     shim = _engine_shim(tmp_path, "named", "exit 3\n")
 
@@ -221,7 +232,10 @@ def test_output_names_the_interpreter_that_ran(tmp_path: Path) -> None:
         + named.stderr
     )
 
-    chosen = _run_setup(tmp_path)
+    path_dir = tmp_path / "bin"
+    path_dir.mkdir()
+    _engine_shim(path_dir, "python3", "exit 3\n")
+    chosen = _run_setup(tmp_path, path_prefix=path_dir)
     assert "PYTHON: python3" in chosen.stdout, (
         "the run did not name the interpreter it chose for itself\n"
         + chosen.stdout
