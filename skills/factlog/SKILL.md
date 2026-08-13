@@ -117,14 +117,24 @@ Set it with `factlog lang <code>` (or `factlog use <kb> --lang <code>` /
 returns to step 2. `factlog lang` with no argument is a porcelain contract —
 parse exactly that one line, do not scrape prose.
 
-**If setting the language exits 1, do not retry it and do not add `--force`.**
-Every setter rebuilds the whole config file, so when the config cannot be read
-(truncated JSON, unreadable mode, a symlink to an unmounted volume) they refuse
-rather than replace a KB root that may still be recoverable as text in those
-bytes. Nothing was written; the message names the file and the repair. Report it
-and let the user repair the file — `--force` sets the language by **discarding
-the recorded KB root**, and that is a choice for the person who owns the KB, not
-for you. Narrate in the step-2 language meanwhile.
+**If setting the language exits non-zero, nothing was written.** Every setter
+rebuilds the whole config file, so rather than replace a KB root it cannot read
+back it stops and explains. Narrate in the step-2 language meanwhile.
+
+- **rc 1 — the config could not be written.** Several different things cause
+  this and the fixes are opposite, so **do not diagnose it yourself: relay the
+  stderr message verbatim and let the user decide.** In particular, do not tell
+  them the config file is damaged — sometimes it is perfectly fine and the
+  *directory* is unwritable, in which case deleting the file destroys the
+  recorded KB root and still does not unblock the write. The message says which
+  case it is.
+- **rc 2 — the arguments were wrong** (the code is too long or has control
+  characters, or `--force` was passed with no code). Fix the call and retry;
+  nothing about the config is at fault.
+
+**Do not retry an rc 1, and do not add `--force`.** It sets the language by
+**discarding the recorded KB root**, and that is a choice for the person who
+owns the KB, not for you.
 
 **Boundary — this changes ONLY your own prose. It does NOT change evidence:**
 

@@ -488,22 +488,71 @@ class TestEverySiteThatDeclinesKnowsTheWayOut:
         }
 
 
-def test_skill_md_tells_the_assistant_what_the_new_rc_means(cfg):
-    """SKILL.md is what an assistant acts on, so a new refusal it does not
-    mention is a refusal the assistant will meet with no instruction.
+class TestSkillMdMatchesWhatTheAssistantWillActuallyGet:
+    """SKILL.md is what an assistant acts on, so a refusal it does not describe
+    is one the assistant meets with no instruction — and one it describes
+    *wrongly* is worse than silence.
 
-    Paired with the live rc below rather than asserted alone: a doc pin that only
-    greps prose passes on a tree where the prose is right and the code changed.
+    Every claim is paired with the live behaviour rather than asserted alone: a
+    doc pin that only greps prose passes on a tree where the prose is right and
+    the code moved underneath it.
     """
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    text = open(
-        os.path.join(repo_root, "skills", "factlog", "SKILL.md"), encoding="utf-8"
-    ).read()
-    assert "exits 1" in text, "SKILL.md does not tell the assistant the setter can refuse"
-    assert "--force" in text, "SKILL.md does not warn the assistant off --force"
 
-    seed_truncated(cfg)
-    assert run_lang("ko") == 1, "SKILL.md documents an rc the code no longer returns"
+    @property
+    def text(self):
+        """The file with runs of whitespace collapsed: where markdown happens to
+        wrap a sentence is not part of what it says, and a pin that depends on it
+        fails the next time the paragraph is re-flowed."""
+        import re
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo_root, "skills", "factlog", "SKILL.md"), encoding="utf-8") as f:
+            return re.sub(r"\s+", " ", f.read())
+
+    def test_it_documents_rc_1_and_the_code_returns_it(self, cfg):
+        assert "rc 1" in self.text
+        seed_truncated(cfg)
+        assert run_lang("ko") == 1, "SKILL.md documents an rc the code no longer returns"
+
+    def test_it_documents_rc_2_and_the_code_returns_it(self, cfg):
+        """Two distinct rc-2 causes, and the doc used to describe neither."""
+        assert "rc 2" in self.text
+        assert run_lang("x" * 100) == 2
+        assert run_lang(None, force=True) == 2
+
+    def test_it_warns_the_assistant_off_force(self):
+        assert "--force" in self.text
+        assert "discarding the recorded KB root" in self.text
+
+    def test_it_does_not_assert_a_cause_the_message_may_contradict(self, cfg, capsys):
+        """The paragraph used to declare rc 1 meant "the config cannot be read"
+        and end "let the user repair the file".
+
+        The write boundary added a second rc-1 class where the config is
+        perfectly READABLE and the config *directory* is unwritable. An assistant
+        following the old text would report "your config is damaged, repair it",
+        the user would delete config.json, and that destroys the recorded root
+        while leaving the write just as blocked — which is precisely what the CLI
+        message tells them not to do. So the doc must send the message on rather
+        than interpret it.
+        """
+        assert "relay the stderr message verbatim" in self.text
+        assert "do not diagnose it yourself" in self.text.lower()
+
+        # And the class that makes the old wording wrong really is rc 1 with a
+        # readable config.
+        cfg.write_bytes(b'{"root": "/Users/real/kb"}')
+        assert factlog_config.config_status() == factlog_config.READABLE
+        cfg.parent.chmod(0o500)
+        try:
+            from factlog.common import FactlogError
+
+            with pytest.raises(FactlogError) as exc:
+                run_lang("ko")
+            assert "not writable" in str(exc.value)
+            assert "config.json is not the obstacle" in str(exc.value)
+        finally:
+            cfg.parent.chmod(0o700)
 
 
 def test_invalid_code_is_still_rejected_before_the_config_is_consulted(cfg, capsys):
