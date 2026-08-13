@@ -139,6 +139,67 @@ class TestRefusesToRebuildADamagedConfig:
         assert json.loads(cfg.read_text(encoding="utf-8")) == {"lang": "ko"}
 
 
+class TestForceLeavesNoRoot:
+    """`--force` writes only the language, so the config comes out recording no KB.
+
+    `factlog use` — the other advertised exit — cannot reach this state: it
+    writes a replacement root in the same breath. This one does not, and SKILL.md
+    opens every flow with `export FACTLOG_ROOT="$(factlog where --porcelain)"`,
+    so a `--force` run from an arbitrary directory quietly promotes that
+    directory to the active KB on the next sync. The escape hatch was more
+    destructive than the one it was modelled on, and said less about it.
+    """
+
+    def test_the_config_really_is_left_without_a_root(self, cfg):
+        seed_truncated(cfg)
+        run_lang("ko", force=True)
+        assert json.loads(cfg.read_text(encoding="utf-8")) == {"lang": "ko"}
+        assert factlog_config.read_root() is None
+
+    def test_it_says_the_root_is_gone_and_how_to_record_one(self, cfg, capsys):
+        seed_truncated(cfg)
+        run_lang("ko", force=True)
+        out = capsys.readouterr().out
+        assert "records no KB root" in out
+        assert "factlog use <kb>" in out
+
+    def test_it_names_the_directory_a_flagless_command_would_fall_back_to(
+        self, cfg, capsys, monkeypatch, tmp_path
+    ):
+        """cwd is the trap SKILL.md walks into, so the fallback is named, not
+        merely implied by 'no root'."""
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+        elsewhere = tmp_path / "some-unrelated-dir"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        seed_truncated(cfg)
+        run_lang("ko", force=True)
+        out = capsys.readouterr().out
+        assert str(elsewhere.resolve()) in out
+        assert "the current directory" in out
+
+    def test_it_names_the_environment_when_that_is_what_wins(
+        self, cfg, capsys, monkeypatch, tmp_path
+    ):
+        """With $FACTLOG_ROOT exported the fallback is not cwd, and saying cwd
+        would be the same false claim `_reach_note` exists to prevent."""
+        kb = tmp_path / "env-kb"
+        kb.mkdir()
+        monkeypatch.setenv("FACTLOG_ROOT", str(kb))
+        seed_truncated(cfg)
+        run_lang("ko", force=True)
+        out = capsys.readouterr().out
+        assert "$FACTLOG_ROOT" in out
+        assert str(kb.resolve()) in out
+
+    def test_a_forced_clear_says_it_too(self, cfg, capsys):
+        """`factlog lang '' --force` writes `{}` — no language and no root."""
+        seed_truncated(cfg)
+        run_lang("", force=True)
+        assert json.loads(cfg.read_text(encoding="utf-8")) == {}
+        assert "records no KB root" in capsys.readouterr().out
+
+
 def test_force_names_the_root_as_the_loss_not_the_language(cfg, capsys):
     """``lost``, reused from the root-writing sites, named the wrong field.
 

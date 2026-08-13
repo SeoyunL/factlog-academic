@@ -905,6 +905,16 @@ def _env_override_note() -> str | None:
     return f"note: $FACTLOG_ROOT={resolved} outranks the config in this session (factlog where)"
 
 
+# How `resolve_root`'s source codes are named in prose. Shared, because two
+# sentences now report where a flagless command would land and they must not
+# call the same rank by two different names.
+_ROOT_SOURCE_LABEL = {
+    "env": "$FACTLOG_ROOT",
+    "config": "the active-KB config",
+    "cwd": "the current directory",
+}
+
+
 def _reach_note(target, *, quiet_when: str | None = None) -> str | None:
     """Say where a flagless command would actually go, when it is not *target*.
 
@@ -931,8 +941,7 @@ def _reach_note(target, *, quiet_when: str | None = None) -> str | None:
     effective, source = factlog_config.resolve_root()
     if effective == str(target) or source == quiet_when:
         return None
-    label = {"env": "$FACTLOG_ROOT", "config": "the active-KB config", "cwd": "the current directory"}
-    origin = label.get(source, source)
+    origin = _ROOT_SOURCE_LABEL.get(source, source)
     fix = f"pass --target {target}"
     if source == "env":
         fix += f", or point $FACTLOG_ROOT at {target}"
@@ -1321,6 +1330,21 @@ def cmd_lang(args: argparse.Namespace) -> int:
         # `lost`: the field this command sets is the language, so the one worth
         # naming is the root. See `_Unreadable`.
         print(f"  replaced an unreadable config ({replacing.lost_root})")
+        # …and then says what that leaves behind. `factlog use` cannot reach this
+        # state — it writes a replacement root in the same breath — but this exit
+        # writes only the language, so the config comes out of it recording no KB
+        # at all. SKILL.md opens every flow with
+        # `export FACTLOG_ROOT="$(factlog where --porcelain)"`, so a `--force` run
+        # from an arbitrary directory silently promotes *that directory* to the
+        # active KB on the next sync. Naming the fallback is the difference
+        # between a disclosed cost and a trap.
+        if factlog_config.read_root() is None:
+            effective, source = factlog_config.resolve_root()
+            origin = _ROOT_SOURCE_LABEL.get(source, source)
+            print(
+                f"  the config now records no KB root — a flagless command would target "
+                f"{effective} (from {origin}); record one with: factlog use <kb>"
+            )
     print(f"  config: {factlog_config.config_path()}")
     return 0
 
