@@ -792,6 +792,16 @@ class _Unreadable(NamedTuple):
     is gone" and say nothing at all about the link they had just replaced with a
     regular file.
 
+    ``lost_root`` is that same answer for the write that goes the other way.
+    ``lost`` is worded for the sites that set the **root** — what else the file
+    held is the language — and ``factlog lang --force`` (#366) sets the
+    **language**, where the thing at risk is the root. Reusing ``lost`` there
+    would have told a user who just destroyed a truncated ``{"root": "…"}`` that
+    a narration language was gone, naming the one field the command was setting
+    anyway and staying silent about the path it had actually dropped. The
+    symlink branch needs no mirror: ``os.replace`` swaps the link and leaves the
+    far end intact, so losing the indirection is the whole loss either way.
+
     Scope, because the sentence above is about the fragments and not about every
     symlinked config: every caller of this reaches it only inside the
     ``config_status() == UNREADABLE`` branch, so "loses its indirection" is
@@ -809,6 +819,7 @@ class _Unreadable(NamedTuple):
     cost: str
     remedy: str
     lost: str
+    lost_root: str
 
 
 def _unreadable() -> _Unreadable:
@@ -816,11 +827,11 @@ def _unreadable() -> _Unreadable:
     # Two questions, two predicates — see the class docstring. What a write
     # destroys is decided by the link alone, because `os.replace` swaps the link
     # and not its target, so the indirection goes whatever the far end holds.
-    lost = (
-        "the symlink is gone — it is a regular file now"
-        if path.is_symlink()
-        else "any narration language in it is gone"
-    )
+    if path.is_symlink():
+        lost = lost_root = "the symlink is gone — it is a regular file now"
+    else:
+        lost = "any narration language in it is gone"
+        lost_root = "any KB root it may still have held is gone"
     # What is *wrong* is decided by reachability. `config_status` classifies this
     # pair together because both mean "do not write"; only the words differ, so
     # the split is here rather than there.
@@ -835,6 +846,7 @@ def _unreadable() -> _Unreadable:
             # the `or` has to live in the fragment, not in one caller's glue.
             "mount it or re-point the link",
             lost,
+            lost_root,
         )
     return _Unreadable(
         "could not be read",
@@ -842,6 +854,7 @@ def _unreadable() -> _Unreadable:
         "destroy the KB root it may still hold",
         "repair that file",
         lost,
+        lost_root,
     )
 
 
@@ -1222,18 +1235,64 @@ def cmd_lang(args: argparse.Namespace) -> int:
     With a CODE: store it (validated via `_normalize_lang`, the shared contract) in
     the active-KB config, leaving the root untouched, then confirm. An empty/blank
     CODE clears the setting (reverts to conversation-language auto-detection).
+
+    "Leaving the root untouched" holds only for a config this process could read.
+    `write_lang` re-emits the whole file from `_read_config()`, which folds bad
+    JSON, a non-object, and an `OSError` alike into `{}` — so on a damaged config
+    the re-emitted file held the new language and nothing else, and a truncated
+    `{"root": "/…/kb",` that still carried the user's root *as text* became
+    unrecoverable (#366). #356 closed this for `init`/`setup` by asking
+    `config_status()` first and refusing on UNREADABLE; the language write is the
+    same hole through the sibling door, and is refused here in the same shape and
+    the same words. MISSING still writes — a first run must be able to set a
+    language before any `init` — and so does a config that parses but records no
+    root, which has no path to lose.
     """
     code = getattr(args, "code", None)
     if code is None:
-        # Query mode: one line, no label (empty line when unset).
+        # Query mode: one line, no label (empty line when unset). A read, so an
+        # unreadable config is not this branch's problem: `read_lang` folds it to
+        # None and prints the empty line, and adding a warning here would break
+        # the porcelain contract the skill parses.
         print(factlog_config.read_lang() or "")
         return 0
     normalized, error = _normalize_lang(code)
     if error is not None:
         print(f"factlog lang: {error}", file=sys.stderr)
         return 2
+    # Captured *before* the write, not merely tested before it: `--force` replaces
+    # a broken symlink with a regular file, so asking `_unreadable()` at print
+    # time would describe the file this command just created — the mistake
+    # `factlog use` documents at its own call site.
+    replacing = _unreadable() if factlog_config.config_status() == factlog_config.UNREADABLE else None
+    if replacing is not None and not getattr(args, "force", False):
+        # rc 1, not 0: setting the language is the *whole* of this command, so a
+        # run that did not set it must not hand a script the same signal as one
+        # that did — `setup --lang` exits 1 for this reason on the same refusal.
+        # Nothing is written, so `preserved` is the one place these fragments are
+        # literally true rather than a promise to keep.
+        #
+        # The retry line quotes the code the user actually typed rather than
+        # `<code>`: the clear action is `factlog lang ''`, and a placeholder there
+        # loses the one argument a reader would not guess.
+        import shlex
+
+        print(
+            f"factlog lang: narration language NOT set: {factlog_config.config_path()} "
+            f"{replacing.reason} — {replacing.preserved}, because writing it would "
+            f"{replacing.cost}. {replacing.remedy[0].upper()}{replacing.remedy[1:]}, "
+            f"or overwrite it deliberately: factlog lang {shlex.quote(code)} --force",
+            file=sys.stderr,
+        )
+        return 1
     phrase = _apply_lang(normalized)
     print(f"factlog lang: {phrase}")
+    if replacing is not None:
+        # The escape hatch says what it cost, as `factlog use` and `init
+        # --activate` do for the write that goes the other way. `lost_root`, not
+        # `lost`: the field this command sets is the language, so the one worth
+        # naming is the root. See `_Unreadable`.
+        print(f"  replaced an unreadable config ({replacing.lost_root})")
     print(f"  config: {factlog_config.config_path()}")
     return 0
 
@@ -3894,6 +3953,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="CODE",
         help="language code to set (e.g. ko, en); omit to print the current setting",
+    )
+    lang.add_argument(
+        "--force",
+        action="store_true",
+        help="set the language even when the active-KB config cannot be read, "
+        "replacing it (this discards any KB root it may still hold)",
     )
     lang.set_defaults(func=cmd_lang)
 
