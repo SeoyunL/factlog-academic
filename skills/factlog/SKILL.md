@@ -117,6 +117,15 @@ Set it with `factlog lang <code>` (or `factlog use <kb> --lang <code>` /
 returns to step 2. `factlog lang` with no argument is a porcelain contract —
 parse exactly that one line, do not scrape prose.
 
+**If setting the language exits 1, do not retry it and do not add `--force`.**
+Every setter rebuilds the whole config file, so when the config cannot be read
+(truncated JSON, unreadable mode, a symlink to an unmounted volume) they refuse
+rather than replace a KB root that may still be recoverable as text in those
+bytes. Nothing was written; the message names the file and the repair. Report it
+and let the user repair the file — `--force` sets the language by **discarding
+the recorded KB root**, and that is a choice for the person who owns the KB, not
+for you. Narrate in the step-2 language meanwhile.
+
 **Boundary — this changes ONLY your own prose. It does NOT change evidence:**
 
 - **Engine reports (`facts/logic_report.txt`) and CLI stdout stay verbatim** —

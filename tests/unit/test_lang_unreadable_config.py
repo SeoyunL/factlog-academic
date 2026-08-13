@@ -431,6 +431,24 @@ class TestEverySiteThatDeclinesKnowsTheWayOut:
         assert cfg.read_bytes() == b'{"root": "/Users/real/kb",'
 
 
+def test_skill_md_tells_the_assistant_what_the_new_rc_means(cfg):
+    """SKILL.md is what an assistant acts on, so a new refusal it does not
+    mention is a refusal the assistant will meet with no instruction.
+
+    Paired with the live rc below rather than asserted alone: a doc pin that only
+    greps prose passes on a tree where the prose is right and the code changed.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    text = open(
+        os.path.join(repo_root, "skills", "factlog", "SKILL.md"), encoding="utf-8"
+    ).read()
+    assert "exits 1" in text, "SKILL.md does not tell the assistant the setter can refuse"
+    assert "--force" in text, "SKILL.md does not warn the assistant off --force"
+
+    seed_truncated(cfg)
+    assert run_lang("ko") == 1, "SKILL.md documents an rc the code no longer returns"
+
+
 def test_invalid_code_is_still_rejected_before_the_config_is_consulted(cfg, capsys):
     """rc 2 (invalid input) outranks rc 1 (unwritable config): the value is wrong
     whatever the config says, and reporting the config instead would send the
