@@ -86,10 +86,17 @@
 # That degrade is made OBSERVABLE: when Python is available but the resolver
 # returns empty (package import failure), a one-line note is emitted so the
 # silent permissive fallback is visible to an operator (see below).
-# THREE branches DENY without evaluating the freshness predicate:
+# FOUR branches DENY without evaluating the freshness predicate:
 #   1. The python-availability check below DENYs when no usable Python 3.11+ is
 #      present, since the predicate cannot then be evaluated. Escape hatch:
 #      FACTLOG_PYTHON (point it at a usable interpreter).
+#   1b. The same reasoning covers a hooks/gate_payload.sh — the payload extractor
+#      shared with gate_reminder.sh (#359) — that cannot be sourced: with no
+#      extractor no target path can be read for any call at all. It is listed
+#      beside branch 1 rather than after branch 3 because it is the same
+#      condition (a broken install makes the predicate unevaluable), and it has
+#      NO escape hatch, since FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD releases
+#      branch 2 only.
 #   2. Target-path extraction DENYs only in the narrow case where the payload
 #      carries a `tool_input` JSON OBJECT, `tool_name` is one of the write-class
 #      tools this hook is registered for, and NO usable path can be read from
@@ -103,8 +110,8 @@
 #   3. _mtime() DENYs when `stat` cannot report a file's mtime. That branch has
 #      NO escape hatch; it is only reachable for a file this script has already
 #      seen pass `-f`, i.e. a race or an unreadable filesystem.
-# Only branches 1 and 2 carry an escape hatch, and only branches 1 and 2 are
-# about the payload/interpreter layer.
+# Only branches 1 and 2 carry an escape hatch. Branches 1, 1b and 2 are the ones
+# about the payload/interpreter layer; branch 3 is about the filesystem.
 #
 # Everything else fails OPEN (exit 0). Four of those branches are a check the
 # gate SKIPPED because it could not read the call, and each emits a one-line
@@ -306,104 +313,56 @@ else
   _note "note: factlog config resolver unavailable; freshness gate falling back to \${FACTLOG_ROOT:-cwd} (KB_ROOT=$KB_ROOT)"
 fi
 
-# Extract the tool target from the hook payload (issue #323).
+# Read the tool target out of the hook payload (issues #323, #359).
 #
-# Claude Code sends an ENVELOPE on stdin, not the bare tool input:
-#   {"session_id":..,"cwd":..,"hook_event_name":"PreToolUse","tool_name":"Write",
-#    "tool_input":{"file_path":..,"content":..},"tool_use_id":..}
-# so the target path lives under `tool_input`, which the previous extractor
-# never looked at — every real payload fell through to the fail-open branch.
+# The extractor itself — the key precedence, the NUL framing, and the three
+# fields of the record — lives in hooks/gate_payload.sh, shared with
+# hooks/gate_reminder.sh. That file's header carries the reasoning for all of
+# it; what stays here is how this gate LOADS the extractor and what it does when
+# no record comes back.
 #
-# Key precedence: `tool_input` first, then the TOP LEVEL as a fallback. No real
-# Claude Code payload puts `file_path` at the top level; that fallback exists to
-# keep the flat fixture shape used by tests/test_gate_check.sh working.
-# `notebook_path` is defensive only: hooks.json registers the matcher "Write|Edit",
-# which Claude Code compares by exact tool name, so NotebookEdit (and MultiEdit)
-# never reach this hook. It costs nothing and covers a user who widens the
-# matcher in their own settings.json.
+# LOADED BY ABSOLUTE PATH, off $HOOK_DIR. hooks.json invokes this hook as
+# `"${CLAUDE_PLUGIN_ROOT}"/hooks/gate_check.sh`, and Claude Code runs it with the
+# SESSION's cwd — the user's project directory, which is not the plugin root and
+# in general is nowhere near it. A relative source would therefore read whatever
+# file happens to sit at that path inside the project the model is editing, or
+# nothing at all, and the first of those is worse than the second.
 #
-# The extractor pulls each field under its OWN try/except and always writes
-# exactly three NUL-terminated fields, so a failure in one field cannot truncate
-# the others. NUL is the separator because a path may legally contain a newline,
-# and a newline separator misreads such a path (or, with a leading newline,
-# denies a perfectly legal write). A JSON string CAN itself contain a NUL, which
-# shifts the remaining fields; that is a wash here — a truncated engine-input
-# path still matches the engine input (deny), and a NUL-prefixed one is a path
-# the OS cannot write to anyway.
-#
-# Three fields, not two: `tool_name` is carried raw so the write-class decision
-# stays a readable `case` in shell right next to hooks.json's matcher, and so
-# the deny message can name the offending tool. Collapsing the tool name and the
-# tool_input shape into one field is possible, but it moves that decision into
-# the embedded Python where it is harder to audit.
-#
-# Fields are read straight off a pipe: bash command substitution silently drops
-# NUL bytes, so `$(...)` cannot capture this. A shell that cannot parse process
-# substitution would raise a SYNTAX error, and bash exits 2 on one — which
-# PreToolUse reads as DENY, not as a fail-open. That is unreachable in practice
-# (bash falls back to FIFOs where /dev/fd is missing, and macOS, Linux and Git
-# Bash all support it), so the code is left as is; it is noted only so the
-# failure direction is not misdescribed.
-GATE_EXTRACT_PY="
-import json, sys
-PATH_KEYS = (\"file_path\", \"path\", \"notebook_path\")
-UNPARSED = object()
-try:
-    payload = json.load(sys.stdin)
-except Exception:
-    payload = UNPARSED
-try:
-    name = payload.get(\"tool_name\")
-    tool_name = name if isinstance(name, str) else \"\"
-except Exception:
-    tool_name = \"\"
-try:
-    if payload is UNPARSED:
-        input_kind = \"unparsed\"
-    elif not isinstance(payload, dict) or \"tool_input\" not in payload:
-        input_kind = \"absent\"
-    elif isinstance(payload[\"tool_input\"], dict):
-        input_kind = \"object\"
-    else:
-        input_kind = \"other\"
-except Exception:
-    input_kind = \"absent\"
-try:
-    target = \"\"
-    nested = payload.get(\"tool_input\") if isinstance(payload, dict) else None
-    for source in (nested, payload):
-        if not isinstance(source, dict):
-            continue
-        for key in PATH_KEYS:
-            value = source.get(key)
-            if isinstance(value, str) and value:
-                target = value
-                break
-        if target:
-            break
-except Exception:
-    target = \"\"
-sys.stdout.write(tool_name + \"\\0\" + target + \"\\0\" + input_kind + \"\\0\")
-"
-
-tool_name=""
-target_path=""
-# Seeded with the value that describes "no record read yet" rather than a real
-# payload shape: every path below overwrites it, and a wrong seed would be a
-# lie waiting for a future edit to expose it.
-tool_input_kind="incomplete"
-if ! { IFS= read -r -d '' tool_name \
-    && IFS= read -r -d '' target_path \
-    && IFS= read -r -d '' tool_input_kind; } \
-    < <(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c "$GATE_EXTRACT_PY" 2>/dev/null); then
-  # The extractor produced no complete record (the interpreter died, or wrote
-  # something that is not three NUL-terminated fields). Treat it as an
-  # unparseable payload: fail OPEN, the pre-#323 behaviour. See the header for
-  # why this lands opposite to the narrow fail-closed branch below.
-  tool_name=""
-  target_path=""
-  tool_input_kind="incomplete"
+# A LIBRARY THAT CANNOT BE LOADED DENIES. That is a fourth DENY branch (the
+# header enumerates it), and it reasons like branch 1 rather than branch 2:
+# without the extractor NO target path can be read for ANY call, so no write can
+# be shown to miss an engine input, and the cause is a half-installed plugin
+# rather than a payload whose shape we failed to understand. Leaving it to
+# `set -e` would have been a silent fail-OPEN instead: a failed `.` exits 1, and
+# PreToolUse reads any non-zero that is not 2 as a non-blocking error, so the
+# write would proceed unchecked with the operator told only that a hook errored.
+# The `declare -f` probe closes the same hole one step further along — a library
+# that sources cleanly but defines nothing would otherwise reach a
+# `command not found`, which is exit 127, fail-open again.
+GATE_PAYLOAD_LIB="$HOOK_DIR/gate_payload.sh"
+if [ ! -r "$GATE_PAYLOAD_LIB" ] \
+  || ! . "$GATE_PAYLOAD_LIB" \
+  || ! declare -f factlog_hook_read_payload >/dev/null 2>&1; then
+  echo "[factlog GATE] DENIED: the shared payload extractor could not be loaded." >&2
+  echo "  Expected it at: $GATE_PAYLOAD_LIB" >&2
+  echo "  Without it no target path can be read, so this write cannot be shown to miss" >&2
+  echo "  facts/accepted.dl or facts/query.dl. That is an install problem rather than a" >&2
+  echo "  payload one: reinstall the factlog plugin so hooks/ ships whole." >&2
+  echo "  This branch has no escape hatch. FACTLOG_GATE_ALLOW_UNREADABLE_PAYLOAD=1" >&2
+  echo "  releases the payload-shape deny below and nothing else." >&2
+  exit 2
 fi
+
+factlog_hook_read_payload "$payload" "${PYTHON_RUNNER[@]}"
+target_path="$FACTLOG_HOOK_TARGET_PATH"
+tool_name="$FACTLOG_HOOK_TOOL_NAME"
+# "incomplete" means the extractor produced no record AT ALL — the interpreter
+# died, or wrote something that is not three NUL-terminated fields. The shared
+# reader seeds that value and the embedded Python can never write it, so the
+# branch below that names it is unambiguous. It is treated as an unparseable
+# payload: fail OPEN, the pre-#323 behaviour. See the header for why that lands
+# opposite to the narrow fail-closed branch further down.
+tool_input_kind="$FACTLOG_HOOK_TOOL_INPUT_KIND"
 
 # Write-class tool names, matched EXACTLY. A user may register this hook with a
 # broader matcher in their own settings.json, so the deny branch below must key

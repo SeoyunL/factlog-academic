@@ -13,10 +13,28 @@ set -euo pipefail
 export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB config (#62) from the dev machine
 
 GATE="$(cd "$(dirname "$0")/.." && pwd)/hooks/gate_check.sh"
+HOOKS_DIR="$(cd "$(dirname "$0")/.." && pwd)/hooks"
 PYTHON_RUNNER="$(cd "$(dirname "$0")/.." && pwd)/tools/factlog_python.sh"
 
 pass=0
 fail=0
+
+# ---------------------------------------------------------------------------
+# Helper: populate a fake plugin's hooks/ the way an INSTALL does.
+#
+# The gate does not ship alone. Since #359 it sources hooks/gate_payload.sh —
+# the payload extractor shared with hooks/gate_reminder.sh — by absolute path off
+# its own directory, and a fake plugin root that copies only gate_check.sh is not
+# an install, it is a half-install. Every case below that builds one would then
+# exercise the missing-extractor DENY instead of the branch it is named for, and
+# the two cases that expect exit 2 anyway would pass for the wrong reason. Copy
+# what the hook actually needs.
+# ---------------------------------------------------------------------------
+install_hooks() {
+  local dest="$1"
+  mkdir -p "$dest"
+  cp "$GATE" "$HOOKS_DIR/gate_payload.sh" "$dest/"
+}
 
 # ---------------------------------------------------------------------------
 # Helper: run gate for a given KB root, target file_path, and expected exit.
@@ -444,10 +462,10 @@ rm -rf "$KB_CWD"
 # stderr note disappears while the degrade stays silent.
 # ---------------------------------------------------------------------------
 FAKE_PLUGIN="$(mktemp -d)"
-mkdir -p "$FAKE_PLUGIN/hooks" "$FAKE_PLUGIN/factlog"
+mkdir -p "$FAKE_PLUGIN/factlog"
 printf 'raise ImportError("factlog package intentionally broken for gate observability test (#244)")\n' \
   > "$FAKE_PLUGIN/factlog/__init__.py"
-cp "$GATE" "$FAKE_PLUGIN/hooks/gate_check.sh"
+install_hooks "$FAKE_PLUGIN/hooks"
 
 # KB with an existing engine input and NO report → the prior behaviour, once
 # KB_ROOT degrades to $FACTLOG_ROOT, is DENY (exit 2). This proves the fallback
@@ -523,10 +541,10 @@ rm -rf "$KB_OK" "$ok_err"
 # is what takes the run through `_allow` instead of the deny path.
 # ---------------------------------------------------------------------------
 DEGRADE_PLUGIN="$(mktemp -d)"
-mkdir -p "$DEGRADE_PLUGIN/hooks" "$DEGRADE_PLUGIN/factlog"
+mkdir -p "$DEGRADE_PLUGIN/factlog"
 printf 'raise ImportError("factlog package intentionally broken for the exit-0 degrade note (CASE 17c)")\n' \
   > "$DEGRADE_PLUGIN/factlog/__init__.py"
-cp "$GATE" "$DEGRADE_PLUGIN/hooks/gate_check.sh"
+install_hooks "$DEGRADE_PLUGIN/hooks"
 
 KB_DEGRADE="$(mktemp -d)"
 make_kb "$KB_DEGRADE"
@@ -1440,10 +1458,10 @@ rm -rf "$TILDE_HOME"
 # ---------------------------------------------------------------------------
 KBTILDE_HOME="$(mktemp -d)"
 KBTILDE_PLUGIN="$(mktemp -d)"
-mkdir -p "$KBTILDE_PLUGIN/hooks" "$KBTILDE_PLUGIN/factlog"
+mkdir -p "$KBTILDE_PLUGIN/factlog"
 printf 'raise ImportError("factlog package intentionally broken to degrade the resolver (CASE 49b)")\n' \
   > "$KBTILDE_PLUGIN/factlog/__init__.py"
-cp "$GATE" "$KBTILDE_PLUGIN/hooks/gate_check.sh"
+install_hooks "$KBTILDE_PLUGIN/hooks"
 
 mkdir -p "$KBTILDE_HOME/kb/facts" "$KBTILDE_HOME/shared"
 touch_file "$KBTILDE_HOME/shared/my-queries.dl"

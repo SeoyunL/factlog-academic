@@ -20,19 +20,15 @@
 # with trains the reader to skip the line, and then it is not there when it
 # matters. This is the same defect #323 fixed in hooks/gate_check.sh.
 #
-# NOT SHARED WITH gate_check.sh, and that is a KNOWN COST, not an oversight.
-# Both hooks now read the same envelope with the same key precedence, so the
-# extractor below is a second copy of gate_check.sh's — and #337 exists because
-# a second, sloppier reader of this envelope drifted from the real one. A third
-# copy schedules the next divergence; saying "we will de-duplicate later" is the
-# promise that produced this bug.
-#
-# It is duplicated anyway because #338 is changing gate_check.sh's freshness
-# predicate right now (a report that records the engine did not run must stop
-# counting as a valid result), and two simultaneous refactors of a security gate
-# is the worse risk. The de-duplication is #359, which names #338 as its
-# predecessor — a tracked item with an unblocking condition, not a comment.
-# Whoever takes #359 deletes the extractor below and sources the shared one.
+# SHARED WITH gate_check.sh since #359. Both hooks read the same envelope with
+# the same key precedence, and they now do it with the same code:
+# hooks/gate_payload.sh, sourced below. Between #337 and #359 this hook carried
+# a second COPY of that extractor — #338 was rewriting gate_check.sh's freshness
+# predicate at the time and two simultaneous edits to a security gate was the
+# worse risk — which is the arrangement #337 itself was filed against. What is
+# left here is only what this hook does with the target once it has it, which is
+# genuinely different from what gate_check.sh does with it; see the next
+# paragraph.
 #
 # HOW MUCH IT CHECKS. Far less than gate_check.sh, on purpose. gate_check.sh
 # resolves the active KB root, canonicalises the path, and asks the filesystem
@@ -105,8 +101,9 @@
 # per-character work on the whole path reopens it, and CASES 35 and 35b of
 # tests/test_gate_reminder.sh are what notice.
 #
-# WHEN THE TARGET CANNOT BE READ (no usable Python, an unparseable payload, or
-# an envelope with no path key at all) it falls back to the payload-wide grep —
+# WHEN THE TARGET CANNOT BE READ (no usable Python, an unparseable payload, an
+# envelope with no path key at all, or — since #359 — a shared extractor that
+# will not load) it falls back to the payload-wide grep —
 # i.e. to the pre-#337 behaviour. That direction is the opposite of the one
 # gate_check.sh takes for a comparable blind spot, and deliberately so: there,
 # guessing costs a blocked write, so it falls open; here, guessing costs one
@@ -129,53 +126,42 @@ HOOK_DIR="$(cd "$_hook_dir" && pwd)"
 PYTHON_RUNNER_SCRIPT="${FACTLOG_PYTHON_RUNNER:-"$HOOK_DIR/../tools/factlog_python.sh"}"
 PYTHON_RUNNER=( "${BASH:-bash}" "$PYTHON_RUNNER_SCRIPT" )
 
-# Extract the tool target from the hook payload.
+# Read the tool target out of the hook payload (issues #337, #359).
 #
-# Claude Code sends an ENVELOPE on stdin, not the bare tool input:
-#   {"session_id":..,"cwd":..,"hook_event_name":"PostToolUse","tool_name":"Write",
-#    "tool_input":{"file_path":..,"content":..},"tool_response":{..}}
-# so the target path lives under `tool_input`. Key precedence matches
-# gate_check.sh: `tool_input` first, then the TOP LEVEL as a fallback for the
-# flat fixture shape the tests use. `notebook_path` is defensive only —
-# hooks.json registers the matcher "Write|Edit", compared by exact tool name, so
-# NotebookEdit never reaches this hook.
+# The extractor is hooks/gate_payload.sh, SHARED with hooks/gate_check.sh. Its
+# header carries the reasoning — the envelope shape, the `tool_input`-before-
+# top-level key precedence, the NUL framing. Until #359 this hook carried a
+# COPY of it, because #338 was rewriting gate_check.sh at the same time and two
+# simultaneous edits to a security gate was the worse risk. The copy is gone:
+# #337 exists precisely because a second reader of this envelope drifted from
+# the real one, and a second copy of the fixed reader schedules the same bug
+# again.
 #
-# `tool_input` FIRST is load-bearing, not cosmetic: the whole point of #337 is
-# that the path which decides the nudge must be the one the tool actually wrote
-# to, and that is the nested one.
+# Loaded by ABSOLUTE path off $HOOK_DIR, not relatively. hooks.json invokes this
+# hook as `"${CLAUDE_PLUGIN_ROOT}"/hooks/gate_reminder.sh` and Claude Code runs
+# it with the SESSION's cwd — the user's project, not the plugin — so a relative
+# source would read a file out of whatever project the model is editing.
 #
-# The field is NUL-terminated and read straight off a pipe rather than through
-# `$(...)`, because command substitution drops NUL bytes and strips trailing
-# newlines — and a path may legally contain a newline.
-GATE_EXTRACT_PY="
-import json, sys
-PATH_KEYS = (\"file_path\", \"path\", \"notebook_path\")
-try:
-    payload = json.load(sys.stdin)
-except Exception:
-    payload = None
-target = \"\"
-try:
-    nested = payload.get(\"tool_input\") if isinstance(payload, dict) else None
-    for source in (nested, payload):
-        if not isinstance(source, dict):
-            continue
-        for key in PATH_KEYS:
-            value = source.get(key)
-            if isinstance(value, str) and value:
-                target = value
-                break
-        if target:
-            break
-except Exception:
-    target = \"\"
-sys.stdout.write(target + \"\\0\")
-"
+# The shared record has three fields; this hook uses only `target`. The other
+# two exist for gate_check.sh, which has to tell a payload with no `tool_input`
+# object apart from one that has an object with no path key in it. Reading a
+# record it partly ignores is the price of there being ONE record shape.
+#
+# IF THE LIBRARY CANNOT BE LOADED the target stays empty, which routes to the
+# payload-wide grep below — the pre-#337 behaviour, exactly where a broken
+# interpreter and an unparseable payload already land. That is the OPPOSITE of
+# what gate_check.sh does with the same condition, and deliberately so: there a
+# missing extractor means a write cannot be shown to be safe, so it denies;
+# here it means one line of output might be wrong, so it errs toward still
+# saying something. This hook must not turn an install problem into silence.
+GATE_PAYLOAD_LIB="$HOOK_DIR/gate_payload.sh"
 
 target_path=""
-if ! IFS= read -r -d '' target_path \
-    < <(printf '%s' "$payload" | "${PYTHON_RUNNER[@]}" -c "$GATE_EXTRACT_PY" 2>/dev/null); then
-  target_path=""
+if [ -r "$GATE_PAYLOAD_LIB" ] \
+  && . "$GATE_PAYLOAD_LIB" \
+  && declare -f factlog_hook_read_payload >/dev/null 2>&1; then
+  factlog_hook_read_payload "$payload" "${PYTHON_RUNNER[@]}"
+  target_path="$FACTLOG_HOOK_TARGET_PATH"
 fi
 
 # Is this path one of the four engine inputs, judged by its last two components?
