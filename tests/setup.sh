@@ -6,8 +6,8 @@
 # network or a real pip install: on an interpreter that already has pyrewire
 # >=1.0.3 setup takes the "already satisfied, skip install" path — the pip
 # branch is exercised by code review (PEP 668 guidance), not here. Point PYTHON
-# at such an interpreter; on one without it, every assertion below fails for a
-# reason that has nothing to do with the `setup` command.
+# at such an interpreter; on one without the engine the run skips rather than
+# reporting failures about `setup` that are really about the interpreter.
 #
 # Asserts:
 #   - setup exits 0
@@ -18,7 +18,8 @@
 #   bash tests/setup.sh
 #   PYTHON=<interpreter> bash tests/setup.sh
 #
-# Returns 0 if all checks pass, 1 on first failure.
+# Returns 0 if all checks pass or pyrewire is absent (SKIP), 1 on first failure
+# or if PYTHON names something that cannot run.
 
 set -euo pipefail
 
@@ -27,41 +28,44 @@ export XDG_CONFIG_HOME="$(mktemp -d)/factlog-test-cfg"  # isolate active-KB conf
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Python interpreter: the engine (pyrewire) is required for setup's doctor
-# checks to pass, so an unset PYTHON prefers the prepared factlog-venv and falls
-# back to python3.
+# Python interpreter: the form the rest of tests/ uses. The caller's value used
+# to be overwritten unconditionally, so `PYTHON=<interpreter> bash tests/x.sh`
+# was silently discarded here — a run pointed at an interpreter WITH pyrewire
+# fell through to a bare python3 without it, and every assertion below failed for
+# a reason that had nothing to do with the `setup` command (#361, the defect
+# golden.sh carried in #354).
 #
-# The caller's value used to be overwritten unconditionally, so the
-# `PYTHON=<interpreter> bash tests/x.sh` convention the rest of tests/ follows
-# was silently discarded here (#361, the same defect golden.sh carried in #354).
-# On a machine without /tmp/factlog-venv a run told to use an interpreter WITH
-# pyrewire fell through to a bare python3 without it and reported 0 passed,
-# 9 failed — and the reverse misattribution is worse: a 9/9 under a PATH that
-# happened to hold a good python3 was read as "because I exported PYTHON", a
-# mechanism that did not exist.
+# No /tmp/factlog-venv branch: an implicit preference for a path the machine
+# shares would make this harness select a different interpreter from every other
+# one on any machine that has it. #354 tried that branch and took it back out
+# (4036ac5); a caller who wants that venv passes it, as everywhere else.
+PYTHON="${PYTHON:-python3}"
+
+# Say which interpreter ran. The misattribution this harness produced was not
+# caused by the choice but by the silence about it: a verdict printed without
+# the interpreter beside it gets explained by whatever the reader assumes.
+echo "PYTHON: $PYTHON"
+
+# An interpreter that cannot run at all is a different fact from one that runs
+# without the engine, and folding them together is how a mistyped path gets
+# reported as "this machine has no pyrewire". `import pyrewire` alone cannot
+# tell them apart — it fails identically — so the executable check comes first
+# and is fatal, and only a real interpreter can reach the skip below.
 #
-# golden.sh dropped its /tmp/factlog-venv branch entirely, on the ground that a
-# regression harness must not silently choose a different interpreter from the
-# other 39. This one keeps it: it is a dev-environment script whose whole
-# premise is an environment where pyrewire is already installed, and that path
-# is where this repo's dev setup puts it. The branch only runs when the caller
-# named nothing.
-if [ -z "${PYTHON:-}" ]; then
-  if [ -x "/tmp/factlog-venv/bin/python" ]; then
-    PYTHON="/tmp/factlog-venv/bin/python"
-  else
-    PYTHON="python3"
-  fi
-elif ! (cd "$PLUGIN_ROOT" && command -v "$PYTHON" >/dev/null 2>&1); then
-  # A named interpreter that cannot run must stop the harness, not fall back:
-  # dropping to python3 here would measure something other than what was asked
-  # for and report the verdict as if it were about the branch under test.
-  #
-  # Checked from PLUGIN_ROOT because that is where every step below invokes it,
-  # so a relative path is judged against the directory it will actually be
-  # resolved in rather than against the caller's cwd.
+# Checked from PLUGIN_ROOT because that is where every step invokes it, so a
+# relative path is judged against the directory it will actually resolve in.
+if ! (cd "$PLUGIN_ROOT" && command -v "$PYTHON" >/dev/null 2>&1); then
   echo "FATAL: PYTHON is not an executable interpreter: $PYTHON" >&2
   exit 1
+fi
+
+# Skip cleanly if pyrewire is absent. `setup` on an interpreter without the
+# engine cannot reach the "already satisfied" path this harness exists to check,
+# so the run says nothing about `setup` — reporting it as 9 failures names the
+# wrong subject.
+if ! "$PYTHON" -c "import pyrewire" >/dev/null 2>&1; then
+  echo "SKIP: pyrewire not installed; tests/setup.sh requires the engine"
+  exit 0
 fi
 
 # Overridable so a caller — the unit pin in particular — can keep the run inside
