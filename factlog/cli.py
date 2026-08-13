@@ -1189,25 +1189,53 @@ def _normalize_lang(code: str) -> tuple[str | None, str | None]:
 
 
 def _lang_force_hint(code: str) -> str:
-    """The exact command that sets *code* over a config that could not be read.
+    """The way out for a caller that has no KB to name: overwrite the config.
 
-    Three sentences now decline to set a narration language — ``factlog lang``'s
-    refusal and ``setup``'s two, in its notes and its rc-1 closing line — and only
-    the first of them knew ``--force`` existed. The other two ended "repair that
-    file, then set the language with `factlog lang`", which sent the user to run
-    a command that would refuse in turn; they learned about the way out one
-    wasted rc 1 later. That is precisely the drift ``_Unreadable`` exists to
-    prevent, so the fragment lives here once.
+    Three sentences decline to set a narration language — ``factlog lang``'s
+    refusal and ``setup``'s two, in its notes and its rc-1 closing line — and all
+    three used to end "repair that file, then set the language with
+    `factlog lang`", which sent the user to run a command that would refuse in
+    turn. They learned there was a way out one wasted rc 1 later.
+
+    The way out is not the same for all three, though, and saying it in one
+    vocabulary was the wrong correction. ``--force`` sets the language by
+    *discarding the recorded KB root*, and the command says so itself. That is
+    the best ``factlog lang`` can offer, because it holds no KB path to put back.
+    ``setup`` does — see ``_lang_via_use_hint``, which the other two sites use.
+    Two answers because the callers really are in two different positions, not
+    because the sentences drifted.
 
     The code is quoted rather than written ``<code>`` because the clear action is
     ``factlog lang ''`` and a placeholder loses the one argument a reader cannot
-    guess. ``setup --lang ko`` is answered with ``factlog lang ko --force``, not
-    ``setup --lang ko --force``: setup has no such flag, and inventing one in a
-    message would be a second lie.
+    guess. Quoting also keeps a code containing shell metacharacters from turning
+    a copy-pasted hint into a different command.
     """
     import shlex
 
     return f"factlog lang {shlex.quote(code)} --force"
+
+
+def _lang_via_use_hint(target, code: str) -> str:
+    """The way out for a caller that *does* hold a KB path: record both at once.
+
+    ``setup`` used to point at ``factlog lang <code> --force``, which is the more
+    destructive of the two exits and the one whose own output warns about the
+    state it leaves: it writes the language alone, so the config comes out
+    recording no KB root at all. ``factlog use <target> --lang <code>`` writes
+    both fields in one go, discloses the same loss, and leaves the user with the
+    KB ``setup`` just built — which is what they were setting a language *for*.
+
+    Pointing there is not setup quietly deciding to activate something. Its own
+    activation hint two lines above already recommends ``factlog use {target}``;
+    this makes the language sentence agree with it instead of sending the reader
+    somewhere its sibling line warns against.
+
+    ``setup --lang ko --force`` is deliberately not offered: ``setup`` has no such
+    flag, and naming one in a message would be a second lie.
+    """
+    import shlex
+
+    return f"factlog use {shlex.quote(str(target))} --lang {shlex.quote(code)}"
 
 
 def _apply_lang(normalized: str, command: str) -> str:
@@ -2902,7 +2930,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 f"narration language NOT set: {factlog_config.config_path()} {said.reason}, "
                 f"and writing it would {said.cost} — {said.remedy}, "
                 "then set the language with `factlog lang`; "
-                f"or set it over the damaged file: {_lang_force_hint(lang_normalized)}"
+                f"or record this KB and the language together: "
+                f"{_lang_via_use_hint(target, lang_normalized)}"
             )
         else:
             phrase = _apply_lang(lang_normalized, "factlog setup")
@@ -2942,8 +2971,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             f"\nfactlog setup: the KB at {target} is ready, but --lang was not applied "
             f"because {factlog_config.config_path()} {said.reason} (see above). "
             f"{said.remedy[0].upper()}{said.remedy[1:]}, then set the language "
-            f"with `factlog lang`; or set it over the damaged file: "
-            f"{_lang_force_hint(lang_normalized)}.",
+            f"with `factlog lang`; or record this KB and the language together: "
+            f"{_lang_via_use_hint(target, lang_normalized)}.",
             file=sys.stderr,
         )
         return 1

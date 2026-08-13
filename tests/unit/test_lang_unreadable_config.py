@@ -390,29 +390,40 @@ class TestTheWriteBoundary:
 
 
 class TestEverySiteThatDeclinesKnowsTheWayOut:
-    """Three sentences decline to set a language; only one knew `--force`.
+    """Three sentences decline to set a language; each must name a way out.
 
-    `setup --lang` ended both of its refusals with "then set the language with
-    `factlog lang`" — a command that, on the same damaged config, refuses in
-    turn. The user learned the escape hatch existed one wasted rc 1 later. That
-    is the drift `_Unreadable` was built to prevent, so the fragment is shared
-    and this asserts the sharing by behaviour, not by grepping the source.
+    All three used to end "then set the language with `factlog lang`" — a command
+    that, on the same damaged config, refuses in turn, so the user learned there
+    was a way out one wasted rc 1 later.
+
+    The way out is not the same for all three. `factlog lang` holds no KB path,
+    so the best it can offer is `--force`, which sets the language by discarding
+    the recorded root. `setup` holds `target`, so it can offer
+    `factlog use <target> --lang <code>`: both fields in one write, and the user
+    keeps the KB setup just built. Pointing setup at `--force` sent it to the
+    exit whose own output warns about the state it leaves.
     """
 
-    def test_the_hint_quotes_the_code_including_the_clear_action(self):
+    def test_the_force_hint_quotes_the_code_including_the_clear_action(self):
         assert cli._lang_force_hint("ko") == "factlog lang ko --force"
         assert cli._lang_force_hint("") == "factlog lang '' --force"
 
-    def test_lang_refusal_carries_it(self, cfg, capsys):
+    def test_the_use_hint_quotes_both_the_target_and_the_code(self, tmp_path):
+        kb = tmp_path / "my kb"
+        assert cli._lang_via_use_hint(kb, "ko") == f"factlog use '{kb}' --lang ko"
+        assert cli._lang_via_use_hint("/kb", "") == "factlog use /kb --lang ''"
+
+    def test_lang_refusal_carries_the_force_hint(self, cfg, capsys):
+        """No target to name here, so `--force` is the honest offer."""
         seed_truncated(cfg)
         run_lang("ko")
-        assert cli._lang_force_hint("ko") in capsys.readouterr().err
+        assert "factlog lang ko --force" in capsys.readouterr().err
 
-    def test_setup_carries_it_in_both_its_notes_and_its_closing_line(
+    def test_setup_points_at_use_in_both_its_notes_and_its_closing_line(
         self, cfg, capsys, tmp_path, monkeypatch
     ):
         """`setup --lang` produces two of the three sentences: a summary note and
-        the rc-1 closing line. Both must name it."""
+        the rc-1 closing line. Both must name the non-destroying way out."""
         import argparse
 
         monkeypatch.delenv("FACTLOG_ROOT", raising=False)
@@ -422,13 +433,59 @@ class TestEverySiteThatDeclinesKnowsTheWayOut:
         captured = capsys.readouterr()
 
         assert rc == 1, "a --lang that was not applied must not exit 0"
-        # Spelled out rather than taken from `_lang_force_hint`, so this fails on
-        # a tree where the two setup sites simply never learned the flag —
-        # asserting via the helper would only prove the helper exists.
-        assert "factlog lang ko --force" in captured.out, captured.out
-        assert "factlog lang ko --force" in captured.err, captured.err
+        # Spelled out rather than taken from the helper, so this fails on a tree
+        # where the two setup sites simply never learned it — asserting via the
+        # helper would only prove the helper exists.
+        expected = f"factlog use {kb.resolve()} --lang ko"
+        assert expected in captured.out, captured.out
+        assert expected in captured.err, captured.err
         # And the refusal it belongs to is still intact: nothing was written.
         assert cfg.read_bytes() == b'{"root": "/Users/real/kb",'
+
+    def test_setup_does_not_send_the_user_to_the_root_discarding_exit(
+        self, cfg, capsys, tmp_path, monkeypatch
+    ):
+        """The point of the change, stated as its own claim: setup knows a KB
+        path, so it must not recommend the exit that throws one away."""
+        import argparse
+
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+        seed_truncated(cfg)
+        cli.cmd_setup(argparse.Namespace(target=str(tmp_path / "kb"), lang="ko", activate=False))
+        captured = capsys.readouterr()
+        assert "--force" not in captured.out, captured.out
+        assert "--force" not in captured.err, captured.err
+
+    def test_following_setups_advice_leaves_both_fields_recorded(
+        self, cfg, capsys, tmp_path, monkeypatch
+    ):
+        """The advice is only good if running it works. Run it.
+
+        `--force` would have left `{"lang": "ko"}` and no root; this must leave
+        both, which is the whole reason the sentence changed.
+        """
+        import argparse
+        import shlex
+
+        monkeypatch.delenv("FACTLOG_ROOT", raising=False)
+        seed_truncated(cfg)
+        kb = tmp_path / "kb"
+        cli.cmd_setup(argparse.Namespace(target=str(kb), lang="ko", activate=False))
+        advice = [
+            line
+            for line in capsys.readouterr().out.splitlines()
+            if "factlog use" in line and "--lang" in line
+        ]
+        assert advice, "setup printed no runnable advice"
+        argv = shlex.split(advice[0].split("factlog use", 1)[1].strip().rstrip("."))
+
+        rc = cli.cmd_use(argparse.Namespace(target=argv[0], lang=argv[2]))
+
+        assert rc == 0
+        assert json.loads(cfg.read_text(encoding="utf-8")) == {
+            "root": str(kb.resolve()),
+            "lang": "ko",
+        }
 
 
 def test_skill_md_tells_the_assistant_what_the_new_rc_means(cfg):
