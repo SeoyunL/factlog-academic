@@ -82,11 +82,24 @@
 # a fragment of the tool name as the target and ALLOWED a write to an engine
 # input. It now reads the path and denies. Nothing reachable is affected —
 # `tool_name` is written by Claude Code, not by the model — but the direction is
-# the safe one, and the property is worth stating plainly: whatever else a
-# payload does to this record, `target` is read from the payload's path key or
-# is empty. A NUL inside the PATH still truncates `target` at the NUL, which is a
-# wash: a truncated engine-input path still matches the engine input (deny), and
-# a NUL-prefixed one is a path the OS cannot write to anyway.
+# the safe one.
+#
+# What the ordering buys is NARROW, and stating it broadly would be a lie the
+# next reader inherits. It buys exactly this: no OTHER field's contents can
+# displace `target`. It does NOT make `target` equal to the payload's path key in
+# every case, because there is a third state. A NUL inside the PATH truncates
+# `target` at that NUL, so the hooks see a PREFIX of the real path — and which
+# way that falls depends on where the NUL sits. Measured against a stale KB whose
+# intact engine-input write denies with rc 2:
+#   <KB>/facts/accepted.dl\0tail  ->  target = the whole engine input  ->  deny
+#   <KB>/facts/acc\0epted.dl      ->  target = "<KB>/facts/acc"        ->  ALLOW
+#   <KB>/fac\0ts/accepted.dl      ->  target = "<KB>/fac"              ->  ALLOW
+# So a NUL landing before the end of the basename walks the gate past the
+# engine-input match, silently. That is unreachable rather than harmless: the OS
+# rejects any path containing a NUL, so the write this would allow cannot be
+# performed. An earlier version of this comment called truncation "a wash"
+# because "a truncated engine-input path still matches the engine input" — that
+# is false in two of the three shapes above, and it was equally false on main.
 #
 # Fields are read straight off a pipe because bash command substitution silently
 # drops NUL bytes and strips trailing newlines, so `$(...)` cannot capture this.
