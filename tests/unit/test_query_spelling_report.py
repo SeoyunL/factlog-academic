@@ -20,7 +20,7 @@ import unicodedata
 import pytest
 
 import run_logic_check as rlc
-from factlog.common import kb_query_spellings, resolve_query_spellings
+from factlog.common import canonical_value, kb_query_spellings, resolve_query_spellings
 
 
 def nfc(value: str) -> str:
@@ -363,3 +363,78 @@ class TestResolutionOntoACanonicalAmount:
         assert warnings == [
             "query references non-engine entity or relation: amount(2000,億)"
         ]
+
+
+class TestPolicyBranchEchoNamesTheWrittenConstant:
+    """``validate_query``'s policy branch tests the RESOLVED constant and names
+    the WRITTEN one. Both halves need a pin; only the test half had one.
+
+    The echo half is unobservable through ``build_report_text``, which derives
+    *entities* and *spelling* from the same rows — a constant that resolved is
+    then necessarily in *entities*, so the warning cannot fire for it and the two
+    constants can never differ where a message is produced. That is a CALLER
+    invariant, not something ``validate_query`` enforces: it takes *entities* and
+    *spelling* as independent parameters and never checks one against the other.
+
+    So this calls it directly with a map whose value is deliberately absent from
+    *entities*. That is not a KB the pipeline can produce today, and it is the
+    point — it is the configuration a future second caller would introduce, and
+    the reason the message operand is written the way it is. Mutating
+    ``arg_value(args[0])`` to ``arg_value(query_args(resolved)[0])`` dies here and
+    nowhere else in the suite.
+    """
+
+    WRITTEN = nfd("한라산기지")
+    STORED = nfc("한라산기지")
+    # Values NOT a superset of the map's — the invariant build_report_text keeps
+    # and this caller breaks on purpose.
+    ENTITIES = {"무관한값"}
+    SPELLING = {canonical_value(WRITTEN): STORED}
+
+    def test_the_warning_names_the_spelling_the_author_typed(self) -> None:
+        """RED after mutating the message operand to the resolved constant:
+        the warning names 한라산기지 in the KB's NFC form, which the author never
+        wrote and cannot find in their query file."""
+        line = f'needs_review("{self.WRITTEN}", R)?'
+        errors, warnings = rlc.validate_query(
+            line, self.ENTITIES, {"needs_review"}, None, self.SPELLING
+        )
+        assert errors == []
+        assert warnings == [
+            f"query references non-engine entity: {self.WRITTEN}"
+        ]
+        assert self.STORED not in warnings[0]
+
+    def test_the_membership_test_reads_the_resolved_constant(self) -> None:
+        """The other half, kept beside it: with the stored spelling present in
+        *entities* the warning must NOT fire, even though the constant the author
+        wrote is absent from *entities* in that spelling. Mutating
+        ``query_args(resolved)[0]`` back to ``args[0]`` dies here."""
+        line = f'needs_review("{self.WRITTEN}", R)?'
+        _errors, warnings = rlc.validate_query(
+            line, {self.STORED}, {"needs_review"}, None, self.SPELLING
+        )
+        assert warnings == []
+
+
+class TestPairedConstantsFallback:
+    """``_paired_constants`` degrades rather than raising, and what it degrades TO
+    is the whole point: the unresolved reading, so the fallback can only warn
+    where the pre-resolution code warned.
+
+    Nothing pinned it. Deleting the guard (``zip(..., strict=False)``) and
+    inverting it (``[(c, c) for c in resolved]``) both left the suite green, so
+    the next refactor could take either. It is a guard for a caller that does not
+    exist yet, which is exactly the kind of branch that gets removed as dead — and
+    the branch whose previous annotation caused the desync bug.
+    """
+
+    def test_equal_lengths_zip_pairwise(self) -> None:
+        assert rlc._paired_constants(["a", "b"], ["A", "B"]) == [("a", "A"), ("b", "B")]
+
+    def test_a_desync_pairs_every_written_constant_with_ITSELF(self) -> None:
+        """Not truncated against the resolved list, and not the resolved list's
+        own constants. Both wrong answers keep the same length as one correct
+        one, so length alone does not distinguish them — assert the values."""
+        assert rlc._paired_constants(["a", "b"], ["A"]) == [("a", "a"), ("b", "b")]
+        assert rlc._paired_constants(["a"], ["A", "B"]) == [("a", "a")]
