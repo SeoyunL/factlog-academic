@@ -330,11 +330,14 @@ def validate_query(
     # ``build_report_text`` — that is the precise claim, and it is narrower than
     # "no pin is possible". The policy branch above has the identical shape and IS
     # pinned, by a direct call handing in a map whose values are not a subset of
-    # *entities*. The same construction would reach this loop. It is left unpinned
-    # because the vocabulary loop, unlike the policy branch, would need that
-    # fabricated caller to assert anything at all about a site no real caller can
-    # reach — so read the pin next door as covering the rule, and this comment as
-    # covering why the rule holds here without one.
+    # *entities*, and the same construction would reach this loop. So this site is
+    # unpinned by CHOICE, not by any structural difference from the one next door:
+    # that branch's echo half needs the same fabricated caller this one would, and
+    # both branches already carry a realistic membership pin beside them. The
+    # choice is that one worked example of the fabricated-caller construction is
+    # enough to fix the rule, and a second copy would pin the construction rather
+    # than the behaviour. Read the pin next door as covering the rule, and this
+    # comment as covering why the rule holds here too.
     # It is written this way so the rule "a message names what the
     # author wrote" holds by construction at every site, and so a future caller
     # passing a map derived from other rows cannot reintroduce the mismatch. The
@@ -421,10 +424,22 @@ def _paired_constants(written: list[str], resolved: list[str]) -> list[tuple[str
       query_args(resolved)`` RAISES ``ValueError`` on any arity but 2. Loud, at
       every mismatch.
     * ``validate_query``'s policy branch — ``query_args(resolved)[0]`` raises
-      ``IndexError``, but ONLY when the resolved line does not parse as an atom at
-      all. A resolved line that parses with the wrong arity still has an index 0
-      and passes through silently; ``needs_review()?`` yields ``['']`` and warns
-      about the empty constant rather than raising.
+      ``IndexError``, but TWO conditions must both hold, and neither alone is
+      enough. The resolved line must not parse as an atom at all, *and* the
+      WRITTEN argument 0 must be a quoted string: the operand sits behind
+      ``is_quoted_string(args[0]) and …``, so a variable there short-circuits it
+      away and the same unparseable resolved line raises nothing. Measured:
+
+          resolved does not parse, written arg0 quoted   -> IndexError
+          resolved does not parse, written arg0 variable -> errors=[] warnings=[]
+
+      A resolved line that DOES parse, with the wrong arity, still has an index 0
+      and passes through silently — ``needs_review()?`` yields ``['']``, so the
+      membership test asks about the empty constant and the warning that comes out
+      names the WRITTEN constant, ``query references non-engine entity: Alice``.
+      Worth saying precisely at a site whose whole subject is which constant a
+      message names: the empty string drives the verdict, the written one is
+      printed.
     * ``policy_result_line``'s ``filter_args`` — **never raises.**
       ``policy_row_matches`` iterates ``enumerate(args)`` behind an
       ``index >= len(row)`` guard and returns False, and the binding loop is
@@ -749,17 +764,33 @@ def evaluate_queries(
             # ``query_lines``' ``splitlines``. So the reachable set is DEL and C1
             # minus 0x85, and that is what the pin uses.
             #
-            # The derivation above is about the CHARACTER SET, not about this call
-            # site, so it carries verbatim to the other query-derived values this
-            # report prints: the `review_required` question echo, the
-            # `query must end with ?` error, and the path trace nodes. All three
-            # are reachable with the same bytes and none is pinned. They are
-            # main's, byte-identical, and left alone on purpose — `_LINE_BREAKS`
-            # above is pinned per FAMILY (newline, NUL, U+2028), one pin per
-            # carrier rather than one per call site, and adding three more here
-            # would be arguing with that policy rather than with a defect. Written
-            # down so the next reader does not re-derive the reachability and
-            # conclude the wrapping is decorative.
+            # The derivation above is SPECIFIC TO THIS CALL SITE and does not
+            # carry to the report's other unpinned `one_line` sites. It is worth
+            # saying which way it fails to carry, because the DEL+C1 set is
+            # NARROWER than what those sites admit — a reader who reuses it there
+            # would conclude they are safe against a class of input they are not.
+            # Measured on three of main's, each reachable with bytes this site's
+            # set excludes:
+            #
+            #   - the `review_required` question echo and the
+            #     `query must end with ?` error are query-derived, but neither
+            #     passes through the `json.loads` gate the derivation rests on.
+            #     The first reads `quoted_constants`, a raw regex; the second
+            #     fires before any `query_error`. So raw C0 reaches both:
+            #     `review_required("갑\x01봇")?` echoes as `'갑\x01봇'`.
+            #   - the path trace nodes are NOT query-derived at all. They come out
+            #     of `dependency_path` over the FACTS (see the comment at the trace
+            #     itself), so their carrier is the facts decoder, not query.dl, and
+            #     a real newline reaches them while the query line is spotless:
+            #     `path("갑봇", "을서비스")?` renders
+            #     `갑봇 -> '중간\n노드' -> 을서비스`.
+            #
+            # All three are SAFE — `one_line` wraps each — and all three stay
+            # unpinned on purpose. `_LINE_BREAKS` above is pinned per FAMILY
+            # (newline, NUL, U+2028), one pin per carrier rather than one per call
+            # site, and they are main's code byte for byte. Written down so the
+            # next reader neither re-derives the reachability nor imports this
+            # site's narrower answer to a site that needs a wider one.
             results.append(
                 f"count results (query: {one_line(line)}): {len(objects)} (distinct objects)"
             )
