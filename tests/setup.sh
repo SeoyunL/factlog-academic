@@ -64,7 +64,10 @@ elif ! (cd "$PLUGIN_ROOT" && command -v "$PYTHON" >/dev/null 2>&1); then
   exit 1
 fi
 
-SETUP_KB="/tmp/factlog-setup-test-kb"
+# Overridable so a caller — the unit pin in particular — can keep the run inside
+# its own scratch directory. The default is machine-wide: every checkout and
+# every parallel lane on the box shares it, and Step 1 begins by deleting it.
+SETUP_KB="${SETUP_KB:-/tmp/factlog-setup-test-kb}"
 
 pass=0
 fail=0

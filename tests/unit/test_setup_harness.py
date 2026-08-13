@@ -30,10 +30,11 @@ Three cases run the real harness as a subprocess and one reads its source:
    the branch only runs when the caller named nothing, so the pin is that the
    preference survives *behind* the caller's value rather than ahead of it.
 
-Case 1 runs Step 1, which begins ``rm -rf /tmp/factlog-setup-test-kb``. That
-path is the harness's own scratch KB — ``tests/setup.sh`` is the only file in
-the repo that names it — so running the harness deletes only output the harness
-itself produced.
+Case 1 runs Step 1, which begins by deleting the run's KB, so every case passes
+``SETUP_KB`` and keeps that KB inside its own ``tmp_path``. The harness's default
+is ``/tmp/factlog-setup-test-kb``: naming the path is not owning it, since every
+checkout and every parallel lane on the machine shares it, and a test that
+deletes it takes whatever another run had there.
 """
 from __future__ import annotations
 
@@ -64,6 +65,10 @@ def _run_setup(tmp_path: Path, python: Path | str) -> subprocess.CompletedProces
     # setup.sh redirects XDG_CONFIG_HOME itself; pin HOME too so no path in the
     # run can reach the developer's real ~/.config/factlog/config.json (#62).
     env["HOME"] = str(tmp_path / "home")
+    # Keep the run's KB inside this case's scratch directory. The harness's
+    # default is /tmp/factlog-setup-test-kb, which every checkout and every
+    # parallel lane on the machine shares, and Step 1 begins by deleting it.
+    env["SETUP_KB"] = str(tmp_path / "kb")
     return subprocess.run(
         ["bash", str(SETUP_SH)],
         cwd=REPO_ROOT,
