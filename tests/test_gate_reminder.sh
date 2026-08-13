@@ -523,6 +523,14 @@ run_case "target read from the 'notebook_path' key — silent" \
 # #337. With it missing the grep fires. One payload, two verdicts, so the pair
 # proves the fallback ran rather than that the hook fires on everything.
 #
+# A PREMISE WORTH WRITING DOWN: in the shipped configuration the fire arm is not
+# observable. hooks.json registers gate_check.sh on PreToolUse for the same
+# Write|Edit matcher, and a missing gate_payload.sh makes THAT hook deny every
+# such call (branch 1b), so the tool never runs and this PostToolUse hook never
+# fires at all. The #337 false positive really does come back when the library
+# goes missing, but only for someone running this hook on its own — which is what
+# this case does. It pins the hook's own contract, not a user-visible regression.
+#
 # A fake hooks/ directory holding gate_reminder.sh alone, rather than deleting
 # the real library, so the rest of the suite and any concurrent run are
 # untouched.
@@ -587,6 +595,69 @@ rm -rf "$NOLIB_HOOKS"
 # ---------------------------------------------------------------------------
 run_case "NUL inside tool_name — target still read, nudge survives" \
   '{"tool_name":"Wr\u0000ite","tool_input":{"file_path":"/kb/facts/accepted.dl"}}' fire
+
+# ---------------------------------------------------------------------------
+# CASE 45: A gate_payload.sh IN THE CWD IS NOT SOURCED (#359).
+#
+# Sourcing runs arbitrary code, so the library is read from the directory this
+# SCRIPT lives in and nowhere else. The one invocation form where
+# `${BASH_SOURCE[0]}` carries no path — `bash gate_reminder.sh` from inside some
+# directory — must therefore skip the source rather than fall back to ".".
+#
+# #359 is what made this worth closing. Before it the nearest thing this hook
+# sourced was `$HOOK_DIR/../tools/factlog_python.sh`, in a PARENT directory; the
+# shared library brought a sourced path down into the SAME directory a decoy
+# would sit in.
+#
+# The decoy here is a library that reports a harmless target. If it were sourced,
+# the engine-input payload would extract "/decoy/..." and the hook would go
+# SILENT. It must fire — via the documented empty-target fallback — instead.
+# Removing `_hook_dir_is_script_dir` from the source guard turns this case red.
+# ---------------------------------------------------------------------------
+CWD_DECOY="$(mktemp -d)"
+cp "$HOOK" "$CWD_DECOY/gate_reminder.sh"
+cat > "$CWD_DECOY/gate_payload.sh" <<'DECOY'
+factlog_hook_read_payload() {
+  FACTLOG_HOOK_TARGET_PATH="/decoy/not/an/engine/input"
+  FACTLOG_HOOK_TOOL_NAME="Write"
+  FACTLOG_HOOK_TOOL_INPUT_KIND="object"
+  return 0
+}
+DECOY
+ENGINE_PAYLOAD='{"tool_name":"Write","tool_input":{"file_path":"/kb/facts/accepted.dl","content":"a"}}'
+
+decoy_exit=0
+decoy_err="$(cd "$CWD_DECOY" && printf '%s' "$ENGINE_PAYLOAD" \
+  | FACTLOG_PYTHON_RUNNER="$REAL_RUNNER" bash gate_reminder.sh 2>&1 >/dev/null)" || decoy_exit=$?
+case "$decoy_err" in
+  *"An engine input was edited"*) decoy_fired=fire ;;
+  *) decoy_fired=silent ;;
+esac
+if [ "$decoy_fired" = "fire" ] && [ "$decoy_exit" -eq 0 ]; then
+  echo "PASS: bare-name invocation ignores a gate_payload.sh in the cwd (fire, exit 0)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: bare-name invocation — expected fire/exit 0, got $decoy_fired/exit $decoy_exit"
+  fail=$((fail + 1))
+fi
+
+# CONTROL: the identical decoy IS sourced when the hook is reached by a path, so
+# the case above is not passing merely because the decoy is inert.
+ctl_exit=0
+ctl_err="$(printf '%s' "$ENGINE_PAYLOAD" \
+  | FACTLOG_PYTHON_RUNNER="$REAL_RUNNER" bash "$CWD_DECOY/gate_reminder.sh" 2>&1 >/dev/null)" || ctl_exit=$?
+case "$ctl_err" in
+  *"An engine input was edited"*) ctl_fired=fire ;;
+  *) ctl_fired=silent ;;
+esac
+if [ "$ctl_fired" = "silent" ] && [ "$ctl_exit" -eq 0 ]; then
+  echo "PASS: control — the same decoy IS sourced via a path, and silences the nudge (silent, exit 0)"
+  pass=$((pass + 1))
+else
+  echo "FAIL: control — expected the decoy to silence the nudge, got $ctl_fired/exit $ctl_exit"
+  fail=$((fail + 1))
+fi
+rm -rf "$CWD_DECOY"
 
 echo "---"
 echo "gate_reminder: $pass passed, $fail failed"
