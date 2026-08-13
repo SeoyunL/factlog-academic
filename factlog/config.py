@@ -152,11 +152,20 @@ def read_lang() -> str | None:
 
 
 def write_root(path: str | os.PathLike) -> Path:
-    """Record *path* as the active KB, preserving any configured ``lang``.
+    """Record *path* as the active KB, preserving a ``lang`` it could read.
 
     Returns the config file path written. Root and language are independent
     settings, so re-pointing the active KB must never drop a language the user
     already set.
+
+    The preservation is only as good as the read: ``_read_config`` folds an
+    unreadable file into ``{}``, so on a damaged config this re-emits the root
+    and nothing else, and whatever those bytes held is gone. That is deliberate
+    at the two callers that reach it — ``factlog use`` and ``init --activate``
+    are the advertised way out of a damaged config, and both name the loss
+    first — but it is **not** a property of this function, so ask
+    ``config_status()`` before calling it from anywhere new. Wording it as an
+    unconditional promise is how the sibling ``write_lang`` acquired #366.
     """
     cfg = config_path()
     data = _read_config()
@@ -166,12 +175,25 @@ def write_root(path: str | os.PathLike) -> Path:
 
 
 def write_lang(code: str | None) -> Path:
-    """Set (or clear) the narration language, preserving the configured ``root``.
+    """Set (or clear) the narration language, preserving a ``root`` it could read.
 
     A non-empty *code* is stored trimmed; passing None or an empty/whitespace
     string removes the field (reverting to conversation-language behaviour).
-    Returns the config file path written. The ``root`` field is read back and
-    re-emitted untouched so setting a language never disturbs the active KB.
+    Returns the config file path written.
+
+    The ``root`` field is read back and re-emitted untouched — *when the file
+    parsed*. It used to say "so setting a language never disturbs the active KB",
+    without that clause, and the clause is the whole of #366: ``_read_config``
+    folds bad JSON, a non-object and an ``OSError`` alike into ``{}``, so on a
+    damaged config there is no root to re-emit and ``factlog lang`` replaced a
+    truncated ``{"root": "/…/kb",`` — where the path was still recoverable as
+    text — with a file holding only the language.
+
+    Callers ask ``config_status()`` first and refuse on ``UNREADABLE``; the
+    guard is not here because both writers need an explicit override
+    (``factlog lang --force``, ``factlog use``), and a refusal raised from this
+    depth cannot say which of the two damaged classes it is looking at or what
+    the command is about to cost. See ``cmd_lang`` and ``_plan_activation``.
     """
     cfg = config_path()
     data = _read_config()
