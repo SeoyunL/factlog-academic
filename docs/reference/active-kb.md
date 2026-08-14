@@ -144,7 +144,7 @@ factlog init: active-KB config at /Users/me/.config/factlog/config.json is a sym
 말을 씁니다.
 
 ```text
-factlog setup: the KB at /tmp/scratch is ready, but --lang was not applied because /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now (see above). Mount it or re-point the link, then set the language with `factlog lang`.
+factlog setup: the KB at /tmp/scratch is ready, but --lang was not applied because /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now (see above). Mount it or re-point the link, then set the language with `factlog lang`; or record this KB and the language together: factlog use /tmp/scratch --lang ko.
 ```
 
 점검이 실패하면 그 자리는 환경 문제를 알리는 줄로 바뀌고, `--lang` 이 거절됐다는 사실은

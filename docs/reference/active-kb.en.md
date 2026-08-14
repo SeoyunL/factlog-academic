@@ -144,7 +144,7 @@ When the final environment check passes, the line that `setup --lang` closes wit
 over such a config uses those same words, too.
 
 ```text
-factlog setup: the KB at /tmp/scratch is ready, but --lang was not applied because /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now (see above). Mount it or re-point the link, then set the language with `factlog lang`.
+factlog setup: the KB at /tmp/scratch is ready, but --lang was not applied because /Users/me/.config/factlog/config.json is a symlink whose target is not reachable right now (see above). Mount it or re-point the link, then set the language with `factlog lang`; or record this KB and the language together: factlog use /tmp/scratch --lang ko.
 ```
 
 If that check fails, this line is replaced by the one reporting the environment
