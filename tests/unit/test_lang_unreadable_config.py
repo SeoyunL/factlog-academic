@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 
 import pytest
 
@@ -291,6 +292,34 @@ def test_query_mode_leaves_a_damaged_config_alone_and_stays_porcelain(cfg, capsy
     assert captured.err == ""
 
 
+def run_cli(cfg, *argv, deadline=None):
+    """Invoke the real CLI in a subprocess against *cfg*'s isolated config home.
+
+    Subprocess rather than in-process for two claims only a real process can
+    settle: what reached stderr (``Traceback`` is not an exception a caller can
+    catch), and whether the command returned at all. *deadline* is for the
+    second — see ``TestAConfigPathThatIsNotAFile`` — and is None everywhere else
+    so a genuinely slow machine cannot turn a passing test red.
+    """
+    import subprocess
+    import sys
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return subprocess.run(
+        [sys.executable, "-m", "factlog", *argv],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "XDG_CONFIG_HOME": str(cfg.parent.parent),
+            "PYTHONPATH": repo_root,
+        },
+        check=False,
+        timeout=deadline,
+    )
+
+
 class TestTheWriteBoundary:
     """`factlog lang` must reach the same OSError boundary the root write does.
 
@@ -326,24 +355,6 @@ class TestTheWriteBoundary:
         # Restore before teardown, or pytest cannot clean up tmp_path.
         cfg.parent.chmod(0o700)
 
-    def run_cli(self, cfg, *argv):
-        import subprocess
-        import sys
-
-        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        return subprocess.run(
-            [sys.executable, "-m", "factlog", *argv],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "XDG_CONFIG_HOME": str(cfg.parent.parent),
-                "PYTHONPATH": repo_root,
-            },
-            check=False,
-        )
-
     def assert_explained(self, proc, cfg):
         assert proc.returncode != 0, proc.stdout + proc.stderr
         assert "Traceback" not in proc.stderr, proc.stderr
@@ -358,20 +369,20 @@ class TestTheWriteBoundary:
         assert not strays, f"a failed write left {strays} behind while claiming nothing changed"
 
     def test_force_explains_instead_of_crashing_on_a_directory(self, blocked_by_a_directory):
-        proc = self.run_cli(blocked_by_a_directory, "lang", "ko", "--force")
+        proc = run_cli(blocked_by_a_directory, "lang", "ko", "--force")
         self.assert_explained(proc, blocked_by_a_directory)
 
     def test_the_refusal_it_prints_names_a_command_that_works(self, blocked_by_a_directory):
         """The refusal and the crash were one command apart: whatever `--force`
         does here, it must not be a traceback."""
-        refusal = self.run_cli(blocked_by_a_directory, "lang", "ko")
+        refusal = run_cli(blocked_by_a_directory, "lang", "ko")
         assert refusal.returncode == 1
         assert "factlog lang ko --force" in refusal.stderr, refusal.stderr
-        forced = self.run_cli(blocked_by_a_directory, "lang", "ko", "--force")
+        forced = run_cli(blocked_by_a_directory, "lang", "ko", "--force")
         assert "Traceback" not in forced.stderr, forced.stderr
 
     def test_a_readable_config_under_an_unwritable_dir_explains(self, blocked_by_an_unwritable_dir):
-        proc = self.run_cli(blocked_by_an_unwritable_dir, "lang", "ko")
+        proc = run_cli(blocked_by_an_unwritable_dir, "lang", "ko")
         self.assert_explained(proc, blocked_by_an_unwritable_dir)
         # The diagnosis must name the directory, not the config file: deleting
         # config.json drops the root and lang without unblocking the write.
@@ -379,13 +390,13 @@ class TestTheWriteBoundary:
 
     def test_the_unwritable_dir_case_keeps_the_config_intact(self, blocked_by_an_unwritable_dir):
         before = blocked_by_an_unwritable_dir.read_bytes()
-        self.run_cli(blocked_by_an_unwritable_dir, "lang", "ko")
+        run_cli(blocked_by_an_unwritable_dir, "lang", "ko")
         assert blocked_by_an_unwritable_dir.read_bytes() == before
 
     def test_the_message_names_the_command_that_could_not_write(self, blocked_by_a_directory):
         """`_apply_lang` is shared by three commands, so the boundary is told
         which one is speaking rather than hard-coding `factlog use`."""
-        proc = self.run_cli(blocked_by_a_directory, "lang", "ko", "--force")
+        proc = run_cli(blocked_by_a_directory, "lang", "ko", "--force")
         assert "factlog lang: cannot write" in proc.stderr, proc.stderr
 
 
@@ -564,3 +575,70 @@ def test_invalid_code_is_still_rejected_before_the_config_is_consulted(cfg, caps
     assert run_lang("x" * 100) == 2
     assert snapshot(cfg) == before
     assert "too long" in capsys.readouterr().err
+
+
+# Bounds an *infinite* wait, not a slow one: a `factlog lang` subprocess starts
+# and returns in well under a second, and the class below is the only caller.
+_FIFO_DEADLINE = 15
+
+
+class TestAConfigPathThatIsNotAFile:
+    """A FIFO at the config path made `factlog lang` wait forever.
+
+    ``config_status`` read every path that got past the MISSING gate. A directory
+    and a socket landed on UNREADABLE through the ``except`` — ``IsADirectoryError``
+    and ``ENXIO`` — but a FIFO has no error to raise: opening one for reading
+    blocks until a writer appears, and for a config path nobody else holds, that
+    is never.
+
+    The defect predates this PR — ``use`` and ``init --activate`` have hung on it
+    since #356 — but this is the PR that walks ``factlog lang`` through the same
+    door, and doing so turns the loss into a different one: ``origin/main``
+    destroys the FIFO silently with rc 0, and an unbounded wait in an
+    agent-driven flow is no better than a silent failure. So the classification
+    is settled by ``is_file()`` and the read is never attempted, which is the
+    treatment the directory class was already given deliberately.
+
+    ``tests/unit/test_factlog_config.py`` pins the classifier itself; this pins
+    the command, because the sentence and the exit code are what a caller sees.
+    """
+
+    @pytest.fixture
+    def fifo(self, cfg):
+        os.mkfifo(cfg)
+        assert stat.S_ISFIFO(os.lstat(cfg).st_mode), "precondition: the path must be a FIFO"
+        return cfg
+
+    def run_within_deadline(self, cfg, *argv):
+        """``run_cli``, but a wait that never ends fails as a sentence rather
+        than stalling the suite until CI kills the job."""
+        import subprocess
+
+        try:
+            return run_cli(cfg, *argv, deadline=_FIFO_DEADLINE)
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                f"`factlog {' '.join(argv)}` did not return within {_FIFO_DEADLINE}s — "
+                "config_status() opened the FIFO for reading and is waiting for a "
+                "writer that will never come"
+            )
+
+    def test_it_is_refused_rather_than_waited_on(self, fifo):
+        proc = self.run_within_deadline(fifo, "lang", "ko")
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "narration language NOT set" in proc.stderr, proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+
+    def test_the_fifo_survives_the_refusal(self, fifo):
+        """The refusal says it left the path alone; a FIFO replaced by a regular
+        file would make that sentence false the same way a destroyed symlink did."""
+        self.run_within_deadline(fifo, "lang", "ko")
+        assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+
+    def test_a_query_is_not_blocked_either(self, fifo):
+        """`factlog lang` with no code is a one-line porcelain contract SKILL.md
+        parses. It reads through ``read_lang``, which was already immune — but it
+        is the call an assistant makes first, so its silence is worth a pin."""
+        proc = self.run_within_deadline(fifo, "lang")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout == "\n"

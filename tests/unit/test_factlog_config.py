@@ -2,6 +2,10 @@
 """Unit tests for the shared prepass resolver (#107)."""
 from __future__ import annotations
 
+import os
+import stat
+import threading
+
 import pytest
 
 import factlog_config
@@ -146,6 +150,11 @@ class TestNormalizeLang:
         assert error is not None and "too long" in error
 
 
+# Bounds an *infinite* wait, so it is generous rather than a performance budget:
+# every other call in this class returns in microseconds.
+_STATUS_DEADLINE = 10
+
+
 class TestConfigStatus:
     """Readers may fold every failure into None; a writer may not (#356).
 
@@ -188,6 +197,40 @@ class TestConfigStatus:
 
         assert not path.exists(), "precondition: the link must dangle"
         assert factlog_config.config_status() == factlog_config.UNREADABLE
+
+    def test_a_fifo_is_unreadable_without_being_opened(self):
+        """A path that ``exists()`` but is not a regular file must not be read.
+
+        A directory and a socket reached UNREADABLE through the ``except`` —
+        ``IsADirectoryError`` and ``ENXIO`` — so the right answer arrived by the
+        wrong route, and a **FIFO** is where that route stops working: opening
+        one for reading blocks until a writer appears, and for a config path
+        nobody else holds, that is never. ``_read_config`` was immune only
+        because it filters on ``is_file()`` first, so root *resolution* never
+        hung; the status check is what every writer asks first.
+
+        A hang cannot be pinned by an assertion, so the call runs on a daemon
+        thread with a deadline: the defect fails as a sentence instead of
+        stalling the suite, and the abandoned reader — a blocked ``open`` cannot
+        be interrupted — does not hold the interpreter open on the way out.
+        """
+        path = factlog_config.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        assert stat.S_ISFIFO(os.lstat(path).st_mode), "precondition: the path must be a FIFO"
+
+        answered = []
+        reader = threading.Thread(
+            target=lambda: answered.append(factlog_config.config_status()), daemon=True
+        )
+        reader.start()
+        reader.join(timeout=_STATUS_DEADLINE)
+
+        assert not reader.is_alive(), (
+            f"config_status() did not return within {_STATUS_DEADLINE}s — it opened the "
+            "FIFO for reading and is waiting for a writer that will never come"
+        )
+        assert answered == [factlog_config.UNREADABLE]
 
     def test_object_is_readable(self):
         self._write('{"root": "/kb"}')

@@ -94,6 +94,17 @@ def config_status() -> str:
     # right now answered "nothing here". Something *is* here — a link the user
     # placed on purpose — and the write that followed replaced the link itself
     # with a regular file, which remounting the volume no longer undoes.
+    #
+    # ``is_file()`` before the read, for the third member of the same family:
+    # ``read_text`` on a *FIFO* blocks until a writer appears, and for a config
+    # path nobody else holds that is never. A directory and a socket reached
+    # UNREADABLE through the ``except`` below, so the right answer was arriving by
+    # a route that only happens to raise; a FIFO is where it stops. Anything that
+    # is here and is not a regular file is unreadable by inspection, and
+    # inspecting it cannot block. ``_read_config`` has filtered this way all
+    # along, which is why root *resolution* never hung and only the writers did.
+    if not path.is_file():
+        return UNREADABLE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
