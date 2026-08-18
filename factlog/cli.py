@@ -5169,10 +5169,24 @@ def cmd_eject(args: argparse.Namespace) -> int:
 
 
 def _make_zotero_client(config):
-    """Build the real Zotero client. Indirected so tests can inject a fake."""
+    """Build the real Zotero client, backend already resolved. Indirected so
+    tests can inject a fake.
+
+    Resolving here runs the client's pre-connection checks (mode / local_port /
+    pyzotero) at build time, so a command can narrate "Connecting to Zotero"
+    knowing a connection is actually the next thing that happens (#625). The
+    checks are not restated here — `resolve_backend()` only forces `_connect()`,
+    which remains their single definition.
+
+    Because of that, this raises `ZoteroError` (unsupported mode/port, missing
+    pyzotero) and `ZoteroConnectionError`: call it *inside* the `try` that maps
+    those to exit 1 and exit 2, not above it.
+    """
     from factlog.integrations.zotero.api_client import ZoteroClient
 
-    return ZoteroClient(config)
+    client = ZoteroClient(config)
+    client.resolve_backend()
+    return client
 
 
 def _convert_placed_pdfs(target, paths, *, quiet: bool) -> int:
@@ -5260,12 +5274,17 @@ def cmd_zotero_import(args: argparse.Namespace) -> int:
         items = None
         label = f'tag "{args.tag}"'
 
-    _human("Connecting to Zotero (Local API)...")
     # No microseconds: a tidy, stable provenance timestamp in the front matter.
     imported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     try:
+        # Build (and so pre-check) the client before announcing the connection:
+        # an unsupported mode/port or a missing pyzotero fails here, and the user
+        # is told that cause instead of "Connecting..." to an API never used
+        # (#625). Inside the try, so both keep their exit codes.
+        client = _make_zotero_client(config)
+        _human("Connecting to Zotero (Local API)...")
         report = import_items(
-            _make_zotero_client(config),
+            client,
             target=target,
             config=config,
             collection=args.collection,
