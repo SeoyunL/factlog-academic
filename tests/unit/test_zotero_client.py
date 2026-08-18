@@ -301,6 +301,43 @@ class TestModeGuard:
             c.list_collections()
 
 
+class TestResolveBackend:
+    """`resolve_backend()` forces `_connect()` early, through the error contract.
+
+    Callers use it to run the checks in `_connect()` before announcing a
+    connection (#625). Those checks raise `ZoteroError` on their own, so they
+    cannot pin *how* the resolution is routed; what pins it is the part
+    `_connect()` does not own — pyzotero's own constructor.
+    """
+
+    def test_a_construction_time_socket_error_is_a_connection_error(self, monkeypatch):
+        # Build the client through pyzotero and a refused socket comes back as a
+        # bare OSError. Unrouted, that reaches the CLI as a traceback; routed
+        # through _fetch it is the same exit-2 connection failure as any other
+        # transport error. Errno 61 = ECONNREFUSED, what a stopped Zotero gives.
+        def _boom(self):
+            raise OSError(61, "Connection refused")
+
+        monkeypatch.setattr(ZoteroClient, "_connect", _boom)
+        c = ZoteroClient(ZoteroConfig())
+        with pytest.raises(ZoteroConnectionError, match="is Zotero running") as ei:
+            c.resolve_backend()
+        assert isinstance(ei.value.__cause__, OSError)
+
+    def test_an_injected_backend_resolves_without_connecting(self, monkeypatch):
+        # The injected-backend path (every other test in this file, and the
+        # CLI's fakes) must not gain a connection attempt from the early
+        # resolution: `backend` is already set, so `_connect()` never runs.
+        def _refuse(self):
+            raise AssertionError("_connect() ran despite an injected backend")
+
+        monkeypatch.setattr(ZoteroClient, "_connect", _refuse)
+        backend = FakeBackend(items=[PREPRINT])
+        c = ZoteroClient(ZoteroConfig(), backend=backend)
+        assert c.resolve_backend() is backend
+        assert backend.calls == []
+
+
 class TestIdsEdge:
     def test_empty_ids_returns_empty_without_backend_call(self):
         backend = FakeBackend(items=[PREPRINT])

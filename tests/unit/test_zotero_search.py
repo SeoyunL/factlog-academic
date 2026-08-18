@@ -7,6 +7,11 @@ backend so they stay deterministic and pyzotero-free, mirroring
 ``test_zotero_client.py``'s convention — a minimal stand-in that records the
 kwargs it was called with, so an assertion can prove ``q``/``qmode``/``limit``
 reached the API unchanged.
+
+The class at the bottom is the exception: it tests when the client is built
+(#625), so it builds the real one and lets pyzotero be looked up. Still no
+network — each case is decided inside ``_connect()``, from config or a failed
+import, before a socket exists.
 """
 from __future__ import annotations
 
@@ -317,8 +322,10 @@ def _policy(kb, body):
 
     The ``[connection]`` header is not decoration: ``from_mapping`` reads that
     section only, so a top-level ``mode = ...`` parses fine and is then ignored.
-    A test that dropped it would fall back to the operator's own settings (or to
-    the defaults) and reach a real Zotero on localhost:23119.
+    A test that dropped it would fall through to the built-in defaults — the
+    user-level file is out of reach, since conftest's ``isolated_user_config``
+    sandboxes ``$HOME``/``$XDG_CONFIG_HOME`` — and those defaults are local mode
+    on port 23119, i.e. whatever Zotero is actually running on this machine.
     """
     (kb / "policy").mkdir(exist_ok=True)
     (kb / "policy" / "zotero-config.toml").write_text(body, encoding="utf-8")

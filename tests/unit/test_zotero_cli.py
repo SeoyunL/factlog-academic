@@ -3,6 +3,11 @@
 
 The real Zotero client is replaced via _make_zotero_client so the command runs
 without a live library. A temp KB (with sources/) is the import target.
+
+The two classes at the bottom are the exception: ``_make_zotero_client`` is
+itself what they test (#625), so they build the real client. They still reach no
+network — each case is decided inside ``_connect()``, from config or a failed
+import, before a socket exists.
 """
 from __future__ import annotations
 
@@ -22,8 +27,10 @@ def _policy(kb, body):
 
     The ``[connection]`` header is not decoration: ``from_mapping`` reads that
     section only, so a top-level ``mode = ...`` parses fine and is then ignored.
-    A test that dropped it would fall back to the operator's own settings (or to
-    the defaults) and reach a real Zotero on localhost:23119.
+    A test that dropped it would fall through to the built-in defaults — the
+    user-level file is out of reach, since conftest's ``isolated_user_config``
+    sandboxes ``$HOME``/``$XDG_CONFIG_HOME`` — and those defaults are local mode
+    on port 23119, i.e. whatever Zotero is actually running on this machine.
     """
     (kb / "policy").mkdir(exist_ok=True)
     (kb / "policy" / "zotero-config.toml").write_text(body, encoding="utf-8")
