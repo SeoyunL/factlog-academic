@@ -5510,11 +5510,14 @@ def cmd_zotero_search(args: argparse.Namespace) -> int:
         print(f"factlog zotero-search: {exc}", file=sys.stderr)
         return 1
 
-    _narrate(f'Searching Zotero (Local API): "{args.query}"...', porcelain=porcelain)
     try:
-        items, total = _make_zotero_client(config).search_items(
-            args.query, qmode=args.qmode, limit=limit
-        )
+        # Build (and so pre-check) the client before announcing the search, for
+        # the reason zotero-import does: an unsupported mode/port or a missing
+        # pyzotero must report itself, not a Local API lookup that never ran
+        # (#625). Inside the try, so both keep their exit codes.
+        client = _make_zotero_client(config)
+        _narrate(f'Searching Zotero (Local API): "{args.query}"...', porcelain=porcelain)
+        items, total = client.search_items(args.query, qmode=args.qmode, limit=limit)
     except ZoteroConnectionError as exc:
         print(f"factlog zotero-search: {exc}", file=sys.stderr)
         return 2

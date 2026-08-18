@@ -310,3 +310,62 @@ class TestRun:
         rc = _run(monkeypatch, ["zotero-search", "x", "--porcelain", "--target", str(kb)], client)
         assert rc == 0
         assert capsys.readouterr().out.splitlines()[-1] == "found\t2"
+
+
+def _policy(kb, body):
+    """Write the KB-scoped Zotero policy file the command will load.
+
+    The ``[connection]`` header is not decoration: ``from_mapping`` reads that
+    section only, so a top-level ``mode = ...`` parses fine and is then ignored.
+    A test that dropped it would fall back to the operator's own settings (or to
+    the defaults) and reach a real Zotero on localhost:23119.
+    """
+    (kb / "policy").mkdir(exist_ok=True)
+    (kb / "policy" / "zotero-config.toml").write_text(body, encoding="utf-8")
+    return kb
+
+
+class TestPreconditionsDecideBeforeNarration:
+    """`zotero-search`'s half of #625 — the same defect, a different string.
+
+    The issue scoped this command out ("이 내레이션이 없어 해당 없음"), literally
+    true of the words "Connecting to Zotero" and false of the behaviour: the line
+    here reads "Searching Zotero (Local API)" and was printed before anything had
+    checked whether the Local API was even the configured transport.
+
+    These build the *real* client — `_make_zotero_client` is the seam under test,
+    so patching it would test nothing. None of the three reaches the network.
+    """
+
+    def test_web_mode_never_claims_to_search_the_local_api(self, tmp_path, capsys):
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "web"\n')
+        rc = cli.main(["zotero-search", "x", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Searching Zotero" not in cap.out
+        assert "'web' mode is not supported" in cap.err
+
+    def test_unsupported_local_port_never_claims_to_search(self, tmp_path, capsys):
+        # 9999 is a valid TCP port, so it survives the config loader (an
+        # out-of-range value would be clamped back to 23119 and check nothing)
+        # and is rejected by `_connect()` as the unsupported port that it is.
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 9999\n')
+        rc = cli.main(["zotero-search", "x", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Searching Zotero" not in cap.out
+        assert "local_port=9999 is not supported" in cap.err
+
+    def test_missing_pyzotero_never_claims_to_search(self, tmp_path, monkeypatch, capsys):
+        import sys
+
+        # `None` in sys.modules is how the import system spells "this module is
+        # not importable", so the guard fires whether or not pyzotero is really
+        # installed in the running interpreter.
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 23119\n')
+        monkeypatch.setitem(sys.modules, "pyzotero", None)
+        rc = cli.main(["zotero-search", "x", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Searching Zotero" not in cap.out
+        assert "pyzotero is required" in cap.err
