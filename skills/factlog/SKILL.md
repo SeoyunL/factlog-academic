@@ -1295,20 +1295,20 @@ for the shared contract, and `docs/zotero-import.md` / `docs/openalex.md` /
 
 ### Selectors and required arguments
 
-**No command below imports from a bare positional string.** Selection is by
-flag: a row's *Required selector* names the flags that choose what to act on,
-and a row reading *(none — whole KB)* takes no selector because it acts on the
-whole KB. Where a positional argument is accepted — `zotero-search`'s `query` —
-it is a search term: it lists matches, selects nothing, and imports nothing.
-Where a row says *exactly one of*, the flags are an
-argparse mutually-exclusive **required** group: omitting all of them is an error
-(`error: one of the arguments --collection --tag --items is required`), and
-passing two is also an error.
+**No command below imports from a bare positional string.** A row's *Required
+selector* names what chooses the target, and for every command that acts on
+records that is a flag; a row reading *(none — whole KB)* takes no selector
+because it acts on the whole KB. Where a positional argument is accepted —
+`zotero-search`'s `query` — it is a search term: it lists matches, selects
+nothing, and imports nothing. Where a row says *exactly one of*, the flags are
+an argparse mutually-exclusive **required** group: omitting all of them is an
+error (`error: one of the arguments --collection --tag --items is required`),
+and passing two is also an error.
 
 | Command | Required selector | Notes |
 | --- | --- | --- |
 | `zotero-import` | **exactly one of** `--collection NAME` \| `--tag TAG` \| `--items KEY,KEY` | `--pdf` also fetches PDF attachments; `--annotations` also imports highlights/notes into `sources/<stem>-notes.md` |
-| `zotero-search` | `QUERY` (positional, not a flag) | imports nothing — it lists matches so a human can choose; `--qmode titleCreatorYear` (default) \| `everything` (full-text); `--limit` default 25, max 200, but `found` is Zotero's match total, not the row count — it is counted before attachments and notes are filtered out, and a search does not page, so there is no page 2 to ask for; no `--dry-run` (nothing to preview), no `--all`; still needs a KB — outside one it exits 1 with `… is not a factlog KB (no sources/)`; each result's key feeds `zotero-import --items` |
+| `zotero-search` | `QUERY` (positional, not a flag) | imports nothing — it lists matches so a human can choose; `--qmode titleCreatorYear` (default) \| `everything` (full-text); `--limit` default 25, max 200; no `--dry-run`, no `--all`; needs a KB (exit 1 outside one); 0 hits is an honest exit 0, but an unreachable Local API is exit 2 — never report "not in your library" without checking which; result keys feed `zotero-import --items` |
 | `openalex-search` | `--query TEXT` | costs 10 credits per search; `--year`, `--type`, `--limit` (default 25, max 200), `--all` |
 | `openalex-import` | **exactly one of** `--work-id W…` \| `--doi 10.…` | free |
 | `openalex-cite` | `--for <source-slug>` | `--direction citing\|cited\|both` (default `citing`), `--limit`, `--auto-import` |
@@ -1394,8 +1394,9 @@ and non-destructive, nothing downstream will flag the mistake.
 
 3. **Only then run the real import**, with the selector the human named.
 
-The same rule generalises to the other three imports, and to `zotero-search`,
-which answers a different question than the one above:
+The same rule generalises to the other three imports. `zotero-search` is on the
+list for a different reason: it answers a different question, and is easy to
+mistake for the probe above:
 
 - `openalex-import` — a string shaped like `W2741809807` is a `--work-id`; one
   shaped like `10.1007/s10462-023-10448-w` is a `--doi`. **Anything else is not
@@ -1414,10 +1415,11 @@ which answers a different question than the one above:
 - `zotero-search` — it does not settle the question above. It answers *"is this
   paper in my library?"*, not *"is this string a collection or a tag"*: Zotero's
   quick search runs over **items**, and a collection is not an item, so zero hits
-  never rules a collection out and hits never rule one in. Use
-  `zotero-search "<text>"` to find a paper, then show the human the keys it lists
-  and let them say which one `zotero-import --items` should receive. The selector
-  question above stays exactly where step 2 left it: with the human.
+  never rules a collection out and hits never rule one in. Reach for it only when
+  the human's question really is that first one: `zotero-search "<text>"` lists
+  the matches, and you show them the keys so they can say which one
+  `zotero-import --items` should receive. While you are disambiguating a selector
+  it is not a probe — that question stays where step 2 left it, with the human.
 - `openalex-cite --for` / `pubmed-mesh --for` — a paper *title* is not a slug.
   Resolve it against `factlog sources` and ask if more than one source matches.
 
