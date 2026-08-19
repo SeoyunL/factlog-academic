@@ -196,7 +196,7 @@ class ZoteroClient:
             from pyzotero import zotero
         except ImportError as exc:
             raise ZoteroError(
-                "pyzotero is required for zotero-import: "
+                "pyzotero is required for the Zotero integration: "
                 "pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'"
             ) from exc
         return zotero.Zotero("0", "user", local=True)

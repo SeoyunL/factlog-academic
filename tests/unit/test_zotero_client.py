@@ -332,6 +332,9 @@ class TestPyzoteroGuard:
         # Presence of the right string does not rule out the wrong one sitting
         # beside it, where the user reads it first -- which is #228 restored.
         assert "factlog[zotero]" not in msg
+        # The client does not know which command called it, so it names none
+        # of them; the CLI prefix already says which one ran (#626).
+        assert "zotero-import" not in msg and "zotero-search" not in msg
 
 
 class TestResolveBackend:

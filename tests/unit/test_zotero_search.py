@@ -376,6 +376,8 @@ class TestPreconditionsDecideBeforeNarration:
         assert rc == 1
         assert "Searching Zotero" not in cap.out
         assert "pyzotero is required" in cap.err
+        # ...and names no other command than the one the user ran (#626).
+        assert "zotero-import" not in cap.err
 
 
 class TestBuildTimeConnectionFailure:
