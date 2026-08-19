@@ -3,6 +3,11 @@
 
 The real Zotero client is replaced via _make_zotero_client so the command runs
 without a live library. A temp KB (with sources/) is the import target.
+
+The two classes at the bottom are the exception: ``_make_zotero_client`` is
+itself what they test (#625), so they build the real client. They still reach no
+network — each case is decided inside ``_connect()``, from config or a failed
+import, before a socket exists.
 """
 from __future__ import annotations
 
@@ -15,6 +20,21 @@ from factlog.integrations.zotero.api_client import ZoteroConnectionError, Zotero
 def _kb(tmp_path):
     (tmp_path / "sources").mkdir()
     return tmp_path
+
+
+def _policy(kb, body):
+    """Write the KB-scoped Zotero policy file the command will load.
+
+    The ``[connection]`` header is not decoration: ``from_mapping`` reads that
+    section only, so a top-level ``mode = ...`` parses fine and is then ignored.
+    A test that dropped it would fall through to the built-in defaults — the
+    user-level file is out of reach, since conftest's ``isolated_user_config``
+    sandboxes ``$HOME``/``$XDG_CONFIG_HOME`` — and those defaults are local mode
+    on port 23119, i.e. whatever Zotero is actually running on this machine.
+    """
+    (kb / "policy").mkdir(exist_ok=True)
+    (kb / "policy" / "zotero-config.toml").write_text(body, encoding="utf-8")
+    return kb
 
 
 def _item(key, title="T"):
@@ -438,3 +458,127 @@ class TestNarrationOrdering:
         assert "Connecting to Zotero" in merged
         assert "not found" in merged
         assert merged.index("Connecting to Zotero") < merged.index("not found")
+
+
+class TestPreconditionsDecideBeforeNarration:
+    """The three `_connect()` checks must fail before "Connecting..." is printed.
+
+    These build the *real* client — `_make_zotero_client` is the seam under test,
+    so patching it would test nothing. None of the three reaches the network:
+    mode and local_port are rejected from config alone, and the pyzotero one
+    fails at import. The KB policy file pins what each run is judging, so the
+    other two checks pass and the failure is the intended one.
+    """
+
+    def test_web_mode_never_claims_to_connect_to_the_local_api(self, tmp_path, capsys):
+        # The clearest case in #625: config asked for `web`, and the CLI announced
+        # the Local API it was never going to use.
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "web"\n')
+        rc = cli.main(["zotero-import", "--collection", "X", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Connecting to Zotero" not in cap.out
+        assert "'web' mode is not supported" in cap.err
+
+    def test_unsupported_local_port_never_claims_to_connect(self, tmp_path, capsys):
+        # 9999 is a valid TCP port, so it survives the config loader (an
+        # out-of-range value would be clamped back to 23119 and check nothing)
+        # and is rejected by `_connect()` as the unsupported port that it is.
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 9999\n')
+        rc = cli.main(["zotero-import", "--tag", "t", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Connecting to Zotero" not in cap.out
+        assert "local_port=9999 is not supported" in cap.err
+
+    def test_missing_pyzotero_never_claims_to_connect(self, tmp_path, monkeypatch, capsys):
+        import sys
+
+        # `None` in sys.modules is how the import system spells "this module is
+        # not importable", so the guard fires whether or not pyzotero is really
+        # installed in the running interpreter.
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 23119\n')
+        monkeypatch.setitem(sys.modules, "pyzotero", None)
+        rc = cli.main(["zotero-import", "--collection", "X", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Connecting to Zotero" not in cap.out
+        assert "pyzotero is required" in cap.err
+
+
+class TestBackendIsResolvedBeforeNarration:
+    def test_connect_runs_before_the_connecting_line(self, tmp_path, monkeypatch, capsys):
+        # The class above pins the failing order; this pins the passing one, on a
+        # config that resolves. Patched at `ZoteroClient._connect` rather than at
+        # `_make_zotero_client`, which is the seam being tested — and at
+        # `_connect` rather than at the backend, so no socket is opened.
+        from types import SimpleNamespace
+
+        from factlog.integrations.zotero import importer as zotero_importer
+        from factlog.integrations.zotero.api_client import ZoteroClient
+
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 23119\n')
+        events: list[str] = []
+
+        def _record_connect(self):
+            events.append("connect")
+            return object()
+
+        real_narrate = cli._narrate
+
+        def _record_narrate(*a, **k):
+            events.append(" ".join(str(x) for x in a))
+            return real_narrate(*a, **k)
+
+        report = SimpleNamespace(
+            outcomes=[], imported=0, skipped=0, errors=0, pdf_outcomes=[],
+            pdf_placed=0, pdf_skipped=0, pdf_errors=0, annotations_written=0,
+            annotations_updated=0, annotations_skipped=0, annotation_errors=0,
+        )
+        monkeypatch.setattr(ZoteroClient, "_connect", _record_connect)
+        monkeypatch.setattr(cli, "_narrate", _record_narrate)
+        monkeypatch.setattr(zotero_importer, "import_items", lambda *a, **k: report)
+
+        rc = cli.main(["zotero-import", "--tag", "t", "--target", str(kb)])
+        assert rc == 0
+        assert "connect" in events, events
+        connecting = [i for i, e in enumerate(events) if "Connecting to Zotero" in e]
+        assert connecting, events
+        assert events.index("connect") < connecting[0], events
+
+
+class TestBuildTimeConnectionFailure:
+    """A connection that fails while *building* the client still exits 2.
+
+    `resolve_backend()` moved the connection attempt into `_make_zotero_client`,
+    inside the command's existing try — where `ZoteroConnectionError` is a
+    `ZoteroError` subclass, so ordering the two `except` clauses the other way
+    round (or collapsing them) would silently downgrade exit 2 to exit 1. The
+    query-time case is pinned by `TestRun.test_connection_error_exits_2`; this
+    pins the build-time one, plus the narration it must not print.
+
+    Not covered under `--porcelain`: `_narrate` suppresses output there, which
+    would make the absence assertion vacuous, while the exit path is shared and
+    already covered here.
+    """
+
+    @staticmethod
+    def _refuse(monkeypatch):
+        # Raised from `_connect()`, i.e. from inside `resolve_backend()` — the
+        # socket-level failure a stopped Zotero produces, which `_classify`
+        # maps to ZoteroConnectionError. No network is touched.
+        from factlog.integrations.zotero.api_client import ZoteroClient
+
+        def _boom(self):
+            raise OSError(61, "Connection refused")
+
+        monkeypatch.setattr(ZoteroClient, "_connect", _boom)
+
+    def test_unreachable_at_build_time_exits_2_without_narrating(self, tmp_path, monkeypatch, capsys):
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 23119\n')
+        self._refuse(monkeypatch)
+        rc = cli.main(["zotero-import", "--collection", "X", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 2
+        assert "Connecting to Zotero" not in cap.out
+        assert "is Zotero running" in cap.err

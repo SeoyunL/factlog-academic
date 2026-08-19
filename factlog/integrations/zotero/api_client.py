@@ -194,12 +194,30 @@ class ZoteroClient:
             )
         try:
             from pyzotero import zotero
-        except ImportError as exc:  # pragma: no cover - environment without the extra
+        except ImportError as exc:
             raise ZoteroError(
                 "pyzotero is required for zotero-import: "
                 "pip install 'factlog-academic[zotero] @ git+https://github.com/SeoyunL/factlog-academic'"
             ) from exc
         return zotero.Zotero("0", "user", local=True)
+
+    def resolve_backend(self):
+        """Resolve :attr:`backend` now instead of at the first query.
+
+        The three checks in :meth:`_connect` (mode / local_port / pyzotero) need
+        no I/O, but ``backend`` is lazy, so they used to run only once a query
+        was already under way — after the caller had announced a connection it
+        might never attempt (#625). A caller forces them by calling this first;
+        the checks themselves stay defined only in :meth:`_connect`.
+
+        Routing through :meth:`_fetch` changes nothing for those three — they
+        raise :class:`ZoteroError` either way. It is here for what is left over:
+        pyzotero's constructor is not part of this module's contract, so an
+        httpx/OSError escaping it would otherwise propagate raw, while through
+        :meth:`_fetch` it classifies as :class:`ZoteroConnectionError` like
+        every other transport failure.
+        """
+        return self._fetch(lambda: self.backend)
 
     def _fetch(self, thunk):
         """Run a backend call, mapping failures to the client's error contract.

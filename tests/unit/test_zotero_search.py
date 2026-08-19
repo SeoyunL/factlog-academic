@@ -7,6 +7,11 @@ backend so they stay deterministic and pyzotero-free, mirroring
 ``test_zotero_client.py``'s convention — a minimal stand-in that records the
 kwargs it was called with, so an assertion can prove ``q``/``qmode``/``limit``
 reached the API unchanged.
+
+The class at the bottom is the exception: it tests when the client is built
+(#625), so it builds the real one and lets pyzotero be looked up. Still no
+network — each case is decided inside ``_connect()``, from config or a failed
+import, before a socket exists.
 """
 from __future__ import annotations
 
@@ -310,3 +315,95 @@ class TestRun:
         rc = _run(monkeypatch, ["zotero-search", "x", "--porcelain", "--target", str(kb)], client)
         assert rc == 0
         assert capsys.readouterr().out.splitlines()[-1] == "found\t2"
+
+
+def _policy(kb, body):
+    """Write the KB-scoped Zotero policy file the command will load.
+
+    The ``[connection]`` header is not decoration: ``from_mapping`` reads that
+    section only, so a top-level ``mode = ...`` parses fine and is then ignored.
+    A test that dropped it would fall through to the built-in defaults — the
+    user-level file is out of reach, since conftest's ``isolated_user_config``
+    sandboxes ``$HOME``/``$XDG_CONFIG_HOME`` — and those defaults are local mode
+    on port 23119, i.e. whatever Zotero is actually running on this machine.
+    """
+    (kb / "policy").mkdir(exist_ok=True)
+    (kb / "policy" / "zotero-config.toml").write_text(body, encoding="utf-8")
+    return kb
+
+
+class TestPreconditionsDecideBeforeNarration:
+    """`zotero-search`'s half of #625 — the same defect, a different string.
+
+    The issue scoped this command out ("이 내레이션이 없어 해당 없음"), literally
+    true of the words "Connecting to Zotero" and false of the behaviour: the line
+    here reads "Searching Zotero (Local API)" and was printed before anything had
+    checked whether the Local API was even the configured transport.
+
+    These build the *real* client — `_make_zotero_client` is the seam under test,
+    so patching it would test nothing. None of the three reaches the network.
+    """
+
+    def test_web_mode_never_claims_to_search_the_local_api(self, tmp_path, capsys):
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "web"\n')
+        rc = cli.main(["zotero-search", "x", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Searching Zotero" not in cap.out
+        assert "'web' mode is not supported" in cap.err
+
+    def test_unsupported_local_port_never_claims_to_search(self, tmp_path, capsys):
+        # 9999 is a valid TCP port, so it survives the config loader (an
+        # out-of-range value would be clamped back to 23119 and check nothing)
+        # and is rejected by `_connect()` as the unsupported port that it is.
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 9999\n')
+        rc = cli.main(["zotero-search", "x", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Searching Zotero" not in cap.out
+        assert "local_port=9999 is not supported" in cap.err
+
+    def test_missing_pyzotero_never_claims_to_search(self, tmp_path, monkeypatch, capsys):
+        import sys
+
+        # `None` in sys.modules is how the import system spells "this module is
+        # not importable", so the guard fires whether or not pyzotero is really
+        # installed in the running interpreter.
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 23119\n')
+        monkeypatch.setitem(sys.modules, "pyzotero", None)
+        rc = cli.main(["zotero-search", "x", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 1
+        assert "Searching Zotero" not in cap.out
+        assert "pyzotero is required" in cap.err
+
+
+class TestBuildTimeConnectionFailure:
+    """`zotero-search`'s half: a build-time connection failure still exits 2.
+
+    `resolve_backend()` moved the connection attempt into `_make_zotero_client`,
+    inside the command's existing try — where `ZoteroConnectionError` is a
+    `ZoteroError` subclass, so ordering the two `except` clauses the other way
+    round (or collapsing them) would silently downgrade exit 2 to exit 1. The
+    query-time case is pinned by `TestRun.test_connection_failure_exits_2`; this
+    pins the build-time one, plus the narration it must not print.
+
+    Not covered under `--porcelain`: `_narrate` suppresses output there, which
+    would make the absence assertion vacuous, while the exit path is shared and
+    already covered here.
+    """
+
+    def test_unreachable_at_build_time_exits_2_without_narrating(self, tmp_path, monkeypatch, capsys):
+        # Raised from `_connect()`, i.e. from inside `resolve_backend()` — the
+        # socket-level failure a stopped Zotero produces, which `_classify`
+        # maps to ZoteroConnectionError. No network is touched.
+        def _boom(self):
+            raise OSError(61, "Connection refused")
+
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 23119\n')
+        monkeypatch.setattr(ZoteroClient, "_connect", _boom)
+        rc = cli.main(["zotero-search", "x", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 2
+        assert "Searching Zotero" not in cap.out
+        assert "is Zotero running" in cap.err
