@@ -1394,7 +1394,8 @@ and non-destructive, nothing downstream will flag the mistake.
 
 3. **Only then run the real import**, with the selector the human named.
 
-The same rule generalises to the other three:
+The same rule generalises to the other three imports, and to `zotero-search`,
+which answers a different question than the one above:
 
 - `openalex-import` — a string shaped like `W2741809807` is a `--work-id`; one
   shaped like `10.1007/s10462-023-10448-w` is a `--doi`. **Anything else is not
@@ -1410,6 +1411,13 @@ The same rule generalises to the other three:
   exact query without spending a request) or `--dry-run`, then ask.
 - `pubmed-import` — `--pmid` takes numeric PMIDs. Free text is not a PMID: use
   `pubmed-search --query "<text>" --show-query` / `--dry-run`, then ask.
+- `zotero-search` — it does not settle the question above. It answers *"is this
+  paper in my library?"*, not *"is this string a collection or a tag"*: Zotero's
+  quick search runs over **items**, and a collection is not an item, so zero hits
+  never rules a collection out and hits never rule one in. Use
+  `zotero-search "<text>"` to find a paper, then show the human the keys it lists
+  and let them say which one `zotero-import --items` should receive. The selector
+  question above stays exactly where step 2 left it: with the human.
 - `openalex-cite --for` / `pubmed-mesh --for` — a paper *title* is not a slug.
   Resolve it against `factlog sources` and ask if more than one source matches.
 
