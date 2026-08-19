@@ -6,7 +6,7 @@ description: >-
   logic check, and attempt gated self-correction. Use when the user asks to
   "sync facts", "check the wiki", "run factlog", "verify facts", or update a
   knowledge base from its source documents.
-argument-hint: "setup | add | sync | query | check | repair | ask | ingest | zotero-import | openalex-* | arxiv-* | pubmed-* | review | accept | reject | amend | provenance | vocab | search | sources | status | export | eject | ignore | use | lang | where"
+argument-hint: "setup | add | sync | query | check | repair | ask | ingest | zotero-import | zotero-search | openalex-* | arxiv-* | pubmed-* | review | accept | reject | amend | provenance | vocab | search | sources | status | export | eject | ignore | use | lang | where"
 allowed-tools: Bash(*factlog_python.sh *) Bash(python3 *) Bash(python *) Bash(py *) Read Edit Write Grep Glob
 ---
 
