@@ -545,3 +545,40 @@ class TestBackendIsResolvedBeforeNarration:
         connecting = [i for i, e in enumerate(events) if "Connecting to Zotero" in e]
         assert connecting, events
         assert events.index("connect") < connecting[0], events
+
+
+class TestBuildTimeConnectionFailure:
+    """A connection that fails while *building* the client still exits 2.
+
+    `resolve_backend()` moved the connection attempt into `_make_zotero_client`,
+    inside the command's existing try — where `ZoteroConnectionError` is a
+    `ZoteroError` subclass, so ordering the two `except` clauses the other way
+    round (or collapsing them) would silently downgrade exit 2 to exit 1. The
+    query-time case is pinned by `TestRun.test_connection_error_exits_2`; this
+    pins the build-time one, plus the narration it must not print.
+
+    Not covered under `--porcelain`: `_narrate` suppresses output there, which
+    would make the absence assertion vacuous, while the exit path is shared and
+    already covered here.
+    """
+
+    @staticmethod
+    def _refuse(monkeypatch):
+        # Raised from `_connect()`, i.e. from inside `resolve_backend()` — the
+        # socket-level failure a stopped Zotero produces, which `_classify`
+        # maps to ZoteroConnectionError. No network is touched.
+        from factlog.integrations.zotero.api_client import ZoteroClient
+
+        def _boom(self):
+            raise OSError(61, "Connection refused")
+
+        monkeypatch.setattr(ZoteroClient, "_connect", _boom)
+
+    def test_unreachable_at_build_time_exits_2_without_narrating(self, tmp_path, monkeypatch, capsys):
+        kb = _policy(_kb(tmp_path), '[connection]\nmode = "local"\nlocal_port = 23119\n')
+        self._refuse(monkeypatch)
+        rc = cli.main(["zotero-import", "--collection", "X", "--target", str(kb)])
+        cap = capsys.readouterr()
+        assert rc == 2
+        assert "Connecting to Zotero" not in cap.out
+        assert "is Zotero running" in cap.err
