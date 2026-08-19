@@ -301,6 +301,39 @@ class TestModeGuard:
             c.list_collections()
 
 
+# The install instruction #228 exists to protect, verbatim. The extra lives on
+# `factlog-academic`, and only the git+ URL resolves it; `factlog[zotero]` is an
+# unrelated project on PyPI.
+INSTALL = (
+    "pip install 'factlog-academic[zotero] "
+    "@ git+https://github.com/SeoyunL/factlog-academic'"
+)
+
+
+class TestPyzoteroGuard:
+    """The third `_connect()` guard, beside mode and port.
+
+    What this pins is the install instruction, not the prose: a user who reaches
+    this message has nowhere else to learn how to install the extra (#228).
+    """
+
+    def test_missing_pyzotero_gives_the_working_install_command(self, monkeypatch):
+        import sys
+
+        # No backend injected -> _connect runs. pyzotero IS installed in this
+        # interpreter, so the monkeypatch is what makes the guard fire at all:
+        # `None` in sys.modules is how the import system spells "not importable".
+        monkeypatch.setitem(sys.modules, "pyzotero", None)
+        c = ZoteroClient(ZoteroConfig())
+        with pytest.raises(ZoteroError) as ei:
+            c.list_collections()
+        msg = str(ei.value)
+        assert INSTALL in msg
+        # Presence of the right string does not rule out the wrong one sitting
+        # beside it, where the user reads it first -- which is #228 restored.
+        assert "factlog[zotero]" not in msg
+
+
 class TestResolveBackend:
     """`resolve_backend()` forces `_connect()` early, through the error contract.
 
