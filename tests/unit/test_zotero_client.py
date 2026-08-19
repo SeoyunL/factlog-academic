@@ -329,6 +329,13 @@ class TestPyzoteroGuard:
             c.list_collections()
         msg = str(ei.value)
         assert INSTALL in msg
+        # ...and it is the ONLY install command offered. Presence alone leaves
+        # the whole class open: "pip install factlog-academic[zotero] or pip
+        # install '... @ git+...'" keeps the two assertions below green while
+        # handing the user a first command that resolves to no distribution.
+        # Here the invariant really is a quantity -- one command, no
+        # alternatives -- unlike the CLI test, where it is positional.
+        assert msg.count("pip install") == 1
         # Presence of the right string does not rule out the wrong one sitting
         # beside it, where the user reads it first -- which is #228 restored.
         assert "factlog[zotero]" not in msg
