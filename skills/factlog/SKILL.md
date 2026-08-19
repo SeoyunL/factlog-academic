@@ -1308,7 +1308,7 @@ and passing two is also an error.
 | Command | Required selector | Notes |
 | --- | --- | --- |
 | `zotero-import` | **exactly one of** `--collection NAME` \| `--tag TAG` \| `--items KEY,KEY` | `--pdf` also fetches PDF attachments; `--annotations` also imports highlights/notes into `sources/<stem>-notes.md` |
-| `zotero-search` | `QUERY` (positional, not a flag) | imports nothing — it lists matches so a human can choose; `--qmode titleCreatorYear` (default) \| `everything` (full-text); `--limit` default 25, max 200; no `--dry-run`, no `--all`; needs a KB (exit 1 outside one); 0 hits is an honest exit 0, but an unreachable Local API is exit 2 — never report "not in your library" without checking which; result keys feed `zotero-import --items` |
+| `zotero-search` | *(no selector — a positional `QUERY`)* | imports nothing — it lists matches so a human can choose; `--qmode titleCreatorYear` (default) \| `everything` (full-text); `--limit` default 25, max 200; no `--dry-run`, no `--all`; 0 hits is an honest exit 0, but an unreachable Local API is exit 2 — never report "not in your library" without checking which; result keys feed `zotero-import --items` |
 | `openalex-search` | `--query TEXT` | costs 10 credits per search; `--year`, `--type`, `--limit` (default 25, max 200), `--all` |
 | `openalex-import` | **exactly one of** `--work-id W…` \| `--doi 10.…` | free |
 | `openalex-cite` | `--for <source-slug>` | `--direction citing\|cited\|both` (default `citing`), `--limit`, `--auto-import` |
