@@ -1295,8 +1295,12 @@ for the shared contract, and `docs/zotero-import.md` / `docs/openalex.md` /
 
 ### Selectors and required arguments
 
-**Every entry-point command below takes a flag selector. None of them accept a
-bare positional string.** Where a row says *exactly one of*, the flags are an
+**No command below imports from a bare positional string.** Selection is by
+flag: a row's *Required selector* names the flags that choose what to act on,
+and a row reading *(none — whole KB)* takes no selector because it acts on the
+whole KB. Where a positional argument is accepted — `zotero-search`'s `query` —
+it is a search term: it lists matches, selects nothing, and imports nothing.
+Where a row says *exactly one of*, the flags are an
 argparse mutually-exclusive **required** group: omitting all of them is an error
 (`error: one of the arguments --collection --tag --items is required`), and
 passing two is also an error.
@@ -1304,6 +1308,7 @@ passing two is also an error.
 | Command | Required selector | Notes |
 | --- | --- | --- |
 | `zotero-import` | **exactly one of** `--collection NAME` \| `--tag TAG` \| `--items KEY,KEY` | `--pdf` also fetches PDF attachments; `--annotations` also imports highlights/notes into `sources/<stem>-notes.md` |
+| `zotero-search` | `QUERY` (positional, not a flag) | imports nothing — it lists matches so a human can choose; `--qmode titleCreatorYear` (default) \| `everything` (full-text); `--limit` default 25, max 200, but `found` is Zotero's match total, not the row count — it is counted before attachments and notes are filtered out, and a search does not page, so there is no page 2 to ask for; no `--dry-run` (nothing to preview), no `--all`; still needs a KB — outside one it exits 1 with `… is not a factlog KB (no sources/)`; each result's key feeds `zotero-import --items` |
 | `openalex-search` | `--query TEXT` | costs 10 credits per search; `--year`, `--type`, `--limit` (default 25, max 200), `--all` |
 | `openalex-import` | **exactly one of** `--work-id W…` \| `--doi 10.…` | free |
 | `openalex-cite` | `--for <source-slug>` | `--direction citing\|cited\|both` (default `citing`), `--limit`, `--auto-import` |
