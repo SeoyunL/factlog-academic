@@ -724,7 +724,13 @@ class TestEngineAcceptsTheseForms:
     for which gaps are worth calling gaps, and it went unmeasured until #517 — the
     one table whose header made an engine claim was the one nothing re-checked."""
 
-    BASE = ".decl src(x: symbol)\n"
+    # `relation` is declared even though no test here derives from it: one
+    # SKELETON_ONLY_FORMS entry ("after a rule on the same line") carries a rule
+    # whose body names it, and from pyrewire 1.0.4 a rule over an UNDECLARED
+    # predicate is an ExecError rather than something the engine tolerates. Before
+    # that the omission was invisible, so the form appeared to be what broke; it is
+    # not — the same form compiles fine once its body's predicate exists (#628).
+    BASE = ".decl src(x: symbol)\n.decl relation(s: symbol, r: symbol, o: symbol)\n"
     RULE = '\np(X, "r") :- src(X).\n'
 
     @pytest.mark.parametrize("label", sorted(WHITESPACE_FORMS))
