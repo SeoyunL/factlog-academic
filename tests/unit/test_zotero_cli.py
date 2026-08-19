@@ -504,6 +504,12 @@ class TestPreconditionsDecideBeforeNarration:
         assert rc == 1
         assert "Connecting to Zotero" not in cap.out
         assert "pyzotero is required" in cap.err
+        # The CLI prefix is the single place the command gets named (#626).
+        # Scoped by position, not by count: "...for zotero-import: ..." after
+        # the prefix counts exactly one occurrence with the bug fully present.
+        prefix = "factlog zotero-import: "
+        assert cap.err.startswith(prefix)
+        assert "zotero-import" not in cap.err[len(prefix):]
 
 
 class TestBackendIsResolvedBeforeNarration:

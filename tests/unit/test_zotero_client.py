@@ -301,6 +301,49 @@ class TestModeGuard:
             c.list_collections()
 
 
+# The install instruction #228 exists to protect, verbatim. The extra lives on
+# `factlog-academic`, and only the git+ URL resolves it; `factlog[zotero]` is an
+# unrelated project on PyPI.
+INSTALL = (
+    "pip install 'factlog-academic[zotero] "
+    "@ git+https://github.com/SeoyunL/factlog-academic'"
+)
+
+
+class TestPyzoteroGuard:
+    """The third `_connect()` guard, beside mode and port.
+
+    What this pins is the install instruction, not the prose: a user who reaches
+    this message has nowhere else to learn how to install the extra (#228).
+    """
+
+    def test_missing_pyzotero_gives_the_working_install_command(self, monkeypatch):
+        import sys
+
+        # No backend injected -> _connect runs. pyzotero IS installed in this
+        # interpreter, so the monkeypatch is what makes the guard fire at all:
+        # `None` in sys.modules is how the import system spells "not importable".
+        monkeypatch.setitem(sys.modules, "pyzotero", None)
+        c = ZoteroClient(ZoteroConfig())
+        with pytest.raises(ZoteroError) as ei:
+            c.list_collections()
+        msg = str(ei.value)
+        assert INSTALL in msg
+        # ...and it is the ONLY install command offered. Presence alone leaves
+        # the whole class open: "pip install factlog-academic[zotero] or pip
+        # install '... @ git+...'" keeps the two assertions below green while
+        # handing the user a first command that resolves to no distribution.
+        # Here the invariant really is a quantity -- one command, no
+        # alternatives -- unlike the CLI test, where it is positional.
+        assert msg.count("pip install") == 1
+        # Presence of the right string does not rule out the wrong one sitting
+        # beside it, where the user reads it first -- which is #228 restored.
+        assert "factlog[zotero]" not in msg
+        # The client does not know which command called it, so it names none
+        # of them; the CLI prefix already says which one ran (#626).
+        assert "zotero-import" not in msg and "zotero-search" not in msg
+
+
 class TestResolveBackend:
     """`resolve_backend()` forces `_connect()` early, through the error contract.
 
